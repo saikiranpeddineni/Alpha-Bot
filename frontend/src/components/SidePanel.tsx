@@ -1,0 +1,258 @@
+import { useState } from "react";
+import { api } from "../api";
+import { fmtSigned, fmtTime, pnlClass } from "../format";
+import { useStore } from "../store";
+import { EquityChart } from "./EquityChart";
+
+export function SidePanel() {
+  return (
+    <div className="side">
+      <InsightsPanel />
+      <PerformancePanel />
+      <StrategiesPanel />
+    </div>
+  );
+}
+
+export function InsightsPanel() {
+  const insights = useStore((s) => s.insights);
+  const model = useStore((s) => s.status?.model);
+  const showToast = useStore((s) => s.showToast);
+  const [training, setTraining] = useState(false);
+
+  async function train() {
+    setTraining(true);
+    showToast("info", "Training AI model — this can take a minute…");
+    try {
+      const info = await api.trainModel(null, 30);
+      showToast("info", `Model trained (AUC ${info.validation_auc ?? "n/a"})`);
+    } catch (e) {
+      showToast("error", (e as Error).message);
+    } finally {
+      setTraining(false);
+    }
+  }
+
+  return (
+    <div className="panel grow">
+      <div className="panel-head">
+        <span>AI Insights</span>
+        <span className="faint" style={{ textTransform: "none", letterSpacing: 0 }}>
+          {model?.trained ? "ML model" : "heuristic"}
+        </span>
+      </div>
+      <div className="panel-body">
+        {!model?.trained && (
+          <div className="ai-banner">
+            <span>Signals gated by transparent heuristic. Train the ML model on recent data for a data-driven gate.</span>
+            <button className="btn sm primary" onClick={train} disabled={training}>
+              {training ? "Training…" : "Train"}
+            </button>
+          </div>
+        )}
+        {insights.length === 0 && <div className="empty-state">Insights appear when the engine runs</div>}
+        {insights.map((i) => (
+          <div className={`insight ${i.severity}`} key={i.id}>
+            <div className="t">
+              <span>{i.title}</span>
+              <span className="time num">{fmtTime(i.ts)}</span>
+            </div>
+            <div className="d">{i.detail}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+export function PerformancePanel() {
+  const metrics = useStore((s) => s.metrics);
+  const stats = metrics?.stats as Record<string, number | null> | undefined;
+  const m = metrics?.metrics ?? {};
+
+  return (
+    <div className="panel" style={{ flexShrink: 0 }}>
+      <div className="panel-head"><span>Performance</span></div>
+      <EquityChart curve={metrics?.equity_curve ?? []} />
+      <div className="kv-grid">
+        <div className="kv">
+          <div className="k">Trades</div>
+          <div className="v num">{stats?.total_trades ?? 0}</div>
+        </div>
+        <div className="kv">
+          <div className="k">Win rate</div>
+          <div className="v num">{stats?.win_rate != null ? `${stats.win_rate}%` : "—"}</div>
+        </div>
+        <div className="kv">
+          <div className="k">Realized P&L</div>
+          <div className={`v num ${pnlClass(stats?.realized_pnl as number | null)}`}>
+            {fmtSigned(stats?.realized_pnl as number | null)}
+          </div>
+        </div>
+        <div className="kv">
+          <div className="k">Profit factor</div>
+          <div className="v num">{stats?.profit_factor ?? "—"}</div>
+        </div>
+        <div className="kv">
+          <div className="k">Max drawdown</div>
+          <div className="v num">{m.max_drawdown_pct != null ? `${m.max_drawdown_pct}%` : "—"}</div>
+        </div>
+        <div className="kv">
+          <div className="k">Sharpe</div>
+          <div className="v num">{m.sharpe ?? "—"}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+interface StrategyRowProps {
+  strategy: any;
+  onToggle: (name: string, enabled: boolean) => void;
+  onSaveParams: (name: string, params: Record<string, any>) => Promise<void>;
+}
+
+function StrategyRow({ strategy, onToggle, onSaveParams }: StrategyRowProps) {
+  const [expanded, setExpanded] = useState(false);
+  const [params, setParams] = useState<Record<string, string>>(() => {
+    const initial: Record<string, string> = {};
+    for (const [k, v] of Object.entries(strategy.params || {})) {
+      initial[k] = String(v);
+    }
+    return initial;
+  });
+  const [saving, setSaving] = useState(false);
+
+  function handleParamChange(key: string, val: string) {
+    setParams((prev) => ({ ...prev, [key]: val }));
+  }
+
+  async function handleSave(e: React.FormEvent) {
+    e.preventDefault();
+    setSaving(true);
+    const typedParams: Record<string, any> = {};
+    for (const [k, v] of Object.entries(params)) {
+      const num = Number(v);
+      typedParams[k] = isNaN(num) ? v : num;
+    }
+    try {
+      await onSaveParams(strategy.name, typedParams);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const helpTexts: Record<string, string> = {
+    range_minutes: "Duration of the opening range in minutes. Recommended: 15 to 30.",
+    entry_cutoff_minute: "Stop taking new entries after this many minutes from open. Recommended: 180 (12:30 PM ET) to avoid lunchtime chop.",
+    breakout_buffer_bps: "Basis points price must clear the opening range to trigger breakout. Recommended: 5 (0.05%) to 10 (0.10%).",
+    atr_buffer_mult: "If > 0, overrides breakout_buffer_bps with (multiplier * ATR). Recommended: 0.0 (disabled) or 0.2 to 0.5.",
+    volume_z_min: "Minimum volume z-score for breakout confirmation. Recommended: 0.5 (above average) to 1.0 (strong volume).",
+    atr_stop_mult: "Multiplier of ATR to determine the stop loss distance. Recommended: 1.5 to 2.5.",
+    reward_risk: "Target reward-to-risk ratio. Recommended: 2.0 (profit target is twice the stop loss).",
+    trailing_stop_atr_mult: "If > 0, activates a dynamic trailing stop based on this multiplier of ATR. Recommended: 2.5 to 3.5.",
+    width_percentile_lookback: "Bands squeeze lookback window length in bars. Recommended: 100.",
+    width_percentile_threshold: "Percentile below which bands width is considered a squeeze. Recommended: 0.15.",
+    vol_z_min: "Minimum volume z-score to confirm squeeze breakout. Recommended: 1.0.",
+    ema_fast: "Period of the fast exponential moving average. Recommended: 9.",
+    ema_slow: "Period of the slow exponential moving average. Recommended: 21.",
+    rsi_period: "Period of the Relative Strength Index (RSI). Recommended: 14 (or 2 for short-term mean reversion).",
+    rsi_exit_high: "RSI level to exit long positions. Recommended: 70 to 75.",
+    rsi_exit_low: "RSI level to exit short positions. Recommended: 25 to 30.",
+    rsi_lower: "RSI level to trigger oversold long entry. Recommended: 10 to 15.",
+    rsi_upper: "RSI level to trigger overbought short entry. Recommended: 85 to 90.",
+    vwap_dev_threshold: "Standard deviations from VWAP to trigger reversion. Recommended: 2.0.",
+    rsi_extreme_high: "Overbought RSI level to trigger short reversion. Recommended: 70.",
+    rsi_extreme_low: "Oversold RSI level to trigger long reversion. Recommended: 30.",
+  };
+
+  return (
+    <div className="strat-row-container" style={{ borderBottom: "1px solid var(--border)" }}>
+      <div className="strat-row" style={{ borderBottom: "none", cursor: "pointer" }} onClick={() => setExpanded(!expanded)}>
+        <div className="info">
+          <div className="name" style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+            {strategy.name}
+            <span style={{ fontSize: "10px", color: "var(--accent)" }}>{expanded ? "▲" : "▼"}</span>
+          </div>
+          <div className="desc" title={strategy.description}>{strategy.description}</div>
+        </div>
+        <button
+          className={`switch ${strategy.enabled ? "on" : ""}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggle(strategy.name, !strategy.enabled);
+          }}
+          title={strategy.enabled ? "Disable" : "Enable"}
+        />
+      </div>
+      {expanded && (
+        <form onSubmit={handleSave} style={{ padding: "8px 12px 14px", background: "var(--panel-2)", borderTop: "1px solid var(--border)" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px" }}>
+            {Object.keys(strategy.params || {}).map((key) => (
+              <div key={key} className="field" title={helpTexts[key] || key}>
+                <label style={{ display: "flex", alignItems: "center", gap: "4px", cursor: "help" }}>
+                  {key} <span style={{ color: "var(--faint)" }}>ⓘ</span>
+                </label>
+                <input
+                  type="text"
+                  className="num"
+                  style={{ width: "100%", padding: "4px 8px", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: "4px", color: "var(--text)" }}
+                  value={params[key] || ""}
+                  onChange={(e) => handleParamChange(key, e.target.value)}
+                />
+              </div>
+            ))}
+          </div>
+          <div style={{ display: "flex", justifyContent: "flex-end", marginTop: "10px" }}>
+            <button type="submit" className="btn sm primary" disabled={saving} style={{ padding: "4px 12px" }}>
+              {saving ? "Saving…" : "Save Params"}
+            </button>
+          </div>
+        </form>
+      )}
+    </div>
+  );
+}
+
+export function StrategiesPanel() {
+  const strategies = useStore((s) => s.strategies);
+  const setStrategies = useStore((s) => s.setStrategies);
+  const showToast = useStore((s) => s.showToast);
+
+  async function toggle(name: string, enabled: boolean) {
+    try {
+      await api.updateStrategy(name, { enabled });
+      setStrategies(await api.strategies());
+    } catch (e) {
+      showToast("error", (e as Error).message);
+    }
+  }
+
+  async function saveParams(name: string, params: Record<string, any>) {
+    try {
+      await api.updateStrategy(name, { params });
+      setStrategies(await api.strategies());
+      showToast("info", `${name} parameters updated`);
+    } catch (e) {
+      showToast("error", (e as Error).message);
+    }
+  }
+
+  return (
+    <div className="panel" style={{ flexShrink: 0 }}>
+      <div className="panel-head"><span>Strategies</span></div>
+      <div>
+        {strategies.map((s) => (
+          <StrategyRow
+            key={s.name}
+            strategy={s}
+            onToggle={toggle}
+            onSaveParams={saveParams}
+          />
+        ))}
+        {strategies.length === 0 && <div className="empty-state">Loading strategies…</div>}
+      </div>
+    </div>
+  );
+}
+

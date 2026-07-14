@@ -1,0 +1,73 @@
+# Secrets and environment
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+secrets.json
+*credentials*
+*secret*
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# Logs and runtime
+*.log
+logs/
+log/
+runtime/
+tmp/
+temp/
+*.pid
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Trading/runtime artifacts
+data/
+cache/
+backtest_results/
+reports/
+artifacts/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local AI/agent configuration
+.claude/
+
+# Debug and rejection output
+debug_output*.txt
+rejections_output*.txt
+
+# Frontend dependencies and build artifacts
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+
+# Coverage
+.coverage
+htmlcov/
+coverage.xml
+
+# Additional local runtime files
+*.bak
+*.tmp

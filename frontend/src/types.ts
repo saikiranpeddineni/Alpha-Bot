@@ -1,0 +1,250 @@
+// API/WebSocket wire types (mirrors backend pydantic models)
+
+export type EngineState = "stopped" | "running" | "halted";
+export type Mode = "demo" | "paper" | "live";
+
+export interface MarketStatus {
+  is_open: boolean;
+  session_date: string;
+  minutes_to_close: number | null;
+  next_open: string | null;
+  always_open: boolean;
+}
+
+export interface TrainerStatus {
+  training_in_progress: boolean;
+  last_trained: string | null;
+  last_result: {
+    timestamp?: string;
+    elapsed_sec?: number;
+    symbols_trained?: number;
+    global_auc?: number;
+    specialists?: Record<string, SpecialistTrainingResult | number>;
+  };
+}
+
+export interface SpecialistTrainingResult {
+  candidate_auc?: number;
+  incumbent_auc?: number;
+  auc?: number;
+  decision?: string;
+}
+
+export interface RiskStatus {
+  hard_halted?: boolean;
+  hard_halt_reason?: string;
+  daily_halted?: boolean;
+  consecutive_losses?: number;
+  cooldown_until?: string | null;
+  config: RiskConfig;
+}
+
+export interface RiskConfig {
+  risk_per_trade_pct: number;
+  max_position_pct: number;
+  max_open_positions: number;
+  max_daily_loss_pct: number;
+  max_drawdown_pct: number;
+  consecutive_loss_limit: number;
+  cooldown_minutes: number;
+  no_entry_minutes_before_close: number;
+  flatten_minutes_before_close: number;
+  min_price: number;
+  min_avg_dollar_volume: number;
+  ml_confidence_threshold: number;
+  min_specialist_auc: number;
+  min_stop_pct: number;
+}
+
+export interface ModelInfo {
+  trained: boolean;
+  engine: string;
+  trained_at?: string;
+  samples?: number;
+  validation_auc?: number | null;
+  validation_accuracy?: number;
+  symbols?: string[];
+}
+
+export interface Status {
+  state: EngineState;
+  mode: Mode;
+  provider: string | null;
+  broker: string | null;
+  market: MarketStatus;
+  watchlist: string[];
+  core_watchlist?: string[];
+  risk: RiskStatus;
+  model: ModelInfo;
+  trainer?: TrainerStatus;
+  live_trading_enabled: boolean;
+  has_alpaca_keys: boolean;
+  tick: number;
+  last_error: string;
+}
+
+export interface Account {
+  equity: number;
+  cash: number;
+  buying_power: number;
+  day_pnl: number;
+  day_pnl_pct: number;
+  drawdown_pct: number;
+}
+
+export interface QuoteRow {
+  symbol: string;
+  price: number;
+  change_pct: number;
+  volume: number;
+  regime?: string | null;
+}
+
+export interface PositionRow {
+  symbol: string;
+  qty: number;
+  side: string;
+  avg_entry_price: number;
+  market_price: number;
+  market_value: number;
+  unrealized_pnl: number;
+  unrealized_pnl_pct: number;
+  stop_loss: number | null;
+  take_profit: number | null;
+  strategy: string;
+  opened_at: string;
+}
+
+export interface OrderRow {
+  id: string;
+  symbol: string;
+  side: "buy" | "sell";
+  qty: number;
+  order_type: "market" | "limit";
+  limit_price: number | null;
+  status: string;
+  filled_qty: number;
+  filled_avg_price: number | null;
+  stop_loss: number | null;
+  take_profit: number | null;
+  strategy: string;
+  reason: string;
+  submitted_at: string;
+  filled_at: string | null;
+}
+
+export interface TradeRow {
+  id: string;
+  symbol: string;
+  side: string;
+  qty: number;
+  entry_price: number;
+  exit_price: number;
+  entry_at: string;
+  exit_at: string;
+  pnl: number;
+  pnl_pct: number;
+  r_multiple: number | null;
+  strategy: string;
+  exit_reason: string;
+}
+
+export interface LogRow {
+  ts: string;
+  level: string;
+  source: string;
+  message: string;
+}
+
+export interface Insight {
+  id: string;
+  ts: string;
+  kind: string;
+  title: string;
+  detail: string;
+  symbol?: string | null;
+  severity: "info" | "success" | "warning" | "danger";
+}
+
+export interface Bar {
+  t: number;
+  o: number;
+  h: number;
+  l: number;
+  c: number;
+  v: number;
+}
+
+export interface SessionStats {
+  total_trades: number;
+  wins: number;
+  losses: number;
+  win_rate: number;
+  gross_profit: number;
+  gross_loss: number;
+  profit_factor: number | null;
+  realized_pnl: number;
+  avg_win: number;
+  avg_loss: number;
+  day_trades_today: number;
+}
+
+export interface Metrics {
+  stats: SessionStats | Record<string, never>;
+  metrics: Record<string, number | null>;
+  equity_curve: [string, number][];
+}
+
+export interface StrategyInfo {
+  name: string;
+  description: string;
+  enabled: boolean;
+  params: Record<string, number | string | boolean>;
+}
+
+export interface BacktestSummary {
+  id: string;
+  created_at: string;
+  symbols: string[];
+  days: number;
+  total_return_pct: number | null;
+  max_drawdown_pct: number | null;
+  total_trades: number | null;
+  win_rate: number | null;
+}
+
+export interface BacktestResult {
+  id: string;
+  created_at: string;
+  params: Record<string, unknown>;
+  metrics: Record<string, number | null>;
+  equity_curve: [string, number][];
+  trades: TradeRow[];
+  bars_processed: number;
+  warnings: string[];
+}
+
+export type WsMessage =
+  | { type: "bootstrap"; data: Bootstrap }
+  | { type: "status"; data: Status }
+  | { type: "account"; data: Account }
+  | { type: "quotes"; data: QuoteRow[] }
+  | { type: "positions"; data: PositionRow[] }
+  | { type: "orders"; data: OrderRow[] }
+  | { type: "trade"; data: TradeRow }
+  | { type: "log"; data: LogRow }
+  | { type: "insight"; data: Insight }
+  | { type: "bar"; data: { symbol: string; bar: Bar } }
+  | { type: "metrics"; data: Metrics }
+  | { type: "backtest_progress"; data: { progress: number } };
+
+export interface Bootstrap {
+  status: Status;
+  quotes: QuoteRow[];
+  orders: OrderRow[];
+  insights: Insight[];
+  logs: LogRow[];
+  metrics: Metrics;
+  positions?: PositionRow[];
+  account?: Account;
+}

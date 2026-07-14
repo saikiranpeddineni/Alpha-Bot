@@ -1,0 +1,83 @@
+"""Trading engine integration test: real ticks over the synthetic market."""
+
+from __future__ import annotations
+
+import pytest
+
+from app.config import Settings
+from app.core.domain import EngineState
+from app.core.engine import TradingEngine
+from app.db.database import Database
+
+
+@pytest.fixture
+async def engine(tmp_path):
+    settings = Settings(
+        ALPHADESK_MODE="demo",
+        DATA_PROVIDER="synthetic",
+        ALPHADESK_DB_PATH=str(tmp_path / "engine.db"),
+        DEFAULT_WATCHLIST="SPY,NVDA",
+        DEMO_BAR_SECONDS=3600,  # background loop stays out of the way
+        RISK_PER_TRADE_PCT=1.0,
+    )
+    db = Database(settings.resolved_db_path)
+    eng = TradingEngine(settings, db)
+    yield eng
+    await eng.shutdown()
+
+
+async def test_engine_ticks_and_streams(engine: TradingEngine):
+    events: list[str] = []
+    engine.publish = lambda t, _d: events.append(t)
+
+    await engine.start("demo")
+    assert engine.state == EngineState.RUNNING
+    assert engine.broker is not None and engine.data is not None
+
+    # Drive several deterministic ticks (each advances the virtual market 1 bar)
+    for _ in range(30):
+        await engine._tick()
+
+    status = engine.status()
+    assert status["state"] == "running"
+    assert status["tick"] >= 30
+
+    quotes = engine.quotes_payload()
+    assert {q["symbol"] for q in quotes} == {"SPY", "NVDA"}
+    assert all(q["price"] > 0 for q in quotes)
+
+    metrics = engine.metrics_payload()
+    assert len(metrics["equity_curve"]) > 0
+    assert "account" not in metrics or metrics["stats"] is not None
+
+    assert "status" in events and "quotes" in events and "bar" in events
+
+    await engine.stop()
+    assert engine.state == EngineState.STOPPED
+
+
+async def test_engine_manual_flow(engine: TradingEngine):
+    from app.core.domain import OrderRequest, OrderSide
+
+    await engine.start("demo")
+    for _ in range(3):
+        await engine._tick()
+
+    order = await engine.manual_order(OrderRequest(symbol="SPY", side=OrderSide.BUY, qty=3))
+    assert order.status == "filled"
+    positions = await engine.broker.positions()
+    assert positions and positions[0].symbol == "SPY"
+
+    await engine.flatten()
+    assert not await engine.broker.positions()
+    # The round trip landed in the portfolio ledger and the DB
+    assert engine.portfolio.trades
+    assert engine.db.recent_trades(mode="demo")
+
+    await engine.stop()
+
+
+async def test_engine_rejects_live_without_gates(engine: TradingEngine):
+    with pytest.raises(PermissionError):
+        await engine.start("live", confirm="LIVE")
+    assert engine.state == EngineState.STOPPED

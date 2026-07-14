@@ -1,0 +1,361 @@
+"""Built-in paper trading simulator.
+
+Realistic local fill engine used by demo/paper modes and the backtester:
+
+- market orders: immediate fill at last price (live paper) or next-bar open
+  (backtests, to avoid look-ahead), both with configurable slippage
+- limit orders: filled when price trades through, gap-aware (fills at the
+  open when the bar gaps past the limit)
+- bracket exits per position (stop-loss / take-profit); when a single bar
+  touches both, the stop is assumed to fill first (conservative)
+- cash accounting with margin-style checks for shorts
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+
+import pandas as pd
+
+from app.brokers.base import Broker, Fill
+from app.core.domain import (
+    AccountSnapshot,
+    Order,
+    OrderRequest,
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    Position,
+    utcnow,
+)
+from app.core.logging import applog
+
+
+class PaperBroker(Broker):
+    name = "paper_sim"
+    is_paper = True
+
+    def __init__(
+        self,
+        starting_cash: float = 100_000.0,
+        slippage_bps: float = 2.0,
+        commission_per_share: float = 0.0,
+        fill_market_on: str = "next_open",  # immediate | next_open
+    ) -> None:
+        if fill_market_on not in ("immediate", "next_open"):
+            raise ValueError("fill_market_on must be 'immediate' or 'next_open'")
+        self.starting_cash = float(starting_cash)
+        self.cash = float(starting_cash)
+        self.slippage = slippage_bps / 10_000.0
+        self.commission_per_share = commission_per_share
+        self.fill_market_on = fill_market_on
+
+        self._positions: dict[str, Position] = {}
+        self._orders: dict[str, Order] = {}
+        self._resting: list[str] = []  # unfilled limit + queued market order ids
+        self._fills: list[Fill] = []
+        self._last_price: dict[str, float] = {}
+        self._now: datetime = utcnow()
+
+    # ---- time & prices ----
+
+    def set_time(self, ts: datetime) -> None:
+        """Backtester injects simulated time so fills carry market timestamps."""
+        self._now = ts
+
+    def _slip(self, price: float, side: OrderSide) -> float:
+        return price * (1.0 + self.slippage) if side == OrderSide.BUY else price * (1.0 - self.slippage)
+
+    # ---- accounting ----
+
+    def equity(self) -> float:
+        return self.cash + sum(p.qty * p.market_price for p in self._positions.values())
+
+    def _short_notional(self) -> float:
+        return sum(-p.qty * p.market_price for p in self._positions.values() if p.qty < 0)
+
+    async def account(self) -> AccountSnapshot:
+        eq = self.equity()
+        return AccountSnapshot(equity=round(eq, 2), cash=round(self.cash, 2), buying_power=round(eq * 2, 2), ts=self._now)
+
+    async def positions(self) -> list[Position]:
+        return [p for p in self._positions.values() if abs(p.qty) > 1e-9]
+
+    async def open_orders(self) -> list[Order]:
+        return [self._orders[oid] for oid in self._resting]
+
+    def drain_fills(self) -> list[Fill]:
+        fills, self._fills = self._fills, []
+        return fills
+
+    async def connect(self) -> None:
+        applog.info("broker.paper", f"Paper simulator ready (cash ${self.cash:,.0f})")
+
+    # ---- order lifecycle ----
+
+    async def submit(self, req: OrderRequest) -> Order:
+        order = Order(
+            client_order_id=req.client_order_id,
+            symbol=req.symbol.upper(),
+            side=req.side,
+            qty=float(req.qty),
+            order_type=req.order_type,
+            limit_price=req.limit_price,
+            stop_loss=req.stop_loss,
+            take_profit=req.take_profit,
+            strategy=req.strategy,
+            reason=req.reason,
+            status=OrderStatus.SUBMITTED,
+            submitted_at=self._now,
+            signal_timestamp_utc=req.signal_timestamp_utc,
+            decision_bar_timestamp_utc=req.decision_bar_timestamp_utc,
+        )
+        self._orders[order.id] = order
+
+        price = self._last_price.get(order.symbol)
+        if price is None:
+            order.status = OrderStatus.REJECTED
+            order.reason = f"{order.reason} | rejected: no market price for {order.symbol}"
+            applog.warning("broker.paper", f"Rejected {order.symbol} {order.side}: no market price")
+            return order
+
+        if not self._check_buying_power(order, price):
+            order.status = OrderStatus.REJECTED
+            order.reason = f"{order.reason} | rejected: insufficient buying power"
+            applog.warning("broker.paper", f"Rejected {order.symbol} {order.side} {order.qty}: buying power")
+            return order
+
+        if order.order_type == OrderType.MARKET:
+            if self.fill_market_on == "immediate" or order.strategy == "manual":
+                self._fill(order, self._slip(price, order.side))
+            else:
+                self._resting.append(order.id)  # fills at next bar open
+        else:  # limit
+            marketable = (order.side == OrderSide.BUY and price <= order.limit_price) or (
+                order.side == OrderSide.SELL and price >= order.limit_price
+            )
+            if marketable and self.fill_market_on == "immediate":
+                fill_price = self._slip(price, order.side)
+                fill_price = min(fill_price, order.limit_price) if order.side == OrderSide.BUY else max(
+                    fill_price, order.limit_price
+                )
+                self._fill(order, fill_price)
+            else:
+                self._resting.append(order.id)
+        return order
+
+    def _check_buying_power(self, order: Order, price: float) -> bool:
+        notional = order.qty * price
+        pos = self._positions.get(order.symbol)
+        pos_qty = pos.qty if pos else 0.0
+        if order.side == OrderSide.BUY:
+            closing = pos_qty < 0  # covering a short frees cash
+            return closing or notional <= self.cash + 1e-6
+        # sell: reducing a long is always allowed; opening/adding short is margin-checked
+        opening_short_qty = max(0.0, order.qty - max(pos_qty, 0.0))
+        if opening_short_qty <= 0:
+            return True
+        return self._short_notional() + opening_short_qty * price <= self.equity() + 1e-6
+
+    def _fill(self, order: Order, price: float) -> None:
+        commission = self.commission_per_share * order.qty
+        signed_qty = order.qty if order.side == OrderSide.BUY else -order.qty
+        self.cash -= signed_qty * price
+        self.cash -= commission
+        self._apply_to_position(order, signed_qty, price)
+
+        order.status = OrderStatus.FILLED
+        order.filled_qty = order.qty
+        order.filled_avg_price = round(price, 4)
+        order.filled_at = self._now
+        self._fills.append(
+            Fill(
+                order_id=order.id,
+                symbol=order.symbol,
+                side=order.side,
+                qty=order.qty,
+                price=round(price, 4),
+                commission=commission,
+                strategy=order.strategy,
+                reason=order.reason,
+                ts=self._now,
+                signal_timestamp_utc=order.signal_timestamp_utc,
+                decision_bar_timestamp_utc=order.decision_bar_timestamp_utc,
+            )
+        )
+        applog.debug(
+            "broker.paper",
+            f"FILL {order.side.upper()} {order.qty:g} {order.symbol} @ {price:.2f} ({order.strategy}: {order.reason})",
+        )
+
+    def _apply_to_position(self, order: Order, signed_qty: float, price: float) -> None:
+        symbol = order.symbol
+        pos = self._positions.get(symbol)
+        if pos is None or abs(pos.qty) < 1e-9:
+            self._positions[symbol] = Position(
+                symbol=symbol,
+                qty=signed_qty,
+                avg_entry_price=price,
+                market_price=price,
+                stop_loss=order.stop_loss,
+                take_profit=order.take_profit,
+                strategy=order.strategy,
+                opened_at=self._now,
+            )
+            return
+
+        same_direction = (pos.qty > 0) == (signed_qty > 0)
+        if same_direction:
+            total = pos.qty + signed_qty
+            pos.avg_entry_price = (pos.avg_entry_price * pos.qty + price * signed_qty) / total
+            pos.qty = total
+            if order.stop_loss is not None:
+                pos.stop_loss = order.stop_loss
+            if order.take_profit is not None:
+                pos.take_profit = order.take_profit
+        else:
+            remaining = pos.qty + signed_qty
+            if abs(remaining) < 1e-9:
+                del self._positions[symbol]
+            elif (remaining > 0) == (pos.qty > 0):
+                pos.qty = remaining  # partial reduce keeps entry basis
+            else:
+                # Flip: close the old side entirely, open the remainder fresh
+                self._positions[symbol] = Position(
+                    symbol=symbol,
+                    qty=remaining,
+                    avg_entry_price=price,
+                    market_price=price,
+                    stop_loss=order.stop_loss,
+                    take_profit=order.take_profit,
+                    strategy=order.strategy,
+                    opened_at=self._now,
+                )
+        if symbol in self._positions:
+            self._positions[symbol].market_price = price
+
+    async def cancel(self, order_id: str) -> bool:
+        if order_id in self._resting:
+            self._resting.remove(order_id)
+            self._orders[order_id].status = OrderStatus.CANCELED
+            return True
+        return False
+
+    async def close_position(self, symbol: str, reason: str = "manual") -> Order | None:
+        symbol = symbol.upper()
+        pos = self._positions.get(symbol)
+        if pos is None or abs(pos.qty) < 1e-9:
+            return None
+        side = OrderSide.SELL if pos.qty > 0 else OrderSide.BUY
+        req = OrderRequest(
+            symbol=symbol,
+            side=side,
+            qty=abs(pos.qty),
+            order_type=OrderType.MARKET,
+            strategy=pos.strategy,
+            reason=reason,
+        )
+        # Position exits always fill immediately at the latest price, even in
+        # next_open mode: stops/targets/flatten act on the observed bar.
+        order = Order(
+            client_order_id=req.client_order_id,
+            symbol=symbol,
+            side=side,
+            qty=abs(pos.qty),
+            order_type=OrderType.MARKET,
+            strategy=pos.strategy,
+            reason=reason,
+            status=OrderStatus.SUBMITTED,
+            submitted_at=self._now,
+            leg="exit",
+        )
+        self._orders[order.id] = order
+        price = self._last_price.get(symbol, pos.market_price)
+        self._fill(order, self._slip(price, side))
+        return order
+
+    async def flatten_all(self, reason: str = "flatten") -> list[Order]:
+        orders = []
+        for oid in list(self._resting):
+            await self.cancel(oid)
+        for symbol in list(self._positions):
+            order = await self.close_position(symbol, reason=reason)
+            if order:
+                orders.append(order)
+        return orders
+
+    # ---- market simulation ----
+
+    def process_bar(self, symbol: str, bar: pd.Series, ts: datetime) -> None:
+        """Advance the simulator with one closed bar (open/high/low/close)."""
+        symbol = symbol.upper()
+        self._now = ts
+        o, h, low, c = float(bar["open"]), float(bar["high"]), float(bar["low"]), float(bar["close"])
+
+        self._fill_resting(symbol, o, h, low)
+        self._check_brackets(symbol, o, h, low)
+        self._last_price[symbol] = c
+        if symbol in self._positions:
+            self._positions[symbol].market_price = c
+
+    def update_price(self, symbol: str, price: float, ts: datetime) -> None:
+        """Advance with a single trade price (live quote tick)."""
+        symbol = symbol.upper()
+        self._now = ts
+        self._last_price[symbol] = price
+        self._fill_resting(symbol, price, price, price)
+        self._check_brackets(symbol, price, price, price)
+        if symbol in self._positions:
+            self._positions[symbol].market_price = price
+
+    def _fill_resting(self, symbol: str, o: float, h: float, low: float) -> None:
+        for oid in list(self._resting):
+            order = self._orders[oid]
+            if order.symbol != symbol:
+                continue
+            if order.order_type == OrderType.MARKET:
+                self._resting.remove(oid)
+                if not self._check_buying_power(order, o):
+                    order.status = OrderStatus.REJECTED
+                    order.reason += " | rejected: insufficient buying power at fill time"
+                    continue
+                self._fill(order, self._slip(o, order.side))
+            elif order.side == OrderSide.BUY and low <= order.limit_price:
+                self._resting.remove(oid)
+                self._fill(order, min(o, order.limit_price))
+            elif order.side == OrderSide.SELL and h >= order.limit_price:
+                self._resting.remove(oid)
+                self._fill(order, max(o, order.limit_price))
+
+    def _check_brackets(self, symbol: str, o: float, h: float, low: float) -> None:
+        pos = self._positions.get(symbol)
+        if pos is None or abs(pos.qty) < 1e-9:
+            return
+        if pos.qty > 0:  # long: stop below, target above; stop wins ties
+            if pos.stop_loss is not None and low <= pos.stop_loss:
+                self._exit_position(pos, min(o, pos.stop_loss), "stop_loss", slip_side=OrderSide.SELL)
+            elif pos.take_profit is not None and h >= pos.take_profit:
+                self._exit_position(pos, max(o, pos.take_profit), "take_profit")
+        else:  # short
+            if pos.stop_loss is not None and h >= pos.stop_loss:
+                self._exit_position(pos, max(o, pos.stop_loss), "stop_loss", slip_side=OrderSide.BUY)
+            elif pos.take_profit is not None and low <= pos.take_profit:
+                self._exit_position(pos, min(o, pos.take_profit), "take_profit")
+
+    def _exit_position(self, pos: Position, price: float, reason: str, slip_side: OrderSide | None = None) -> None:
+        side = OrderSide.SELL if pos.qty > 0 else OrderSide.BUY
+        if slip_side is not None:  # stops get adverse slippage; targets fill at the limit
+            price = self._slip(price, slip_side)
+        order = Order(
+            symbol=pos.symbol,
+            side=side,
+            qty=abs(pos.qty),
+            order_type=OrderType.MARKET,
+            strategy=pos.strategy,
+            reason=reason,
+            status=OrderStatus.SUBMITTED,
+            submitted_at=self._now,
+            leg="stop" if reason == "stop_loss" else "target",
+        )
+        self._orders[order.id] = order
+        self._fill(order, price)

@@ -1,0 +1,411 @@
+"""REST API.
+
+Everything the dashboard does goes through these routes; the WebSocket at
+/ws streams live updates. All state lives in app.state (engine, db, hub).
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta
+
+from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel, Field
+
+from app.backtest.engine import BacktestParams, BacktestResult, run_backtest
+from app.core.domain import OrderRequest, OrderSide, OrderType, utcnow
+from app.core.logging import applog
+
+router = APIRouter(prefix="/api")
+
+
+def _engine(request: Request):  # noqa: ANN202
+    return request.app.state.engine
+
+
+def _db(request: Request):  # noqa: ANN202
+    return request.app.state.db
+
+
+# ---------------------------------------------------------------- status --
+
+@router.get("/status")
+async def get_status(request: Request) -> dict:
+    return _engine(request).status()
+
+
+class StartBody(BaseModel):
+    mode: str = "demo"
+    confirm: str = ""
+
+
+@router.post("/engine/start")
+async def engine_start(body: StartBody, request: Request) -> dict:
+    engine = _engine(request)
+    try:
+        await engine.start(body.mode, confirm=body.confirm)
+    except (PermissionError, RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return engine.status()
+
+
+class StopBody(BaseModel):
+    flatten: bool | None = None
+
+
+@router.post("/engine/stop")
+async def engine_stop(body: StopBody, request: Request) -> dict:
+    engine = _engine(request)
+    await engine.stop(flatten=body.flatten)
+    return engine.status()
+
+
+@router.post("/engine/reset-halt")
+async def engine_reset_halt(request: Request) -> dict:
+    engine = _engine(request)
+    engine.reset_halt()
+    return engine.status()
+
+
+# ------------------------------------------------------------- watchlist --
+
+class WatchlistBody(BaseModel):
+    symbols: list[str]
+
+
+@router.get("/watchlist")
+async def get_watchlist(request: Request) -> dict:
+    return {"symbols": _engine(request).watchlist}
+
+
+@router.put("/watchlist")
+async def put_watchlist(body: WatchlistBody, request: Request) -> dict:
+    try:
+        symbols = await _engine(request).set_watchlist(body.symbols)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"symbols": symbols}
+
+
+# ------------------------------------------------------------------ data --
+
+@router.get("/bars")
+async def get_bars(request: Request, symbol: str, timeframe: str = "1Min", limit: int = 500) -> dict:
+    engine = _engine(request)
+    symbol = symbol.upper()
+    limit = max(10, min(limit, 2000))
+    data = await engine.ensure_data()
+    df = data.frame(symbol, timeframe, limit=limit)
+    if df.empty:
+        try:
+            df = await data.provider.get_bars(symbol, timeframe, limit=limit)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=f"data fetch failed: {exc}") from exc
+    bars = [
+        {
+            "t": int(ts.timestamp()),
+            "o": round(float(r["open"]), 4),
+            "h": round(float(r["high"]), 4),
+            "l": round(float(r["low"]), 4),
+            "c": round(float(r["close"]), 4),
+            "v": float(r["volume"]),
+        }
+        for ts, r in df.iterrows()
+    ]
+    return {"symbol": symbol, "timeframe": timeframe, "bars": bars}
+
+
+@router.get("/quotes")
+async def get_quotes(request: Request) -> list[dict]:
+    return _engine(request).quotes_payload()
+
+
+# --------------------------------------------------------------- trading --
+
+@router.get("/positions")
+async def get_positions(request: Request) -> list[dict]:
+    engine = _engine(request)
+    if engine.broker is None:
+        return []
+    return [p.to_payload() for p in await engine.broker.positions()]
+
+
+@router.post("/positions/{symbol}/close")
+async def close_position(symbol: str, request: Request) -> dict:
+    engine = _engine(request)
+    try:
+        order = await engine.close_symbol(symbol)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if order is None:
+        raise HTTPException(status_code=404, detail=f"No open position in {symbol.upper()}")
+    return order.model_dump(mode="json")
+
+
+@router.post("/flatten")
+async def flatten(request: Request) -> dict:
+    engine = _engine(request)
+    try:
+        await engine.flatten()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True}
+
+
+@router.get("/orders")
+async def get_orders(request: Request) -> list[dict]:
+    return _engine(request).orders_payload()
+
+
+class ManualOrderBody(BaseModel):
+    symbol: str
+    side: OrderSide
+    qty: float = Field(gt=0, le=100_000)
+    order_type: OrderType = OrderType.MARKET
+    limit_price: float | None = Field(default=None, gt=0)
+
+
+@router.post("/orders")
+async def submit_order(body: ManualOrderBody, request: Request) -> dict:
+    engine = _engine(request)
+    if body.order_type == OrderType.LIMIT and body.limit_price is None:
+        raise HTTPException(status_code=400, detail="limit_price required for limit orders")
+    req = OrderRequest(
+        symbol=body.symbol.upper(),
+        side=body.side,
+        qty=body.qty,
+        order_type=body.order_type,
+        limit_price=body.limit_price,
+        strategy="manual",
+        reason="manual order",
+    )
+    try:
+        order = await engine.manual_order(req)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return order.model_dump(mode="json")
+
+
+@router.get("/trades")
+async def get_trades(request: Request, limit: int = 200) -> list[dict]:
+    engine = _engine(request)
+    if engine.portfolio is not None and engine.portfolio.trades:
+        live = [t.model_dump(mode="json") for t in reversed(engine.portfolio.trades[-limit:])]
+        return live
+    return _db(request).recent_trades(mode=engine.mode, limit=limit)
+
+
+# --------------------------------------------------------- observability --
+
+@router.get("/logs")
+async def get_logs(request: Request, limit: int = 200) -> list[dict]:
+    return [e.model_dump(mode="json") for e in applog.recent(limit)]
+
+
+@router.get("/insights")
+async def get_insights(request: Request, limit: int = 30) -> list[dict]:
+    return [i.model_dump(mode="json") for i in _engine(request).insights.recent(limit)]
+
+
+@router.get("/metrics")
+async def get_metrics(request: Request) -> dict:
+    return _engine(request).metrics_payload()
+
+
+# ---------------------------------------------------------------- config --
+
+@router.get("/settings")
+async def get_settings_route(request: Request) -> dict:
+    engine = _engine(request)
+    s = engine.settings
+    return {
+        "mode": engine.mode,
+        "risk": engine.risk_config.model_dump(),
+        "data_provider": s.resolve_data_provider(engine.mode),
+        "broker": s.broker,
+        "live_trading_enabled": s.enable_live_trading,
+        "has_alpaca_keys": s.has_alpaca_keys,
+        "poll_interval_sec": s.poll_interval_sec,
+        "paper_starting_cash": s.paper_starting_cash,
+    }
+
+
+@router.put("/settings/risk")
+async def put_risk(request: Request, body: dict) -> dict:
+    try:
+        cfg = _engine(request).update_risk_config(body)
+    except Exception as exc:  # noqa: BLE001 - pydantic validation detail
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return cfg.model_dump()
+
+
+@router.get("/strategies")
+async def get_strategies(request: Request) -> list[dict]:
+    return [s.describe() for s in _engine(request).strategies]
+
+
+class StrategyBody(BaseModel):
+    enabled: bool | None = None
+    params: dict | None = None
+
+
+@router.put("/strategies/{name}")
+async def put_strategy(name: str, body: StrategyBody, request: Request) -> dict:
+    try:
+        return _engine(request).update_strategy(name, body.enabled, body.params)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+# -------------------------------------------------------------------- ai --
+
+@router.get("/ai/model")
+async def get_model(request: Request) -> dict:
+    return _engine(request).model.info()
+
+
+class TrainBody(BaseModel):
+    symbols: list[str] | None = None
+    days: int = Field(default=30, ge=2, le=365)
+
+
+@router.post("/ai/train")
+async def train_model(body: TrainBody, request: Request) -> dict:
+    try:
+        return await _engine(request).train_model(body.symbols, body.days)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/ai/trainer/status")
+async def get_trainer_status(request: Request) -> dict:
+    engine = _engine(request)
+    if engine.trainer is None:
+        return {"training_in_progress": False, "last_trained": None, "last_result": {}}
+    return engine.trainer.status
+
+
+@router.post("/ai/trainer/run")
+async def run_trainer(request: Request) -> dict:
+    """Manually trigger a continuous learning cycle on the current watchlist."""
+    engine = _engine(request)
+    if engine.trainer is None:
+        try:
+            data = await engine.ensure_data()
+            from app.ai.trainer import ContinuousTrainer
+            from app.config import MODELS_DIR
+            engine.trainer = ContinuousTrainer(
+                data,
+                engine.model,
+                MODELS_DIR,
+                engine.db.get_setting("strategies") or {},
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"Trainer not initialized and failed to start: {exc}") from exc
+    if engine.trainer.training_in_progress:
+        raise HTTPException(status_code=409, detail="Training already in progress")
+    await engine.trainer.trigger(engine.watchlist)
+    return {"status": "started", "symbols": engine.watchlist}
+
+
+# -------------------------------------------------------------- backtest --
+
+class BacktestBody(BaseModel):
+    symbols: list[str]
+    days: int = Field(default=5, ge=1, le=90)
+    starting_cash: float = Field(default=100_000.0, gt=0)
+    use_ml_gate: bool = True
+    use_dynamic_scanner: bool = False
+    debug_mode: bool = False
+    strategies: dict[str, dict] | None = None
+    start_date: str | None = None
+    end_date: str | None = None
+
+
+@router.post("/backtest")
+async def post_backtest(body: BacktestBody, request: Request) -> dict:
+    engine = _engine(request)
+    hub = request.app.state.hub
+    lock = request.app.state.backtest_lock
+    if lock.locked():
+        raise HTTPException(status_code=409, detail="A backtest is already running")
+    async with lock:
+        data = await engine.ensure_data()
+        
+        if body.start_date and body.end_date:
+            try:
+                from datetime import timezone
+                start = datetime.strptime(body.start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                end = datetime.strptime(body.end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59, tzinfo=timezone.utc)
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=f"Invalid date format (must be YYYY-MM-DD): {exc}") from exc
+        else:
+            end = utcnow()
+            start = end - timedelta(days=body.days)
+
+        from app.strategies.base import REGISTRY
+        db_strats = engine.db.get_setting("strategies") or {}
+        submitted = body.strategies or {}
+        merged_strategies = {}
+        for name in REGISTRY.keys():
+            if name in submitted:
+                merged_strategies[name] = submitted[name]
+            elif name in db_strats:
+                merged_strategies[name] = db_strats[name]
+            else:
+                default_enabled = False if name == "rsi2_reversion" else True
+                merged_strategies[name] = {"enabled": default_enabled, "params": {}}
+
+        params = BacktestParams(
+            symbols=[s.upper() for s in body.symbols],
+            start=start,
+            end=end,
+            starting_cash=body.starting_cash,
+            use_ml_gate=body.use_ml_gate,
+            use_dynamic_scanner=body.use_dynamic_scanner,
+            debug_mode=body.debug_mode,
+            strategies=merged_strategies,
+            risk=engine.risk_config,
+        )
+        try:
+            result: BacktestResult = await run_backtest(
+                data,
+                engine.model,
+                params,
+                on_progress=lambda frac: hub.publish("backtest_progress", {"progress": round(frac, 3)}),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        payload = result.model_dump(mode="json")
+        summary = {
+            "symbols": params.symbols,
+            "days": body.days,
+            "total_return_pct": result.metrics.get("total_return_pct"),
+            "max_drawdown_pct": result.metrics.get("max_drawdown_pct"),
+            "total_trades": result.metrics.get("total_trades"),
+            "win_rate": result.metrics.get("win_rate"),
+        }
+        _db(request).save_backtest(result.id, result.created_at, summary, payload)
+        hub.publish("backtest_progress", {"progress": 1.0})
+        return payload
+
+
+@router.get("/backtests")
+async def list_backtests(request: Request) -> list[dict]:
+    return _db(request).list_backtests()
+
+
+@router.get("/backtests/{run_id}")
+async def get_backtest(run_id: str, request: Request) -> dict:
+    payload = _db(request).get_backtest(run_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="backtest not found")
+    return payload
+
+
+@router.post("/scanner/run")
+async def run_scanner(request: Request) -> dict:
+    try:
+        new_watchlist = await _engine(request).run_market_scanner()
+        return {"status": "success", "watchlist": new_watchlist}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
