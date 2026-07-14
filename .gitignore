@@ -40,7 +40,7 @@ temp/
 *.sqlite3
 
 # Trading/runtime artifacts
-data/
+/data/
 cache/
 backtest_results/
 reports/
