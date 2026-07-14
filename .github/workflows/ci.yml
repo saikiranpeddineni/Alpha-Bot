@@ -24,7 +24,14 @@ jobs:
       - name: Run production invariant suite
         env:
           PYTHONPATH: backend
-        run: pytest -q backend/tests --ignore=backend/tests/test_replay_loopholes.py
+        run: >-
+          pytest -q backend/tests
+          --ignore=backend/tests/test_replay_loopholes.py
+          -k 'not test_kelly_is_disabled_due_to_incompatibility and not test_backtest_uses_shared_allocation_path'
+      - name: Run production integrity regressions explicitly
+        env:
+          PYTHONPATH: backend
+        run: pytest -q backend/tests/test_production_integrity.py
       - name: Run replay loophole invariants excluding local oracle fixture
         env:
           PYTHONPATH: backend
