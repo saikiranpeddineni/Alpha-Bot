@@ -17,6 +17,7 @@ def _signal(symbol: str, score: float, ml_probability: float) -> Signal:
         price=100.0,
         stop_loss=99.0,
         take_profit=100.1,  # deliberately negative Kelly under old invalid event pairing
+        confidence=ml_probability,
         reason="test",
     )
     sig.score = score
