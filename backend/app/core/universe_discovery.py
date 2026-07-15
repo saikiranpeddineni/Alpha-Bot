@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import random
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Callable, Iterable, Iterator, Protocol
+from typing import Awaitable, Callable, Iterable, Iterator, Protocol
 
 from app.core.domain import Quote
 
@@ -26,6 +28,10 @@ class DiscoveryTelemetry:
     eligible_symbols: int
     snapshot_batches: int
     snapshot_requests: int
+    snapshot_retries: int
+    rate_limit_retries: int
+    failed_batches: int
+    deadline_exhausted: bool
     request_budget: int
     covered_symbols: int
     missing_symbols: int
@@ -56,6 +62,29 @@ def _normalize_symbol(symbol: object) -> str | None:
         return None
     normalized = symbol.strip().upper()
     return normalized or None
+
+
+def _status_code(exc: BaseException) -> int | None:
+    value = getattr(exc, "status_code", None)
+    if value is None:
+        response = getattr(exc, "response", None)
+        value = getattr(response, "status_code", None)
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _retry_after_seconds(exc: BaseException) -> float | None:
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    value = headers.get("Retry-After") if hasattr(headers, "get") else None
+    if value is None:
+        value = getattr(exc, "retry_after", None)
+    try:
+        return max(0.0, float(value)) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def eligible_symbols(assets: Iterable[DiscoverableAsset]) -> tuple[str, ...]:
@@ -119,6 +148,12 @@ class DiscoveryCoordinator:
         max_snapshot_age: timedelta = timedelta(minutes=5),
         future_tolerance: timedelta = timedelta(0),
         shortlist_limit: int = 50,
+        max_retries: int = 2,
+        retry_base_delay: float = 0.25,
+        retry_max_delay: float = 5.0,
+        deadline_seconds: float = 15.0,
+        sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        random_fn: Callable[[], float] = random.random,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         if asset_cache_ttl < timedelta(0):
@@ -133,6 +168,12 @@ class DiscoveryCoordinator:
             raise ValueError("future_tolerance must be non-negative")
         if shortlist_limit < 1:
             raise ValueError("shortlist_limit must be positive")
+        if max_retries < 0:
+            raise ValueError("max_retries must be non-negative")
+        if retry_base_delay < 0 or retry_max_delay < retry_base_delay:
+            raise ValueError("retry delays must be bounded and non-negative")
+        if deadline_seconds <= 0:
+            raise ValueError("deadline_seconds must be positive")
         self.provider = provider
         self.feed = feed
         self.asset_cache_ttl = asset_cache_ttl
@@ -141,6 +182,12 @@ class DiscoveryCoordinator:
         self.max_snapshot_age = max_snapshot_age
         self.future_tolerance = future_tolerance
         self.shortlist_limit = shortlist_limit
+        self.max_retries = max_retries
+        self.retry_base_delay = retry_base_delay
+        self.retry_max_delay = retry_max_delay
+        self.deadline_seconds = deadline_seconds
+        self._sleeper = sleeper
+        self._random = random_fn
         self._clock = clock or (lambda: datetime.now(UTC))
         self._asset_cache: tuple[str, ...] | None = None
         self._asset_cache_at: datetime | None = None
@@ -160,20 +207,72 @@ class DiscoveryCoordinator:
         self._asset_cache_at = now
         return symbols, False
 
+    async def _get_quotes_with_retry(
+        self,
+        batch: tuple[str, ...],
+        deadline: float,
+    ) -> tuple[dict[str, Quote], int, int, bool]:
+        retries = 0
+        rate_limit_retries = 0
+        loop = asyncio.get_running_loop()
+        for attempt in range(self.max_retries + 1):
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return {}, retries, rate_limit_retries, True
+            try:
+                return (
+                    await asyncio.wait_for(self.provider.get_quotes(list(batch)), timeout=remaining),
+                    retries,
+                    rate_limit_retries,
+                    False,
+                )
+            except TimeoutError:
+                return {}, retries, rate_limit_retries, True
+            except Exception as exc:  # noqa: BLE001 - provider transports vary
+                status = _status_code(exc)
+                retryable = status == 429 or (status is not None and 500 <= status < 600)
+                if not retryable or attempt >= self.max_retries:
+                    return {}, retries, rate_limit_retries, False
+                retries += 1
+                if status == 429:
+                    rate_limit_retries += 1
+                retry_after = _retry_after_seconds(exc) if status == 429 else None
+                exponential = min(self.retry_max_delay, self.retry_base_delay * (2**attempt))
+                delay = retry_after if retry_after is not None else exponential * (0.5 + 0.5 * self._random())
+                delay = min(self.retry_max_delay, max(0.0, delay))
+                remaining = deadline - loop.time()
+                if delay >= remaining:
+                    return {}, retries, rate_limit_retries, True
+                await self._sleeper(delay)
+        return {}, retries, rate_limit_retries, False
+
     async def acquire(self) -> DiscoveryResult:
         symbols, cache_hit = await self._symbols()
         as_of = self._clock()
         quotes: dict[str, Quote] = {}
         batches = 0
         requests = 0
+        retries = 0
+        rate_limit_retries = 0
+        failed_batches = 0
+        deadline_exhausted = False
         stale = 0
         future = 0
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.deadline_seconds
         for batch in batched_symbols(symbols, self.batch_size):
-            if requests >= self.request_budget:
+            if requests >= self.request_budget or loop.time() >= deadline:
+                deadline_exhausted = loop.time() >= deadline
                 break
             batches += 1
             requests += 1
-            received = await self.provider.get_quotes(list(batch))
+            received, batch_retries, batch_rate_limits, batch_deadline = await self._get_quotes_with_retry(batch, deadline)
+            retries += batch_retries
+            rate_limit_retries += batch_rate_limits
+            if batch_deadline:
+                deadline_exhausted = True
+            if not received:
+                failed_batches += 1
             for symbol, quote in received.items():
                 normalized = _normalize_symbol(symbol)
                 if not normalized or normalized not in batch:
@@ -190,6 +289,8 @@ class DiscoveryCoordinator:
                     stale += 1
                     continue
                 quotes[normalized] = quote
+            if deadline_exhausted:
+                break
 
         shortlist = coarse_shortlist(quotes, self.shortlist_limit)
         covered = len(quotes)
@@ -200,6 +301,10 @@ class DiscoveryCoordinator:
             eligible_symbols=len(symbols),
             snapshot_batches=batches,
             snapshot_requests=requests,
+            snapshot_retries=retries,
+            rate_limit_retries=rate_limit_retries,
+            failed_batches=failed_batches,
+            deadline_exhausted=deadline_exhausted,
             request_budget=self.request_budget,
             covered_symbols=covered,
             missing_symbols=max(0, len(symbols) - covered - stale - future),
