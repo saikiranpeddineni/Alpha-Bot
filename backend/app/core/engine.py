@@ -376,6 +376,48 @@ class TradingEngine:
             await asyncio.sleep(10.0)
 
     # ------------------------------------------------------------------
+    # authoritative EOD liquidation
+    # ------------------------------------------------------------------
+
+    async def _reconcile_eod_liquidation(self, session, now: datetime) -> bool:  # noqa: ANN001
+        """Retry EOD liquidation until the broker proves positions and orders are clear."""
+        assert self.broker is not None
+        try:
+            open_orders = await self.broker.open_orders()
+            if open_orders:
+                applog.warning("engine", f"EOD liquidation: cancelling {len(open_orders)} open orders before flatten retry")
+                await self.broker.cancel_all()
+            positions = await self.broker.positions()
+            if positions:
+                applog.warning("engine", f"EOD liquidation unresolved: flattening {len(positions)} authoritative positions")
+                await self.broker.flatten_all(reason="end of day")
+                await self._drain_fills(now)
+            residual_positions = await self.broker.positions()
+            residual_orders = await self.broker.open_orders()
+            if residual_positions or residual_orders:
+                symbols = sorted({position.symbol for position in residual_positions})
+                self.last_error = (
+                    "CRITICAL EOD liquidation unresolved: "
+                    f"residual_positions={symbols}, open_orders={len(residual_orders)}"
+                )
+                applog.error("engine", self.last_error)
+                self.publish("status", self.status())
+                return False
+            self._flattened_sessions.add(session)
+            if self.last_error.startswith("CRITICAL EOD liquidation unresolved"):
+                self.last_error = ""
+            applog.info("engine", "End-of-day liquidation authoritatively complete")
+            self.publish("status", self.status())
+            return True
+        except BaseException as exc:
+            self.last_error = f"CRITICAL EOD liquidation unresolved: {type(exc).__name__}: {exc}"
+            applog.error("engine", self.last_error)
+            self.publish("status", self.status())
+            if isinstance(exc, (KeyboardInterrupt, SystemExit, asyncio.CancelledError)):
+                raise
+            return False
+
+    # ------------------------------------------------------------------
     # the tick
     # ------------------------------------------------------------------
 
@@ -474,22 +516,22 @@ class TradingEngine:
                 severity="danger",
             )
 
-        # 4. end-of-day flatten
+        # 4. end-of-day flatten. Completion is latched only after an
+        # authoritative broker post-condition proves no positions or open orders.
+        in_flatten_window = self.risk.should_flatten(now)
         if (
             self.state == EngineState.RUNNING
-            and positions
-            and self.risk.should_flatten(now)
+            and in_flatten_window
             and session not in self._flattened_sessions
         ):
-            self._flattened_sessions.add(session)
-            applog.info("engine", "End-of-day window -- flattening all positions")
-            await self.broker.flatten_all(reason="end of day")
-            await self._drain_fills(now)
+            await self._reconcile_eod_liquidation(session, now)
 
-        # 5. strategy evaluation on newly closed bars
+        # 5. strategy evaluation on newly closed bars. Do not reopen exposure
+        # while EOD liquidation is active, including unresolved retry ticks.
         can_trade = (
             self.state == EngineState.RUNNING
             and not self.risk.daily_halted
+            and not in_flatten_window
             and (self.clock.is_open(now) or self.mode == "demo")
         )
         if can_trade and new_closed:
