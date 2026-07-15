@@ -137,7 +137,15 @@ class SignalModel:
             for pkl in specialists_dir.glob("*.pkl"):
                 try:
                     import joblib
-                    self._specialists[pkl.stem.upper()] = joblib.load(pkl)
+                    artifact = joblib.load(pkl)
+                    # Backfill side-specific AUC from combined AUC for backward compatibility
+                    if isinstance(artifact, dict):
+                        if 'auc' in artifact:
+                            if 'auc_long' not in artifact:
+                                artifact['auc_long'] = artifact['auc']
+                            if 'auc_short' not in artifact:
+                                artifact['auc_short'] = artifact['auc']
+                    self._specialists[pkl.stem.upper()] = artifact
                 except Exception as exc:
                     applog.debug("ai.model", f"Could not load specialist {pkl.name}: {exc}")
         self._auc_warned_symbols = set()
