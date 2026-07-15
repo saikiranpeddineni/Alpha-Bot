@@ -12,6 +12,7 @@ from app.indicators.ta import enrich
 def mock_data_manager():
     dm = MagicMock()
     dm.history = AsyncMock()
+    dm.provider.get_bars = AsyncMock(return_value=pd.DataFrame())
     return dm
 
 
