@@ -23,6 +23,8 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from app.ai.insights import InsightEngine
+from app.ai.gemini_ranker import GeminiShadowRanker
+from app.ai.shadow_bridge import GeminiShadowBridge
 from app.ai.model import SignalModel
 from app.ai.regime import detect_regime
 from app.ai.trainer import ContinuousTrainer
@@ -96,8 +98,10 @@ class TradingEngine:
         self.strategies: list[Strategy] = create_strategies(db.get_setting("strategies"))
 
         self.recent_orders: deque[Order] = deque(maxlen=200)
-        self.narrative_interval: int = 12
-        self._narrative_task: asyncio.Task | None = None
+        self.gemini_shadow = GeminiShadowBridge(
+            GeminiShadowRanker(settings.gemini_api_key),
+            observation_sink=self._persist_gemini_shadow_observation,
+        )
         self._regimes: dict[str, Regime] = {}
         self._position_peaks: dict[str, float] = {}
         self._position_troughs: dict[str, float] = {}
@@ -513,6 +517,13 @@ class TradingEngine:
                     portfolio_allocator=self.portfolio_allocator,
                 )
 
+                # Shadow research observes only deterministic post-allocation candidates.
+                # The bridge has no return channel into risk, order construction, or submission.
+                self.gemini_shadow.schedule(
+                    [sig for sig, _ in decision_outcome.approved_entries],
+                    session=session,
+                )
+
                 # Process gated/rejected entries
                 for sig, reason in decision_outcome.gated_entries:
                     applog.info("engine", f"{sig.symbol}: Portfolio Gate/Allocator rejected -- {reason}")
@@ -564,17 +575,6 @@ class TradingEngine:
 
         # 7. broadcast
         self._broadcast_tick(account, now, new_closed)
-
-        # 8. optional LLM narrative generation
-        if (
-            (self.settings.gemini_api_key or self.settings.anthropic_api_key)
-            and new_closed
-            and self._tick_count % self.narrative_interval == 0
-        ):
-            if self._narrative_task is None or self._narrative_task.done():
-                self._narrative_task = asyncio.create_task(
-                    self._generate_narrative(), name="engine-narrative-generation"
-                )
 
     async def _evaluate_symbol(self, symbol: str, position, equity: float, now: datetime) -> list[tuple[Signal, pd.DataFrame]]:  # noqa: ANN001
         assert self.data and self.broker and self.risk and self.pipeline
@@ -913,6 +913,7 @@ class TradingEngine:
             "trainer": self.trainer.status if self.trainer else {"training_in_progress": False, "last_trained": None, "last_result": {}},
             "live_trading_enabled": self.settings.enable_live_trading,
             "has_alpaca_keys": self.settings.has_alpaca_keys,
+            "gemini_shadow": self.gemini_shadow.ranker.telemetry(),
             "tick": self._tick_count,
             "last_error": self.last_error,
         }
@@ -1238,74 +1239,17 @@ class TradingEngine:
                 self.publish("status", self.status())
                 self.publish("quotes", self.quotes_payload())
 
-    async def _generate_narrative(self) -> None:
-        """Generate a brief narrative summary using the LLM (Gemini or Claude)."""
-        if not (self.settings.gemini_api_key or self.settings.anthropic_api_key):
-            return
-
-        # Build context string
-        context_parts = []
-        
-        # 1. Mode and status
-        context_parts.append(f"Engine Mode: {self.mode.upper()}")
-        context_parts.append(f"State: {self.state}")
-        
-        # 2. Account & Portfolio Performance
-        if self.portfolio and self.broker:
-            try:
-                acc = await self.broker.account()
-                day_pnl = self.portfolio.day_pnl(acc.equity)
-                stats = self.portfolio.stats()
-                context_parts.append(
-                    f"Account Equity: ${acc.equity:,.2f}, Day P&L: ${day_pnl:+,.2f}, "
-                    f"Win Rate: {stats.get('win_rate', 0)}%, Profit Factor: {stats.get('profit_factor') or 'N/A'}, "
-                    f"Total Trades: {stats.get('total_trades', 0)}"
-                )
-            except Exception:
-                pass
-
-        # 3. Active Positions
-        if self.broker:
-            try:
-                positions = await self.broker.positions()
-                if positions:
-                    pos_desc = []
-                    for p in positions:
-                        side_str = "LONG" if p.qty > 0 else "SHORT"
-                        pos_desc.append(f"{p.symbol} {side_str} ({p.qty} shares @ ${p.avg_entry_price:.2f})")
-                    context_parts.append(f"Active Positions: {', '.join(pos_desc)}")
-                else:
-                    context_parts.append("Active Positions: None")
-            except Exception:
-                pass
-
-        # 4. Market Regimes
-        if self._regimes:
-            from app.ai.regime import REGIME_LABELS
-            regime_desc = [f"{sym}: {REGIME_LABELS[reg]}" for sym, reg in self._regimes.items()]
-            context_parts.append(f"Watchlist Regimes: {', '.join(regime_desc)}")
-
-        context_str = "\n".join(context_parts)
-        
-        # Call the llm_narrative method on insights
-        try:
-            narrative = await self.insights.llm_narrative(context_str)
-            if narrative:
-                # Broadcast the newly generated insight to connected WebSocket clients
-                recent = self.insights.recent(1)
-                if recent:
-                    self.publish("insight", recent[0].model_dump(mode="json"))
-        except Exception as exc:
-            applog.warning("engine", f"Failed to generate LLM narrative: {exc}")
+    def _persist_gemini_shadow_observation(self, observation: dict[str, Any]) -> None:
+        """Persist bounded research evidence without exposing it to execution code."""
+        key = "gemini_shadow_observations"
+        observations = self.db.get_setting(key) or []
+        if not isinstance(observations, list):
+            observations = []
+        observations.append(observation)
+        self.db.set_setting(key, observations[-200:])
 
     async def shutdown(self) -> None:
-        if self._narrative_task is not None and not self._narrative_task.done():
-            self._narrative_task.cancel()
-            try:
-                await self._narrative_task
-            except asyncio.CancelledError:
-                pass
-
+        await self.gemini_shadow.shutdown()
         await self.stop(flatten=False)
         if self.data is not None:
             await self.data.close()
