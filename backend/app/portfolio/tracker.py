@@ -24,27 +24,23 @@ class _OpenLot:
     strategy: str
     stop_loss: float | None = None
     initial_risk_per_share: float | None = None
+    commission_basis: float = 0.0
 
 
 @dataclass
 class PortfolioTracker:
     max_curve_points: int = 5000
-
     realized_pnl: float = 0.0
     day_realized_pnl: float = 0.0
     session_date: date | None = None
     session_start_equity: float | None = None
     peak_equity: float = 0.0
     day_trades_today: int = 0
-
     trades: list[TradeRecord] = field(default_factory=list)
     equity_curve: list[tuple[datetime, float]] = field(default_factory=list)
     _lots: dict[str, _OpenLot] = field(default_factory=dict)
 
-    # ---- session lifecycle ----
-
     def roll_session(self, session: date, equity: float) -> bool:
-        """Start a new trading session; returns True when the date changed."""
         if self.session_date == session:
             return False
         self.session_date = session
@@ -61,7 +57,6 @@ class PortfolioTracker:
         else:
             curve.append((ts, equity))
         if len(curve) > self.max_curve_points:
-            # Thin the oldest half to every other point
             keep = curve[: len(curve) // 2 : 2] + curve[len(curve) // 2 :]
             self.equity_curve = keep
 
@@ -75,110 +70,64 @@ class PortfolioTracker:
             return 0.0
         return max(0.0, (self.peak_equity - equity) / self.peak_equity * 100.0)
 
-    # ---- entry metadata (risk unit for R-multiples) ----
-
     def note_stop(self, symbol: str, stop_loss: float | None) -> None:
         lot = self._lots.get(symbol.upper())
         if lot and stop_loss is not None:
             lot.stop_loss = stop_loss
             lot.initial_risk_per_share = abs(lot.avg_price - stop_loss)
 
-    # ---- fills ----
-
-    def on_fill(
-        self,
-        fill: Fill,
-        peak_price: float | None = None,
-        trough_price: float | None = None,
-        initial_stop: float | None = None,
-    ) -> TradeRecord | None:
-        """Apply a fill to the ledger; returns a TradeRecord when a round trip closes."""
+    def on_fill(self, fill: Fill, peak_price: float | None = None, trough_price: float | None = None, initial_stop: float | None = None) -> TradeRecord | None:
         symbol = fill.symbol.upper()
         signed = fill.qty if fill.side == OrderSide.BUY else -fill.qty
         lot = self._lots.get(symbol)
-
         if lot is None or abs(lot.qty) < 1e-9:
-            self._lots[symbol] = _OpenLot(
-                qty=signed, avg_price=fill.price, entry_ts=fill.ts, strategy=fill.strategy
-            )
-            # Store initial stop in lot if provided
+            self._lots[symbol] = _OpenLot(qty=signed, avg_price=fill.price, entry_ts=fill.ts, strategy=fill.strategy, commission_basis=fill.commission)
             if initial_stop is not None:
                 self._lots[symbol].stop_loss = initial_stop
                 self._lots[symbol].initial_risk_per_share = abs(fill.price - initial_stop)
             side_str = "BOUGHT" if signed > 0 else "SOLD SHORT"
             total_amt = abs(signed) * fill.price
-            applog.info(
-                "portfolio",
-                f"[{fill.ts}] {side_str} {symbol}: {abs(signed):g} shares @ {fill.price:.2f} (Total Amt: ${total_amt:,.2f} | {fill.strategy})"
-            )
+            applog.info("portfolio", f"[{fill.ts}] {side_str} {symbol}: {abs(signed):g} shares @ {fill.price:.2f} (Total Amt: ${total_amt:,.2f} | {fill.strategy})")
             return None
 
-        if (lot.qty > 0) == (signed > 0):  # add to existing direction
+        if (lot.qty > 0) == (signed > 0):
             total = lot.qty + signed
             lot.avg_price = (lot.avg_price * lot.qty + fill.price * signed) / total
             lot.qty = total
+            lot.commission_basis += fill.commission
             side_str = "BOUGHT MORE" if signed > 0 else "SOLD MORE SHORT"
             total_amt = abs(signed) * fill.price
-            applog.info(
-                "portfolio",
-                f"[{fill.ts}] {side_str} {symbol}: {abs(signed):g} shares @ {fill.price:.2f} (Total Amt: ${total_amt:,.2f} | {fill.strategy})"
-            )
+            applog.info("portfolio", f"[{fill.ts}] {side_str} {symbol}: {abs(signed):g} shares @ {fill.price:.2f} (Total Amt: ${total_amt:,.2f} | {fill.strategy})")
             return None
 
-        # Opposite-direction fill: close (part of) the round trip
         closed_qty = min(abs(lot.qty), abs(signed))
         direction = 1.0 if lot.qty > 0 else -1.0
-        pnl = (fill.price - lot.avg_price) * closed_qty * direction - fill.commission
+        entry_fee = lot.commission_basis * (closed_qty / abs(lot.qty))
+        close_fee = fill.commission * (closed_qty / abs(signed))
+        pnl = (fill.price - lot.avg_price) * closed_qty * direction - entry_fee - close_fee
         basis = lot.avg_price * closed_qty
         r_multiple = None
-        
-        # Determine initial risk
         init_risk = lot.initial_risk_per_share
         if initial_stop is not None:
             init_risk = abs(lot.avg_price - initial_stop)
-
         if init_risk:
             r_multiple = round(pnl / (init_risk * closed_qty), 2)
-
-        # Excursion calculations
-        if direction > 0:  # Long trade
+        if direction > 0:
             best = peak_price if peak_price is not None else max(lot.avg_price, fill.price)
             worst = trough_price if trough_price is not None else min(lot.avg_price, fill.price)
             mfe_val = best - lot.avg_price
             mae_val = lot.avg_price - worst
-        else:  # Short trade
+        else:
             best = trough_price if trough_price is not None else min(lot.avg_price, fill.price)
             worst = peak_price if peak_price is not None else max(lot.avg_price, fill.price)
             mfe_val = lot.avg_price - best
             mae_val = worst - lot.avg_price
-
         mfe_pct = (mfe_val / lot.avg_price * 100.0) if lot.avg_price > 0 else 0.0
         mae_pct = (mae_val / lot.avg_price * 100.0) if lot.avg_price > 0 else 0.0
-
         mfe_r = (mfe_val / init_risk) if init_risk and init_risk > 0 else 0.0
         mae_r = (mae_val / init_risk) if init_risk and init_risk > 0 else 0.0
-
         winner_cap = (r_multiple / mfe_r) if r_multiple is not None and mfe_r > 0 else 0.0
-
-        trade = TradeRecord(
-            symbol=symbol,
-            side="long" if direction > 0 else "short",
-            qty=closed_qty,
-            entry_price=round(lot.avg_price, 4),
-            exit_price=round(fill.price, 4),
-            entry_at=lot.entry_ts,
-            exit_at=fill.ts,
-            pnl=round(pnl, 2),
-            pnl_pct=round(pnl / basis * 100.0, 3) if basis else 0.0,
-            r_multiple=r_multiple,
-            strategy=lot.strategy,
-            exit_reason=fill.reason or "exit",
-            mfe=round(mfe_val, 4),
-            mae=round(mae_val, 4),
-            mfe_pct=round(mfe_pct, 4),
-            mae_pct=round(mae_pct, 4),
-            capture_efficiency=round(winner_cap, 4),
-        )
+        trade = TradeRecord(symbol=symbol, side="long" if direction > 0 else "short", qty=closed_qty, entry_price=round(lot.avg_price, 4), exit_price=round(fill.price, 4), entry_at=lot.entry_ts, exit_at=fill.ts, pnl=round(pnl, 2), pnl_pct=round(pnl / basis * 100.0, 3) if basis else 0.0, r_multiple=r_multiple, strategy=lot.strategy, exit_reason=fill.reason or "exit", mfe=round(mfe_val, 4), mae=round(mae_val, 4), mfe_pct=round(mfe_pct, 4), mae_pct=round(mae_pct, 4), capture_efficiency=round(winner_cap, 4))
         self.trades.append(trade)
         self.realized_pnl += pnl
         self.day_realized_pnl += pnl
@@ -186,49 +135,26 @@ class PortfolioTracker:
             self.day_trades_today += 1
 
         remainder = lot.qty + signed
+        remaining_entry_fee = lot.commission_basis - entry_fee
+        remaining_fill_fee = fill.commission - close_fee
         if abs(remainder) < 1e-9:
             del self._lots[symbol]
         elif (remainder > 0) == (lot.qty > 0):
-            lot.qty = remainder  # partial close keeps basis
+            lot.qty = remainder
+            lot.commission_basis = remaining_entry_fee
         else:
-            # Flip: remainder opens a fresh lot at the fill price
-            self._lots[symbol] = _OpenLot(
-                qty=remainder, avg_price=fill.price, entry_ts=fill.ts, strategy=fill.strategy
-            )
+            self._lots[symbol] = _OpenLot(qty=remainder, avg_price=fill.price, entry_ts=fill.ts, strategy=fill.strategy, commission_basis=remaining_fill_fee)
         action_str = "SOLD" if trade.side == "long" else "BOUGHT TO COVER"
         pct_str = f"{trade.pnl_pct:+.2f}%" if trade.pnl_pct else "0.0%"
-        
         if pnl > 0:
-            applog.info(
-                "portfolio",
-                f"[{fill.ts}] {action_str} {symbol}: {closed_qty:g} shares @ {fill.price:.2f} -> "
-                f"P&L: +${pnl:,.2f} ({pct_str}) ({fill.reason or 'exit'}) | Entered: {trade.entry_at}",
-            )
+            applog.info("portfolio", f"[{fill.ts}] {action_str} {symbol}: {closed_qty:g} shares @ {fill.price:.2f} -> P&L: +${pnl:,.2f} ({pct_str}) ({fill.reason or 'exit'}) | Entered: {trade.entry_at}")
         else:
-            applog.info(
-                "portfolio",
-                f"[{fill.ts}] {action_str} {symbol}: {closed_qty:g} shares @ {fill.price:.2f} -> "
-                f"P&L: -${abs(pnl):,.2f} ({pct_str}) ({fill.reason or 'exit'}) | Entered: {trade.entry_at}",
-            )
+            applog.info("portfolio", f"[{fill.ts}] {action_str} {symbol}: {closed_qty:g} shares @ {fill.price:.2f} -> P&L: -${abs(pnl):,.2f} ({pct_str}) ({fill.reason or 'exit'}) | Entered: {trade.entry_at}")
         return trade
-
-    # ---- summaries ----
 
     def stats(self) -> dict:
         wins = [t for t in self.trades if t.pnl > 0]
         losses = [t for t in self.trades if t.pnl <= 0]
         gross_win = sum(t.pnl for t in wins)
         gross_loss = abs(sum(t.pnl for t in losses))
-        return {
-            "total_trades": len(self.trades),
-            "wins": len(wins),
-            "losses": len(losses),
-            "win_rate": round(len(wins) / len(self.trades) * 100.0, 1) if self.trades else 0.0,
-            "gross_profit": round(gross_win, 2),
-            "gross_loss": round(gross_loss, 2),
-            "profit_factor": round(gross_win / gross_loss, 2) if gross_loss > 0 else None,
-            "realized_pnl": round(self.realized_pnl, 2),
-            "avg_win": round(gross_win / len(wins), 2) if wins else 0.0,
-            "avg_loss": round(-gross_loss / len(losses), 2) if losses else 0.0,
-            "day_trades_today": self.day_trades_today,
-        }
+        return {"total_trades": len(self.trades), "wins": len(wins), "losses": len(losses), "win_rate": round(len(wins) / len(self.trades) * 100.0, 1) if self.trades else 0.0, "gross_profit": round(gross_win, 2), "gross_loss": round(gross_loss, 2), "profit_factor": round(gross_win / gross_loss, 2) if gross_loss > 0 else None, "realized_pnl": round(self.realized_pnl, 2), "avg_win": round(gross_win / len(wins), 2) if wins else 0.0, "avg_loss": round(-gross_loss / len(losses), 2) if losses else 0.0, "day_trades_today": self.day_trades_today}
