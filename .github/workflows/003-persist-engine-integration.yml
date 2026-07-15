@@ -1,20 +1,20 @@
 name: 003 Persist Engine Integration
 
 on:
-  push:
-    branches: [003-budgeted-gemini-shadow-ranker-clean]
+  pull_request:
+    branches: [master]
 
 permissions:
   contents: write
 
 jobs:
   persist:
-    if: github.actor != 'github-actions[bot]'
+    if: github.head_ref == '003-budgeted-gemini-shadow-ranker-clean'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 003-budgeted-gemini-shadow-ranker-clean
+          ref: ${{ github.head_ref }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -114,4 +114,4 @@ jobs:
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add backend/app/core/engine.py backend/tests/test_gemini_engine_integration.py .github/workflows/003-persist-engine-integration.yml
           git commit -m '003: wire shadow ranker after allocation'
-          git push origin HEAD:003-budgeted-gemini-shadow-ranker-clean
+          git push origin HEAD:${{ github.head_ref }}
