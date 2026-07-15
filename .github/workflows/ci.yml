@@ -6,44 +6,9 @@ on:
     branches: [master]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  apply-004-scanner-wiring:
-    if: github.head_ref == '004-scanner-wiring-runner' && github.actor != 'github-actions[bot]'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: 004-scanner-wiring-runner
-          fetch-depth: 0
-      - name: Apply and validate scanner wiring
-        shell: python
-        run: |
-          from pathlib import Path
-          p = Path('backend/app/core/scanner.py')
-          s = p.read_text()
-          s = s.replace('from app.core.logging import applog\n', 'from app.core.logging import applog\nfrom app.core.scanner_discovery_input import resolve_stage1_symbols\nfrom app.core.universe_discovery import DiscoveryCoordinator\n')
-          s = s.replace('        self.core_watchlist = core_watchlist\n', '''        self.core_watchlist = core_watchlist\n        self._discovery: DiscoveryCoordinator | None = None\n\n    async def _stage1_symbols(self, as_of: datetime | None = None) -> list[str]:\n        \"\"\"Resolve bounded Stage-1 input without current-data replay leakage.\"\"\"\n        provider = self.data.provider\n        discovery_supported = bool(getattr(provider, \"supports_asset_discovery\", False))\n        acquire_discovery = None\n        if as_of is None and discovery_supported:\n            if self._discovery is None:\n                self._discovery = DiscoveryCoordinator(\n                    provider, feed=\"iex\", asset_cache_ttl=timedelta(hours=6),\n                    batch_size=200, request_budget=10, shortlist_limit=50,\n                )\n            acquire_discovery = self._discovery.acquire\n        symbols = await resolve_stage1_symbols(\n            as_of=as_of, static_symbols=CANDIDATE_POOL, fallback_limit=50,\n            discovery_supported=discovery_supported, acquire_discovery=acquire_discovery,\n        )\n        return list(symbols)\n''')
-          s = s.replace('        self, as_of: datetime | None = None\n    ) -> list[dict]:', '        self, as_of: datetime | None = None, symbols: list[str] | None = None\n    ) -> list[dict]:', 1)
-          s = s.replace('        all_symbols = CANDIDATE_POOL\n', '        all_symbols = list(symbols) if symbols is not None else CANDIDATE_POOL\n', 1)
-          s = s.replace('            candidates = await self._stage1_prefilter_parallel(as_of)\n', '            stage1_symbols = await self._stage1_symbols(as_of)\n            candidates = await self._stage1_prefilter_parallel(as_of, stage1_symbols)\n', 1)
-          p.write_text(s)
-          Path('backend/tests/test_scanner_discovery_wiring.py').write_text('''from datetime import UTC, datetime\nfrom types import SimpleNamespace\nfrom unittest.mock import AsyncMock\n\nimport pytest\n\nfrom app.core.scanner import CANDIDATE_POOL, MarketScanner, ScannerOutcome\n\nHISTORICAL_T = datetime(2026, 7, 14, 14, 0, tzinfo=UTC)\n\n@pytest.mark.asyncio\nasync def test_scanner_replay_stage1_symbols_never_call_current_discovery():\n    provider = SimpleNamespace(name=\"alpaca\", supports_asset_discovery=True)\n    scanner = MarketScanner(SimpleNamespace(provider=provider), [])\n    scanner._discovery = SimpleNamespace(acquire=AsyncMock(side_effect=AssertionError(\"current discovery reached replay\")))\n    symbols = await scanner._stage1_symbols(HISTORICAL_T)\n    assert symbols == CANDIDATE_POOL\n    scanner._discovery.acquire.assert_not_awaited()\n\n@pytest.mark.asyncio\nasync def test_run_passes_live_discovery_shortlist_only_to_stage1(monkeypatch):\n    provider = SimpleNamespace(name=\"alpaca\", supports_asset_discovery=True)\n    scanner = MarketScanner(SimpleNamespace(provider=provider), [])\n    scanner._discovery = SimpleNamespace(acquire=AsyncMock(return_value=SimpleNamespace(shortlist=(\"NEW2\", \"NEW1\"))))\n    scanner.check_spy_volatility = AsyncMock(return_value=True)\n    stage1 = AsyncMock(return_value=[])\n    monkeypatch.setattr(scanner, \"_stage1_prefilter_parallel\", stage1)\n    outcome, symbols = await scanner.run()\n    assert outcome is ScannerOutcome.SUCCESS_EMPTY\n    assert symbols == []\n    stage1.assert_awaited_once_with(None, [\"NEW1\", \"NEW2\"])\n\n@pytest.mark.asyncio\nasync def test_run_passes_full_static_pool_to_stage1_for_historical_as_of(monkeypatch):\n    provider = SimpleNamespace(name=\"alpaca\", supports_asset_discovery=True)\n    scanner = MarketScanner(SimpleNamespace(provider=provider), [])\n    scanner.check_spy_volatility = AsyncMock(return_value=True)\n    stage1 = AsyncMock(return_value=[])\n    monkeypatch.setattr(scanner, \"_stage1_prefilter_parallel\", stage1)\n    outcome, symbols = await scanner.run(HISTORICAL_T)\n    assert outcome is ScannerOutcome.SUCCESS_EMPTY\n    assert symbols == []\n    stage1.assert_awaited_once_with(HISTORICAL_T, CANDIDATE_POOL)\n''')
-      - name: Run focused tests
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt -r requirements-dev.txt
-          PYTHONPATH=backend pytest -q backend/tests/test_scanner_discovery_input.py backend/tests/test_scanner_discovery_input_boundaries.py backend/tests/test_scanner_discovery_input_duplicate.py backend/tests/test_scanner_discovery_input_integration_contract.py backend/tests/test_scanner_discovery_input_order.py backend/tests/test_scanner_discovery_input_malformed.py backend/tests/test_scanner_discovery_wiring.py backend/tests/test_scanner.py
-      - name: Commit validated wiring and restore CI workflow
-        run: |
-          git show origin/master:.github/workflows/ci.yml > .github/workflows/ci.yml
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add backend/app/core/scanner.py backend/tests/test_scanner_discovery_wiring.py .github/workflows/ci.yml
-          git commit -m "004 wire bounded live discovery into scanner stage1"
-          git push origin HEAD:004-scanner-wiring-runner
-
   frontend-build:
     runs-on: ubuntu-latest
     timeout-minutes: 10
