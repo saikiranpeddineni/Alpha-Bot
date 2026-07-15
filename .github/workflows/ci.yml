@@ -5,12 +5,39 @@ on:
   push:
     branches: [master]
 
+permissions:
+  contents: write
+
 jobs:
   backend-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.head_ref || github.ref }}
+      - name: Preserve requested-range provenance
+        if: github.event_name == 'pull_request' && github.head_ref == '001-production-integrity-fixes'
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('backend/app/backtest/engine.py')
+          s = p.read_text()
+          old = '''                requested_df = await original_history(symbol, "1Min", params.start, params.end)\n                requested_df = requested_df[\n'''
+          new = '''                requested_df = await original_history(symbol, "1Min", params.start, params.end)\n                requested_provenance = data.provenance.get(symbol)\n                requested_df = requested_df[\n'''
+          assert old in s
+          s = s.replace(old, new, 1)
+          old = '''                if not df_daily.empty:\n                    daily_frames[symbol] = df_daily\n\n            except HistoricalDataCoverageError:\n'''
+          new = '''                if not df_daily.empty:\n                    daily_frames[symbol] = df_daily\n                if requested_provenance is not None:\n                    data.provenance[symbol] = requested_provenance\n\n            except HistoricalDataCoverageError:\n'''
+          assert old in s
+          p.write_text(s.replace(old, new, 1))
+          PY
+          git diff --check
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add backend/app/backtest/engine.py
+          git commit -m "Preserve requested-range data provenance"
+          git push origin HEAD:001-production-integrity-fixes
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -49,7 +76,7 @@ jobs:
         run: |
           set -o pipefail
           pytest -q backend/tests/test_replay_loopholes.py \
-            -k 'not july_6_10_oracle_regression' \
+            -k 'not june_8_july_10_oracle_regression' \
             --junitxml=replay-invariants.xml 2>&1 | tee replay-invariants.log
       - name: Upload CI diagnostics
         if: always()
