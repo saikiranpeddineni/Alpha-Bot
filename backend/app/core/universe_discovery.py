@@ -191,6 +191,7 @@ class DiscoveryCoordinator:
         self._clock = clock or (lambda: datetime.now(UTC))
         self._asset_cache: tuple[str, ...] | None = None
         self._asset_cache_at: datetime | None = None
+        self._cached_result: DiscoveryResult | None = None
 
     async def _symbols(self) -> tuple[tuple[str, ...], bool]:
         now = self._clock()
@@ -254,6 +255,32 @@ class DiscoveryCoordinator:
 
     async def acquire(self) -> DiscoveryResult:
         symbols, cache_hit = await self._symbols()
+        if cache_hit and self._cached_result is not None:
+            tel = self._cached_result.telemetry
+            new_tel = DiscoveryTelemetry(
+                provider=tel.provider,
+                feed=tel.feed,
+                asset_cache_hit=True,
+                eligible_symbols=tel.eligible_symbols,
+                snapshot_batches=tel.snapshot_batches,
+                snapshot_requests=tel.snapshot_requests,
+                snapshot_retries=tel.snapshot_retries,
+                rate_limit_retries=tel.rate_limit_retries,
+                failed_batches=tel.failed_batches,
+                deadline_exhausted=tel.deadline_exhausted,
+                request_budget=tel.request_budget,
+                covered_symbols=tel.covered_symbols,
+                missing_symbols=tel.missing_symbols,
+                stale_symbols=tel.stale_symbols,
+                future_symbols=tel.future_symbols,
+                shortlist_symbols=tel.shortlist_symbols,
+                budget_exhausted=tel.budget_exhausted,
+            )
+            return DiscoveryResult(
+                quotes=self._cached_result.quotes,
+                shortlist=self._cached_result.shortlist,
+                telemetry=new_tel,
+            )
         as_of = self._clock()
         quotes: dict[str, Quote] = {}
         batches = 0
@@ -323,4 +350,6 @@ class DiscoveryCoordinator:
             shortlist_symbols=len(shortlist),
             budget_exhausted=requests >= self.request_budget and covered + stale + future < len(symbols),
         )
-        return DiscoveryResult(quotes=quotes, shortlist=shortlist, telemetry=telemetry)
+        res = DiscoveryResult(quotes=quotes, shortlist=shortlist, telemetry=telemetry)
+        self._cached_result = res
+        return res
