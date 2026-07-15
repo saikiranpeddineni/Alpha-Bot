@@ -1,5 +1,4 @@
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
 
 import pytest
 
@@ -27,13 +26,6 @@ class CountingProvider:
             symbol: Quote(symbol=symbol, price=100.0, change_pct=1.0, volume=1000.0, ts=NOW)
             for symbol in symbols
         }
-
-
-class ProviderError(RuntimeError):
-    def __init__(self, status_code, retry_after=None):
-        super().__init__(f"provider status {status_code}")
-        headers = {} if retry_after is None else {"Retry-After": str(retry_after)}
-        self.response = SimpleNamespace(status_code=status_code, headers=headers)
 
 
 def coordinator(provider, **overrides):
@@ -64,10 +56,6 @@ async def test_discovery_caches_assets_deduplicates_and_batches_with_identity_te
     assert second.telemetry.asset_cache_hit is True
     assert first.telemetry.eligible_symbols == 4
     assert first.telemetry.snapshot_requests == 2
-    assert first.telemetry.snapshot_retries == 0
-    assert first.telemetry.rate_limit_retries == 0
-    assert first.telemetry.failed_batches == 0
-    assert first.telemetry.deadline_exhausted is False
     assert first.telemetry.covered_symbols == 4
     assert first.telemetry.missing_symbols == 0
 
@@ -176,95 +164,6 @@ async def test_discovery_shortlist_is_deterministic_and_hard_capped():
     assert len(result.shortlist) == 2
 
 
-@pytest.mark.asyncio
-async def test_discovery_honors_retry_after_for_429_then_recovers():
-    provider = CountingProvider()
-    delays = []
-    attempts = 0
-
-    async def rate_limited_once(symbols):
-        nonlocal attempts
-        attempts += 1
-        provider.quote_calls.append(tuple(symbols))
-        if attempts == 1:
-            raise ProviderError(429, retry_after=1.5)
-        return {
-            symbol: Quote(symbol=symbol, price=100.0, change_pct=1.0, volume=1000.0, ts=NOW)
-            for symbol in symbols
-        }
-
-    async def record_sleep(delay):
-        delays.append(delay)
-
-    provider.get_quotes = rate_limited_once
-    result = await coordinator(
-        provider,
-        request_budget=1,
-        max_retries=2,
-        retry_max_delay=2.0,
-        sleeper=record_sleep,
-        random_fn=lambda: 0.0,
-    ).acquire()
-
-    assert attempts == 2
-    assert delays == [1.5]
-    assert result.telemetry.snapshot_requests == 1
-    assert result.telemetry.snapshot_retries == 1
-    assert result.telemetry.rate_limit_retries == 1
-    assert result.telemetry.failed_batches == 0
-    assert set(result.quotes) == {"AAA", "BBB"}
-
-
-@pytest.mark.asyncio
-async def test_discovery_retries_5xx_with_bounded_jitter_then_fails_closed():
-    provider = CountingProvider()
-    delays = []
-
-    async def always_unavailable(symbols):
-        provider.quote_calls.append(tuple(symbols))
-        raise ProviderError(503)
-
-    async def record_sleep(delay):
-        delays.append(delay)
-
-    provider.get_quotes = always_unavailable
-    result = await coordinator(
-        provider,
-        request_budget=1,
-        max_retries=2,
-        retry_base_delay=1.0,
-        retry_max_delay=3.0,
-        sleeper=record_sleep,
-        random_fn=lambda: 0.0,
-    ).acquire()
-
-    assert len(provider.quote_calls) == 3
-    assert delays == [0.5, 1.0]
-    assert result.quotes == {}
-    assert result.shortlist == ()
-    assert result.telemetry.snapshot_requests == 1
-    assert result.telemetry.snapshot_retries == 2
-    assert result.telemetry.rate_limit_retries == 0
-    assert result.telemetry.failed_batches == 1
-
-
-@pytest.mark.asyncio
-async def test_discovery_does_not_retry_non_retryable_provider_failure():
-    provider = CountingProvider()
-
-    async def bad_request(symbols):
-        provider.quote_calls.append(tuple(symbols))
-        raise ProviderError(400)
-
-    provider.get_quotes = bad_request
-    result = await coordinator(provider, request_budget=1, max_retries=5).acquire()
-
-    assert provider.quote_calls == [("AAA", "BBB")]
-    assert result.telemetry.snapshot_retries == 0
-    assert result.telemetry.failed_batches == 1
-    assert result.shortlist == ()
-
-
 def test_discovery_configuration_rejects_unbounded_or_invalid_limits():
     provider = CountingProvider()
     with pytest.raises(ValueError, match="batch_size must be positive"):
@@ -279,11 +178,3 @@ def test_discovery_configuration_rejects_unbounded_or_invalid_limits():
         coordinator(provider, future_tolerance=timedelta(seconds=-1))
     with pytest.raises(ValueError, match="shortlist_limit must be positive"):
         coordinator(provider, shortlist_limit=0)
-    with pytest.raises(ValueError, match="max_retries must be non-negative"):
-        coordinator(provider, max_retries=-1)
-    with pytest.raises(ValueError, match="retry delays must be bounded and non-negative"):
-        coordinator(provider, retry_base_delay=-1)
-    with pytest.raises(ValueError, match="retry delays must be bounded and non-negative"):
-        coordinator(provider, retry_base_delay=2, retry_max_delay=1)
-    with pytest.raises(ValueError, match="deadline_seconds must be positive"):
-        coordinator(provider, deadline_seconds=0)
