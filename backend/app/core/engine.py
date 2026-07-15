@@ -376,6 +376,47 @@ class TradingEngine:
             await asyncio.sleep(10.0)
 
     # ------------------------------------------------------------------
+    # authoritative hard-halt liquidation
+    # ------------------------------------------------------------------
+
+    async def _reconcile_hard_halt_liquidation(self, now: datetime) -> bool:
+        """Keep a latched hard halt unresolved until broker state proves flat."""
+        assert self.broker is not None
+        try:
+            open_orders = await self.broker.open_orders()
+            if open_orders:
+                applog.warning("engine", f"Hard halt liquidation: cancelling {len(open_orders)} open orders")
+                await self.broker.cancel_all()
+            positions = await self.broker.positions()
+            if positions:
+                applog.warning("engine", f"Hard halt liquidation unresolved: flattening {len(positions)} authoritative positions")
+                await self.broker.flatten_all(reason="max drawdown kill switch")
+                await self._drain_fills(now)
+            residual_positions = await self.broker.positions()
+            residual_orders = await self.broker.open_orders()
+            if residual_positions or residual_orders:
+                symbols = sorted({position.symbol for position in residual_positions})
+                self.last_error = (
+                    "HARD HALTED — liquidation unresolved: "
+                    f"residual_positions={symbols}, open_orders={len(residual_orders)}"
+                )
+                applog.error("engine", self.last_error)
+                self.publish("status", self.status())
+                return False
+            if self.last_error.startswith("HARD HALTED — liquidation unresolved"):
+                self.last_error = "HARD HALTED — flat"
+            applog.info("engine", "Hard halt liquidation authoritatively complete: flat")
+            self.publish("status", self.status())
+            return True
+        except BaseException as exc:
+            self.last_error = f"HARD HALTED — liquidation unresolved: {type(exc).__name__}: {exc}"
+            applog.error("engine", self.last_error)
+            self.publish("status", self.status())
+            if isinstance(exc, (KeyboardInterrupt, SystemExit, asyncio.CancelledError)):
+                raise
+            return False
+
+    # ------------------------------------------------------------------
     # authoritative EOD liquidation
     # ------------------------------------------------------------------
 
@@ -500,13 +541,15 @@ class TradingEngine:
         )
         halt = self.risk.check_halts(ctx, now=now)
         if halt == "hard":
-            await self.broker.flatten_all(reason="max drawdown kill switch")
-            await self._drain_fills(now)
+            # Latch the capital-preservation state before any fallible broker I/O.
             self.state = EngineState.HALTED
             self.insights.on_risk_event(
                 "Kill switch tripped", self.risk.hard_halt_reason, severity="danger"
             )
+            await self._reconcile_hard_halt_liquidation(now)
             self.publish("status", self.status())
+        elif self.state == EngineState.HALTED and self.risk.hard_halted:
+            await self._reconcile_hard_halt_liquidation(now)
         elif halt == "daily":
             await self.broker.flatten_all(reason="daily loss halt")
             await self._drain_fills(now)
