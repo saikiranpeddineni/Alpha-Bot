@@ -43,7 +43,11 @@ async def test_engine_ticks_and_streams(engine: TradingEngine):
     assert status["tick"] >= 30
 
     quotes = engine.quotes_payload()
-    assert {q["symbol"] for q in quotes} == {"SPY", "NVDA"}
+    quote_symbols = {q["symbol"] for q in quotes}
+    # The configured user watchlist must remain observable. The production
+    # scanner is allowed to expand the active watchlist during these ticks, so
+    # asserting exact equality makes this integration test timing-dependent.
+    assert {"SPY", "NVDA"} <= quote_symbols
     assert all(q["price"] > 0 for q in quotes)
 
     metrics = engine.metrics_payload()

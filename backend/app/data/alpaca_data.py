@@ -14,6 +14,7 @@ import pandas as pd
 
 from app.core.domain import Quote
 from app.core.logging import applog
+from app.core.universe_discovery import DiscoverableAsset
 from app.data.base import DataProvider, empty_bars, normalize_bars
 
 _TF_MAP = {"1Min": ("Minute", 1), "5Min": ("Minute", 5), "15Min": ("Minute", 15), "1Day": ("Day", 1)}
@@ -21,15 +22,18 @@ _TF_MAP = {"1Min": ("Minute", 1), "5Min": ("Minute", 5), "15Min": ("Minute", 15)
 
 class AlpacaDataProvider(DataProvider):
     name = "alpaca"
+    supports_asset_discovery = True
 
     def __init__(self, api_key: str, api_secret: str) -> None:
         if not (api_key and api_secret):
             raise RuntimeError("Alpaca data provider requires ALPACA_API_KEY and ALPACA_API_SECRET")
         try:
             from alpaca.data.historical import StockHistoricalDataClient
+            from alpaca.trading.client import TradingClient
         except ImportError as exc:  # pragma: no cover
             raise RuntimeError("alpaca-py is not installed; run the install script") from exc
         self._client = StockHistoricalDataClient(api_key, api_secret)
+        self._trading_client = TradingClient(api_key, api_secret, paper=True)
         try:
             from requests.adapters import HTTPAdapter
             adapter = HTTPAdapter(pool_connections=64, pool_maxsize=64)
@@ -92,6 +96,32 @@ class AlpacaDataProvider(DataProvider):
                 applog.error("data.alpaca", f"{symbol}: bars failed: {exc}")
                 break
         return empty_bars()
+
+    async def discover_assets(self) -> tuple[DiscoverableAsset, ...]:
+        """Fetch Alpaca's active US-equity asset metadata for bounded discovery."""
+        def fetch() -> tuple[DiscoverableAsset, ...]:
+            from alpaca.trading.enums import AssetClass, AssetStatus
+            from alpaca.trading.requests import GetAssetsRequest
+
+            assets = self._trading_client.get_all_assets(
+                GetAssetsRequest(status=AssetStatus.ACTIVE, asset_class=AssetClass.US_EQUITY)
+            )
+            return tuple(
+                DiscoverableAsset(
+                    symbol=getattr(asset, "symbol", None),
+                    active=getattr(asset, "status", None) == AssetStatus.ACTIVE,
+                    tradable=bool(getattr(asset, "tradable", False)),
+                    asset_class="us_equity" if getattr(asset, "asset_class", None) == AssetClass.US_EQUITY else "",
+                    exchange=str(getattr(asset, "exchange", "") or ""),
+                )
+                for asset in assets
+            )
+
+        try:
+            return await asyncio.to_thread(fetch)
+        except Exception as exc:  # noqa: BLE001
+            applog.error("data.alpaca", f"asset discovery failed: {exc}")
+            return ()
 
     async def get_quotes(self, symbols: list[str]) -> dict[str, Quote]:
         def fetch() -> dict[str, Quote]:
