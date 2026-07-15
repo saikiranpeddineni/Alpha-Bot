@@ -102,9 +102,14 @@ def batched_symbols(symbols: Iterable[str], batch_size: int) -> Iterator[tuple[s
     """Normalize/deduplicate symbols and yield deterministic bounded batches."""
     if batch_size < 1:
         raise ValueError("batch_size must be positive")
-    normalized = tuple(sorted({value for symbol in symbols if (value := _normalize_symbol(symbol))}))
+    seen: dict[str, bool] = {}
+    normalized: list[str] = []
+    for symbol in symbols:
+        if (value := _normalize_symbol(symbol)) and value not in seen:
+            seen[value] = True
+            normalized.append(value)
     for start in range(0, len(normalized), batch_size):
-        yield normalized[start : start + batch_size]
+        yield tuple(normalized[start : start + batch_size])
 
 
 def bounded_fallback(symbols: Iterable[str], limit: int) -> tuple[str, ...]:
@@ -282,6 +287,14 @@ class DiscoveryCoordinator:
                 telemetry=new_tel,
             )
         as_of = self._clock()
+        # Shuffle symbols deterministically by day to cover the entire A-Z spectrum
+        shuffled = list(symbols)
+        import random
+        seed_val = int(as_of.timestamp()) // 86400  # daily seed
+        rng = random.Random(seed_val)
+        rng.shuffle(shuffled)
+        symbols = tuple(shuffled)
+
         quotes: dict[str, Quote] = {}
         batches = 0
         requests = 0
