@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -53,6 +54,36 @@ def test_same_event_loop_turn_allows_exactly_one_training_owner() -> None:
     asyncio.run(scenario())
 
 
+def test_forced_thread_interleaving_admits_one_writer() -> None:
+    coordinator = TrainingCoordinator()
+    barrier = threading.Barrier(3)
+    release = threading.Event()
+    results: list[tuple[str, bool]] = []
+    results_lock = threading.Lock()
+
+    def writer(owner: str) -> None:
+        barrier.wait()
+        claimed = coordinator.try_claim(owner)
+        with results_lock:
+            results.append((owner, claimed))
+        if claimed:
+            release.wait(timeout=2)
+            coordinator.release(owner)
+
+    threads = [threading.Thread(target=writer, args=("manual",)), threading.Thread(target=writer, args=("continuous",))]
+    for thread in threads:
+        thread.start()
+    barrier.wait()
+    while len(results) < 2:
+        pass
+    assert sum(claimed for _, claimed in results) == 1
+    release.set()
+    for thread in threads:
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+    assert coordinator.busy is False
+
+
 def test_reverse_writer_order_is_rejected_deterministically() -> None:
     coordinator = TrainingCoordinator()
     with coordinator.claim_sync("manual"):
@@ -87,21 +118,15 @@ def test_inference_snapshot_never_mixes_sides_during_publish(tmp_path: Path) -> 
     store.publish(MarkerModel("g0", "long"), MarkerModel("g0", "short"), {"name": "g0"})
     before = store.current
     assert before is not None
-
     store.publish(MarkerModel("g1", "long"), MarkerModel("g1", "short"), {"name": "g1"})
     after = store.current
     assert after is not None
-
-    # A scorer captures one immutable reference per decision. The old reference
-    # remains coherent even after the store atomically swaps to the new one.
     assert before.long_model.generation == before.short_model.generation == "g0"
     assert after.long_model.generation == after.short_model.generation == "g1"
     assert before.generation_id != after.generation_id
 
 
-def test_failure_before_manifest_commit_preserves_disk_and_memory_incumbent(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_failure_before_manifest_commit_preserves_disk_and_memory_incumbent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     store = AtomicGenerationStore(tmp_path)
     incumbent = store.publish(MarkerModel("g0", "long"), MarkerModel("g0", "short"), {"name": "g0"})
     original_replace = __import__("app.ai.generation", fromlist=["os"]).os.replace
@@ -114,15 +139,24 @@ def test_failure_before_manifest_commit_preserves_disk_and_memory_incumbent(
     monkeypatch.setattr("app.ai.generation.os.replace", fail_manifest_swap)
     with pytest.raises(OSError, match="injected manifest failure"):
         store.publish(MarkerModel("g1", "long"), MarkerModel("g1", "short"), {"name": "g1"})
-
     assert store.current is not None
     assert store.current.generation_id == incumbent.generation_id
     assert store.current.long_model.generation == store.current.short_model.generation == "g0"
-
     loaded = AtomicGenerationStore(tmp_path).load()
     assert loaded is not None
     assert loaded.generation_id == incumbent.generation_id
     assert loaded.long_model.generation == loaded.short_model.generation == "g0"
+
+
+def test_restart_rejects_manifest_metadata_generation_mismatch(tmp_path: Path) -> None:
+    store = AtomicGenerationStore(tmp_path)
+    published = store.publish(MarkerModel("g0", "long"), MarkerModel("g0", "short"), {"name": "g0"})
+    meta_path = store.generations_dir / published.generation_id / "meta.json"
+    meta = json.loads(meta_path.read_text())
+    meta["generation_id"] = "different-generation"
+    meta_path.write_text(json.dumps(meta))
+    with pytest.raises(ValueError, match="generation metadata mismatch"):
+        AtomicGenerationStore(tmp_path).load()
 
 
 def test_manifest_never_points_at_staging_directory(tmp_path: Path) -> None:
