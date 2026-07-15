@@ -136,7 +136,15 @@ class SignalModel:
             for pkl in specialists_dir.glob("*.pkl"):
                 try:
                     import joblib
-                    self._specialists[pkl.stem.upper()] = joblib.load(pkl)
+                    artifact = joblib.load(pkl)
+                    # Backfill side-specific AUC from combined AUC for backward compatibility
+                    if isinstance(artifact, dict):
+                        if 'auc' in artifact:
+                            if 'auc_long' not in artifact:
+                                artifact['auc_long'] = artifact['auc']
+                            if 'auc_short' not in artifact:
+                                artifact['auc_short'] = artifact['auc']
+                    self._specialists[pkl.stem.upper()] = artifact
                 except Exception as exc:
                     applog.debug("ai.model", f"Could not load specialist {pkl.name}: {exc}")
 
@@ -293,9 +301,10 @@ class SignalModel:
 
                 # Dynamic safety gate: block if specialist validation AUC is below config threshold
                 if auc < min_auc:
+                    side_label = "short" if action == SignalAction.ENTER_SHORT else "long"
                     applog.info(
                         "ai.model",
-                        f"[specialist] {sym_upper} VALIDATION FAILED — "
+                        f"[specialist] {sym_upper} VALIDATION FAILED ({side_label}) — "
                         f"auc={auc:.4f} < min_auc={min_auc:.4f} | "
                         f"trained_at={spec.get('trained_at', 'unknown')} | "
                         f"n_samples={spec.get('n_samples', 'unknown')} | "
