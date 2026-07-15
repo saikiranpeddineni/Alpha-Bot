@@ -19,6 +19,8 @@ from app.data.base import DataProvider, empty_bars, normalize_bars
 
 _TF_MAP = {"1Min": ("Minute", 1), "5Min": ("Minute", 5), "15Min": ("Minute", 15), "1Day": ("Day", 1)}
 
+_SNAPSHOT_SUPPRESS_AFTER = 2  # downgrade to DEBUG after this many consecutive failures
+
 
 class AlpacaDataProvider(DataProvider):
     name = "alpaca"
@@ -41,6 +43,7 @@ class AlpacaDataProvider(DataProvider):
             self._client._session.mount("http://", adapter)
         except Exception:
             pass
+        self._snapshot_fail_counts: dict[str, int] = {}  # consecutive parse-failure counts per symbol
 
     def _fetch_bars(self, symbol: str, timeframe: str, start: datetime, end: datetime) -> pd.DataFrame:
         from alpaca.data.enums import DataFeed
@@ -145,8 +148,17 @@ class AlpacaDataProvider(DataProvider):
                         volume=float(daily.volume) if daily else 0.0,
                         ts=trade.timestamp if trade.timestamp.tzinfo else trade.timestamp.replace(tzinfo=UTC),
                     )
+                    self._snapshot_fail_counts.pop(symbol, None)  # reset on success
                 except Exception as exc:  # noqa: BLE001
-                    applog.warning("data.alpaca", f"{symbol}: snapshot parse failed: {exc}")
+                    count = self._snapshot_fail_counts.get(symbol, 0) + 1
+                    self._snapshot_fail_counts[symbol] = count
+                    if count <= _SNAPSHOT_SUPPRESS_AFTER:
+                        applog.warning("data.alpaca", f"{symbol}: snapshot parse failed: {exc}")
+                    else:
+                        applog.debug(
+                            "data.alpaca",
+                            f"{symbol}: snapshot parse suppressed (failed {count}x): {exc}",
+                        )
             return quotes
 
         try:
@@ -154,3 +166,11 @@ class AlpacaDataProvider(DataProvider):
         except Exception as exc:  # noqa: BLE001
             applog.error("data.alpaca", f"snapshot batch failed: {exc}")
             return {}
+
+    def get_snapshot_fail_summary(self) -> dict[str, int]:
+        """Return symbols with suppressed snapshot parse failures and their consecutive fail counts.
+
+        Symbols appear here when they have failed more than _SNAPSHOT_SUPPRESS_AFTER times
+        consecutively. Useful for identifying permanently dead symbols to blocklist.
+        """
+        return {s: c for s, c in self._snapshot_fail_counts.items() if c > _SNAPSHOT_SUPPRESS_AFTER}
