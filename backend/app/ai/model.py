@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import pandas as pd
 
 from app.ai.generation import AtomicGenerationStore, TrainingCoordinator
@@ -16,6 +17,22 @@ class SignalModel(_LegacySignalModel):
         self._training_coordinator = TrainingCoordinator()
         self._generation_store = AtomicGenerationStore(models_dir)
         super().__init__(models_dir)
+
+    def __deepcopy__(self, memo):
+        """Backtests receive isolated model state without copying thread locks."""
+        clone = self.__class__.__new__(self.__class__)
+        memo[id(self)] = clone
+        for name, value in self.__dict__.items():
+            if name in {"_training_coordinator", "_generation_store"}:
+                continue
+            setattr(clone, name, copy.deepcopy(value, memo))
+        clone._training_coordinator = TrainingCoordinator()
+        clone._generation_store = AtomicGenerationStore(clone.models_dir)
+        current = self._generation_store.current
+        if current is not None:
+            with clone._generation_store._snapshot_lock:
+                clone._generation_store._snapshot = copy.deepcopy(current, memo)
+        return clone
 
     def _load(self) -> None:
         committed = self._generation_store.load()
