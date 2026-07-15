@@ -183,7 +183,7 @@ class TestMetaLabelEngine:
         # Monkeypatch get_strategy_candidates to return all timestamps of df except the first 60
         monkeypatch.setattr(
             "app.ai.prediction.get_strategy_candidates",
-            lambda strategy, df, symbol, side: list(df.index[60:])
+            lambda strategy, df, symbol, side, strategy_overrides: list(df.index[60:])
         )
         # Use min_validation_auc=0.0 to avoid rejected status on low random OOS AUC
         result = engine.train("orb", {"SYM": df}, horizon_bars=10, threshold_pct=0.05, side="long", min_validation_auc=0.0)
@@ -321,7 +321,7 @@ class TestStrategyCandidatesRegression:
         # Monkeypatch get_strategy_candidates to return all timestamps of df except the first 60
         monkeypatch.setattr(
             "app.ai.prediction.get_strategy_candidates",
-            lambda strategy, df, symbol, side: list(df.index[60:])
+            lambda strategy, df, symbol, side, strategy_overrides: list(df.index[60:])
         )
         engine.train("orb", {"SYM": df}, horizon_bars=10, threshold_pct=0.05, side="long", min_validation_auc=0.0)
 
