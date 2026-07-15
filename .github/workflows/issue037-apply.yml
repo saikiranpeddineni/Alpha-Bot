@@ -24,3 +24,4 @@ jobs:
           git add backend/app/core/engine.py backend/tests/test_hard_halt_liquidation_authority.py
           git commit -m "037 enforce authoritative hard-halt liquidation [037-done]"
           git push origin HEAD:037-hard-drawdown-authoritative-liquidation
+# trigger
