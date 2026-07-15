@@ -49,6 +49,11 @@ class GeminiShadowRanker:
         return {"calls_today": self._calls, "candidates_ranked": self._candidates_ranked, "cache_hits": self._cache_hits,
                 "failures": self._failures, "budget_remaining": max(0, self.max_calls_per_session - self._calls)}
 
+    def candidate_fingerprint(self, candidates: list[dict[str, Any]]) -> str:
+        """Fingerprint the exact bounded, whitelisted candidate state used for ranking."""
+        batch = self._sanitize(candidates[: self.max_candidates])
+        return self._fingerprint(batch)
+
     async def rank(self, candidates: list[dict[str, Any]], *, session: date) -> tuple[ShadowRank, ...]:
         self.roll_session(session)
         try:
