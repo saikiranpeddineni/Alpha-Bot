@@ -1,6 +1,11 @@
 name: State Machine Watchdog
 
 on:
+  pull_request:
+    paths:
+      - scripts/validate_engineering_ledger.py
+      - tests/test_engineering_ledger_watchdog.py
+      - .github/workflows/state-machine-watchdog.yml
   issue_comment:
     types: [created, edited]
   issues:
