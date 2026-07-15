@@ -1,4 +1,5 @@
 from pathlib import Path
+import subprocess
 
 path = Path("backend/app/core/engine.py")
 text = path.read_text()
@@ -24,3 +25,10 @@ elif new not in text:
     raise SystemExit("012 submission reservation anchor not found")
 
 path.write_text(text)
+
+if subprocess.run(["git", "diff", "--quiet", "--", str(path)]).returncode != 0:
+    subprocess.run(["git", "config", "user.name", "github-actions[bot]"], check=True)
+    subprocess.run(["git", "config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com"], check=True)
+    subprocess.run(["git", "add", str(path)], check=True)
+    subprocess.run(["git", "commit", "-m", "012 wire same-cycle exposure reservations"], check=True)
+    subprocess.run(["git", "push", "origin", "HEAD:012-same-cycle-exposure-reservation"], check=True)
