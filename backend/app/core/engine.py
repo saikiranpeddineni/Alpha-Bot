@@ -117,6 +117,7 @@ class TradingEngine:
         self._tick_count = 0
         self._consec_errors = 0
         self._trades_since_insight = 0
+        self._pending_close_symbols: set[str] = set()  # symbols with in-flight close order
         self.trainer: ContinuousTrainer | None = None
 
         # Feature 4: Economic calendar / event guard
@@ -433,6 +434,8 @@ class TradingEngine:
             if positions:
                 applog.warning("engine", f"EOD liquidation unresolved: flattening {len(positions)} authoritative positions")
                 await self.broker.flatten_all(reason="end of day")
+                if hasattr(self, "_pending_close_symbols"):
+                    self._pending_close_symbols.clear()
                 await self._drain_fills(now)
             residual_positions = await self.broker.positions()
             residual_orders = await self.broker.open_orders()
@@ -703,7 +706,7 @@ class TradingEngine:
                             stop_price = self._position_peaks[symbol] - ts_mult * atr
                             if close <= stop_price:
                                 applog.info("engine", f"{symbol}: trailing stop triggered @ {close:.2f} (stop {stop_price:.2f})")
-                                await self.broker.close_position(symbol, reason=f"trailing stop triggered ({ts_mult}x ATR)")
+                                await self._close_position_guarded(symbol, reason=f"trailing stop triggered ({ts_mult}x ATR)")
                                 if symbol in self._position_peaks:
                                     del self._position_peaks[symbol]
                                 if symbol in self._position_troughs:
@@ -715,7 +718,7 @@ class TradingEngine:
                             stop_price = self._position_peaks[symbol] + ts_mult * atr
                             if close >= stop_price:
                                 applog.info("engine", f"{symbol}: trailing stop triggered @ {close:.2f} (stop {stop_price:.2f})")
-                                await self.broker.close_position(symbol, reason=f"trailing stop triggered ({ts_mult}x ATR)")
+                                await self._close_position_guarded(symbol, reason=f"trailing stop triggered ({ts_mult}x ATR)")
                                 if symbol in self._position_peaks:
                                     del self._position_peaks[symbol]
                                 if symbol in self._position_troughs:
@@ -821,13 +824,26 @@ class TradingEngine:
             if sig.action == SignalAction.EXIT:
                 if position is not None:
                     applog.info("engine", f"{symbol}: strategy exit -- {sig.reason}")
-                    await self.broker.close_position(symbol, reason=sig.reason)
+                    await self._close_position_guarded(symbol, reason=sig.reason)
                 continue
             
             # Record initial stop-loss when entries are accepted
             self._position_initial_stops[symbol] = sig.stop_loss
             candidate_entries.append((sig, df))
         return candidate_entries
+
+    async def _close_position_guarded(self, symbol: str, reason: str) -> None:
+        """Close a position, skipping if a close order is already in-flight for this symbol."""
+        if not hasattr(self, "_pending_close_symbols"):
+            self._pending_close_symbols = set()
+        if symbol in self._pending_close_symbols:
+            applog.debug("engine", f"{symbol}: skipping duplicate close — close already in-flight")
+            return
+        self._pending_close_symbols.add(symbol)
+        order = await self.broker.close_position(symbol, reason=reason)
+        # If close failed immediately (None returned), release the guard so retries work
+        if order is None:
+            self._pending_close_symbols.discard(symbol)
 
     async def _drain_fills(self, now: datetime) -> None:
         assert self.broker and self.portfolio and self.risk
@@ -846,6 +862,9 @@ class TradingEngine:
                 order.filled_at = fill.ts
             
             symbol = fill.symbol.upper()
+            # Release pending-close guard when sell fill arrives
+            if fill.side == OrderSide.SELL and hasattr(self, "_pending_close_symbols"):
+                self._pending_close_symbols.discard(symbol)
             peak = self._position_peaks.get(symbol)
             trough = self._position_troughs.get(symbol)
             init_stop = self._position_initial_stops.get(symbol)
