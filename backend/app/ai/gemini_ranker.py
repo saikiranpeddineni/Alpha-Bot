@@ -38,12 +38,16 @@ class GeminiShadowRanker:
         self._last_call_at: float | None = None
         self._cache: dict[str, tuple[ShadowRank, ...]] = {}
 
-    def roll_session(self, session: date) -> None:
+    def roll_session(self, session: date) -> bool:
+        """Roll budget state forward only; stale async work fails closed."""
+        if self._session is not None and session < self._session:
+            return False
         if session != self._session:
             self._session = session
             self._calls = self._candidates_ranked = self._cache_hits = self._failures = 0
             self._last_call_at = None
             self._cache.clear()
+        return True
 
     def telemetry(self) -> dict[str, int]:
         return {"calls_today": self._calls, "candidates_ranked": self._candidates_ranked, "cache_hits": self._cache_hits,
@@ -55,7 +59,8 @@ class GeminiShadowRanker:
         return self._fingerprint(batch)
 
     async def rank(self, candidates: list[dict[str, Any]], *, session: date) -> tuple[ShadowRank, ...]:
-        self.roll_session(session)
+        if not self.roll_session(session):
+            return ()
         try:
             batch = self._sanitize(candidates[: self.max_candidates])
         except (TypeError, ValueError):
