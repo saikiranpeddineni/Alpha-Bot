@@ -29,12 +29,16 @@ class DiscoveryTelemetry:
     request_budget: int
     covered_symbols: int
     missing_symbols: int
+    stale_symbols: int
+    future_symbols: int
+    shortlist_symbols: int
     budget_exhausted: bool
 
 
 @dataclass(frozen=True, slots=True)
 class DiscoveryResult:
     quotes: dict[str, Quote]
+    shortlist: tuple[str, ...]
     telemetry: DiscoveryTelemetry
 
 
@@ -82,11 +86,26 @@ def bounded_fallback(symbols: Iterable[str], limit: int) -> tuple[str, ...]:
     return normalized[:limit]
 
 
-class DiscoveryCoordinator:
-    """Acquire broad discovery snapshots without unbounded provider traffic.
+def coarse_shortlist(quotes: dict[str, Quote], limit: int) -> tuple[str, ...]:
+    """Rank causally accepted snapshots using cheap deterministic opportunity proxies."""
+    if limit < 1:
+        raise ValueError("limit must be positive")
+    ranked = sorted(
+        quotes.items(),
+        key=lambda item: (
+            -(max(0.0, float(item[1].price)) * max(0.0, float(item[1].volume))),
+            -abs(float(item[1].change_pct)),
+            item[0],
+        ),
+    )
+    return tuple(symbol for symbol, _quote in ranked[:limit])
 
-    This component does not rank symbols or alter scanner authority. It only
-    supplies bounded, deduplicated snapshot inputs and request telemetry.
+
+class DiscoveryCoordinator:
+    """Acquire broad snapshots without unbounded or non-causal provider inputs.
+
+    Discovery only supplies a bounded symbol shortlist. Existing scanner, ML,
+    risk, portfolio and execution gates remain authoritative.
     """
 
     def __init__(
@@ -97,6 +116,9 @@ class DiscoveryCoordinator:
         asset_cache_ttl: timedelta,
         batch_size: int,
         request_budget: int,
+        max_snapshot_age: timedelta = timedelta(minutes=5),
+        future_tolerance: timedelta = timedelta(0),
+        shortlist_limit: int = 50,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         if asset_cache_ttl < timedelta(0):
@@ -105,11 +127,20 @@ class DiscoveryCoordinator:
             raise ValueError("batch_size must be positive")
         if request_budget < 1:
             raise ValueError("request_budget must be positive")
+        if max_snapshot_age < timedelta(0):
+            raise ValueError("max_snapshot_age must be non-negative")
+        if future_tolerance < timedelta(0):
+            raise ValueError("future_tolerance must be non-negative")
+        if shortlist_limit < 1:
+            raise ValueError("shortlist_limit must be positive")
         self.provider = provider
         self.feed = feed
         self.asset_cache_ttl = asset_cache_ttl
         self.batch_size = batch_size
         self.request_budget = request_budget
+        self.max_snapshot_age = max_snapshot_age
+        self.future_tolerance = future_tolerance
+        self.shortlist_limit = shortlist_limit
         self._clock = clock or (lambda: datetime.now(UTC))
         self._asset_cache: tuple[str, ...] | None = None
         self._asset_cache_at: datetime | None = None
@@ -131,9 +162,12 @@ class DiscoveryCoordinator:
 
     async def acquire(self) -> DiscoveryResult:
         symbols, cache_hit = await self._symbols()
+        as_of = self._clock()
         quotes: dict[str, Quote] = {}
         batches = 0
         requests = 0
+        stale = 0
+        future = 0
         for batch in batched_symbols(symbols, self.batch_size):
             if requests >= self.request_budget:
                 break
@@ -142,9 +176,22 @@ class DiscoveryCoordinator:
             received = await self.provider.get_quotes(list(batch))
             for symbol, quote in received.items():
                 normalized = _normalize_symbol(symbol)
-                if normalized and normalized in batch:
-                    quotes[normalized] = quote
+                if not normalized or normalized not in batch:
+                    continue
+                quote_ts = quote.ts
+                if quote_ts.tzinfo is None:
+                    quote_ts = quote_ts.replace(tzinfo=UTC)
+                else:
+                    quote_ts = quote_ts.astimezone(UTC)
+                if quote_ts > as_of + self.future_tolerance:
+                    future += 1
+                    continue
+                if as_of - quote_ts > self.max_snapshot_age:
+                    stale += 1
+                    continue
+                quotes[normalized] = quote
 
+        shortlist = coarse_shortlist(quotes, self.shortlist_limit)
         covered = len(quotes)
         telemetry = DiscoveryTelemetry(
             provider=self.provider.name,
@@ -155,7 +202,10 @@ class DiscoveryCoordinator:
             snapshot_requests=requests,
             request_budget=self.request_budget,
             covered_symbols=covered,
-            missing_symbols=max(0, len(symbols) - covered),
-            budget_exhausted=requests >= self.request_budget and covered < len(symbols),
+            missing_symbols=max(0, len(symbols) - covered - stale - future),
+            stale_symbols=stale,
+            future_symbols=future,
+            shortlist_symbols=len(shortlist),
+            budget_exhausted=requests >= self.request_budget and covered + stale + future < len(symbols),
         )
-        return DiscoveryResult(quotes=quotes, telemetry=telemetry)
+        return DiscoveryResult(quotes=quotes, shortlist=shortlist, telemetry=telemetry)
