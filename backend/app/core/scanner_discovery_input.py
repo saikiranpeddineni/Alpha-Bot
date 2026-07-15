@@ -28,9 +28,17 @@ async def resolve_stage1_symbols(
     Any historical ``as_of=T`` path returns the static historical candidate
     surface without invoking current asset metadata or snapshot discovery.
     Live discovery is input-only and fail-closed to the same deterministic,
-    bounded static fallback when unsupported, empty, or failed.
+    bounded static fallback when unsupported, empty, malformed, or failed.
     """
-    static_pool = tuple(sorted({str(symbol).strip().upper() for symbol in static_symbols if str(symbol).strip()}))
+    static_pool = tuple(
+        sorted(
+            {
+                symbol.strip().upper()
+                for symbol in static_symbols
+                if isinstance(symbol, str) and symbol.strip()
+            }
+        )
+    )
     if as_of is not None:
         return static_pool
 
@@ -40,10 +48,17 @@ async def resolve_stage1_symbols(
 
     try:
         result = await acquire_discovery()
-    except Exception:  # provider transports and timeout types vary
+        raw_shortlist = result.shortlist
+    except Exception:  # provider transports and result shapes vary
         return fallback
 
     shortlist = tuple(
-        sorted({str(symbol).strip().upper() for symbol in result.shortlist if str(symbol).strip()})
+        sorted(
+            {
+                symbol.strip().upper()
+                for symbol in raw_shortlist
+                if isinstance(symbol, str) and symbol.strip()
+            }
+        )
     )
     return shortlist[:fallback_limit] if shortlist else fallback
