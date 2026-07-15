@@ -37,44 +37,73 @@ def parse_time(value: str) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
+def _parse_event(raw: str, comment_id: Any) -> dict[str, Any] | None:
+    event_type = raw.splitlines()[0].strip()
+    if event_type not in EVENT_KEYS:
+        return None
+    try:
+        payload = yaml.load("\n".join(raw.splitlines()[1:]), Loader=yaml.BaseLoader)
+    except yaml.YAMLError as exc:
+        raise LedgerError("SCHEMA_INVALID", comment_id=comment_id, error=str(exc)) from exc
+    if not isinstance(payload, dict):
+        raise LedgerError("SCHEMA_INVALID", comment_id=comment_id, error="event payload must be a mapping")
+    missing = EVENT_KEYS[event_type] - payload.keys()
+    extra = payload.keys() - EVENT_KEYS[event_type]
+    if missing or extra:
+        raise LedgerError("SCHEMA_INVALID", event=event_type, missing=sorted(missing), extra=sorted(extra))
+    for key, value in payload.items():
+        if key in LIST_FIELDS:
+            if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+                raise LedgerError("SCHEMA_INVALID", event=event_type, field=key, error="must be a list of strings")
+        elif not isinstance(value, str):
+            raise LedgerError("SCHEMA_INVALID", event=event_type, field=key, error="must be a scalar string")
+    try:
+        parse_time(payload["worker-run"])
+    except (ValueError, TypeError) as exc:
+        raise LedgerError("SCHEMA_INVALID", event=event_type, error="invalid worker-run") from exc
+    if event_type in {"CLAIM", "RECLAIM"}:
+        try:
+            start = parse_time(payload["worker-run"])
+            lease = parse_time(payload["lease-until"])
+        except (ValueError, TypeError) as exc:
+            raise LedgerError("SCHEMA_INVALID", event=event_type, error="invalid lease timestamp") from exc
+        if int((lease - start).total_seconds()) != 55 * 60:
+            raise LedgerError("SCHEMA_INVALID", event=event_type, error="lease must be exactly 55 minutes")
+        if not re.fullmatch(r"[0-9a-f]{40}", payload["head"]):
+            raise LedgerError("SCHEMA_INVALID", event=event_type, error="head must be 40-char lowercase SHA")
+    return {"type": event_type, **payload, "_comment_id": comment_id}
+
+
 def parse_events(comments: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    events = []
+    entries: list[dict[str, Any]] = []
     for comment in comments:
         for raw in FENCE.findall(comment.get("body", "")):
-            event_type = raw.splitlines()[0].strip()
-            if event_type not in EVENT_KEYS:
-                continue
             try:
+                event = _parse_event(raw, comment.get("id"))
+            except LedgerError as exc:
+                event_type = raw.splitlines()[0].strip()
                 payload = yaml.load("\n".join(raw.splitlines()[1:]), Loader=yaml.BaseLoader)
-            except yaml.YAMLError as exc:
-                raise LedgerError("SCHEMA_INVALID", comment_id=comment.get("id"), error=str(exc)) from exc
-            if not isinstance(payload, dict):
-                raise LedgerError("SCHEMA_INVALID", comment_id=comment.get("id"), error="event payload must be a mapping")
-            missing = EVENT_KEYS[event_type] - payload.keys()
-            extra = payload.keys() - EVENT_KEYS[event_type]
-            if missing or extra:
-                raise LedgerError("SCHEMA_INVALID", event=event_type, missing=sorted(missing), extra=sorted(extra))
-            for key, value in payload.items():
-                if key in LIST_FIELDS:
-                    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-                        raise LedgerError("SCHEMA_INVALID", event=event_type, field=key, error="must be a list of strings")
-                elif not isinstance(value, str):
-                    raise LedgerError("SCHEMA_INVALID", event=event_type, field=key, error="must be a scalar string")
-            try:
-                parse_time(payload["worker-run"])
-            except (ValueError, TypeError) as exc:
-                raise LedgerError("SCHEMA_INVALID", event=event_type, error="invalid worker-run") from exc
-            if event_type in {"CLAIM", "RECLAIM"}:
-                try:
-                    start = parse_time(payload["worker-run"])
-                    lease = parse_time(payload["lease-until"])
-                except (ValueError, TypeError) as exc:
-                    raise LedgerError("SCHEMA_INVALID", event=event_type, error="invalid lease timestamp") from exc
-                if int((lease - start).total_seconds()) != 55 * 60:
-                    raise LedgerError("SCHEMA_INVALID", event=event_type, error="lease must be exactly 55 minutes")
-                if not re.fullmatch(r"[0-9a-f]{40}", payload["head"]):
-                    raise LedgerError("SCHEMA_INVALID", event=event_type, error="head must be 40-char lowercase SHA")
-            events.append({"type": event_type, **payload, "_comment_id": comment.get("id")})
+                worker_run = payload.get("worker-run") if isinstance(payload, dict) else None
+                entries.append({"_error": exc, "type": event_type, "worker-run": worker_run})
+                continue
+            if event is not None:
+                entries.append(event)
+
+    events: list[dict[str, Any]] = []
+    for index, entry in enumerate(entries):
+        error = entry.get("_error")
+        if error is None:
+            events.append(entry)
+            continue
+        worker_run = entry.get("worker-run")
+        tombstoned = entry.get("type") in {"CLAIM", "RECLAIM"} and isinstance(worker_run, str) and any(
+            later.get("_error") is None
+            and later.get("type") in {"HANDOFF", "ABORT"}
+            and later.get("worker-run") == worker_run
+            for later in entries[index + 1 :]
+        )
+        if not tombstoned:
+            raise error
     return events
 
 
@@ -150,7 +179,7 @@ def main() -> int:
         for key, value in exc.details.items():
             print(f"{key}={value}")
         return 1
-    except (KeyError, OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
+    except (KeyError, OSError, urllib.error.URLError, json.JSONDecodeError, yaml.YAMLError) as exc:
         print("WATCHDOG_INFRA_FAILURE")
         print("code=INFRA_FAILURE")
         print(f"error={type(exc).__name__}: {exc}")
