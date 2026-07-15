@@ -40,6 +40,45 @@ async def test_minimum_interval_and_budget_are_hard_gates():
 
 
 @pytest.mark.asyncio
+async def test_stale_session_cannot_roll_budget_state_backward():
+    calls = []
+    clock = Clock()
+    async def transport(payload):
+        calls.append(payload["candidates"][0]["symbol"])
+        return {"rankings": [{"symbol": payload["candidates"][0]["symbol"], "score": 75}]}
+    ranker = GeminiShadowRanker("key", max_calls_per_session=2, min_interval_sec=300, transport=transport, monotonic=clock)
+    d1, d2 = date(2026, 7, 14), date(2026, 7, 15)
+    assert await ranker.rank([candidate("A")], session=d1)
+    clock.value += 300; assert await ranker.rank([candidate("B")], session=d2)
+    d2_state = ranker.telemetry().copy()
+    clock.value += 300
+    assert await ranker.rank([candidate("STALE")], session=d1) == ()
+    assert ranker.telemetry() == d2_state
+    assert calls == ["A", "B"]
+
+
+@pytest.mark.asyncio
+async def test_alternating_stale_sessions_cannot_bypass_current_session_budget():
+    calls = []
+    clock = Clock()
+    async def transport(payload):
+        symbol = payload["candidates"][0]["symbol"]
+        calls.append(symbol)
+        return {"rankings": [{"symbol": symbol, "score": 75}]}
+    ranker = GeminiShadowRanker("key", max_calls_per_session=2, min_interval_sec=0, transport=transport, monotonic=clock)
+    d1, d2 = date(2026, 7, 14), date(2026, 7, 15)
+    assert await ranker.rank([candidate("OLD")], session=d1)
+    assert await ranker.rank([candidate("A")], session=d2)
+    assert await ranker.rank([candidate("OLD2")], session=d1) == ()
+    assert await ranker.rank([candidate("B")], session=d2)
+    assert await ranker.rank([candidate("OLD3")], session=d1) == ()
+    assert await ranker.rank([candidate("C")], session=d2) == ()
+    assert calls == ["OLD", "A", "B"]
+    assert ranker.telemetry()["calls_today"] == 2
+    assert ranker.telemetry()["budget_remaining"] == 0
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("response", [{}, {"rankings": [{"symbol": "A", "score": 101}]}, {"rankings": [{"symbol": "UNKNOWN", "score": 50}]}])
 async def test_malformed_or_untrusted_output_fails_open(response):
     async def transport(_): return response
