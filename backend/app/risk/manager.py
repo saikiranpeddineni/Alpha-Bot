@@ -241,6 +241,11 @@ class RiskManager:
                 return RiskDecision(False, "no stop provided and ATR unavailable")
             stop_loss = price - 1.5 * atr if signal.action == SignalAction.ENTER_LONG else price + 1.5 * atr
 
+        if signal.action == SignalAction.ENTER_LONG and stop_loss >= price:
+            return RiskDecision(False, f"long stop must be below entry ({stop_loss:.4f} >= {price:.4f})")
+        if signal.action == SignalAction.ENTER_SHORT and stop_loss <= price:
+            return RiskDecision(False, f"short stop must be above entry ({stop_loss:.4f} <= {price:.4f})")
+
         stop_distance = abs(price - stop_loss)
         min_distance = max(price * 0.0005, 0.01)
         if stop_distance < min_distance:
@@ -297,6 +302,10 @@ class RiskManager:
         take_profit = signal.take_profit
         if take_profit is None:
             take_profit = price + 2.0 * stop_distance if side == OrderSide.BUY else price - 2.0 * stop_distance
+        elif side == OrderSide.BUY and take_profit <= price:
+            return RiskDecision(False, f"long target must be above entry ({take_profit:.4f} <= {price:.4f})")
+        elif side == OrderSide.SELL and take_profit >= price:
+            return RiskDecision(False, f"short target must be below entry ({take_profit:.4f} >= {price:.4f})")
 
         order = OrderRequest(
             symbol=symbol,
