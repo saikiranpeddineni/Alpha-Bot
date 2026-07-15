@@ -31,9 +31,23 @@ async def test_network_latency_cannot_block_schedule_caller():
 
 
 @pytest.mark.asyncio
-async def test_shadow_score_has_no_execution_return_channel():
+async def test_shadow_score_has_no_execution_return_channel_and_is_observed():
+    observations = []
     async def transport(_payload): return {"rankings": [{"symbol": "NVDA", "score": 0}]}
-    bridge = GeminiShadowBridge(GeminiShadowRanker("key", transport=transport))
+    bridge = GeminiShadowBridge(GeminiShadowRanker("key", transport=transport), observation_sink=observations.append)
+    result = await bridge._run([bridge.candidate_dto(signal())], session=date(2026, 7, 15))
+    assert result is None
+    assert observations[0]["rankings"] == [{"symbol": "NVDA", "score": 0}]
+    assert observations[0]["candidate_symbols"] == ["NVDA"]
+    assert len(observations[0]["candidate_fingerprint"]) == 64
+    assert observations[0]["telemetry"]["candidates_ranked"] == 1
+
+
+@pytest.mark.asyncio
+async def test_observation_sink_failure_cannot_escape_shadow_task():
+    async def transport(_payload): return {"rankings": [{"symbol": "NVDA", "score": 100}]}
+    def broken_sink(_observation): raise RuntimeError("storage unavailable")
+    bridge = GeminiShadowBridge(GeminiShadowRanker("key", transport=transport), observation_sink=broken_sink)
     result = await bridge._run([bridge.candidate_dto(signal())], session=date(2026, 7, 15))
     assert result is None
     assert bridge.ranker.telemetry()["candidates_ranked"] == 1
