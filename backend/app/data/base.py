@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 
 from app.core.domain import Quote
+from app.core.universe_discovery import DiscoverableAsset
 
 BAR_COLUMNS = ["open", "high", "low", "close", "volume"]
 
@@ -70,6 +71,7 @@ class DataProvider(ABC):
     """Abstract market data source."""
 
     name: str = "abstract"
+    supports_asset_discovery: bool = False
 
     @abstractmethod
     async def get_bars(
@@ -85,6 +87,10 @@ class DataProvider(ABC):
     @abstractmethod
     async def get_quotes(self, symbols: list[str]) -> dict[str, Quote]:
         """Latest price snapshot per symbol."""
+
+    async def discover_assets(self) -> tuple[DiscoverableAsset, ...]:
+        """Return provider asset metadata when discovery is explicitly supported."""
+        raise NotImplementedError(f"{self.name} does not support asset discovery")
 
     async def close(self) -> None:  # pragma: no cover - default no-op
         return None
