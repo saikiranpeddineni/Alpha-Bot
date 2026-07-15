@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import re
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from typing import Any
@@ -17,6 +18,7 @@ EVENT_KEYS = {
     "ABORT": {"worker-run", "role", "slice", "reason", "surviving-defect", "next-action"},
     "RECOVERY": {"worker-run", "incident-code", "work-item", "slice", "terminated-worker-runs", "pre-recovery-head", "post-recovery-head", "branch-change-classification", "attributed-worker-run", "recovery-action", "next-state"},
 }
+LIST_FIELDS = {"files", "test-commands", "test-results", "terminated-worker-runs"}
 STATE_LABELS = {"state:ready", "state:claimed", "state:patching", "state:needs-validation", "state:ci-red", "state:blocked", "state:merge-ready", "state:ledger-invalid"}
 FENCE = re.compile(r"```yaml\s*\n(.*?)\n```", re.S | re.I)
 
@@ -52,6 +54,12 @@ def parse_events(comments: list[dict[str, Any]]) -> list[dict[str, Any]]:
             extra = payload.keys() - EVENT_KEYS[event_type]
             if missing or extra:
                 raise LedgerError("SCHEMA_INVALID", event=event_type, missing=sorted(missing), extra=sorted(extra))
+            for key, value in payload.items():
+                if key in LIST_FIELDS:
+                    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+                        raise LedgerError("SCHEMA_INVALID", event=event_type, field=key, error="must be a list of strings")
+                elif not isinstance(value, (str, int)) or isinstance(value, bool):
+                    raise LedgerError("SCHEMA_INVALID", event=event_type, field=key, error="must be a scalar string or integer")
             try:
                 parse_time(str(payload["worker-run"]))
             except (ValueError, TypeError) as exc:
@@ -71,17 +79,19 @@ def parse_events(comments: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def validate(events: list[dict[str, Any]], labels: set[str], remote_head: str, now: datetime) -> None:
-    terminated = set()
+    active_by_run: dict[str, dict[str, Any]] = {}
     for event in events:
-        if event["type"] in {"HANDOFF", "ABORT"}:
-            terminated.add(str(event["worker-run"]))
+        worker_run = str(event["worker-run"])
+        if event["type"] in {"CLAIM", "RECLAIM"}:
+            active_by_run[worker_run] = event
+        elif event["type"] in {"HANDOFF", "ABORT"}:
+            active_by_run.pop(worker_run, None)
         elif event["type"] == "RECOVERY":
-            terminated.update(map(str, event["terminated-worker-runs"]))
+            for terminated_run in event["terminated-worker-runs"]:
+                active_by_run.pop(str(terminated_run), None)
 
     active = []
-    for event in events:
-        if event["type"] not in {"CLAIM", "RECLAIM"} or str(event["worker-run"]) in terminated:
-            continue
+    for event in active_by_run.values():
         if parse_time(str(event["lease-until"])) <= now:
             raise LedgerError("LEASE_ORPHANED", work_item=event.get("work-item"), slice=event["slice"], worker_run=event["worker-run"])
         if event["head"] != remote_head:
@@ -116,9 +126,9 @@ def main() -> int:
     parser.add_argument("--repo", default=os.getenv("GITHUB_REPOSITORY"))
     parser.add_argument("--issue", type=int)
     args = parser.parse_args()
-    token = os.environ["GITHUB_TOKEN"]
-    issues = [github(f"/repos/{args.repo}/issues/{args.issue}", token)] if args.issue else github(f"/repos/{args.repo}/issues?state=open&per_page=100", token)
     try:
+        token = os.environ["GITHUB_TOKEN"]
+        issues = [github(f"/repos/{args.repo}/issues/{args.issue}", token)] if args.issue else github(f"/repos/{args.repo}/issues?state=open&per_page=100", token)
         for issue in issues:
             if "pull_request" in issue:
                 continue
@@ -140,6 +150,11 @@ def main() -> int:
         for key, value in exc.details.items():
             print(f"{key}={value}")
         return 1
+    except (KeyError, OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
+        print("WATCHDOG_INFRA_FAILURE")
+        print("code=INFRA_FAILURE")
+        print(f"error={type(exc).__name__}: {exc}")
+        return 2
     print("LEDGER_VALID")
     return 0
 
