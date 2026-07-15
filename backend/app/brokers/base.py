@@ -34,6 +34,12 @@ class Fill(BaseModel):
     ts: datetime = Field(default_factory=utcnow)
     signal_timestamp_utc: datetime | None = None
     decision_bar_timestamp_utc: datetime | None = None
+    # Broker-backed cumulative execution watermark.  When present, portfolio
+    # accounting persists this watermark atomically with its durable checkpoint
+    # and can replay only the unprocessed delta after a process restart.
+    broker_fill_key: str | None = None
+    cumulative_qty: float | None = None
+    broker_mode: str | None = None
 
 
 class Broker(ABC):
