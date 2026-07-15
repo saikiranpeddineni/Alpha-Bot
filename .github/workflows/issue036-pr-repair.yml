@@ -17,10 +17,11 @@ jobs:
         with:
           python-version: '3.12'
       - run: python .github/issue036_direct_patch.py
-      - run: pip install -r backend/requirements.txt
+      - run: pip install -r requirements.txt -r requirements-dev.txt
       - name: Focused regression gate
-        working-directory: backend
-        run: pytest -q tests/test_eod_liquidation_authority.py tests/test_decision_cycle_parity.py tests/test_gemini_engine_integration.py
+        env:
+          PYTHONPATH: backend
+        run: pytest -q backend/tests/test_eod_liquidation_authority.py backend/tests/test_decision_cycle_parity.py backend/tests/test_gemini_engine_integration.py
       - name: Commit direct production path
         run: |
           git config user.name "github-actions[bot]"
