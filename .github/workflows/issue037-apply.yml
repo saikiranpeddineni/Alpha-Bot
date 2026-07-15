@@ -1,0 +1,26 @@
+name: Issue 037 implementation
+on:
+  push:
+    branches: [037-hard-drawdown-authoritative-liquidation]
+permissions:
+  contents: write
+jobs:
+  apply:
+    if: ${{ !contains(github.event.head_commit.message, '[037-done]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: 037-hard-drawdown-authoritative-liquidation, fetch-depth: 0}
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python .github/issue037_patch.py
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Focused 037 and execution-order gate
+        env: {PYTHONPATH: backend}
+        run: pytest -q backend/tests/test_hard_halt_liquidation_authority.py backend/tests/test_decision_cycle_parity.py backend/tests/test_gemini_engine_integration.py backend/tests/test_eod_liquidation_authority.py
+      - run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add backend/app/core/engine.py backend/tests/test_hard_halt_liquidation_authority.py
+          git commit -m "037 enforce authoritative hard-halt liquidation [037-done]"
+          git push origin HEAD:037-hard-drawdown-authoritative-liquidation
