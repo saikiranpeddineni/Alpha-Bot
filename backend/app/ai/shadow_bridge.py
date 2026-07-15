@@ -3,18 +3,21 @@ from __future__ import annotations
 
 import asyncio
 from datetime import date
-from typing import Any
+from typing import Any, Callable
 
 from app.ai.gemini_ranker import GeminiShadowRanker
 from app.core.domain import Signal
 from app.core.logging import applog
 
+ObservationSink = Callable[[dict[str, Any]], None]
+
 
 class GeminiShadowBridge:
     """Schedules shadow ranking out-of-band and exposes no execution result channel."""
 
-    def __init__(self, ranker: GeminiShadowRanker) -> None:
+    def __init__(self, ranker: GeminiShadowRanker, *, observation_sink: ObservationSink | None = None) -> None:
         self.ranker = ranker
+        self.observation_sink = observation_sink
         self.task: asyncio.Task | None = None
 
     @staticmethod
@@ -38,7 +41,20 @@ class GeminiShadowBridge:
         self.task = asyncio.create_task(self._run(candidates, session=session), name="engine-gemini-shadow-ranking")
 
     async def _run(self, candidates: list[dict[str, Any]], *, session: date) -> None:
+        fingerprint = self.ranker._fingerprint(self.ranker._sanitize(candidates[: self.ranker.max_candidates]))
         ranks = await self.ranker.rank(candidates, session=session)
+        observation = {
+            "session": session.isoformat(),
+            "candidate_fingerprint": fingerprint,
+            "candidate_symbols": [str(c["symbol"]).upper() for c in candidates[: self.ranker.max_candidates]],
+            "rankings": [{"symbol": rank.symbol, "score": rank.score} for rank in ranks],
+            "telemetry": self.ranker.telemetry(),
+        }
+        if self.observation_sink is not None:
+            try:
+                self.observation_sink(observation)
+            except Exception as exc:  # research persistence must never enter execution authority
+                applog.warning("engine.shadow_rank", f"Shadow observation sink failed: {exc}")
         if ranks:
             applog.info("engine.shadow_rank", f"Gemini shadow ranking: {[(rank.symbol, rank.score) for rank in ranks]}")
 
