@@ -61,16 +61,16 @@ def test_same_symbol_on_different_sessions_is_not_collapsed():
 
 
 @pytest.mark.parametrize(
-    "row, message",
+    "kwargs, message",
     [
-        (_row(" ", {"A"}, {"A"}, set(), set(), 1, 1, 1, 1), "session is required"),
-        (_row("s", {"A"}, {"A"}, {"A"}, {"A"}, -1, 1, 1, 1), "counts must be non-negative"),
-        (_row("s", {"A"}, {"A"}, {"B"}, {"A"}, 1, 1, 1, 1), "fixed qualified symbols must be fixed candidates"),
+        ({"session": " ", "fixed_candidates": frozenset({"A"}), "dynamic_candidates": frozenset({"A"}), "fixed_qualified": frozenset(), "dynamic_qualified": frozenset(), "fixed_requests": 1, "dynamic_requests": 1, "fixed_latency_ms": 1, "dynamic_latency_ms": 1}, "session is required"),
+        ({"session": "s", "fixed_candidates": frozenset({"A"}), "dynamic_candidates": frozenset({"A"}), "fixed_qualified": frozenset({"A"}), "dynamic_qualified": frozenset({"A"}), "fixed_requests": -1, "dynamic_requests": 1, "fixed_latency_ms": 1, "dynamic_latency_ms": 1}, "counts must be non-negative"),
+        ({"session": "s", "fixed_candidates": frozenset({"A"}), "dynamic_candidates": frozenset({"A"}), "fixed_qualified": frozenset({"B"}), "dynamic_qualified": frozenset({"A"}), "fixed_requests": 1, "dynamic_requests": 1, "fixed_latency_ms": 1, "dynamic_latency_ms": 1}, "fixed qualified symbols must be fixed candidates"),
     ],
 )
-def test_invalid_shadow_evidence_fails_closed(row, message):
+def test_invalid_shadow_evidence_fails_closed(kwargs, message):
     with pytest.raises(ValueError, match=message):
-        ShadowSessionEvidence(**{field: getattr(row, field) for field in row.__dataclass_fields__})
+        ShadowSessionEvidence(**kwargs)
 
 
 def test_duplicate_or_empty_session_sets_are_rejected():
