@@ -16,6 +16,16 @@ class MarkerModel:
         self.side = side
 
 
+def _assert_incumbent(store: AtomicGenerationStore, generation_id: str) -> None:
+    assert store.current is not None
+    assert store.current.generation_id == generation_id
+    assert store.current.long_model.generation == store.current.short_model.generation == "g0"
+    loaded = AtomicGenerationStore(store.models_dir).load()
+    assert loaded is not None
+    assert loaded.generation_id == generation_id
+    assert loaded.long_model.generation == loaded.short_model.generation == "g0"
+
+
 def test_training_coordinator_claim_is_atomic_before_background_work() -> None:
     coordinator = TrainingCoordinator()
     assert coordinator.try_claim("continuous:a") is True
@@ -126,6 +136,32 @@ def test_inference_snapshot_never_mixes_sides_during_publish(tmp_path: Path) -> 
     assert before.generation_id != after.generation_id
 
 
+@pytest.mark.parametrize("fail_dump_number", [1, 2])
+def test_failure_after_each_candidate_persistence_step_preserves_incumbent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fail_dump_number: int
+) -> None:
+    store = AtomicGenerationStore(tmp_path)
+    incumbent = store.publish(MarkerModel("g0", "long"), MarkerModel("g0", "short"), {"name": "g0"})
+    import joblib
+
+    original_dump = joblib.dump
+    calls = 0
+
+    def fail_selected_dump(value, path, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        result = original_dump(value, path, *args, **kwargs)
+        if calls == fail_dump_number:
+            raise OSError(f"injected persistence failure {fail_dump_number}")
+        return result
+
+    monkeypatch.setattr(joblib, "dump", fail_selected_dump)
+    with pytest.raises(OSError, match="injected persistence failure"):
+        store.publish(MarkerModel("g1", "long"), MarkerModel("g1", "short"), {"name": "g1"})
+    _assert_incumbent(store, incumbent.generation_id)
+    assert not list(store.generations_dir.glob("*.staging"))
+
+
 def test_failure_before_manifest_commit_preserves_disk_and_memory_incumbent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     store = AtomicGenerationStore(tmp_path)
     incumbent = store.publish(MarkerModel("g0", "long"), MarkerModel("g0", "short"), {"name": "g0"})
@@ -139,13 +175,30 @@ def test_failure_before_manifest_commit_preserves_disk_and_memory_incumbent(tmp_
     monkeypatch.setattr("app.ai.generation.os.replace", fail_manifest_swap)
     with pytest.raises(OSError, match="injected manifest failure"):
         store.publish(MarkerModel("g1", "long"), MarkerModel("g1", "short"), {"name": "g1"})
-    assert store.current is not None
-    assert store.current.generation_id == incumbent.generation_id
-    assert store.current.long_model.generation == store.current.short_model.generation == "g0"
-    loaded = AtomicGenerationStore(tmp_path).load()
-    assert loaded is not None
-    assert loaded.generation_id == incumbent.generation_id
-    assert loaded.long_model.generation == loaded.short_model.generation == "g0"
+    _assert_incumbent(store, incumbent.generation_id)
+
+
+def test_cancellation_during_candidate_persistence_cannot_publish(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = AtomicGenerationStore(tmp_path)
+    incumbent = store.publish(MarkerModel("g0", "long"), MarkerModel("g0", "short"), {"name": "g0"})
+    import joblib
+
+    original_dump = joblib.dump
+    calls = 0
+
+    def cancel_after_long(value, path, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        result = original_dump(value, path, *args, **kwargs)
+        if calls == 1:
+            raise asyncio.CancelledError()
+        return result
+
+    monkeypatch.setattr(joblib, "dump", cancel_after_long)
+    with pytest.raises(asyncio.CancelledError):
+        store.publish(MarkerModel("g1", "long"), MarkerModel("g1", "short"), {"name": "g1"})
+    _assert_incumbent(store, incumbent.generation_id)
+    assert not list(store.generations_dir.glob("*.staging"))
 
 
 def test_restart_rejects_manifest_metadata_generation_mismatch(tmp_path: Path) -> None:
