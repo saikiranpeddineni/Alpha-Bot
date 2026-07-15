@@ -381,6 +381,7 @@ async def run_backtest(
                     end_utc = end_utc.tz_convert("UTC")
 
                 requested_df = await original_history(symbol, "1Min", params.start, params.end)
+                requested_provenance = data.provenance.get(symbol)
                 requested_df = requested_df[
                     (requested_df.index >= start_utc) & (requested_df.index <= end_utc)
                 ]
@@ -404,6 +405,8 @@ async def run_backtest(
                     df_daily = pd.DataFrame()
                 if not df_daily.empty:
                     daily_frames[symbol] = df_daily
+                if requested_provenance is not None:
+                    data.provenance[symbol] = requested_provenance
 
             except HistoricalDataCoverageError:
                 if symbol in [s.upper() for s in params.symbols]:
