@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pandas as pd
+
 from app.ai.generation import AtomicGenerationStore, TrainingCoordinator
 from app.ai.model_legacy import *  # noqa: F403
 from app.ai.model_legacy import SignalModel as _LegacySignalModel
@@ -47,26 +49,35 @@ class SignalModel(_LegacySignalModel):
 
     def p_up(self, features, regime_key=None) -> float:
         snapshot = self._generation_store.current
-        if snapshot is None:
-            return super().p_up(features, regime_key)
-        incumbent = self._model_long
-        try:
-            self._model_long = snapshot.long_model
-            return super().p_up(features, regime_key)
-        finally:
-            self._model_long = incumbent
+        global_long = snapshot.long_model if snapshot is not None else self._model_long
+        if global_long is None:
+            return self._heuristic_p_up(features)
+        x = pd.DataFrame([features[FEATURE_COLUMNS].to_numpy(dtype=float)], columns=FEATURE_COLUMNS)  # noqa: F405
+        p_global = float(predict_proba_safe(global_long, x)[0, 1])  # noqa: F405
+        reg_model = self._regime_adaptive_long.get(regime_key or "")
+        if reg_model is not None:
+            p_adaptive = float(predict_proba_safe(reg_model, x)[0, 1])  # noqa: F405
+            return 0.70 * p_global + 0.30 * p_adaptive
+        if self._adaptive_long is not None:
+            p_adaptive = float(predict_proba_safe(self._adaptive_long, x)[0, 1])  # noqa: F405
+            return 0.70 * p_global + 0.30 * p_adaptive
+        return p_global
 
     def p_down(self, features, regime_key=None) -> float:
         snapshot = self._generation_store.current
-        if snapshot is None:
-            return super().p_down(features, regime_key)
-        incumbent_long, incumbent_short = self._model_long, self._model_short
-        try:
-            self._model_long = snapshot.long_model
-            self._model_short = snapshot.short_model
-            return super().p_down(features, regime_key)
-        finally:
-            self._model_long, self._model_short = incumbent_long, incumbent_short
+        global_short = snapshot.short_model if snapshot is not None else self._model_short
+        if global_short is None:
+            return 1.0 - self.p_up(features)
+        x = pd.DataFrame([features[FEATURE_COLUMNS].to_numpy(dtype=float)], columns=FEATURE_COLUMNS)  # noqa: F405
+        p_global = float(predict_proba_safe(global_short, x)[0, 1])  # noqa: F405
+        reg_model = self._regime_adaptive_short.get(regime_key or "")
+        if reg_model is not None:
+            p_adaptive = float(predict_proba_safe(reg_model, x)[0, 1])  # noqa: F405
+            return 0.70 * p_global + 0.30 * p_adaptive
+        if self._adaptive_short is not None:
+            p_adaptive = float(predict_proba_safe(self._adaptive_short, x)[0, 1])  # noqa: F405
+            return 0.70 * p_global + 0.30 * p_adaptive
+        return p_global
 
     def train(self, *args, **kwargs) -> dict:
         with self._training_coordinator.claim_sync(f"manual:{id(self)}"):
