@@ -22,6 +22,8 @@ import numpy as np
 import pandas as pd
 
 from app.core.logging import applog
+from app.core.scanner_discovery_input import resolve_stage1_symbols
+from app.core.universe_discovery import DiscoveryCoordinator
 from app.ai.features import FEATURE_COLUMNS, build_training_set
 from app.data.manager import DataManager
 
@@ -104,6 +106,25 @@ class MarketScanner:
     def __init__(self, data_manager: DataManager, core_watchlist: list[str]) -> None:
         self.data = data_manager
         self.core_watchlist = core_watchlist
+        self._discovery: DiscoveryCoordinator | None = None
+
+    async def _stage1_symbols(self, as_of: datetime | None = None) -> list[str]:
+        """Resolve bounded Stage-1 input without current-data replay leakage."""
+        provider = self.data.provider
+        discovery_supported = bool(getattr(provider, "supports_asset_discovery", False))
+        acquire_discovery = None
+        if as_of is None and discovery_supported:
+            if self._discovery is None:
+                self._discovery = DiscoveryCoordinator(
+                    provider, feed="iex", asset_cache_ttl=timedelta(hours=6),
+                    batch_size=200, request_budget=10, shortlist_limit=50,
+                )
+            acquire_discovery = self._discovery.acquire
+        symbols = await resolve_stage1_symbols(
+            as_of=as_of, static_symbols=CANDIDATE_POOL, fallback_limit=50,
+            discovery_supported=discovery_supported, acquire_discovery=acquire_discovery,
+        )
+        return list(symbols)
 
     # ------------------------------------------------------------------
     # Global safety gate
@@ -157,12 +178,12 @@ class MarketScanner:
     # ------------------------------------------------------------------
 
     async def _stage1_prefilter_parallel(
-        self, as_of: datetime | None = None
+        self, as_of: datetime | None = None, symbols: list[str] | None = None
     ) -> list[dict]:
         """Fetch daily stats for all ~200 symbols concurrently. Returns candidates."""
         end = as_of or datetime.now(UTC)
         start = end - timedelta(days=25)
-        all_symbols = CANDIDATE_POOL
+        all_symbols = list(symbols) if symbols is not None else CANDIDATE_POOL
         semaphore = asyncio.Semaphore(_PREFILTER_CONCURRENCY)
 
         applog.info("scanner", f"[Stage 1] Pre-filtering {len(all_symbols)} symbols (parallel)... end={end.isoformat()} tzinfo={end.tzinfo}")
@@ -436,7 +457,8 @@ class MarketScanner:
                 return (ScannerOutcome.SUCCESS_NONEMPTY, DEFENSIVE_WATCHLIST)
 
             # Stage 1: parallel pre-filter
-            candidates = await self._stage1_prefilter_parallel(as_of)
+            stage1_symbols = await self._stage1_symbols(as_of)
+            candidates = await self._stage1_prefilter_parallel(as_of, stage1_symbols)
             if not candidates:
                 applog.info("scanner", "SCANNER_RUN_EMPTY: All candidates failed pre-filter.")
                 return (ScannerOutcome.SUCCESS_EMPTY, [])
