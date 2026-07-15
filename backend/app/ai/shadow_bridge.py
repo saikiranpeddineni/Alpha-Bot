@@ -41,7 +41,7 @@ class GeminiShadowBridge:
         self.task = asyncio.create_task(self._run(candidates, session=session), name="engine-gemini-shadow-ranking")
 
     async def _run(self, candidates: list[dict[str, Any]], *, session: date) -> None:
-        fingerprint = self.ranker._fingerprint(self.ranker._sanitize(candidates[: self.ranker.max_candidates]))
+        fingerprint = self.ranker.candidate_fingerprint(candidates)
         ranks = await self.ranker.rank(candidates, session=session)
         observation = {
             "session": session.isoformat(),
