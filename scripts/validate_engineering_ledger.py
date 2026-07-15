@@ -45,7 +45,7 @@ def parse_events(comments: list[dict[str, Any]]) -> list[dict[str, Any]]:
             if event_type not in EVENT_KEYS:
                 continue
             try:
-                payload = yaml.safe_load("\n".join(raw.splitlines()[1:]))
+                payload = yaml.load("\n".join(raw.splitlines()[1:]), Loader=yaml.BaseLoader)
             except yaml.YAMLError as exc:
                 raise LedgerError("SCHEMA_INVALID", comment_id=comment.get("id"), error=str(exc)) from exc
             if not isinstance(payload, dict):
@@ -58,21 +58,21 @@ def parse_events(comments: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 if key in LIST_FIELDS:
                     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
                         raise LedgerError("SCHEMA_INVALID", event=event_type, field=key, error="must be a list of strings")
-                elif not isinstance(value, (str, int)) or isinstance(value, bool):
-                    raise LedgerError("SCHEMA_INVALID", event=event_type, field=key, error="must be a scalar string or integer")
+                elif not isinstance(value, str):
+                    raise LedgerError("SCHEMA_INVALID", event=event_type, field=key, error="must be a scalar string")
             try:
-                parse_time(str(payload["worker-run"]))
+                parse_time(payload["worker-run"])
             except (ValueError, TypeError) as exc:
                 raise LedgerError("SCHEMA_INVALID", event=event_type, error="invalid worker-run") from exc
             if event_type in {"CLAIM", "RECLAIM"}:
                 try:
-                    start = parse_time(str(payload["worker-run"]))
-                    lease = parse_time(str(payload["lease-until"]))
+                    start = parse_time(payload["worker-run"])
+                    lease = parse_time(payload["lease-until"])
                 except (ValueError, TypeError) as exc:
                     raise LedgerError("SCHEMA_INVALID", event=event_type, error="invalid lease timestamp") from exc
                 if int((lease - start).total_seconds()) != 55 * 60:
                     raise LedgerError("SCHEMA_INVALID", event=event_type, error="lease must be exactly 55 minutes")
-                if not re.fullmatch(r"[0-9a-f]{40}", str(payload["head"])):
+                if not re.fullmatch(r"[0-9a-f]{40}", payload["head"]):
                     raise LedgerError("SCHEMA_INVALID", event=event_type, error="head must be 40-char lowercase SHA")
             events.append({"type": event_type, **payload, "_comment_id": comment.get("id")})
     return events
@@ -81,18 +81,18 @@ def parse_events(comments: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def validate(events: list[dict[str, Any]], labels: set[str], remote_head: str, now: datetime) -> None:
     active_by_run: dict[str, dict[str, Any]] = {}
     for event in events:
-        worker_run = str(event["worker-run"])
+        worker_run = event["worker-run"]
         if event["type"] in {"CLAIM", "RECLAIM"}:
             active_by_run[worker_run] = event
         elif event["type"] in {"HANDOFF", "ABORT"}:
             active_by_run.pop(worker_run, None)
         elif event["type"] == "RECOVERY":
             for terminated_run in event["terminated-worker-runs"]:
-                active_by_run.pop(str(terminated_run), None)
+                active_by_run.pop(terminated_run, None)
 
     active = []
     for event in active_by_run.values():
-        if parse_time(str(event["lease-until"])) <= now:
+        if parse_time(event["lease-until"]) <= now:
             raise LedgerError("LEASE_ORPHANED", work_item=event.get("work-item"), slice=event["slice"], worker_run=event["worker-run"])
         if event["head"] != remote_head:
             raise LedgerError("HEAD_MISMATCH", work_item=event.get("work-item"), slice=event["slice"], worker_run=event["worker-run"], declared_head=event["head"], remote_head=remote_head)
@@ -100,7 +100,7 @@ def validate(events: list[dict[str, Any]], labels: set[str], remote_head: str, n
 
     seen = {}
     for event in active:
-        key = (str(event.get("work-item")), event["slice"])
+        key = (event.get("work-item"), event["slice"])
         if key in seen:
             raise LedgerError("OVERLAPPING_ACTIVE_CLAIMS", work_item=key[0], slice=key[1], active_claim_1=seen[key]["worker-run"], active_claim_2=event["worker-run"])
         seen[key] = event
