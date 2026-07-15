@@ -155,3 +155,37 @@ class AtomicGenerationStore:
         with self._snapshot_lock:
             self._snapshot = snapshot
         return snapshot
+
+
+class AtomicSpecialistStore:
+    """Serialize same-symbol specialist publication and atomically replace artifacts."""
+
+    def __init__(self, models_dir: Path) -> None:
+        self.specialists_dir = models_dir / "specialists"
+        self.specialists_dir.mkdir(parents=True, exist_ok=True)
+        self._locks_guard = threading.Lock()
+        self._symbol_locks: dict[str, threading.Lock] = {}
+
+    def _lock_for(self, symbol: str) -> threading.Lock:
+        key = symbol.strip().upper()
+        if not key:
+            raise ValueError("symbol is required")
+        with self._locks_guard:
+            return self._symbol_locks.setdefault(key, threading.Lock())
+
+    def publish(self, symbol: str, artifact: object) -> Path:
+        """Persist one complete specialist artifact before exposing it at the live path."""
+        import joblib
+
+        key = symbol.strip().upper()
+        lock = self._lock_for(key)
+        target = self.specialists_dir / f"{key}.pkl"
+        tmp = self.specialists_dir / f".{key}.{uuid.uuid4().hex}.tmp"
+        with lock:
+            try:
+                joblib.dump(artifact, tmp)
+                os.replace(tmp, target)
+            except BaseException:
+                tmp.unlink(missing_ok=True)
+                raise
+        return target
