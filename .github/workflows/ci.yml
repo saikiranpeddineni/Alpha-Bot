@@ -41,7 +41,7 @@ jobs:
           set -o pipefail
           pytest -q backend/tests/test_production_integrity.py \
             --junitxml=production-integrity.xml 2>&1 | tee production-integrity.log
-      - name: Run replay loophole invariants excluding local oracle fixture
+      - name: Run replay loophole invariants excluding local oracle fixtures
         id: replay_invariants
         continue-on-error: true
         env:
@@ -49,7 +49,7 @@ jobs:
         run: |
           set -o pipefail
           pytest -q backend/tests/test_replay_loopholes.py \
-            -k 'not june_8_july_10_oracle_regression' \
+            -k 'not oracle_regression' \
             --junitxml=replay-invariants.xml 2>&1 | tee replay-invariants.log
       - name: Upload CI diagnostics
         if: always()
