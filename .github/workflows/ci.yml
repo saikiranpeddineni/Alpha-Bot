@@ -6,7 +6,7 @@ on:
     branches: [master]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   backend-tests:
@@ -14,26 +14,6 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event_name == 'pull_request' && github.head_ref || github.ref }}
-      - name: Persist optional daily context provenance fix
-        if: github.event_name == 'pull_request' && github.head_ref == '001-production-integrity-fixes'
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          p = Path('backend/app/backtest/engine.py')
-          s = p.read_text()
-          old = '''                # 2. Daily history is optional scanner context. Missing pre-start\n                # daily coverage must not invalidate a complete requested 1-minute range.\n                start_fetch_daily = params.start - timedelta(days=40)\n                try:\n                    df_daily = await original_history(symbol, "1Day", start_fetch_daily, params.end)\n                except HistoricalDataCoverageError:\n                    df_daily = pd.DataFrame()\n                if not df_daily.empty:\n                    daily_frames[symbol] = df_daily\n'''
-          new = '''                # 2. Daily history is optional scanner context. Read only available\n                # cached context so it cannot overwrite requested-range provenance or\n                # add provider calls to a replay.\n                start_fetch_daily = params.start - timedelta(days=40)\n                df_daily = data.cache.query(symbol, "1Day", start_fetch_daily, params.end)\n                if not df_daily.empty:\n                    daily_frames[symbol] = df_daily[df_daily.index <= end_utc]\n'''
-          assert old in s
-          p.write_text(s.replace(old, new, 1))
-          PY
-          git diff --check
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add backend/app/backtest/engine.py
-          git commit -m "Keep optional daily context cache-only"
-          git push origin HEAD:001-production-integrity-fixes
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
