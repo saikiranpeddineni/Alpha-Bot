@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -22,6 +23,34 @@ def test_training_coordinator_claim_is_atomic_before_background_work() -> None:
     coordinator.release("continuous:a")
     assert coordinator.try_claim("manual") is True
     coordinator.release("manual")
+
+
+def test_same_event_loop_turn_allows_exactly_one_training_owner() -> None:
+    async def scenario() -> None:
+        coordinator = TrainingCoordinator()
+        entered: list[str] = []
+        release = asyncio.Event()
+
+        async def trigger(owner: str) -> bool:
+            if not coordinator.try_claim(owner):
+                return False
+            entered.append(owner)
+            try:
+                await release.wait()
+            finally:
+                coordinator.release(owner)
+            return True
+
+        first = asyncio.create_task(trigger("continuous:first"))
+        second = asyncio.create_task(trigger("continuous:second"))
+        await asyncio.sleep(0)
+        assert len(entered) == 1
+        assert coordinator.busy is True
+        release.set()
+        assert sum(await asyncio.gather(first, second)) == 1
+        assert coordinator.busy is False
+
+    asyncio.run(scenario())
 
 
 def test_reverse_writer_order_is_rejected_deterministically() -> None:
@@ -53,7 +82,26 @@ def test_atomic_store_restart_loads_one_complete_generation(tmp_path: Path) -> N
     assert loaded1.meta["generation_id"] == g1.generation_id
 
 
-def test_failure_before_manifest_commit_preserves_incumbent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_inference_snapshot_never_mixes_sides_during_publish(tmp_path: Path) -> None:
+    store = AtomicGenerationStore(tmp_path)
+    store.publish(MarkerModel("g0", "long"), MarkerModel("g0", "short"), {"name": "g0"})
+    before = store.current
+    assert before is not None
+
+    store.publish(MarkerModel("g1", "long"), MarkerModel("g1", "short"), {"name": "g1"})
+    after = store.current
+    assert after is not None
+
+    # A scorer captures one immutable reference per decision. The old reference
+    # remains coherent even after the store atomically swaps to the new one.
+    assert before.long_model.generation == before.short_model.generation == "g0"
+    assert after.long_model.generation == after.short_model.generation == "g1"
+    assert before.generation_id != after.generation_id
+
+
+def test_failure_before_manifest_commit_preserves_disk_and_memory_incumbent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     store = AtomicGenerationStore(tmp_path)
     incumbent = store.publish(MarkerModel("g0", "long"), MarkerModel("g0", "short"), {"name": "g0"})
     original_replace = __import__("app.ai.generation", fromlist=["os"]).os.replace
@@ -66,6 +114,10 @@ def test_failure_before_manifest_commit_preserves_incumbent(tmp_path: Path, monk
     monkeypatch.setattr("app.ai.generation.os.replace", fail_manifest_swap)
     with pytest.raises(OSError, match="injected manifest failure"):
         store.publish(MarkerModel("g1", "long"), MarkerModel("g1", "short"), {"name": "g1"})
+
+    assert store.current is not None
+    assert store.current.generation_id == incumbent.generation_id
+    assert store.current.long_model.generation == store.current.short_model.generation == "g0"
 
     loaded = AtomicGenerationStore(tmp_path).load()
     assert loaded is not None
