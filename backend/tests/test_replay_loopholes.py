@@ -171,6 +171,77 @@ async def test_4_mixed_source_provenance_tracking(tmp_path, empty_cache):
 
 
 @pytest.mark.asyncio
+async def test_3b_partial_warmup_is_optional_cache_context(tmp_path):
+    warmup_times = pd.date_range(
+        datetime(2026, 7, 2, 15, 0, tzinfo=UTC), periods=30, freq="1min"
+    )
+    requested_times = pd.date_range(
+        datetime(2026, 7, 6, 13, 30, tzinfo=UTC), periods=390, freq="1min"
+    )
+    times = warmup_times.append(requested_times)
+    df = pd.DataFrame(
+        [[100.0, 101.0, 99.0, 100.5, 1000.0] for _ in times],
+        columns=["open", "high", "low", "close", "volume"],
+        index=pd.DatetimeIndex(times, name="ts"),
+    )
+
+    prov = BlockingProvider(should_fail=True)
+    dm = DataManager(prov, tmp_path / "test_cache.db")
+    dm.cache.upsert("SPY", "1Min", df)
+    params = BacktestParams(
+        symbols=["SPY"],
+        start=datetime(2026, 7, 6, 0, 0, tzinfo=UTC),
+        end=datetime(2026, 7, 6, 23, 59, tzinfo=UTC),
+        cache_policy=CachePolicy.IMMUTABLE_CACHE_ONLY,
+    )
+
+    result = await run_backtest(dm, SignalModel(DATA_DIR / "models"), params)
+
+    assert result.actual_data_start == warmup_times[0].to_pydatetime()
+    assert result.actual_data_end <= params.end
+    assert not prov.called
+
+
+@pytest.mark.asyncio
+async def test_3c_requested_range_is_explicitly_end_bounded(tmp_path):
+    requested_times = pd.date_range(
+        datetime(2026, 7, 6, 13, 30, tzinfo=UTC), periods=390, freq="1min"
+    )
+    future_ts = datetime(2026, 7, 7, 13, 30, tzinfo=UTC)
+    times = requested_times.append(pd.DatetimeIndex([future_ts]))
+    df = pd.DataFrame(
+        [[100.0, 101.0, 99.0, 100.5, 1000.0] for _ in times],
+        columns=["open", "high", "low", "close", "volume"],
+        index=pd.DatetimeIndex(times, name="ts"),
+    )
+
+    prov = BlockingProvider(should_fail=True)
+    dm = DataManager(prov, tmp_path / "test_cache.db")
+
+    async def overbroad_history(symbol, timeframe, start, end, prefer_cache=True, cache_policy=None):
+        if timeframe == "1Day":
+            raise HistoricalDataCoverageError(
+                symbol=symbol, timeframe=timeframe, start=start, end=end,
+                cached_start=None, cached_end=None, reason="optional daily context absent",
+            )
+        return df
+
+    dm.history = overbroad_history
+    params = BacktestParams(
+        symbols=["SPY"],
+        start=datetime(2026, 7, 6, 0, 0, tzinfo=UTC),
+        end=datetime(2026, 7, 6, 23, 59, tzinfo=UTC),
+        cache_policy=CachePolicy.IMMUTABLE_CACHE_ONLY,
+    )
+
+    result = await run_backtest(dm, SignalModel(DATA_DIR / "models"), params)
+
+    assert result.actual_data_end <= params.end
+    assert result.actual_data_end != future_ts
+    assert not prov.called
+
+
+@pytest.mark.asyncio
 async def test_5_dataset_immutability_assertion(tmp_path, empty_cache):
     """Test 5: Dataset immutability assertion fails if cache mutated during run."""
     # Seed cache

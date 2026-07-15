@@ -31,6 +31,7 @@ from app.core.clock import MarketClock
 from app.core.domain import SignalAction, TradeRecord, new_id, utcnow, OrderStatus
 from app.core.logging import applog
 from app.data.manager import DataManager
+from app.data.base import HistoricalDataCoverageError
 from app.portfolio.tracker import PortfolioTracker
 from app.risk.manager import AccountContext, RiskManager
 from app.strategies import SignalPipeline, create_strategies
@@ -394,9 +395,13 @@ async def run_backtest(
                     warnings.append(f"{symbol}: insufficient data -- skipped")
                     applog.warning("backtest", warnings[-1])
 
-                # 2. Load historical daily bars (at least 40 calendar days to guarantee 8+ daily bars before params.start)
+                # 2. Daily history is optional scanner context. Missing pre-start
+                # daily coverage must not invalidate a complete requested 1-minute range.
                 start_fetch_daily = params.start - timedelta(days=40)
-                df_daily = await original_history(symbol, "1Day", start_fetch_daily, params.end)
+                try:
+                    df_daily = await original_history(symbol, "1Day", start_fetch_daily, params.end)
+                except HistoricalDataCoverageError:
+                    df_daily = pd.DataFrame()
                 if not df_daily.empty:
                     daily_frames[symbol] = df_daily
 
