@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from app.config import Settings
@@ -58,6 +60,30 @@ async def test_engine_ticks_and_streams(engine: TradingEngine):
 
     await engine.stop()
     assert engine.state == EngineState.STOPPED
+
+
+async def test_tick_reuses_authoritative_positions_snapshot_for_broadcast(engine: TradingEngine, monkeypatch):
+    published_positions: list[list[dict]] = []
+    engine.publish = lambda topic, payload: published_positions.append(payload) if topic == "positions" else None
+
+    await engine.start("demo")
+    assert engine.broker is not None
+
+    original_positions = engine.broker.positions
+    provider_calls = 0
+
+    async def counted_positions():
+        nonlocal provider_calls
+        provider_calls += 1
+        return await original_positions()
+
+    monkeypatch.setattr(engine.broker, "positions", counted_positions)
+
+    await engine._tick()
+    await asyncio.sleep(0)
+
+    assert provider_calls == 1, "one tick must use one authoritative broker positions snapshot"
+    assert published_positions, "the tick must broadcast the snapshot it already fetched"
 
 
 async def test_engine_manual_flow(engine: TradingEngine):
