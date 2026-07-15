@@ -34,7 +34,7 @@ async def test_run_passes_live_discovery_shortlist_only_to_stage1(monkeypatch):
     outcome, symbols = await scanner.run()
     assert outcome is ScannerOutcome.SUCCESS_EMPTY
     assert symbols == []
-    stage1.assert_awaited_once_with(None, ["NEW1", "NEW2"])
+    stage1.assert_awaited_once_with(as_of=None, symbols=["NEW1", "NEW2"])
 
 
 @pytest.mark.asyncio
@@ -47,4 +47,4 @@ async def test_run_passes_full_static_pool_to_stage1_for_historical_as_of(monkey
     outcome, symbols = await scanner.run(HISTORICAL_T)
     assert outcome is ScannerOutcome.SUCCESS_EMPTY
     assert symbols == []
-    stage1.assert_awaited_once_with(HISTORICAL_T, CANDIDATE_POOL)
+    stage1.assert_awaited_once_with(as_of=HISTORICAL_T, symbols=CANDIDATE_POOL)
