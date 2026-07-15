@@ -114,12 +114,14 @@ class MarketScanner:
         discovery_supported = bool(getattr(provider, "supports_asset_discovery", False))
         acquire_discovery = None
         if as_of is None and discovery_supported:
-            if self._discovery is None:
-                self._discovery = DiscoveryCoordinator(
+            discovery = getattr(self.data, "_discovery", None)
+            if discovery is None:
+                discovery = DiscoveryCoordinator(
                     provider, feed="iex", asset_cache_ttl=timedelta(hours=6),
                     batch_size=200, request_budget=10, shortlist_limit=50,
                 )
-            acquire_discovery = self._discovery.acquire
+                self.data._discovery = discovery
+            acquire_discovery = discovery.acquire
         symbols = await resolve_stage1_symbols(
             as_of=as_of, static_symbols=CANDIDATE_POOL, fallback_limit=50,
             discovery_supported=discovery_supported, acquire_discovery=acquire_discovery,
