@@ -792,15 +792,19 @@ async def run_backtest(
             except Exception as exc:
                 applog.debug("backtest", f"Calendar check error: {exc}")
 
-        if portfolio.roll_session(session, broker.equity()):
-            risk.roll_session(session)
-
         symbols_here = [s for s, idx in positions_index.items() if ts in idx]
         for symbol in symbols_here:
             i = positions_index[symbol][ts]
             broker.process_bar(symbol, frames[symbol].iloc[i], now)
             bars_processed += 1
         drain(now)
+
+        # Match the live decision cycle: observe/process all as-of-T fills first,
+        # then roll session state before account context, halts, and decisions.
+        # This makes a boundary fill on the first processed bar of D+1 land in
+        # identical portfolio/risk state in live and replay.
+        if portfolio.roll_session(session, broker.equity()):
+            risk.roll_session(session)
 
         # Update midday filter status (aligned with live engine)
         from zoneinfo import ZoneInfo
