@@ -44,6 +44,7 @@ from app.core.domain import (
     utcnow,
 )
 from app.core.logging import applog
+from app.core.entry_reservations import SameCycleEntryReservations
 from app.data.manager import DataManager, make_provider
 from app.db.database import Database
 from app.indicators.ta import enrich, compute_relative_strength
@@ -622,13 +623,14 @@ class TradingEngine:
                         if is_entry_order(o, positions)
                     ]
                     effective_pending_entries = set(pending_entries)
+                    reservations = SameCycleEntryReservations.from_snapshot(account.cash, positions)
 
                     for sig, kelly_val in decision_outcome.approved_entries:
                         df = df_by_symbol[sig.symbol]
                         ctx = AccountContext(
                             equity=account.equity,
-                            cash=account.cash,
-                            positions=positions,
+                            cash=reservations.cash,
+                            positions=reservations.positions,
                             day_pnl=self.portfolio.day_pnl(account.equity),
                             session_start_equity=self.portfolio.session_start_equity or account.equity,
                             peak_equity=self.portfolio.peak_equity,
@@ -646,8 +648,10 @@ class TradingEngine:
                         self.publish("insight", self.insights.on_signal(sig, gated=False).model_dump(mode="json"))
                         self.publish("orders", self.orders_payload())
                         
-                        # Add to effective pending set if successfully submitted into an active state
-                        if order.status not in (OrderStatus.CANCELED, OrderStatus.REJECTED):
+                        # Reserve active same-cycle submissions before evaluating the next candidate.
+                        # This overlays the stale broker snapshot for cash, position-count, and sector checks.
+                        reference_price = sig.price or float(df["close"].iloc[-1])
+                        if reservations.reserve(order, reference_price):
                             effective_pending_entries.add(sig.symbol.upper())
 
             await self._drain_fills(now)
