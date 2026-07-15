@@ -1,0 +1,117 @@
+name: 003 Persist Engine Integration
+
+on:
+  push:
+    branches: [003-budgeted-gemini-shadow-ranker-clean]
+
+permissions:
+  contents: write
+
+jobs:
+  persist:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 003-budgeted-gemini-shadow-ranker-clean
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply narrow 003 engine integration
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('backend/app/core/engine.py')
+          s = p.read_text()
+          s = s.replace('from app.ai.insights import InsightEngine\n', 'from app.ai.insights import InsightEngine\nfrom app.ai.gemini_ranker import GeminiShadowRanker\nfrom app.ai.shadow_bridge import GeminiShadowBridge\n')
+          s = s.replace('        self.narrative_interval: int = 12\n        self._narrative_task: asyncio.Task | None = None\n', '        self.gemini_shadow = GeminiShadowBridge(\n            GeminiShadowRanker(settings.gemini_api_key),\n            observation_sink=self._persist_gemini_shadow_observation,\n        )\n')
+          needle = '''                decision_outcome = process_portfolio_allocations(\n                    signals=alloc_signals,\n                    positions=positions,\n                    available_capital=account.cash,\n                    equity=account.equity,\n                    portfolio_gate=self.portfolio_gate,\n                    portfolio_allocator=self.portfolio_allocator,\n                )\n\n                # Process gated/rejected entries\n'''
+          replacement = '''                decision_outcome = process_portfolio_allocations(\n                    signals=alloc_signals,\n                    positions=positions,\n                    available_capital=account.cash,\n                    equity=account.equity,\n                    portfolio_gate=self.portfolio_gate,\n                    portfolio_allocator=self.portfolio_allocator,\n                )\n\n                # Shadow research observes only deterministic post-allocation candidates.\n                # The bridge has no return channel into risk, order construction, or submission.\n                self.gemini_shadow.schedule(\n                    [sig for sig, _ in decision_outcome.approved_entries],\n                    session=session,\n                )\n\n                # Process gated/rejected entries\n'''
+          assert needle in s
+          s = s.replace(needle, replacement)
+          start = s.index('        # 8. optional LLM narrative generation\n')
+          end = s.index('    async def _evaluate_symbol', start)
+          s = s[:start] + s[end:]
+          start = s.index('    async def _generate_narrative(self) -> None:\n')
+          end = s.index('    async def shutdown(self) -> None:\n', start)
+          persistence = '''    def _persist_gemini_shadow_observation(self, observation: dict[str, Any]) -> None:\n        """Persist bounded research evidence without exposing it to execution code."""\n        key = "gemini_shadow_observations"\n        observations = self.db.get_setting(key) or []\n        if not isinstance(observations, list):\n            observations = []\n        observations.append(observation)\n        self.db.set_setting(key, observations[-200:])\n\n'''
+          s = s[:start] + persistence + s[end:]
+          old_shutdown = '''    async def shutdown(self) -> None:\n        if self._narrative_task is not None and not self._narrative_task.done():\n            self._narrative_task.cancel()\n            try:\n                await self._narrative_task\n            except asyncio.CancelledError:\n                pass\n\n        await self.stop(flatten=False)\n'''
+          new_shutdown = '''    async def shutdown(self) -> None:\n        await self.gemini_shadow.shutdown()\n        await self.stop(flatten=False)\n'''
+          assert old_shutdown in s
+          s = s.replace(old_shutdown, new_shutdown)
+          status_needle = '''            "has_alpaca_keys": self.settings.has_alpaca_keys,\n            "tick": self._tick_count,\n'''
+          assert status_needle in s
+          s = s.replace(status_needle, '''            "has_alpaca_keys": self.settings.has_alpaca_keys,\n            "gemini_shadow": self.gemini_shadow.ranker.telemetry(),\n            "tick": self._tick_count,\n''')
+          p.write_text(s)
+          PY
+          cat > backend/tests/test_gemini_engine_integration.py <<'PY'
+          import inspect
+          from pathlib import Path
+
+          from app.config import Settings
+          from app.core.engine import TradingEngine
+          from app.db.database import Database
+
+
+          def test_engine_wires_shadow_after_allocation_before_risk_and_broker():
+              source = inspect.getsource(TradingEngine._tick)
+              allocation = source.index("decision_outcome = process_portfolio_allocations(")
+              shadow = source.index("self.gemini_shadow.schedule(")
+              risk = source.index("decision = self.risk.evaluate_entry(")
+              broker = source.index("order = await self.broker.submit(")
+              assert allocation < shadow < risk < broker
+              assert "[sig for sig, _ in decision_outcome.approved_entries]" in source
+
+
+          def test_engine_execution_path_never_reads_shadow_rankings_or_scores():
+              source = inspect.getsource(TradingEngine._tick)
+              assert "gemini_shadow.ranker.rank" not in source
+              assert "gemini_shadow.task" not in source
+              assert ".rankings" not in source
+              assert "shadow_score" not in source
+              assert source.count("self.gemini_shadow") == 1
+
+
+          def test_periodic_llm_narrative_spend_is_removed_from_engine():
+              source = Path(inspect.getsourcefile(TradingEngine)).read_text()
+              assert "narrative_interval" not in source
+              assert "_narrative_task" not in source
+              assert "_generate_narrative" not in source
+              assert "llm_narrative(" not in source
+
+
+          def test_shadow_observation_persistence_is_bounded_and_telemetry_is_exposed(tmp_path):
+              db = Database(tmp_path / "test.db")
+              engine = TradingEngine(Settings(_env_file=None), db)
+              for index in range(205):
+                  engine._persist_gemini_shadow_observation({"index": index})
+              stored = db.get_setting("gemini_shadow_observations")
+              assert len(stored) == 200
+              assert stored[0] == {"index": 5}
+              assert stored[-1] == {"index": 204}
+              assert engine.status()["gemini_shadow"] == {
+                  "calls_today": 0,
+                  "candidates_ranked": 0,
+                  "cache_hits": 0,
+                  "failures": 0,
+                  "budget_remaining": 10,
+              }
+              db.close()
+          PY
+      - name: Install backend dependencies
+        run: python -m pip install -r backend/requirements.txt
+      - name: Validate focused 003 integration
+        working-directory: backend
+        run: |
+          python -m compileall -q app tests
+          python -m pytest -q tests/test_gemini_ranker.py tests/test_gemini_shadow_bridge.py tests/test_gemini_engine_integration.py
+      - name: Persist validated source and remove temporary workflow
+        run: |
+          rm .github/workflows/003-persist-engine-integration.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add backend/app/core/engine.py backend/tests/test_gemini_engine_integration.py .github/workflows/003-persist-engine-integration.yml
+          git commit -m '003: wire shadow ranker after allocation'
+          git push origin HEAD:003-budgeted-gemini-shadow-ranker-clean
