@@ -49,6 +49,7 @@ class AlpacaBroker(Broker):
         self._client = TradingClient(api_key, api_secret, paper=paper)
         self._fills: list[Fill] = []
         self._emitted_fill_ids: set[str] = set()
+        self._processed_fill_qty: dict[str, float] = {}
         self._meta: dict[str, tuple[str, str]] = {}  # order id -> (strategy, reason)
         self._symbol_strategies: dict[str, str] = {}
 
@@ -66,7 +67,12 @@ class AlpacaBroker(Broker):
                 GetOrdersRequest(status="closed", after=after, limit=200),
             )
             for o in raw:
-                self._emitted_fill_ids.add(str(o.id))
+                oid = str(o.id)
+                filled_qty = float(o.filled_qty or 0)
+                if filled_qty > 0:
+                    self._processed_fill_qty[oid] = filled_qty
+                if str(o.status).split(".")[-1].lower() == "filled":
+                    self._emitted_fill_ids.add(oid)
         except Exception as exc:
             applog.warning("broker.alpaca", f"failed to pre-populate emitted fill IDs: {exc}")
 
@@ -176,39 +182,47 @@ class AlpacaBroker(Broker):
         return order
 
     async def poll_fills(self) -> None:
-        """Detect newly filled orders; call once per engine tick."""
+        """Emit each newly executed cumulative quantity delta exactly once."""
         from alpaca.trading.requests import GetOrdersRequest
 
         after = datetime.now(UTC) - timedelta(hours=24)
         try:
             raw = await asyncio.to_thread(
                 self._client.get_orders,
-                GetOrdersRequest(status="closed", after=after, limit=200),
+                GetOrdersRequest(status="all", after=after, limit=200),
             )
         except Exception as exc:  # noqa: BLE001
             applog.warning("broker.alpaca", f"fill poll failed: {exc}")
             return
         for o in raw:
             oid = str(o.id)
-            if oid in self._emitted_fill_ids:
+            cumulative_qty = float(o.filled_qty or 0)
+            processed_qty = self._processed_fill_qty.get(oid, 0.0)
+            delta_qty = cumulative_qty - processed_qty
+            if delta_qty <= 1e-9:
                 continue
-            status = str(o.status).split(".")[-1].lower()
-            if status != "filled" or not o.filled_avg_price:
+            if not o.filled_avg_price:
+                applog.warning(
+                    "broker.alpaca",
+                    f"order {oid} reports {cumulative_qty:g} filled shares without an average fill price; retaining watermark at {processed_qty:g}",
+                )
                 continue
-            self._emitted_fill_ids.add(oid)
             strategy, reason = self._meta.get(oid, ("alpaca", ""))
             self._fills.append(
                 Fill(
                     order_id=oid,
                     symbol=o.symbol,
                     side=OrderSide.BUY if "buy" in str(o.side).lower() else OrderSide.SELL,
-                    qty=float(o.filled_qty or 0),
+                    qty=delta_qty,
                     price=float(o.filled_avg_price),
                     strategy=strategy,
                     reason=reason,
                     ts=o.filled_at or datetime.now(UTC),
                 )
             )
+            self._processed_fill_qty[oid] = cumulative_qty
+            if str(o.status).split(".")[-1].lower() == "filled":
+                self._emitted_fill_ids.add(oid)
 
     def drain_fills(self) -> list[Fill]:
         fills, self._fills = self._fills, []
