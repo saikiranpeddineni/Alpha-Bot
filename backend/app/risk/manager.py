@@ -47,7 +47,6 @@ def is_entry_order(order: Order, positions: list[Position]) -> bool:
     pos = next((p for p in positions if p.symbol.upper() == order.symbol.upper()), None)
     if pos is None:
         return True
-    # If same side as position, it is an entry/position increase. If opposite, it is an exit.
     if pos.qty > 0 and order.side == OrderSide.SELL:
         return False
     if pos.qty < 0 and order.side == OrderSide.BUY:
@@ -73,7 +72,7 @@ class RiskDecision:
     approved: bool
     reason: str
     order: OrderRequest | None = None
-    kelly_fraction: float | None = None  # fractional Kelly used for sizing (Phase 3)
+    kelly_fraction: float | None = None
 
 
 class RiskManager:
@@ -90,25 +89,16 @@ class RiskManager:
         self._pdt_warned = False
         self.core_watchlist: list[str] | None = None
 
-    # ---- lifecycle hooks ----
-
     def on_trade_closed(self, trade: TradeRecord, now: datetime | None = None) -> None:
         if trade.pnl <= 0:
             self.consecutive_losses += 1
             symbol = trade.symbol.upper()
             now_dt = now or datetime.now(UTC)
             self.symbol_cooldowns[symbol] = now_dt + timedelta(minutes=self.config.cooldown_minutes)
-            applog.warning(
-                "risk",
-                f"Loss on {symbol} -- cooling down this ticker for {self.config.cooldown_minutes} minutes"
-            )
+            applog.warning("risk", f"Loss on {symbol} -- cooling down this ticker for {self.config.cooldown_minutes} minutes")
             if self.consecutive_losses >= self.config.consecutive_loss_limit:
                 self.cooldown_until = now_dt + timedelta(minutes=self.config.cooldown_minutes)
-                applog.warning(
-                    "risk",
-                    f"{self.consecutive_losses} consecutive losses -- pausing new entries "
-                    f"for {self.config.cooldown_minutes} minutes",
-                )
+                applog.warning("risk", f"{self.consecutive_losses} consecutive losses -- pausing new entries for {self.config.cooldown_minutes} minutes")
         else:
             self.consecutive_losses = 0
 
@@ -125,17 +115,13 @@ class RiskManager:
         self.hard_halt_reason = ""
         applog.warning("risk", "Hard halt manually reset -- trading re-enabled")
 
-    # ---- halt checks (engine calls every tick) ----
-
     def check_halts(self, ctx: AccountContext, now: datetime | None = None) -> str | None:
         """Returns 'daily' or 'hard' when a halt newly trips this tick."""
         if not self.hard_halted and ctx.peak_equity > 0:
             dd_pct = (ctx.peak_equity - ctx.equity) / ctx.peak_equity * 100.0
             if dd_pct >= self.config.max_drawdown_pct:
                 self.hard_halted = True
-                self.hard_halt_reason = (
-                    f"Max drawdown breached: {dd_pct:.1f}% >= {self.config.max_drawdown_pct}%"
-                )
+                self.hard_halt_reason = f"Max drawdown breached: {dd_pct:.1f}% >= {self.config.max_drawdown_pct}%"
                 applog.error("risk", f"KILL SWITCH: {self.hard_halt_reason}")
                 return "hard"
         if not self.daily_halted and ctx.session_start_equity > 0:
@@ -143,11 +129,7 @@ class RiskManager:
             if loss_pct >= self.config.max_daily_loss_pct:
                 self.daily_halted = True
                 self.daily_halt_date = self.clock.session_date(now)
-                applog.error(
-                    "risk",
-                    f"DAILY HALT: day loss {loss_pct:.2f}% >= {self.config.max_daily_loss_pct}% "
-                    "-- flattening and stopping for the session",
-                )
+                applog.error("risk", f"DAILY HALT: day loss {loss_pct:.2f}% >= {self.config.max_daily_loss_pct}% -- flattening and stopping for the session")
                 return "daily"
         return None
 
@@ -158,8 +140,6 @@ class RiskManager:
     def should_flatten(self, now: datetime | None = None) -> bool:
         return self.clock.in_flatten_window(self.config.flatten_minutes_before_close, now)
 
-    # ---- entry evaluation ----
-
     def evaluate_entry(
         self,
         signal: Signal,
@@ -168,16 +148,7 @@ class RiskManager:
         now: datetime | None = None,
         kelly_override: float | None = None,
     ) -> RiskDecision:
-        """Evaluate a proposed entry and return a sizing decision.
-
-        Parameters
-        ----------
-        kelly_override:
-            When provided by the CapitalAllocationOptimizer, this fractional
-            Kelly value (0-1) replaces the fixed ``risk_per_trade_pct`` for
-            position sizing. It is capped at ``cfg.kelly_fraction_cap``.
-            Pass ``None`` (default) to use the existing fixed-fraction logic.
-        """
+        """Evaluate a proposed entry and return a sizing decision."""
         cfg = self.config
         symbol = signal.symbol.upper()
 
@@ -199,39 +170,29 @@ class RiskManager:
         if len(ctx.positions) >= cfg.max_open_positions:
             return RiskDecision(False, f"max open positions ({cfg.max_open_positions}) reached")
 
-        # Sector concentration check
         from app.portfolio.allocator import _sector
         sector = _sector(symbol)
         sector_count = sum(1 for p in ctx.positions if _sector(p.symbol.upper()) == sector)
         if sector_count >= cfg.max_positions_per_sector:
-            return RiskDecision(
-                False,
-                f"sector limit exceeded: {symbol} is in {sector} which already has {sector_count} open positions (max {cfg.max_positions_per_sector})"
-            )
+            return RiskDecision(False, f"sector limit exceeded: {symbol} is in {sector} which already has {sector_count} open positions (max {cfg.max_positions_per_sector})")
 
         if bars.empty:
             return RiskDecision(False, "no market data")
         price = signal.price or float(bars["close"].iloc[-1])
         if price < cfg.min_price:
             return RiskDecision(False, f"price {price:.2f} below minimum {cfg.min_price}")
-        recent = bars.tail(120)  # Smooth out opening volume spikes by checking a 2-hour window instead of 30 mins
+        recent = bars.tail(120)
         avg_dollar_vol = float((recent["close"] * recent["volume"]).mean())
         if avg_dollar_vol < cfg.min_avg_dollar_volume:
             return RiskDecision(False, f"illiquid: avg ${avg_dollar_vol:,.0f}/min below minimum")
 
-        # PDT protection: block only for small LIVE accounts; warn on paper
         if ctx.day_trades_today >= PDT_MAX_DAY_TRADES and ctx.equity < PDT_EQUITY_MIN:
             if not ctx.is_paper:
                 return RiskDecision(False, "PDT guard: 3 day trades used and equity < $25k (live)")
             if not self._pdt_warned:
                 self._pdt_warned = True
-                applog.warning(
-                    "risk",
-                    "PDT note: this pace of day trading would exceed the pattern-day-trader "
-                    "limit on a live account under $25k",
-                )
+                applog.warning("risk", "PDT note: this pace of day trading would exceed the pattern-day-trader limit on a live account under $25k")
 
-        # ---- stop synthesis & position sizing ----
         stop_loss = signal.stop_loss
         atr = None
         if "atr14" in bars.columns and pd.notna(bars["atr14"].iloc[-1]):
@@ -241,14 +202,17 @@ class RiskManager:
                 return RiskDecision(False, "no stop provided and ATR unavailable")
             stop_loss = price - 1.5 * atr if signal.action == SignalAction.ENTER_LONG else price + 1.5 * atr
 
+        if signal.action == SignalAction.ENTER_LONG and stop_loss >= price:
+            return RiskDecision(False, f"long stop must be below entry ({stop_loss:.4f} >= {price:.4f})")
+        if signal.action == SignalAction.ENTER_SHORT and stop_loss <= price:
+            return RiskDecision(False, f"short stop must be above entry ({stop_loss:.4f} <= {price:.4f})")
+
         stop_distance = abs(price - stop_loss)
         min_distance = max(price * 0.0005, 0.01)
         if stop_distance < min_distance:
             return RiskDecision(False, f"stop too tight ({stop_distance:.4f})")
 
-        # Determine effective risk fraction
         if kelly_override is not None:
-            # Phase 3: fractional Kelly from CapitalAllocationOptimizer
             kelly_cap = getattr(cfg, "kelly_fraction_cap", 0.15)
             effective_allocation = min(kelly_override, kelly_cap)
             target_notional = ctx.equity * effective_allocation
@@ -260,12 +224,10 @@ class RiskManager:
             if self.core_watchlist is not None and symbol not in self.core_watchlist:
                 effective_risk_pct *= 0.5
                 applog.info("risk", f"Scanned asset {symbol}: scaling risk down to {effective_risk_pct}% (50% reduction)")
-
             kelly_used = effective_risk_pct / 100.0
             risk_amount = ctx.equity * kelly_used
             qty = int(risk_amount / stop_distance)
 
-        # --- binding-constraint trace ---
         qty_unconstrained = qty
         max_notional = ctx.equity * cfg.max_position_pct / 100.0
         qty_after_notional = min(qty, int(max_notional / price))
@@ -281,15 +243,7 @@ class RiskManager:
 
         qty = qty_after_cash
         final_notional = qty * price
-        applog.info(
-            "risk",
-            f"[sizing] {symbol} allocator_target={'${:,.0f}'.format(target_notional) if kelly_override is not None else 'n/a (fixed-risk)'} "
-            f"unconstrained_qty={qty_unconstrained} "
-            f"after_notional_cap={qty_after_notional} "
-            f"after_cash_cap={qty_after_cash} "
-            f"final_qty={qty} final_notional=${final_notional:,.0f} "
-            f"binding_constraint={binding}",
-        )
+        applog.info("risk", f"[sizing] {symbol} allocator_target={'${:,.0f}'.format(target_notional) if kelly_override is not None else 'n/a (fixed-risk)'} unconstrained_qty={qty_unconstrained} after_notional_cap={qty_after_notional} after_cash_cap={qty_after_cash} final_qty={qty} final_notional=${final_notional:,.0f} binding_constraint={binding}")
         if qty < 1:
             return RiskDecision(False, "computed size below 1 share (risk budget or cash too small)")
 
@@ -297,6 +251,10 @@ class RiskManager:
         take_profit = signal.take_profit
         if take_profit is None:
             take_profit = price + 2.0 * stop_distance if side == OrderSide.BUY else price - 2.0 * stop_distance
+        elif side == OrderSide.BUY and take_profit <= price:
+            return RiskDecision(False, f"long target must be above entry ({take_profit:.4f} <= {price:.4f})")
+        elif side == OrderSide.SELL and take_profit >= price:
+            return RiskDecision(False, f"short target must be below entry ({take_profit:.4f} >= {price:.4f})")
 
         order = OrderRequest(
             symbol=symbol,
@@ -308,12 +266,7 @@ class RiskManager:
             strategy=signal.strategy,
             reason=signal.reason,
         )
-        return RiskDecision(
-            approved=True,
-            reason=f"sized {qty} shares, risk ${risk_amount:,.0f}",
-            order=order,
-            kelly_fraction=round(kelly_used, 6),
-        )
+        return RiskDecision(approved=True, reason=f"sized {qty} shares, risk ${risk_amount:,.0f}", order=order, kelly_fraction=round(kelly_used, 6))
 
     def status(self) -> dict:
         return {
