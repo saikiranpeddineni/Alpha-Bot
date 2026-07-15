@@ -68,6 +68,7 @@ class SignalModel:
         self._regime_adaptive_long: dict[str, object] = {}
         self._regime_adaptive_short: dict[str, object] = {}
         self._specialists: dict[str, dict] = {}
+        self._auc_warned_symbols: set[str] = set()  # suppress repeated per-session AUC warnings
         # Set only while a historical replay is running.  Live engine scoring
         # must see an explicit None rather than reading a missing attribute.
         self.backtest_start_time: datetime | None = None
@@ -139,6 +140,7 @@ class SignalModel:
                     self._specialists[pkl.stem.upper()] = joblib.load(pkl)
                 except Exception as exc:
                     applog.debug("ai.model", f"Could not load specialist {pkl.name}: {exc}")
+        self._auc_warned_symbols = set()
 
     @property
     def is_trained(self) -> bool:
@@ -293,18 +295,27 @@ class SignalModel:
 
                 # Dynamic safety gate: block if specialist validation AUC is below config threshold
                 if auc < min_auc:
-                    applog.info(
-                        "ai.model",
-                        f"[specialist] {sym_upper} VALIDATION FAILED — "
-                        f"auc={auc:.4f} < min_auc={min_auc:.4f} | "
-                        f"trained_at={spec.get('trained_at', 'unknown')} | "
-                        f"n_samples={spec.get('n_samples', 'unknown')} | "
-                        f"n_pos={spec.get('n_positive', 'unknown')} | "
-                        f"n_neg={spec.get('n_negative', 'unknown')} | "
-                        f"feature_version={spec.get('feature_version', 'unknown')} | "
-                        f"artifact={self.models_dir / 'specialists' / f'{sym_upper.lower()}.pkl'} "
-                        f"— falling back to global base model",
-                    )
+                    if sym_upper not in self._auc_warned_symbols:
+                        self._auc_warned_symbols.add(sym_upper)
+                        side_label = "short" if action == SignalAction.ENTER_SHORT else "long"
+                        applog.info(
+                            "ai.model",
+                            f"[specialist] {sym_upper} VALIDATION FAILED ({side_label}) — "
+                            f"auc={auc:.4f} < min_auc={min_auc:.4f} | "
+                            f"trained_at={spec.get('trained_at', 'unknown')} | "
+                            f"n_samples={spec.get('n_samples', 'unknown')} | "
+                            f"n_pos={spec.get('n_positive', 'unknown')} | "
+                            f"n_neg={spec.get('n_negative', 'unknown')} | "
+                            f"feature_version={spec.get('feature_version', 'unknown')} | "
+                            f"artifact={self.models_dir / 'specialists' / f'{sym_upper.lower()}.pkl'} "
+                            f"— falling back to global base model",
+                        )
+                    else:
+                        applog.debug(
+                            "ai.model",
+                            f"[specialist] {sym_upper} AUC below threshold (suppressed repeat) — "
+                            f"auc={auc:.4f} < min_auc={min_auc:.4f}",
+                        )
                     return self._get_base_result(
                         features, action, "REJECTED_LOW_AUC", auc, min_auc,
                         f"Specialist AUC {auc:.4f} below minimum threshold {min_auc:.2f}"
