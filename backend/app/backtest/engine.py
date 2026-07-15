@@ -31,6 +31,7 @@ from app.core.clock import MarketClock
 from app.core.domain import SignalAction, TradeRecord, new_id, utcnow, OrderStatus
 from app.core.logging import applog
 from app.data.manager import DataManager
+from app.data.base import HistoricalDataCoverageError
 from app.portfolio.tracker import PortfolioTracker
 from app.risk.manager import AccountContext, RiskManager
 from app.strategies import SignalPipeline, create_strategies
@@ -366,36 +367,48 @@ async def run_backtest(
     async def _load_symbol(symbol: str) -> None:
         async with sem:
             try:
-                # 1. Load 1-minute bars (warmup + backtest range)
-                start_fetch = params.start - timedelta(days=10)
-                raw = await original_history(symbol, "1Min", start_fetch, params.end)
-                if not raw.empty:
-                    start_utc = pd.Timestamp(params.start)
-                    if start_utc.tzinfo is None:
-                        start_utc = start_utc.tz_localize("UTC")
-                    else:
-                        start_utc = start_utc.tz_convert("UTC")
-                    
-                    backtest_df = raw[raw.index >= start_utc]
-                    if not backtest_df.empty:
-                        warmup_df = raw[raw.index < start_utc].tail(600)
-                        combined_df = pd.concat([warmup_df, backtest_df])
-                        frames[symbol] = compute_features(combined_df)
-                    else:
-                        if symbol in [s.upper() for s in params.symbols]:
-                            warnings.append(f"{symbol}: insufficient data -- skipped")
-                            applog.warning("backtest", warnings[-1])
+                # 1. Validate/load the exact requested replay range. Warmup is
+                # optional cached context and must not redefine range completeness.
+                start_utc = pd.Timestamp(params.start)
+                if start_utc.tzinfo is None:
+                    start_utc = start_utc.tz_localize("UTC")
                 else:
-                    if symbol in [s.upper() for s in params.symbols]:
-                        warnings.append(f"{symbol}: insufficient data -- skipped")
-                        applog.warning("backtest", warnings[-1])
+                    start_utc = start_utc.tz_convert("UTC")
+                end_utc = pd.Timestamp(params.end)
+                if end_utc.tzinfo is None:
+                    end_utc = end_utc.tz_localize("UTC")
+                else:
+                    end_utc = end_utc.tz_convert("UTC")
 
-                # 2. Load historical daily bars (at least 40 calendar days to guarantee 8+ daily bars before params.start)
+                requested_df = await original_history(symbol, "1Min", params.start, params.end)
+                requested_provenance = data.provenance.get(symbol)
+                requested_df = requested_df[
+                    (requested_df.index >= start_utc) & (requested_df.index <= end_utc)
+                ]
+                if not requested_df.empty:
+                    start_fetch = params.start - timedelta(days=10)
+                    warmup_df = data.cache.query(symbol, "1Min", start_fetch, params.start)
+                    warmup_df = warmup_df[warmup_df.index < start_utc].tail(600)
+                    combined_df = pd.concat([warmup_df, requested_df])
+                    combined_df = combined_df[~combined_df.index.duplicated(keep="last")].sort_index()
+                    frames[symbol] = compute_features(combined_df)
+                elif symbol in [s.upper() for s in params.symbols]:
+                    warnings.append(f"{symbol}: insufficient data -- skipped")
+                    applog.warning("backtest", warnings[-1])
+
+                # 2. Daily history is optional scanner context. Read only available
+                # cached context so it cannot overwrite requested-range provenance or
+                # add provider calls to a replay.
                 start_fetch_daily = params.start - timedelta(days=40)
-                df_daily = await original_history(symbol, "1Day", start_fetch_daily, params.end)
+                df_daily = data.cache.query(symbol, "1Day", start_fetch_daily, params.end)
                 if not df_daily.empty:
-                    daily_frames[symbol] = df_daily
+                    daily_frames[symbol] = df_daily[df_daily.index <= end_utc]
+                if requested_provenance is not None:
+                    data.provenance[symbol] = requested_provenance
 
+            except HistoricalDataCoverageError:
+                if symbol in [s.upper() for s in params.symbols]:
+                    raise
             except Exception as exc:
                 if symbol in [s.upper() for s in params.symbols]:
                     warnings.append(f"{symbol}: download failed ({exc}) -- skipped")
