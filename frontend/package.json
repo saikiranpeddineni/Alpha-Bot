@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "test:theme": "rm -rf .theme-test-dist && tsc src/theme.ts --target ES2022 --module ES2022 --moduleResolution bundler --lib ES2022,DOM --skipLibCheck --outDir .theme-test-dist --noEmit false && node --test tests/theme.test.mjs && rm -rf .theme-test-dist",
     "preview": "vite preview"
   },
   "dependencies": {
