@@ -396,15 +396,13 @@ async def run_backtest(
                     warnings.append(f"{symbol}: insufficient data -- skipped")
                     applog.warning("backtest", warnings[-1])
 
-                # 2. Daily history is optional scanner context. Missing pre-start
-                # daily coverage must not invalidate a complete requested 1-minute range.
+                # 2. Daily history is optional scanner context. Read only available
+                # cached context so it cannot overwrite requested-range provenance or
+                # add provider calls to a replay.
                 start_fetch_daily = params.start - timedelta(days=40)
-                try:
-                    df_daily = await original_history(symbol, "1Day", start_fetch_daily, params.end)
-                except HistoricalDataCoverageError:
-                    df_daily = pd.DataFrame()
+                df_daily = data.cache.query(symbol, "1Day", start_fetch_daily, params.end)
                 if not df_daily.empty:
-                    daily_frames[symbol] = df_daily
+                    daily_frames[symbol] = df_daily[df_daily.index <= end_utc]
                 if requested_provenance is not None:
                     data.provenance[symbol] = requested_provenance
 
