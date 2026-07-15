@@ -111,6 +111,18 @@ next-action: ready""", 1)
         validate(parse_events([abort, later]), {"state:needs-validation"}, HEAD, NOW)
 
 
+def test_malformed_claim_can_be_tombstoned_by_later_abort():
+    malformed = claim(head="master")
+    abort = comment("""ABORT
+worker-run: 2026-07-15T06:40:00Z
+role: lead
+slice: warmup
+reason: malformed claim
+surviving-defect: none
+next-action: ready""", 2)
+    assert [event["type"] for event in parse_events([malformed, abort])] == ["ABORT"]
+
+
 def test_api_failure_is_canonical_infra_failure(monkeypatch, capsys):
     def fail(path, token):
         raise URLError("rate limited")
