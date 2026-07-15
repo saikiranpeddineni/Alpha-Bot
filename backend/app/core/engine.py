@@ -391,7 +391,7 @@ class TradingEngine:
             if self._last_scan_date != today_date and et_mins >= 9 * 60:
                 self._last_scan_date = today_date
                 applog.info("engine", "Pre-market scanner trigger time reached (>= 09:00 ET)")
-                asyncio.create_task(self.run_market_scanner(is_intraday=False))
+                await self.run_market_scanner(is_intraday=False)
             # Feature 1: Intraday watchlist refresh every 30 min during session
             elif (
                 9 * 60 + 30 <= et_mins <= 15 * 60 + 30  # 9:30 AM – 3:30 PM ET
@@ -400,7 +400,7 @@ class TradingEngine:
             ):
                 self._last_intraday_scan_min = et_mins
                 applog.info("engine", f"Intraday watchlist refresh triggered at {et_mins} ET mins")
-                asyncio.create_task(self.run_market_scanner(is_intraday=True))
+                await self.run_market_scanner(is_intraday=True)
             if self.trainer and self._last_train_date != today_date and et_mins >= 16 * 60 + 15:
                 self._last_train_date = today_date
                 applog.info("engine", "Post-market trainer trigger time reached (>= 16:15 ET)")
@@ -419,7 +419,7 @@ class TradingEngine:
                 )
             if 9 * 60 + 30 <= et_mins <= 16 * 60 and et_mins % 5 == 0 and self._last_event_monitor_min != et_mins:
                 self._last_event_monitor_min = et_mins
-                asyncio.create_task(self.run_event_monitor(now))
+                await self.run_event_monitor(now)
 
         new_closed = await self.data.poll(self.watchlist)
 
