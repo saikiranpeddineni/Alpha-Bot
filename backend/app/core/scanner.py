@@ -114,12 +114,15 @@ class MarketScanner:
         discovery_supported = bool(getattr(provider, "supports_asset_discovery", False))
         acquire_discovery = None
         if as_of is None and discovery_supported:
-            discovery = getattr(self.data, "_discovery", None)
+            discovery = getattr(self, "_discovery", None)
+            if discovery is None:
+                discovery = getattr(self.data, "_discovery", None)
             if discovery is None:
                 discovery = DiscoveryCoordinator(
                     provider, feed="iex", asset_cache_ttl=timedelta(hours=6),
                     batch_size=200, request_budget=10, shortlist_limit=50,
                 )
+                self._discovery = discovery
                 self.data._discovery = discovery
             acquire_discovery = discovery.acquire
         symbols = await resolve_stage1_symbols(
@@ -411,11 +414,14 @@ class MarketScanner:
                     tscv = TimeSeriesSplit(n_splits=3)
                     aucs: list[float] = []
                     for train_idx, val_idx in tscv.split(X):
+                        y_train = y.iloc[train_idx]
+                        if y_train.nunique() < 2:
+                            continue
                         model = RandomForestClassifier(
                             n_estimators=50, max_depth=5, min_samples_leaf=10,
                             random_state=42, n_jobs=1,
                         )
-                        model.fit(X.iloc[train_idx][FEATURE_COLUMNS], y.iloc[train_idx])
+                        model.fit(X.iloc[train_idx][FEATURE_COLUMNS], y_train)
                         probs = model.predict_proba(X.iloc[val_idx][FEATURE_COLUMNS])[:, 1]
                         try:
                             aucs.append(roc_auc_score(y.iloc[val_idx], probs))

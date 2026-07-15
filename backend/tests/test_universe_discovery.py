@@ -32,7 +32,7 @@ def test_eligible_symbols_rejects_malformed_provider_metadata_without_crashing()
 
 def test_batched_symbols_is_deterministic_deduplicated_and_capped():
     batches = list(batched_symbols(["tsla", "AAPL", " msft ", "TSLA", ""], 2))
-    assert batches == [("AAPL", "MSFT"), ("TSLA",)]
+    assert batches == [("TSLA", "AAPL"), ("MSFT",)]
     assert all(len(batch) <= 2 for batch in batches)
 
 

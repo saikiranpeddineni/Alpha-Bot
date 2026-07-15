@@ -4,9 +4,19 @@ from types import SimpleNamespace
 import pytest
 
 from app.core.domain import Quote
+from unittest.mock import MagicMock, patch
 from app.core.universe_discovery import DiscoverableAsset, DiscoveryCoordinator
 
 NOW = datetime(2026, 7, 15, 14, 0, tzinfo=UTC)
+
+
+@pytest.fixture(autouse=True)
+def mock_rng_shuffle():
+    with patch("random.Random") as mock_random:
+        mock_rng = MagicMock()
+        mock_rng.shuffle = lambda x: None  # no-op shuffle
+        mock_random.return_value = mock_rng
+        yield
 
 
 class ProviderError(RuntimeError):

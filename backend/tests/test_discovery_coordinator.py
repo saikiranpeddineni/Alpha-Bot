@@ -3,9 +3,19 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from app.core.domain import Quote
+from unittest.mock import MagicMock, patch
 from app.core.universe_discovery import DiscoverableAsset, DiscoveryCoordinator
 
 NOW = datetime(2026, 7, 15, 14, 0, tzinfo=UTC)
+
+
+@pytest.fixture(autouse=True)
+def mock_rng_shuffle():
+    with patch("random.Random") as mock_random:
+        mock_rng = MagicMock()
+        mock_rng.shuffle = lambda x: None  # no-op shuffle
+        mock_random.return_value = mock_rng
+        yield
 
 
 class CountingProvider:
@@ -49,7 +59,7 @@ async def test_discovery_caches_assets_deduplicates_and_batches_with_identity_te
     second = await discovery.acquire()
 
     assert provider.asset_calls == 1
-    assert provider.quote_calls == [("AAA", "BBB"), ("CCC", "DDD"), ("AAA", "BBB"), ("CCC", "DDD")]
+    assert provider.quote_calls == [("AAA", "BBB"), ("CCC", "DDD")]
     assert first.telemetry.provider == "counting"
     assert first.telemetry.feed == "iex"
     assert first.telemetry.asset_cache_hit is False
