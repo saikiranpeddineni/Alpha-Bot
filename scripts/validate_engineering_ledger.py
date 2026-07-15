@@ -167,7 +167,8 @@ def main() -> int:
             comments = github(f"/repos/{args.repo}/issues/{issue['number']}/comments?per_page=100", token)
             events = parse_events(comments)
             blocks = FENCE.findall(issue.get("body", ""))
-            body = yaml.safe_load(blocks[0]) if blocks else {}
+            body_lines = blocks[0].splitlines() if blocks else []
+            body = yaml.safe_load("\n".join(body_lines[1:])) if body_lines else {}
             branch = (body or {}).get("branch")
             if not branch:
                 continue
