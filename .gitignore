@@ -62,6 +62,7 @@ rejections_output*.txt
 frontend/node_modules/
 frontend/dist/
 frontend/build/
+frontend/.theme-test-dist/
 
 # Coverage
 .coverage
