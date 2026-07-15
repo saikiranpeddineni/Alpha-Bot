@@ -68,7 +68,10 @@ class ContinuousTrainer(_LegacyContinuousTrainer):
 
     def _fit_global_sync(self, dfs):
         """Fit candidates off the inference snapshot, then commit one generation."""
-        incumbent = self.model._generation_store.current
+        generation_store = getattr(self.model, "_generation_store", None)
+        if generation_store is None:
+            return super()._fit_global_sync(dfs)
+        incumbent = generation_store.current
         incumbent_long = self.model._model_long
         incumbent_short = self.model._model_short
         incumbent_meta = dict(self.model.meta)
@@ -83,9 +86,7 @@ class ContinuousTrainer(_LegacyContinuousTrainer):
                 or candidate_meta != incumbent_meta
             )
             if changed:
-                snapshot = self.model._generation_store.publish(
-                    candidate_long, candidate_short, candidate_meta
-                )
+                snapshot = generation_store.publish(candidate_long, candidate_short, candidate_meta)
                 self.model._model_long = snapshot.long_model
                 self.model._model_short = snapshot.short_model
                 self.model.meta = dict(snapshot.meta)
