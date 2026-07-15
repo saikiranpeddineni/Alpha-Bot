@@ -17,6 +17,7 @@ from app.core.logging import applog
 from app.data.base import DataProvider, empty_bars, resample_bars, timeframe_delta, HistoricalDataCoverageError, CachePolicy
 from app.data.store import BarCache
 from app.data.synthetic import SyntheticProvider
+from app.data.session_coverage import validate_requested_session_coverage
 
 CLOSED_BAR_GRACE_SEC = 3.0
 
@@ -152,60 +153,14 @@ class DataManager:
         end: datetime,
         cached_df: pd.DataFrame,
     ) -> None:
-        """Verify that each expected regular trading session has cached data present."""
-        from zoneinfo import ZoneInfo
-        from datetime import date
-        from app.core.clock import MarketClock
-        from pandas.tseries.holiday import USFederalHolidayCalendar
-
-        ET = ZoneInfo("America/New_York")
-        clock = MarketClock(always_open=False)
-
-        start_et = start.astimezone(ET)
-        end_et = end.astimezone(ET)
-
-        cal = USFederalHolidayCalendar()
-        holidays = cal.holidays(start=start_et.date(), end=end_et.date())
-        holiday_dates = set(h.date() for h in holidays)
-        # Good Friday is a market holiday but not a federal holiday
-        holiday_dates.add(date(2026, 4, 3))
-
-        expected_days = []
-        curr = start_et.date()
-        limit_date = end_et.date()
-        while curr <= limit_date:
-            if clock.is_trading_day(curr) and curr not in holiday_dates:
-                expected_days.append(curr)
-            curr += timedelta(days=1)
-
-        if not expected_days:
-            return
-
-        if cached_df.empty:
-            raise HistoricalDataCoverageError(
-                symbol=symbol,
-                timeframe=timeframe,
-                start=start,
-                end=end,
-                cached_start=None,
-                cached_end=None,
-                reason="Cached dataset is empty",
-            )
-
-        et_idx = cached_df.index.tz_convert(ET)
-        cached_dates = set(et_idx.date)
-
-        for d in expected_days:
-            if d not in cached_dates:
-                raise HistoricalDataCoverageError(
-                    symbol=symbol,
-                    timeframe=timeframe,
-                    start=start,
-                    end=end,
-                    cached_start=cached_df.index[0].to_pydatetime(),
-                    cached_end=cached_df.index[-1].to_pydatetime(),
-                    reason=f"Cached data is missing completely for expected trading day {d}",
-                )
+        """Fail closed when requested immutable history is materially incomplete."""
+        validate_requested_session_coverage(
+            symbol=symbol,
+            timeframe=timeframe,
+            start=start,
+            end=end,
+            cached_df=cached_df,
+        )
 
     def _record_provenance(
         self,
