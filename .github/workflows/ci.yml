@@ -60,6 +60,15 @@ jobs:
             *.log
             *.xml
           if-no-files-found: error
+      - name: Upload clean-checkout source snapshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: clean-checkout-source
+          path: |
+            backend/app
+            backend/tests
+          if-no-files-found: error
       - name: Enforce test success
         if: always()
         env:
