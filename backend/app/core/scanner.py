@@ -22,8 +22,12 @@ import numpy as np
 import pandas as pd
 
 from app.core.logging import applog
+from app.core.scanner_discovery_input import resolve_stage1_symbols
+from app.core.scanner_selection import select_sector_diverse_momentum
+from app.core.universe_discovery import DiscoveryCoordinator
 from app.ai.features import FEATURE_COLUMNS, build_training_set
 from app.data.manager import DataManager
+
 
 class ScannerOutcome(Enum):
     SUCCESS_NONEMPTY = "SUCCESS_NONEMPTY"
@@ -104,6 +108,38 @@ class MarketScanner:
     def __init__(self, data_manager: DataManager, core_watchlist: list[str]) -> None:
         self.data = data_manager
         self.core_watchlist = core_watchlist
+        self._discovery: DiscoveryCoordinator | None = None
+
+    async def _stage1_symbols(self, as_of: datetime | None = None) -> list[str]:
+        """Resolve bounded Stage-1 input without leaking current discovery into replay."""
+        provider = self.data.provider
+        discovery_supported = bool(getattr(provider, "supports_asset_discovery", False))
+        acquire_discovery = None
+        if as_of is None and discovery_supported:
+            if self._discovery is None:
+                self._discovery = DiscoveryCoordinator(
+                    provider,
+                    feed="iex",
+                    asset_cache_ttl=timedelta(hours=6),
+                    batch_size=200,
+                    request_budget=10,
+                    shortlist_limit=50,
+                )
+            acquire_discovery = self._discovery.acquire
+
+        symbols = await resolve_stage1_symbols(
+            as_of=as_of,
+            static_symbols=CANDIDATE_POOL,
+            fallback_limit=50,
+            discovery_supported=discovery_supported,
+            acquire_discovery=acquire_discovery,
+        )
+        applog.info(
+            "scanner",
+            f"[Discovery] mode={'replay-static' if as_of is not None else 'live'} "
+            f"provider={provider.name} stage1_symbols={len(symbols)}",
+        )
+        return list(symbols)
 
     # ------------------------------------------------------------------
     # Global safety gate
@@ -157,12 +193,12 @@ class MarketScanner:
     # ------------------------------------------------------------------
 
     async def _stage1_prefilter_parallel(
-        self, as_of: datetime | None = None
+        self, as_of: datetime | None = None, symbols: list[str] | None = None
     ) -> list[dict]:
-        """Fetch daily stats for all ~200 symbols concurrently. Returns candidates."""
+        """Fetch daily stats for the supplied bounded symbol universe concurrently."""
         end = as_of or datetime.now(UTC)
         start = end - timedelta(days=25)
-        all_symbols = CANDIDATE_POOL
+        all_symbols = list(symbols) if symbols is not None else CANDIDATE_POOL
         semaphore = asyncio.Semaphore(_PREFILTER_CONCURRENCY)
 
         applog.info("scanner", f"[Stage 1] Pre-filtering {len(all_symbols)} symbols (parallel)... end={end.isoformat()} tzinfo={end.tzinfo}")
@@ -401,7 +437,6 @@ class MarketScanner:
         scores = 0.30 * rvol_rank + 0.20 * gap_rank + 0.20 * atr_rank + 0.30 * mom_rank
         for i, c in enumerate(candidates):
             c["tech_score"] = float(scores[i])
-            # Log component scores
             applog.info(
                 "scanner",
                 f"SCAN_SCORE: symbol={c['symbol']}, T={T.isoformat()}, "
@@ -415,12 +450,7 @@ class MarketScanner:
         top = candidates[:_TECH_SCORE_TOP_N]
         applog.info("scanner", "[Stage 2] Ranked candidates:")
         for rank, c in enumerate(top):
-            # Temporarily compute if it would be selected based on cap/momentum logic
-            # This is slightly duplicated from the selection logic below to provide accurate logging
-            # but is necessary for the audit trail.
-            # Wait, the actual selection logic runs in run(), not here. We can just return the candidates and log them in run() instead.
-            # But the user asked for this log in Stage 2. Let's just log rank and score here, and we'll log selection in run().
-            pass # We will move the logging to run() where final_anchors and final_momentum are decided.
+            pass
 
         return top
 
@@ -435,8 +465,9 @@ class MarketScanner:
             if not await self.check_spy_volatility(as_of):
                 return (ScannerOutcome.SUCCESS_NONEMPTY, DEFENSIVE_WATCHLIST)
 
-            # Stage 1: parallel pre-filter
-            candidates = await self._stage1_prefilter_parallel(as_of)
+            # Stage 1: bounded live discovery input or causally isolated replay pool
+            stage1_symbols = await self._stage1_symbols(as_of)
+            candidates = await self._stage1_prefilter_parallel(as_of, stage1_symbols)
             if not candidates:
                 applog.info("scanner", "SCANNER_RUN_EMPTY: All candidates failed pre-filter.")
                 return (ScannerOutcome.SUCCESS_EMPTY, [])
@@ -453,7 +484,6 @@ class MarketScanner:
             MarketScanner._last_scans = MarketScanner._last_scans[-10:]
             age_seconds = (MarketScanner._last_scans[-1][0] - latest_timestamp).total_seconds()
 
-
             # Separate into Large-cap Anchors and Momentum Leaders
             anchors = [c for c in top_candidates if c["symbol"] in LARGE_CAP_ANCHORS]
             momentum = [c for c in top_candidates if c["symbol"] not in LARGE_CAP_ANCHORS]
@@ -461,14 +491,13 @@ class MarketScanner:
             # Select top 4 anchors (already sorted by tech_score descending in Stage 2)
             final_anchors = [c["symbol"] for c in anchors[:4]]
 
-            final_momentum = []
+            final_momentum = select_sector_diverse_momentum(
+                momentum, max_symbols=8, max_per_sector=_MAX_PER_SECTOR
+            )
             sector_counts = {}
             for c in momentum:
-                if len(final_momentum) >= 8:
-                    break
-                s = c["sector"]
-                if sector_counts.get(s, 0) < _MAX_PER_SECTOR:
-                    final_momentum.append(c["symbol"])
+                if c["symbol"] in final_momentum:
+                    s = c["sector"]
                     sector_counts[s] = sector_counts.get(s, 0) + 1
 
             # Log Stage 2 results explicitly
