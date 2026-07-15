@@ -107,7 +107,7 @@ def parse_events(comments: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return events
 
 
-def validate(events: list[dict[str, Any]], labels: set[str], remote_head: str, now: datetime) -> None:
+def active_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     active_by_run: dict[str, dict[str, Any]] = {}
     for event in events:
         worker_run = event["worker-run"]
@@ -118,14 +118,16 @@ def validate(events: list[dict[str, Any]], labels: set[str], remote_head: str, n
         elif event["type"] == "RECOVERY":
             for terminated_run in event["terminated-worker-runs"]:
                 active_by_run.pop(terminated_run, None)
+    return list(active_by_run.values())
 
-    active = []
-    for event in active_by_run.values():
+
+def validate(events: list[dict[str, Any]], labels: set[str], remote_head: str, now: datetime) -> None:
+    active = active_events(events)
+    for event in active:
         if parse_time(event["lease-until"]) <= now:
             raise LedgerError("LEASE_ORPHANED", work_item=event.get("work-item"), slice=event["slice"], worker_run=event["worker-run"])
         if event["head"] != remote_head:
             raise LedgerError("HEAD_MISMATCH", work_item=event.get("work-item"), slice=event["slice"], worker_run=event["worker-run"], declared_head=event["head"], remote_head=remote_head)
-        active.append(event)
 
     seen = {}
     for event in active:
@@ -172,8 +174,12 @@ def main() -> int:
             branch = (body or {}).get("branch")
             if not branch:
                 continue
-            ref = github(f"/repos/{args.repo}/git/ref/heads/{branch}", token)
-            validate(events, labels, ref["object"]["sha"], datetime.now(timezone.utc))
+            active = active_events(events)
+            remote_head = ""
+            if active:
+                ref = github(f"/repos/{args.repo}/git/ref/heads/{branch}", token)
+                remote_head = ref["object"]["sha"]
+            validate(events, labels, remote_head, datetime.now(timezone.utc))
     except LedgerError as exc:
         print("LEDGER_INVALID")
         print(f"code={exc.code}")
