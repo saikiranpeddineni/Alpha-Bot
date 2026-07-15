@@ -1,0 +1,29 @@
+name: Issue 036 clean rebase
+on:
+  pull_request:
+    branches: [master]
+permissions:
+  contents: write
+jobs:
+  patch:
+    if: ${{ github.head_ref == '036-authoritative-eod-liquidation' && !contains(github.event.pull_request.title, '[036-clean]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 036-authoritative-eod-liquidation
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python .github/issue036_rebase_patch.py
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Focused gate
+        env: {PYTHONPATH: backend}
+        run: pytest -q backend/tests/test_eod_liquidation_authority.py backend/tests/test_decision_cycle_parity.py backend/tests/test_gemini_engine_integration.py
+      - run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add backend/app/core/engine.py backend/tests/test_eod_liquidation_authority.py
+          git commit -m "036 enforce authoritative EOD liquidation completion [036-clean]"
+          git push origin HEAD:036-authoritative-eod-liquidation
