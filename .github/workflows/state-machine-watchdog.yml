@@ -32,7 +32,23 @@ jobs:
       - name: Install deterministic validator dependencies
         run: python -m pip install --disable-pip-version-check PyYAML==6.0.3 pytest==9.0.2
       - name: Run watchdog invariant tests
-        run: python -m pytest -q tests/test_engineering_ledger_watchdog.py
+        id: watchdog_tests
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          python -m pytest -q tests/test_engineering_ledger_watchdog.py --junitxml=watchdog-tests.xml 2>&1 | tee watchdog-tests.log
+      - name: Upload watchdog diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: watchdog-diagnostics
+          path: |
+            watchdog-tests.log
+            watchdog-tests.xml
+          if-no-files-found: error
+      - name: Enforce watchdog tests
+        if: always()
+        run: test "${{ steps.watchdog_tests.outcome }}" = success
       - name: Validate engineering ledger
         env:
           GITHUB_TOKEN: ${{ github.token }}
