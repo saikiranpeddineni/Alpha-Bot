@@ -30,6 +30,7 @@ class _OpenLot:
 @dataclass
 class PortfolioTracker:
     max_curve_points: int = 5000
+    restore_mode: str | None = None
     realized_pnl: float = 0.0
     day_realized_pnl: float = 0.0
     session_date: date | None = None
@@ -41,16 +42,16 @@ class PortfolioTracker:
     _lots: dict[str, _OpenLot] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        if self.restore_mode not in {"live", "paper"}:
+            return
         from app.db.database import Database
         db = Database.active()
         if db is None:
             return
-        for mode in ("live", "paper"):
-            checkpoint = db.get_portfolio_checkpoint(mode)
-            if checkpoint:
-                self.restore_checkpoint(checkpoint)
-                applog.info("portfolio", f"Restored durable {mode} portfolio checkpoint")
-                break
+        checkpoint = db.get_portfolio_checkpoint(self.restore_mode)
+        if checkpoint:
+            self.restore_checkpoint(checkpoint)
+            applog.info("portfolio", f"Restored durable {self.restore_mode} portfolio checkpoint")
 
     def checkpoint(self) -> dict:
         return {
@@ -125,7 +126,6 @@ class PortfolioTracker:
 
     def on_fill(self, fill: Fill, peak_price: float | None = None, trough_price: float | None = None,
                 initial_stop: float | None = None) -> TradeRecord | None:
-        """Apply a fill, atomically checkpointing broker-backed executions."""
         if fill.broker_fill_key and fill.cumulative_qty is not None and fill.broker_mode:
             from app.db.database import Database
             db = Database.active()
@@ -138,10 +138,8 @@ class PortfolioTracker:
                 before = deepcopy(self.__dict__)
                 try:
                     trade = self._apply_fill(effective, peak_price, trough_price, initial_stop)
-                    db.commit_fill_processing(
-                        fill_key=fill.broker_fill_key, cumulative_qty=float(fill.cumulative_qty),
-                        mode=fill.broker_mode, checkpoint=self.checkpoint(), trade=trade,
-                    )
+                    db.commit_fill_processing(fill_key=fill.broker_fill_key, cumulative_qty=float(fill.cumulative_qty),
+                                              mode=fill.broker_mode, checkpoint=self.checkpoint(), trade=trade)
                     return trade
                 except Exception:
                     self.__dict__.clear()
@@ -163,7 +161,6 @@ class PortfolioTracker:
             applog.info("portfolio", f"[{fill.ts}] {side_str} {symbol}: {abs(signed):g} shares @ {fill.price:.2f} "
                                     f"(Total Amt: ${abs(signed) * fill.price:,.2f} | {fill.strategy})")
             return None
-
         if (lot.qty > 0) == (signed > 0):
             total = lot.qty + signed
             lot.avg_price = (lot.avg_price * lot.qty + fill.price * signed) / total
@@ -172,7 +169,6 @@ class PortfolioTracker:
             applog.info("portfolio", f"[{fill.ts}] {side_str} {symbol}: {abs(signed):g} shares @ {fill.price:.2f} "
                                     f"(Total Amt: ${abs(signed) * fill.price:,.2f} | {fill.strategy})")
             return None
-
         closed_qty = min(abs(lot.qty), abs(signed))
         direction = 1.0 if lot.qty > 0 else -1.0
         pnl = (fill.price - lot.avg_price) * closed_qty * direction - fill.commission
@@ -181,7 +177,6 @@ class PortfolioTracker:
         if initial_stop is not None:
             init_risk = abs(lot.avg_price - initial_stop)
         r_multiple = round(pnl / (init_risk * closed_qty), 2) if init_risk else None
-
         if direction > 0:
             best = peak_price if peak_price is not None else max(lot.avg_price, fill.price)
             worst = trough_price if trough_price is not None else min(lot.avg_price, fill.price)
@@ -193,24 +188,17 @@ class PortfolioTracker:
         mfe_pct = mfe_val / lot.avg_price * 100.0 if lot.avg_price > 0 else 0.0
         mae_pct = mae_val / lot.avg_price * 100.0 if lot.avg_price > 0 else 0.0
         mfe_r = mfe_val / init_risk if init_risk and init_risk > 0 else 0.0
-        mae_r = mae_val / init_risk if init_risk and init_risk > 0 else 0.0
         winner_cap = r_multiple / mfe_r if r_multiple is not None and mfe_r > 0 else 0.0
-
-        trade = TradeRecord(
-            symbol=symbol, side="long" if direction > 0 else "short", qty=closed_qty,
-            entry_price=round(lot.avg_price, 4), exit_price=round(fill.price, 4),
-            entry_at=lot.entry_ts, exit_at=fill.ts, pnl=round(pnl, 2),
-            pnl_pct=round(pnl / basis * 100.0, 3) if basis else 0.0, r_multiple=r_multiple,
-            strategy=lot.strategy, exit_reason=fill.reason or "exit", mfe=round(mfe_val, 4),
-            mae=round(mae_val, 4), mfe_pct=round(mfe_pct, 4), mae_pct=round(mae_pct, 4),
-            capture_efficiency=round(winner_cap, 4),
-        )
+        trade = TradeRecord(symbol=symbol, side="long" if direction > 0 else "short", qty=closed_qty,
+            entry_price=round(lot.avg_price, 4), exit_price=round(fill.price, 4), entry_at=lot.entry_ts,
+            exit_at=fill.ts, pnl=round(pnl, 2), pnl_pct=round(pnl / basis * 100.0, 3) if basis else 0.0,
+            r_multiple=r_multiple, strategy=lot.strategy, exit_reason=fill.reason or "exit", mfe=round(mfe_val, 4),
+            mae=round(mae_val, 4), mfe_pct=round(mfe_pct, 4), mae_pct=round(mae_pct, 4), capture_efficiency=round(winner_cap, 4))
         self.trades.append(trade)
         self.realized_pnl += pnl
         self.day_realized_pnl += pnl
         if trade.entry_at.date() == trade.exit_at.date():
             self.day_trades_today += 1
-
         remainder = lot.qty + signed
         if abs(remainder) < 1e-9:
             del self._lots[symbol]
@@ -218,7 +206,6 @@ class PortfolioTracker:
             lot.qty = remainder
         else:
             self._lots[symbol] = _OpenLot(qty=remainder, avg_price=fill.price, entry_ts=fill.ts, strategy=fill.strategy)
-
         action_str = "SOLD" if trade.side == "long" else "BOUGHT TO COVER"
         pct_str = f"{trade.pnl_pct:+.2f}%" if trade.pnl_pct else "0.0%"
         pnl_text = f"+${pnl:,.2f}" if pnl > 0 else f"-${abs(pnl):,.2f}"
@@ -231,13 +218,9 @@ class PortfolioTracker:
         losses = [t for t in self.trades if t.pnl <= 0]
         gross_win = sum(t.pnl for t in wins)
         gross_loss = abs(sum(t.pnl for t in losses))
-        return {
-            "total_trades": len(self.trades), "wins": len(wins), "losses": len(losses),
+        return {"total_trades": len(self.trades), "wins": len(wins), "losses": len(losses),
             "win_rate": round(len(wins) / len(self.trades) * 100.0, 1) if self.trades else 0.0,
             "gross_profit": round(gross_win, 2), "gross_loss": round(gross_loss, 2),
             "profit_factor": round(gross_win / gross_loss, 2) if gross_loss > 0 else None,
-            "realized_pnl": round(self.realized_pnl, 2),
-            "avg_win": round(gross_win / len(wins), 2) if wins else 0.0,
-            "avg_loss": round(-gross_loss / len(losses), 2) if losses else 0.0,
-            "day_trades_today": self.day_trades_today,
-        }
+            "realized_pnl": round(self.realized_pnl, 2), "avg_win": round(gross_win / len(wins), 2) if wins else 0.0,
+            "avg_loss": round(-gross_loss / len(losses), 2) if losses else 0.0, "day_trades_today": self.day_trades_today}
