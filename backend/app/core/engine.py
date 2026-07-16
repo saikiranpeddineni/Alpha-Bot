@@ -667,7 +667,7 @@ class TradingEngine:
             self.db.save_equity(account.equity, account.cash, self.mode, now)
 
         # 7. broadcast
-        self._broadcast_tick(account, now, new_closed)
+        self._broadcast_tick(account, now, new_closed, positions)
 
     async def _evaluate_symbol(self, symbol: str, position, equity: float, now: datetime) -> list[tuple[Signal, pd.DataFrame]]:  # noqa: ANN001
         assert self.data and self.broker and self.risk and self.pipeline
@@ -930,7 +930,7 @@ class TradingEngine:
     # broadcast payloads
     # ------------------------------------------------------------------
 
-    def _broadcast_tick(self, account, now: datetime, new_closed: dict) -> None:  # noqa: ANN001
+    def _broadcast_tick(self, account, now: datetime, new_closed: dict, positions: list) -> None:  # noqa: ANN001
         assert self.portfolio is not None
         self.publish("account", {
             "equity": account.equity,
@@ -944,7 +944,7 @@ class TradingEngine:
             "drawdown_pct": round(self.portfolio.drawdown_pct(account.equity), 2),
         })
         self.publish("quotes", self.quotes_payload())
-        asyncio.create_task(self._publish_positions())
+        self.publish("positions", [p.to_payload() for p in positions])
         for symbol, bars in new_closed.items():
             last_ts = bars.index[-1]
             row = bars.iloc[-1]

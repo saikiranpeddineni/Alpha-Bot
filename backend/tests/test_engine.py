@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import suppress
+
 import pytest
 
 from app.config import Settings
@@ -77,6 +80,37 @@ async def test_engine_manual_flow(engine: TradingEngine):
     # The round trip landed in the portfolio ledger and the DB
     assert engine.portfolio.trades
     assert engine.db.recent_trades(mode="demo")
+
+    await engine.stop()
+
+
+async def test_tick_reuses_authoritative_positions_snapshot_for_broadcast(engine: TradingEngine):
+    published_positions: list[list[dict]] = []
+    engine.publish = lambda topic, payload: published_positions.append(payload) if topic == "positions" else None
+
+    await engine.start("demo")
+    assert engine.broker is not None
+
+    if engine._task is not None:
+        engine._task.cancel()
+        with suppress(asyncio.CancelledError):
+            await engine._task
+        engine._task = None
+
+    original_positions = engine.broker.positions
+    provider_calls = 0
+
+    async def counted_positions():
+        nonlocal provider_calls
+        provider_calls += 1
+        return await original_positions()
+
+    engine.broker.positions = counted_positions  # type: ignore[method-assign]
+
+    await engine._tick()
+
+    assert provider_calls == 1
+    assert published_positions, "the tick must broadcast the already-fetched positions snapshot"
 
     await engine.stop()
 

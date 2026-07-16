@@ -120,10 +120,22 @@ class GeminiShadowRanker:
         return tuple(sorted(out, key=lambda item: (-item.score, item.symbol)))
 
     async def _gemini_request(self, payload: dict[str, Any]) -> dict[str, Any]:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={self.api_key}"
-        body = {"contents": [{"parts": [{"text": json.dumps(payload, separators=(",", ":"), default=str)}]}], "generationConfig": {"temperature": 0.0, "maxOutputTokens": 256, "responseMimeType": "application/json"}}
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(url, json=body); response.raise_for_status(); data = response.json()
-        parsed = json.loads(data["candidates"][0]["content"]["parts"][0]["text"])
-        if not isinstance(parsed, dict): raise ValueError("Gemini response must be an object")
-        return parsed
+        gemini_models = ["gemini-3.1-flash-lite", "gemini-3-flash-preview", "gemini-2.5-flash", "gemini-2.0-flash"]
+        last_exception = None
+        for model in gemini_models:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={self.api_key}"
+            body = {"contents": [{"parts": [{"text": json.dumps(payload, separators=(",", ":"), default=str)}]}], "generationConfig": {"temperature": 0.0, "maxOutputTokens": 256, "responseMimeType": "application/json"}}
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    response = await client.post(url, json=body)
+                    response.raise_for_status()
+                    data = response.json()
+                parsed = json.loads(data["candidates"][0]["content"]["parts"][0]["text"])
+                if not isinstance(parsed, dict): raise ValueError("Gemini response must be an object")
+                return parsed
+            except Exception as exc:
+                last_exception = exc
+                continue
+        if last_exception:
+            raise last_exception
+        raise ValueError("No Gemini models available")
