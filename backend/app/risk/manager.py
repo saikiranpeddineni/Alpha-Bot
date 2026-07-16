@@ -86,6 +86,8 @@ class RiskManager:
         self.daily_halt_date = None
         self.consecutive_losses: int = 0
         self.cooldown_until: datetime | None = None
+        self.strategy_consecutive_losses: dict[str, int] = {}
+        self.strategy_cooldowns: dict[str, datetime] = {}
         self.symbol_cooldowns: dict[str, datetime] = {}
         self._pdt_warned = False
         self.core_watchlist: list[str] | None = None
@@ -93,24 +95,41 @@ class RiskManager:
     # ---- lifecycle hooks ----
 
     def on_trade_closed(self, trade: TradeRecord, now: datetime | None = None) -> None:
+        strategy = trade.strategy or "manual"
+        now_dt = now or datetime.now(UTC)
         if trade.pnl <= 0:
-            self.consecutive_losses += 1
             symbol = trade.symbol.upper()
-            now_dt = now or datetime.now(UTC)
             self.symbol_cooldowns[symbol] = now_dt + timedelta(minutes=self.config.cooldown_minutes)
             applog.warning(
                 "risk",
                 f"Loss on {symbol} -- cooling down this ticker for {self.config.cooldown_minutes} minutes"
             )
-            if self.consecutive_losses >= self.config.consecutive_loss_limit:
-                self.cooldown_until = now_dt + timedelta(minutes=self.config.cooldown_minutes)
+            
+            # Track strategy-specific consecutive losses
+            current_losses = self.strategy_consecutive_losses.get(strategy, 0) + 1
+            self.strategy_consecutive_losses[strategy] = current_losses
+            
+            if current_losses >= self.config.consecutive_loss_limit:
+                cooldown_time = now_dt + timedelta(minutes=self.config.cooldown_minutes)
+                self.strategy_cooldowns[strategy] = cooldown_time
                 applog.warning(
                     "risk",
-                    f"{self.consecutive_losses} consecutive losses -- pausing new entries "
-                    f"for {self.config.cooldown_minutes} minutes",
+                    f"Strategy '{strategy}' has {current_losses} consecutive losses -- pausing new entries "
+                    f"for this strategy for {self.config.cooldown_minutes} minutes",
                 )
+            
+            # Keep legacy fields updated for UI/backward compatibility
+            self.consecutive_losses = max(self.strategy_consecutive_losses.values(), default=0)
+            active_cooldowns = [t for t in self.strategy_cooldowns.values() if t > now_dt]
+            self.cooldown_until = max(active_cooldowns) if active_cooldowns else None
         else:
-            self.consecutive_losses = 0
+            self.strategy_consecutive_losses[strategy] = 0
+            # Keep legacy fields updated
+            self.consecutive_losses = max(self.strategy_consecutive_losses.values(), default=0)
+            # Clean expired cooldowns from dict
+            self.strategy_cooldowns = {k: v for k, v in self.strategy_cooldowns.items() if v > now_dt}
+            active_cooldowns = list(self.strategy_cooldowns.values())
+            self.cooldown_until = max(active_cooldowns) if active_cooldowns else None
 
     def roll_session(self, session_date) -> None:  # noqa: ANN001
         if self.daily_halted and self.daily_halt_date != session_date:
@@ -118,6 +137,8 @@ class RiskManager:
             applog.info("risk", "New session -- daily loss halt cleared")
         self.cooldown_until = None
         self.consecutive_losses = 0
+        self.strategy_consecutive_losses.clear()
+        self.strategy_cooldowns.clear()
         self.symbol_cooldowns.clear()
 
     def reset_hard_halt(self) -> None:
@@ -155,6 +176,11 @@ class RiskManager:
         now = now or datetime.now(UTC)
         return self.cooldown_until is not None and now < self.cooldown_until
 
+    def is_strategy_in_cooldown(self, strategy: str, now: datetime | None = None) -> bool:
+        now = now or datetime.now(UTC)
+        cooldown_until = self.strategy_cooldowns.get(strategy)
+        return cooldown_until is not None and now < cooldown_until
+
     def should_flatten(self, now: datetime | None = None) -> bool:
         return self.clock.in_flatten_window(self.config.flatten_minutes_before_close, now)
 
@@ -180,12 +206,13 @@ class RiskManager:
         """
         cfg = self.config
         symbol = signal.symbol.upper()
+        strategy = signal.strategy or "manual"
 
         if self.hard_halted:
             return RiskDecision(False, f"hard halt active: {self.hard_halt_reason}")
         if self.daily_halted:
             return RiskDecision(False, "daily loss halt active")
-        if self.in_cooldown(now):
+        if self.is_strategy_in_cooldown(strategy, now):
             return RiskDecision(False, "loss-streak cooldown active")
         cooldown_until = self.symbol_cooldowns.get(symbol)
         if cooldown_until is not None and (now or datetime.now(UTC)) < cooldown_until:
