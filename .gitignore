@@ -72,3 +72,6 @@ coverage.xml
 # Additional local runtime files
 *.bak
 *.tmp
+
+# Local utility scripts
+update_bot.cmd
