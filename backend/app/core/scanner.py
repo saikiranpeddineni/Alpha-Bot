@@ -103,9 +103,10 @@ _AUC_TIER2 = 0.50             # Beats random (minimum acceptable)
 class MarketScanner:
     _last_scans = []
 
-    def __init__(self, data_manager: DataManager, core_watchlist: list[str]) -> None:
+    def __init__(self, data_manager: DataManager, core_watchlist: list[str], risk_config=None) -> None:
         self.data = data_manager
         self.core_watchlist = core_watchlist
+        self.risk_config = risk_config
         self._discovery: DiscoveryCoordinator | None = None
 
     async def _stage1_symbols(self, as_of: datetime | None = None) -> list[str]:
@@ -277,7 +278,7 @@ class MarketScanner:
                     record["price"] = price
                     
                     from app.config import get_settings
-                    cfg = get_settings().risk_config()
+                    cfg = self.risk_config or get_settings().risk_config()
                     
                     record["filter_price"] = {
                         "actual": price,

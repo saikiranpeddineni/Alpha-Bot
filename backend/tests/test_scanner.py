@@ -35,7 +35,12 @@ async def test_spy_volatility_checks(mock_data_manager):
 
 @pytest.mark.anyio
 async def test_pool_screener_filtering(mock_data_manager):
-    scanner = MarketScanner(mock_data_manager, ["SPY", "QQQ"])
+    from app.config import RiskConfig
+    test_risk = RiskConfig(
+        min_price=10.0,
+        min_avg_dollar_volume=1_000_000.0,
+    )
+    scanner = MarketScanner(mock_data_manager, ["SPY", "QQQ"], risk_config=test_risk)
     
     # Custom history for different symbols to test filters
     async def mock_history(symbol, timeframe, start, end, prefer_cache=True):

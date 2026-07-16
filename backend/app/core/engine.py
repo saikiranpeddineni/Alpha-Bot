@@ -643,6 +643,7 @@ class TradingEngine:
                         )
                         decision = self.risk.evaluate_entry(sig, ctx, df, now=now, kelly_override=kelly_val)
                         if not decision.approved:
+                            applog.info("engine", f"{sig.symbol.upper()}: entry rejected by RiskManager — {decision.reason}")
                             self.publish("insight", self.insights.on_signal(sig, gated=True, gate_reason=decision.reason).model_dump(mode="json"))
                             continue
                         order = await self.broker.submit(decision.order)
@@ -1176,7 +1177,7 @@ class TradingEngine:
 
     async def run_market_scanner(self, is_intraday: bool = False) -> list[str]:
         from app.core.scanner import MarketScanner, ScannerOutcome
-        scanner = MarketScanner(self.data, self.user_watchlist)
+        scanner = MarketScanner(self.data, self.user_watchlist, risk_config=self.risk_config)
         scan_label = "Intraday refresh" if is_intraday else "Pre-market"
         applog.info("engine", f"Starting autonomous market scanner ({scan_label} scan)...")
         outcome, new_watchlist = await scanner.run()
