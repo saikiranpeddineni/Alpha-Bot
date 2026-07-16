@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import asyncio
+from types import SimpleNamespace
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from app.brokers.base import Fill
+from app.brokers.alpaca import AlpacaBroker
+from app.config import Settings
 from app.core.domain import OrderSide
+from app.core.domain import AccountSnapshot
+from app.core.engine import TradingEngine
 from app.db.database import Database
 from app.portfolio.tracker import PortfolioTracker
 
@@ -119,3 +125,134 @@ def test_non_broker_tracker_never_inherits_alpaca_checkpoint(tmp_path):
     assert isolated._lots == {}
     assert isolated.trades == []
     assert isolated.realized_pnl == 0.0
+
+
+class _FakeData:
+    provider = SimpleNamespace(name="synthetic")
+
+    async def warmup(self, _watchlist):
+        return None
+
+
+class _FakePaperSimBroker:
+    name = "paper_sim"
+    _client = object()
+
+    async def connect(self):
+        return None
+
+    async def positions(self):
+        return []
+
+    async def account(self):
+        return AccountSnapshot(equity=100_000, cash=100_000, buying_power=100_000)
+
+    async def open_orders(self):
+        return []
+
+    def drain_fills(self):
+        return []
+
+    async def cancel(self, _order_id):
+        return True
+
+    async def close_position(self, _symbol, reason="manual"):
+        return None
+
+    async def flatten_all(self, reason="flatten"):
+        return []
+
+
+class _FakeAlpacaBroker(_FakePaperSimBroker):
+    name = "alpaca"
+
+
+async def test_engine_only_restores_durable_checkpoint_for_alpaca_backed_modes(tmp_path, monkeypatch):
+    async def fake_ensure_data(self, mode=None):
+        self.data = _FakeData()
+        return self.data
+
+    async def fake_run_loop(self):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(TradingEngine, "ensure_data", fake_ensure_data)
+    monkeypatch.setattr(TradingEngine, "_run_loop", fake_run_loop)
+    monkeypatch.setattr("app.brokers.alpaca.AlpacaBroker", _FakeAlpacaBroker)
+
+    for mode, settings_kwargs, expected_restore in [
+        ("demo", {"BROKER": "paper_sim"}, None),
+        ("paper", {"BROKER": "alpaca", "ALPACA_API_KEY": "key", "ALPACA_API_SECRET": "secret"}, "paper"),
+        (
+            "live",
+            {
+                "BROKER": "alpaca",
+                "ENABLE_LIVE_TRADING": True,
+                "ALPACA_API_KEY": "key",
+                "ALPACA_API_SECRET": "secret",
+            },
+            "live",
+        ),
+    ]:
+        settings = Settings(
+            ALPHADESK_MODE=mode,
+            DATA_PROVIDER="synthetic",
+            ALPHADESK_DB_PATH=str(tmp_path / f"{mode}.db"),
+            DEFAULT_WATCHLIST="SPY,NVDA",
+            DEMO_BAR_SECONDS=3600,
+            **settings_kwargs,
+        )
+        db = Database(settings.resolved_db_path)
+        engine = TradingEngine(settings, db)
+
+        fake_broker = _FakeAlpacaBroker() if settings_kwargs.get("BROKER") == "alpaca" else _FakePaperSimBroker()
+        monkeypatch.setattr("app.core.engine.make_broker", lambda name, _settings, broker=fake_broker: broker)
+
+        await engine.start(mode, confirm="LIVE" if mode == "live" else "")
+        assert engine.portfolio is not None
+        assert engine.portfolio.restore_mode == expected_restore
+        await engine.stop()
+
+
+async def test_alpaca_positions_remain_broker_authoritative(tmp_path):
+    db = Database(tmp_path / "alpaca.db")
+    db.bootstrap_broker_checkpoint(
+        mode="paper",
+        checkpoint={
+            "realized_pnl": 0.0,
+            "day_realized_pnl": 0.0,
+            "session_date": None,
+            "session_start_equity": None,
+            "peak_equity": 0.0,
+            "day_trades_today": 0,
+            "trades": [],
+            "equity_curve": [],
+            "lots": {"AAPL": {"qty": 999, "avg_price": 1.0, "entry_ts": datetime.now(UTC).isoformat(),
+                               "strategy": "checkpoint", "stop_loss": None, "initial_risk_per_share": None}},
+        },
+        fill_watermarks={},
+    )
+
+    class _Client:
+        def get_all_positions(self):
+            return [
+                SimpleNamespace(
+                    symbol="AAPL",
+                    qty="7",
+                    avg_entry_price="101.5",
+                    current_price="102.25",
+                    side="PositionSide.LONG",
+                )
+            ]
+
+    broker = object.__new__(AlpacaBroker)
+    broker._client = _Client()
+    broker._fills = []
+    broker._meta = {}
+    broker._symbol_strategies = {}
+    broker.is_paper = True
+
+    positions = await broker.positions()
+    assert len(positions) == 1
+    assert positions[0].qty == 7
+    assert positions[0].avg_entry_price == 101.5
+    assert positions[0].market_price == 102.25

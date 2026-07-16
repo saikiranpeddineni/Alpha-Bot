@@ -90,22 +90,6 @@ class AlpacaBroker(Broker):
         return AccountSnapshot(equity=float(acct.equity), cash=float(acct.cash), buying_power=float(acct.buying_power))
 
     async def positions(self) -> list[Position]:
-        from app.db.database import Database
-        db = Database.active()
-        checkpoint = db.get_portfolio_checkpoint(self._broker_mode) if db else None
-        if checkpoint is not None:
-            market = {}
-            try:
-                for p in await asyncio.to_thread(self._client.get_all_positions):
-                    market[p.symbol.upper()] = float(p.current_price or p.avg_entry_price)
-            except Exception:
-                pass
-            return [
-                Position(symbol=symbol, qty=float(lot["qty"]), avg_entry_price=float(lot["avg_price"]),
-                         market_price=market.get(symbol, float(lot["avg_price"])), strategy=lot.get("strategy", "alpaca"),
-                         opened_at=datetime.fromisoformat(lot["entry_ts"]))
-                for symbol, lot in checkpoint.get("lots", {}).items() if abs(float(lot["qty"])) > 1e-9
-            ]
         raw = await asyncio.to_thread(self._client.get_all_positions)
         out = []
         for p in raw:
