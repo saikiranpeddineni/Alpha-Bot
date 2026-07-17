@@ -140,6 +140,15 @@ _UNIVERSE_STRESS_FRAC = 0.40   # >= 40% of symbols in extreme vol → stress
 _UNIVERSE_CAUTION_FRAC = 0.25  # >= 25% → caution
 _EXTREME_VOL_THRESHOLD = 4.0   # ATR% > 4 = extreme for a single symbol
 
+# Breadth family: minimum symbols for a healthy vote and lookback window.
+# 5-day lookback survives weekends + single holidays without starving history.
+# Minimum 3 symbols (reduced from 5) allows graceful degradation with lower
+# confidence instead of hard UNKNOWN on thin coverage days.
+_BREADTH_LOOKBACK_DAYS = 5
+_BREADTH_MIN_SYMBOLS = 3
+_BREADTH_THIN_COVERAGE_CONFIDENCE = 0.55   # < full confidence when 3-4 symbols
+_BREADTH_FULL_COVERAGE_CONFIDENCE = 0.85   # full confidence when >= 5 symbols
+
 
 class MarketRiskAggregator:
     """Aggregate multi-family market risk signals into a single ``MarketRiskState``.
@@ -285,10 +294,17 @@ class MarketRiskAggregator:
             )
 
     async def _family_breadth(self, T: datetime) -> SignalVote:
-        """Advancing/declining breadth across the live universe."""
+        """Advancing/declining breadth across the live universe.
+
+        Fix (#140): widened lookback from 2d -> 5d so weekends and single
+        holidays don't starve the 2-bar history requirement. Minimum healthy
+        symbol count relaxed from 5 -> 3 with proportionally reduced confidence
+        (0.55) to allow graceful degradation instead of hard UNKNOWN on thin
+        coverage pre-market days.
+        """
         family = "breadth"
         try:
-            start = T - timedelta(days=2)
+            start = T - timedelta(days=_BREADTH_LOOKBACK_DAYS)  # was days=2
             advancing = 0
             total = 0
             errors = 0
@@ -301,7 +317,7 @@ class MarketRiskAggregator:
                 except Exception:
                     errors += 1
 
-            if total < 5:
+            if total < _BREADTH_MIN_SYMBOLS:  # was total < 5
                 return SignalVote(
                     family=family,
                     state=MarketRiskState.UNKNOWN,
@@ -315,7 +331,22 @@ class MarketRiskAggregator:
 
             adv_ratio = advancing / total
             error_rate = errors / max(len(self._universe[:20]), 1)
-            confidence = max(0.3, 0.85 - error_rate)
+
+            # Degrade confidence proportionally when coverage is thin (3-4 symbols)
+            # vs full coverage (>=5 symbols). High error rate further reduces confidence.
+            base_confidence = (
+                _BREADTH_FULL_COVERAGE_CONFIDENCE
+                if total >= 5
+                else _BREADTH_THIN_COVERAGE_CONFIDENCE
+            )
+            confidence = max(0.3, base_confidence - error_rate)
+
+            if total < 5:
+                applog.warning(
+                    "market_regime",
+                    f"breadth family: thin coverage ({total} symbols) — "
+                    f"confidence degraded to {confidence:.2f}. adv_ratio={adv_ratio:.2f}",
+                )
 
             if adv_ratio < _BREADTH_STRESS_BELOW:
                 state = MarketRiskState.STRESS
