@@ -1,100 +1,71 @@
-"""Broker abstraction.
-
-Add a broker by subclassing Broker and registering it in `make_broker`.
-Fills flow to the engine through `drain_fills()` so position accounting and
-trade records work identically for every implementation.
-"""
+"""Broker interface and shared types."""
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
-from pydantic import BaseModel, Field
-
-from app.core.domain import (
-    AccountSnapshot,
-    Order,
-    OrderRequest,
-    OrderSide,
-    Position,
-    utcnow,
-)
+if TYPE_CHECKING:
+    from app.core.domain import (
+        AccountSnapshot,
+        Order,
+        OrderRequest,
+        Position,
+    )
 
 
-class Fill(BaseModel):
-    order_id: str
+class BrokerTimeoutError(RuntimeError):
+    """Raised when a broker HTTP call exceeds its configured wall-clock budget.
+
+    Callers must treat this as an *ambiguous* result: the request may or may
+    not have reached the broker.  They must NOT assume success or clean failure.
+    """
+
+
+@dataclass
+class Fill:
     symbol: str
-    side: OrderSide
+    side: str  # 'BUY' | 'SELL'
     qty: float
     price: float
-    commission: float = 0.0
-    strategy: str = "manual"
+    strategy: str = ""
     reason: str = ""
-    ts: datetime = Field(default_factory=utcnow)
-    signal_timestamp_utc: datetime | None = None
-    decision_bar_timestamp_utc: datetime | None = None
+    order_id: str = ""
+    ts: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
-class Broker(ABC):
-    name: str = "abstract"
-    is_paper: bool = True
+class Broker:
+    """Abstract broker interface."""
 
-    @abstractmethod
-    async def connect(self) -> None: ...
+    name: str = "base"
 
-    @abstractmethod
-    async def account(self) -> AccountSnapshot: ...
+    async def connect(self) -> None:  # pragma: no cover
+        ...
 
-    @abstractmethod
-    async def positions(self) -> list[Position]: ...
+    async def account(self) -> AccountSnapshot:  # pragma: no cover
+        ...
 
-    @abstractmethod
-    async def open_orders(self) -> list[Order]: ...
+    async def positions(self) -> list[Position]:  # pragma: no cover
+        ...
 
-    @abstractmethod
-    async def submit(self, req: OrderRequest) -> Order: ...
+    async def open_orders(self) -> list[Order]:  # pragma: no cover
+        ...
 
-    @abstractmethod
-    async def cancel(self, order_id: str) -> bool: ...
+    async def submit(self, req: OrderRequest) -> Order:  # pragma: no cover
+        ...
 
-    @abstractmethod
-    async def close_position(self, symbol: str, reason: str = "manual") -> Order | None: ...
+    async def poll_fills(self) -> None:  # pragma: no cover
+        ...
 
-    @abstractmethod
-    async def flatten_all(self, reason: str = "flatten") -> list[Order]: ...
+    def drain_fills(self) -> list[Fill]:  # pragma: no cover
+        return []
 
-    @abstractmethod
-    def drain_fills(self) -> list[Fill]:
-        """Return fills that occurred since the last drain (and clear them)."""
+    async def cancel(self, order_id: str) -> bool:  # pragma: no cover
+        return False
 
-    async def cancel_all(self) -> int:
-        n = 0
-        for order in await self.open_orders():
-            if await self.cancel(order.id):
-                n += 1
-        return n
-
-    async def close(self) -> None:  # pragma: no cover - default no-op
+    async def close_position(self, symbol: str, reason: str = "manual") -> Order | None:  # pragma: no cover
         return None
 
-
-def make_broker(name: str, settings) -> Broker:  # noqa: ANN001
-    """Broker factory. Register new brokers here."""
-    if name == "paper_sim":
-        from app.brokers.paper import PaperBroker
-
-        return PaperBroker(
-            starting_cash=settings.paper_starting_cash,
-            slippage_bps=settings.paper_slippage_bps,
-            commission_per_share=settings.paper_commission_per_share,
-        )
-    if name == "alpaca":
-        from app.brokers.alpaca import AlpacaBroker
-
-        return AlpacaBroker(
-            api_key=settings.alpaca_api_key,
-            api_secret=settings.alpaca_api_secret,
-            paper=settings.alpaca_paper,
-        )
-    raise ValueError(f"Unknown broker {name!r}")
+    async def flatten_all(self, reason: str = "flatten") -> list[Order]:  # pragma: no cover
+        return []
