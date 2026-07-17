@@ -44,7 +44,7 @@ _STATUS_MAP = {
 }
 
 
-async def _call(fn, *args, timeout: float = _API_TIMEOUT, label: str = ""):
+async def _call(fn, *args, timeout: float = _API_TIMEOUT, label: str = "", **kwargs):
     """Run a synchronous Alpaca SDK call in a thread with a bounded timeout.
 
     Raises BrokerTimeoutError (not asyncio.TimeoutError) so callers can
@@ -52,7 +52,7 @@ async def _call(fn, *args, timeout: float = _API_TIMEOUT, label: str = ""):
     """
     try:
         return await asyncio.wait_for(
-            asyncio.to_thread(fn, *args),
+            asyncio.to_thread(fn, *args, **kwargs),
             timeout=timeout,
         )
     except asyncio.TimeoutError as exc:
