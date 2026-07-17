@@ -197,7 +197,6 @@ async def run_backtest(
     # live DataManager is always restored on success, exception, and
     # cancellation. Previously only the success path restored data.history.
     original_history = data.history
-    data.original_history = original_history
     current_backtest_ts = [params.start]
     daily_frames = {}
 
@@ -707,7 +706,7 @@ async def run_backtest(
 
             # Intraday Watchlist updates (only if dynamic scanner is enabled)
             if params.use_dynamic_scanner:
-                # Intraday Watchlist Refresh (9:30 AM – 3:30 PM ET, every 30 minutes)
+                # Intraday Watchlist Refresh (9:30 AM - 3:30 PM ET, every 30 minutes)
                 if (
                     9 * 60 + 30 <= et_mins <= 15 * 60 + 30
                     and et_mins % 30 == 0
@@ -730,7 +729,7 @@ async def run_backtest(
                             if new_watchlist != current_watchlist:
                                 current_watchlist = new_watchlist
                                 risk.core_watchlist = list(current_watchlist)
-                                applog.info("backtest", f"Intraday watchlist refresh: +{list(to_add)} −{list(to_remove)}")
+                                applog.info("backtest", f"Intraday watchlist refresh: +{list(to_add)} -{list(to_remove)}")
                         
                         elif outcome == ScannerOutcome.SUCCESS_EMPTY:
                             open_symbols = {p.symbol.upper() for p in broker._positions.values() if abs(p.qty) > 1e-9}
@@ -741,7 +740,7 @@ async def run_backtest(
                             if new_watchlist != current_watchlist:
                                 current_watchlist = new_watchlist
                                 risk.core_watchlist = list(current_watchlist)
-                                applog.info("backtest", f"Intraday watchlist refresh: +[] −{list(to_remove)}")
+                                applog.info("backtest", f"Intraday watchlist refresh: +[] -{list(to_remove)}")
                                 
                         elif outcome == ScannerOutcome.FAILED:
                             applog.warning("backtest", "Intraday scanner FAILED; retaining last-known-good dynamic candidates.")
@@ -792,7 +791,7 @@ async def run_backtest(
                             except Exception as _exc:
                                 applog.debug(
                                     "backtest",
-                                    f"[{now}] [Event Monitor] {symbol} skipped — transient error: {type(_exc).__name__}: {_exc}",
+                                    f"[{now}] [Event Monitor] {symbol} skipped - transient error: {type(_exc).__name__}: {_exc}",
                                 )
 
             # Check event calendar every 5 minutes (aligned with live event monitor)
@@ -802,7 +801,7 @@ async def run_backtest(
                     is_event, reason = await calendar.check(now, current_watchlist)
                     pipeline.set_event_day(is_event)
                     if is_event:
-                        applog.info("backtest", f"[{now}] Event guard ACTIVE — score threshold raised to event level ({reason[:60]})")
+                        applog.info("backtest", f"[{now}] Event guard ACTIVE - score threshold raised to event level ({reason[:60]})")
                 except Exception as exc:
                     applog.debug("backtest", f"Calendar check error: {exc}")
 
