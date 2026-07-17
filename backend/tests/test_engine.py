@@ -91,6 +91,7 @@ async def test_tick_reuses_authoritative_positions_snapshot_for_broadcast(engine
 async def test_engine_manual_flow(engine: TradingEngine):
     from app.core.domain import OrderRequest, OrderSide
 
+    engine.strategies = []  # Clear strategies to prevent background auto-trading from polluting positions
     await engine.start("demo")
     for _ in range(3):
         await engine._tick()

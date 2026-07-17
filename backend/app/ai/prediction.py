@@ -745,11 +745,11 @@ class MetaLabelEngine:
     # Default per-strategy approval thresholds.
     # These are deliberately conservative; lower only with evidence.
     DEFAULT_THRESHOLDS: dict[str, float] = {
-        "orb":           0.0,
-        "momentum":      0.0,
-        "vwap_reversion": 0.0,
-        "rsi2_reversion": 0.0,
-        "bb_squeeze":    0.0,
+        "orb":           0.55,
+        "momentum":      0.55,
+        "vwap_reversion": 0.52,
+        "rsi2_reversion": 0.52,
+        "bb_squeeze":    0.53,
     }
     FALLBACK_THRESHOLD = 0.53
 

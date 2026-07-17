@@ -20,6 +20,8 @@ class _FakeData:
         return None
     async def poll(self, _watchlist):
         return {}
+    def last_prices(self, symbols: list[str]) -> dict[str, float]:
+        return {sym: 100.0 for sym in symbols}
     def frame(self, *args, **kwargs):
         import pandas as pd
         idx = pd.date_range("2026-07-17 09:30:00", periods=5, freq="min", tz="UTC")
