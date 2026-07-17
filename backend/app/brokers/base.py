@@ -1,4 +1,4 @@
-"""Broker interface and shared types."""
+"""Broker interface, shared types, and broker factory."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from app.config import Settings
     from app.core.domain import (
         AccountSnapshot,
         Order,
@@ -64,8 +65,36 @@ class Broker:
     async def cancel(self, order_id: str) -> bool:  # pragma: no cover
         return False
 
+    async def cancel_all(self) -> None:  # pragma: no cover
+        pass
+
     async def close_position(self, symbol: str, reason: str = "manual") -> Order | None:  # pragma: no cover
         return None
 
     async def flatten_all(self, reason: str = "flatten") -> list[Order]:  # pragma: no cover
         return []
+
+
+def make_broker(broker_name: str, settings: Settings) -> Broker:
+    """Factory — instantiate the correct Broker implementation by name.
+
+    Supported names:
+        ``"alpaca"``      — Live/paper Alpaca broker.
+        ``"paper_sim"``   — Local in-process paper simulator (no Alpaca keys required).
+
+    Raises
+    ------
+    ValueError
+        When *broker_name* is not recognised.
+    """
+    name = broker_name.lower().strip()
+    if name == "alpaca":
+        from app.brokers.alpaca import AlpacaBroker
+        return AlpacaBroker(settings)
+    if name in ("paper_sim", "paper", "demo"):
+        from app.brokers.paper import PaperBroker
+        return PaperBroker(settings)
+    raise ValueError(
+        f"Unknown broker {broker_name!r}. "
+        "Valid choices are: 'alpaca', 'paper_sim'."
+    )
