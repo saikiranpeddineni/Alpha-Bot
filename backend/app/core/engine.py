@@ -244,7 +244,14 @@ class TradingEngine:
                 "call reset_halt() to acknowledge and re-enable trading"
             )
 
-        self.portfolio = PortfolioTracker()
+        restore_mode = None
+        try:
+            from app.brokers.alpaca import AlpacaBroker
+            if isinstance(self.broker, AlpacaBroker) and mode in {"paper", "live"}:
+                restore_mode = mode
+        except Exception:
+            pass
+        self.portfolio = PortfolioTracker(restore_mode=restore_mode)
 
         from app.portfolio.allocator import PortfolioAIGate, CapitalAllocationOptimizer
         self.portfolio_gate = PortfolioAIGate(

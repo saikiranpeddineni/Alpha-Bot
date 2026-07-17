@@ -11,10 +11,13 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
-from sqlalchemy import String, Text, create_engine, select
+from sqlalchemy import Float, String, Text, create_engine, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 from app.core.domain import Order, TradeRecord
+
+
+_ACTIVE_DATABASE: Database | None = None
 
 
 class Base(DeclarativeBase):
@@ -73,11 +76,33 @@ class ShadowLedgerRow(Base):
     payload: Mapped[str] = mapped_column(Text)
 
 
+class FillProgressRow(Base):
+    __tablename__ = "broker_fill_progress"
+    mode: Mapped[str] = mapped_column(String(20), primary_key=True)
+    account_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    fill_key: Mapped[str] = mapped_column(String(96), primary_key=True)
+    cumulative_qty: Mapped[float] = mapped_column(Float)
+    processed_at: Mapped[datetime]
+
+
+class PortfolioCheckpointRow(Base):
+    __tablename__ = "portfolio_checkpoints"
+    mode: Mapped[str] = mapped_column(String(20), primary_key=True)
+    updated_at: Mapped[datetime]
+    payload: Mapped[str] = mapped_column(Text)
+
+
 class Database:
     def __init__(self, path: Path) -> None:
+        global _ACTIVE_DATABASE
         path.parent.mkdir(parents=True, exist_ok=True)
         self.engine = create_engine(f"sqlite:///{path}", connect_args={"check_same_thread": False})
         Base.metadata.create_all(self.engine)
+        _ACTIVE_DATABASE = self
+
+    @staticmethod
+    def active() -> Database | None:
+        return _ACTIVE_DATABASE
 
     def _session(self) -> Session:
         return Session(self.engine)
@@ -130,6 +155,52 @@ class Database:
             )
             rows = list(s.scalars(stmt))
         return [(r.ts, r.equity) for r in reversed(rows)]
+
+    # ---- durable broker fill / portfolio checkpoint contract ----
+
+    def processed_fill_qty(self, mode: str, account_id: str, fill_key: str) -> float:
+        with self._session() as s:
+            row = s.get(FillProgressRow, (mode, account_id, fill_key))
+            return float(row.cumulative_qty) if row else 0.0
+
+    def get_portfolio_checkpoint(self, mode: str) -> dict | None:
+        with self._session() as s:
+            row = s.get(PortfolioCheckpointRow, mode)
+            return json.loads(row.payload) if row else None
+
+    def has_portfolio_checkpoint(self, mode: str) -> bool:
+        with self._session() as s:
+            return s.get(PortfolioCheckpointRow, mode) is not None
+
+    def commit_fill_processing(
+        self, *, fill_key: str, cumulative_qty: float, mode: str, account_id: str,
+        checkpoint: dict, trade: TradeRecord | None,
+    ) -> None:
+        """Atomically advance a broker execution watermark and portfolio state."""
+        with self._session() as s:
+            current = s.get(FillProgressRow, (mode, account_id, fill_key))
+            if current is not None and float(current.cumulative_qty) >= cumulative_qty - 1e-9:
+                return
+            s.merge(FillProgressRow(mode=mode, account_id=account_id, fill_key=fill_key,
+                                    cumulative_qty=cumulative_qty, processed_at=datetime.now(UTC)))
+            s.merge(PortfolioCheckpointRow(mode=mode, updated_at=datetime.now(UTC),
+                                           payload=json.dumps(checkpoint, default=str)))
+            if trade is not None:
+                s.merge(TradeRow(id=trade.id, exit_at=trade.exit_at, symbol=trade.symbol, pnl=trade.pnl,
+                                 mode=mode, payload=trade.model_dump_json()))
+            s.commit()
+
+    def bootstrap_broker_checkpoint(self, *, mode: str, account_id: str, checkpoint: dict, fill_watermarks: dict[str, float]) -> None:
+        """Create the migration baseline once; never advance an existing checkpoint."""
+        with self._session() as s:
+            if s.get(PortfolioCheckpointRow, mode) is not None:
+                return
+            s.add(PortfolioCheckpointRow(mode=mode, updated_at=datetime.now(UTC),
+                                         payload=json.dumps(checkpoint, default=str)))
+            for key, qty in fill_watermarks.items():
+                s.merge(FillProgressRow(mode=mode, account_id=account_id, fill_key=key,
+                                        cumulative_qty=qty, processed_at=datetime.now(UTC)))
+            s.commit()
 
     # ---- backtests ----
 
@@ -215,5 +286,8 @@ class Database:
             return [json.loads(r.payload) for r in s.scalars(stmt)]
 
     def close(self) -> None:
+        global _ACTIVE_DATABASE
+        if _ACTIVE_DATABASE is self:
+            _ACTIVE_DATABASE = None
         self.engine.dispose()
 

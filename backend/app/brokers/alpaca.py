@@ -80,32 +80,66 @@ class AlpacaBroker(Broker):
         self._processed_fill_qty: dict[str, float] = {}
         self._meta: dict[str, tuple[str, str]] = {}  # order id -> (strategy, reason)
         self._symbol_strategies: dict[str, str] = {}
+        self.account_id: str | None = None
+
+    @property
+    def _broker_mode(self) -> str:
+        return "paper" if self.is_paper else "live"
 
     async def connect(self) -> None:
         acct = await _call(self._client.get_account, label="get_account")
+        self.account_id = str(acct.account_number)
         applog.info(
             "broker.alpaca",
-            f"Connected to Alpaca ({'paper' if self.is_paper else 'LIVE'}) -- equity ${float(acct.equity):,.2f}",
+            f"Connected to Alpaca ({'paper' if self.is_paper else 'LIVE'}) account {self.account_id} -- equity ${float(acct.equity):,.2f}",
         )
+        await self._bootstrap_durable_fill_baseline()
+
+    async def _bootstrap_durable_fill_baseline(self) -> None:
+        """One-time migration baseline; existing installations must not replay old history."""
+        from app.db.database import Database
+        db = Database.active()
+        if db is None or db.has_portfolio_checkpoint(self._broker_mode):
+            return
         try:
             from alpaca.trading.requests import GetOrdersRequest
+            raw_positions = await _call(self._client.get_all_positions, label="get_all_positions")
             after = datetime.now(UTC) - timedelta(hours=24)
-            raw = await _call(
+            orders = await _call(
                 self._client.get_orders,
-                GetOrdersRequest(status="closed", after=after, limit=200),
-                label="get_orders/connect",
+                GetOrdersRequest(status="all", after=after, limit=500),
+                label="get_orders/bootstrap",
             )
-            for o in raw:
-                oid = str(o.id)
-                filled_qty = float(o.filled_qty or 0)
-                if filled_qty > 0:
-                    self._processed_fill_qty[oid] = filled_qty
-                if str(o.status).split(".")[-1].lower() == "filled":
-                    self._emitted_fill_ids.add(oid)
-        except BrokerTimeoutError:
-            raise
+            lots = {}
+            for p in raw_positions:
+                qty = float(p.qty)
+                if str(p.side) == "PositionSide.SHORT" or qty < 0:
+                    qty = -abs(qty)
+                lots[p.symbol.upper()] = {
+                    "qty": qty,
+                    "avg_price": float(p.avg_entry_price),
+                    "stop_loss": None,
+                    "initial_risk_per_share": None,
+                }
+            checkpoint = {
+                "realized_pnl": 0.0,
+                "day_realized_pnl": 0.0,
+                "session_date": None,
+                "session_start_equity": None,
+                "peak_equity": float(acct.equity) if (acct := await _call(self._client.get_account, label="get_account")) else 0.0,
+                "day_trades_today": 0,
+                "trades": [],
+                "equity_curve": [],
+                "lots": lots,
+            }
+            watermarks = {
+                str(o.id): float(o.filled_qty or 0)
+                for o in orders if float(o.filled_qty or 0) > 0
+            }
+            db.bootstrap_broker_checkpoint(mode=self._broker_mode, account_id=self.account_id, checkpoint=checkpoint, fill_watermarks=watermarks)
+            applog.info("broker.alpaca", "Initialized durable Alpaca fill baseline from authoritative broker state")
         except Exception as exc:
-            applog.warning("broker.alpaca", f"failed to pre-populate emitted fill IDs: {exc}")
+            applog.warning("broker.alpaca", f"failed to initialize durable fill baseline: {exc}")
 
     async def account(self) -> AccountSnapshot:
         acct = await _call(self._client.get_account, label="get_account")
@@ -218,14 +252,15 @@ class AlpacaBroker(Broker):
         return order
 
     async def poll_fills(self) -> None:
-        """Emit each newly executed cumulative quantity delta exactly once."""
+        """Surface every cumulative execution watermark not durably processed yet."""
         from alpaca.trading.requests import GetOrdersRequest
+        from app.db.database import Database
 
         after = datetime.now(UTC) - timedelta(hours=24)
         try:
             raw = await _call(
                 self._client.get_orders,
-                GetOrdersRequest(status="all", after=after, limit=200),
+                GetOrdersRequest(status="all", after=after, limit=500),
                 label="get_orders/poll_fills",
             )
         except BrokerTimeoutError:
@@ -234,18 +269,38 @@ class AlpacaBroker(Broker):
         except Exception as exc:  # noqa: BLE001
             applog.warning("broker.alpaca", f"fill poll failed: {exc}")
             return
+
+        db = Database.active()
+        candidates = []
         for o in raw:
-            oid = str(o.id)
-            cumulative_qty = float(o.filled_qty or 0)
-            processed_qty = self._processed_fill_qty.get(oid, 0.0)
-            delta_qty = cumulative_qty - processed_qty
-            if delta_qty <= 1e-9:
+            cumulative = float(o.filled_qty or 0)
+            if cumulative <= 0 or not o.filled_avg_price:
                 continue
-            if not o.filled_avg_price:
-                applog.warning(
-                    "broker.alpaca",
-                    f"order {oid} reports {cumulative_qty:g} filled shares without an average fill price; retaining watermark at {processed_qty:g}",
-                )
+            oid = str(o.id)
+            if db:
+                processed = db.processed_fill_qty(mode=self._broker_mode, account_id=self.account_id, fill_key=oid)
+            else:
+                processed = self._processed_fill_qty.get(oid, 0.0)
+            if cumulative <= processed + 1e-9:
+                continue
+            candidates.append(o)
+
+        candidates.sort(key=lambda o: (o.filled_at or o.updated_at or o.submitted_at or datetime.now(UTC), str(o.id)))
+        queued = {(f.broker_fill_key, f.cumulative_qty) for f in self._fills}
+        local_watermarks = {}
+        for o in candidates:
+            oid = str(o.id)
+            cumulative = float(o.filled_qty or 0)
+            if (oid, cumulative) in queued:
+                continue
+            if oid in local_watermarks:
+                processed = local_watermarks[oid]
+            elif db:
+                processed = db.processed_fill_qty(mode=self._broker_mode, account_id=self.account_id, fill_key=oid)
+            else:
+                processed = self._processed_fill_qty.get(oid, 0.0)
+            delta = cumulative - processed
+            if delta <= 1e-9:
                 continue
             strategy, reason = self._meta.get(oid, ("alpaca", ""))
             self._fills.append(
@@ -253,16 +308,19 @@ class AlpacaBroker(Broker):
                     order_id=oid,
                     symbol=o.symbol,
                     side=OrderSide.BUY if "buy" in str(o.side).lower() else OrderSide.SELL,
-                    qty=delta_qty,
+                    qty=delta,
                     price=float(o.filled_avg_price),
                     strategy=strategy,
                     reason=reason,
-                    ts=o.filled_at or datetime.now(UTC),
+                    ts=o.filled_at or o.updated_at or datetime.now(UTC),
+                    broker_fill_key=oid,
+                    cumulative_qty=cumulative,
+                    broker_mode=self._broker_mode,
+                    broker_account_id=self.account_id,
                 )
             )
-            self._processed_fill_qty[oid] = cumulative_qty
-            if str(o.status).split(".")[-1].lower() == "filled":
-                self._emitted_fill_ids.add(oid)
+            self._processed_fill_qty[oid] = cumulative
+            local_watermarks[oid] = cumulative
 
     def drain_fills(self) -> list[Fill]:
         fills, self._fills = self._fills, []

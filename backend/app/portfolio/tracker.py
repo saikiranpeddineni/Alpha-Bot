@@ -8,6 +8,7 @@ Alpaca, and the backtester.
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import NamedTuple
@@ -72,6 +73,7 @@ class _OpenLot:
 @dataclass
 class PortfolioTracker:
     max_curve_points: int = 5000
+    restore_mode: str | None = None
     realized_pnl: float = 0.0
     day_realized_pnl: float = 0.0
     session_date: date | None = None
@@ -84,6 +86,18 @@ class PortfolioTracker:
     trades: list[TradeRecord] = field(default_factory=list)
     equity_curve: list[tuple[datetime, float]] = field(default_factory=list)
     _lots: dict[str, _OpenLot] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.restore_mode not in {"live", "paper"}:
+            return
+        from app.db.database import Database
+        db = Database.active()
+        if db is None:
+            return
+        checkpoint = db.get_portfolio_checkpoint(self.restore_mode)
+        if checkpoint:
+            self.restore_checkpoint(checkpoint)
+            applog.info("portfolio", f"Restored durable {self.restore_mode} portfolio checkpoint")
 
     # ------------------------------------------------------------------
     # PDT rolling-window counter
@@ -199,7 +213,87 @@ class PortfolioTracker:
         """Return a snapshot of all symbols with non-zero open lots."""
         return {s: lot for s, lot in self._lots.items() if abs(lot.qty) >= 1e-9}
 
-    def on_fill(self, fill: Fill, peak_price: float | None = None, trough_price: float | None = None, initial_stop: float | None = None) -> TradeRecord | None:
+    def checkpoint(self) -> dict:
+        return {
+            "realized_pnl": self.realized_pnl,
+            "day_realized_pnl": self.day_realized_pnl,
+            "session_date": self.session_date.isoformat() if self.session_date else None,
+            "session_start_equity": self.session_start_equity,
+            "peak_equity": self.peak_equity,
+            "day_trades_today": self.day_trades_today,
+            "trades": [t.model_dump(mode="json") for t in self.trades],
+            "equity_curve": [[ts.isoformat(), value] for ts, value in self.equity_curve],
+            "lots": {
+                symbol: {
+                    "qty": lot.qty,
+                    "avg_price": lot.avg_price,
+                    "entry_ts": lot.entry_ts.isoformat(),
+                    "strategy": lot.strategy,
+                    "stop_loss": lot.stop_loss,
+                    "initial_risk_per_share": lot.initial_risk_per_share,
+                    "commission_basis": lot.commission_basis,
+                }
+                for symbol, lot in self._lots.items()
+            }
+        }
+
+    def restore_checkpoint(self, payload: dict) -> None:
+        self.realized_pnl = float(payload.get("realized_pnl", 0.0))
+        self.day_realized_pnl = float(payload.get("day_realized_pnl", 0.0))
+        self.session_date = date.fromisoformat(payload["session_date"]) if payload.get("session_date") else None
+        self.session_start_equity = payload.get("session_start_equity")
+        self.peak_equity = float(payload.get("peak_equity", 0.0))
+        self.day_trades_today = int(payload.get("day_trades_today", 0))
+        self.trades = [TradeRecord.model_validate(t) for t in payload.get("trades", [])]
+        self.equity_curve = [(datetime.fromisoformat(ts), float(value)) for ts, value in payload.get("equity_curve", [])]
+        self._lots = {
+            symbol.upper(): _OpenLot(
+                qty=float(lot["qty"]),
+                avg_price=float(lot["avg_price"]),
+                entry_ts=datetime.fromisoformat(lot["entry_ts"]),
+                strategy=lot["strategy"],
+                stop_loss=lot.get("stop_loss"),
+                initial_risk_per_share=lot.get("initial_risk_per_share"),
+                commission_basis=float(lot.get("commission_basis", 0.0)),
+            )
+            for symbol, lot in payload.get("lots", {}).items()
+        }
+
+    def on_fill(self, fill: Fill, peak_price: float | None = None, trough_price: float | None = None,
+                initial_stop: float | None = None) -> TradeRecord | None:
+        if fill.broker_fill_key and fill.cumulative_qty is not None and fill.broker_mode:
+            from app.db.database import Database
+            db = Database.active()
+            if db is not None:
+                processed = db.processed_fill_qty(
+                    mode=fill.broker_mode,
+                    account_id=fill.broker_account_id or "default_account",
+                    fill_key=fill.broker_fill_key
+                )
+                delta = float(fill.cumulative_qty) - processed
+                if delta <= 1e-9:
+                    return None
+                effective = copy.copy(fill)
+                effective.qty = delta
+                before = copy.deepcopy(self.__dict__)
+                try:
+                    trade = self._apply_fill(effective, peak_price, trough_price, initial_stop)
+                    db.commit_fill_processing(
+                        fill_key=fill.broker_fill_key,
+                        cumulative_qty=float(fill.cumulative_qty),
+                        mode=fill.broker_mode,
+                        account_id=fill.broker_account_id or "default_account",
+                        checkpoint=self.checkpoint(),
+                        trade=trade
+                    )
+                    return trade
+                except Exception:
+                    self.__dict__.clear()
+                    self.__dict__.update(before)
+                    raise
+        return self._apply_fill(fill, peak_price, trough_price, initial_stop)
+
+    def _apply_fill(self, fill: Fill, peak_price: float | None = None, trough_price: float | None = None, initial_stop: float | None = None) -> TradeRecord | None:
         symbol = fill.symbol.upper()
         signed = fill.qty if fill.side == OrderSide.BUY else -fill.qty
         lot = self._lots.get(symbol)

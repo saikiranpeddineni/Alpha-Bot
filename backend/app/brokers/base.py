@@ -39,6 +39,10 @@ class Fill:
     ts: datetime = field(default_factory=lambda: datetime.now(UTC))
     signal_timestamp_utc: datetime | None = None
     decision_bar_timestamp_utc: datetime | None = None
+    broker_fill_key: str | None = None
+    cumulative_qty: float | None = None
+    broker_mode: str | None = None
+    broker_account_id: str | None = None
 
 
 class Broker:
