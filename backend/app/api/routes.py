@@ -401,6 +401,19 @@ async def post_backtest(body: BacktestBody, request: Request) -> dict:
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        finally:
+            # --- FIX #69: Belt-and-suspenders assertion. run_backtest() deep-copies
+            # engine.model and never writes to the live singleton, but we assert
+            # and forcibly reset here to guarantee the invariant holds even if a
+            # future refactor accidentally passes the singleton without copying.
+            if getattr(engine.model, "backtest_start_time", None) is not None:
+                applog.warning(
+                    "backtest",
+                    "BUG #69: engine.model.backtest_start_time was non-None after "
+                    "run_backtest() returned — forcibly resetting to None to protect "
+                    "live ML temporal gate.",
+                )
+                engine.model.backtest_start_time = None
         payload = result.model_dump(mode="json")
         summary = {
             "symbols": params.symbols,
