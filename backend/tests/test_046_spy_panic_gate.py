@@ -12,12 +12,17 @@ from datetime import datetime, UTC
 from unittest.mock import AsyncMock, MagicMock
 
 from app.core.scanner import MarketScanner, SpyVolatilityState, ScannerOutcome, DEFENSIVE_WATCHLIST
+from app.risk.market_regime import MarketRiskState
 
 
 @pytest.fixture
 def dm():
     m = MagicMock()
-    m.history = AsyncMock()
+    async def _history(symbol, timeframe, start, end, prefer_cache=True):
+        if timeframe == "1Day":
+            return pd.DataFrame()
+        return m.history.return_value
+    m.history = AsyncMock(side_effect=_history)
     m.original_history = m.history
     m.provider.get_bars = AsyncMock(return_value=pd.DataFrame())
     return m
@@ -200,7 +205,7 @@ async def test_exactly_200_bars_not_unknown(dm):
 async def test_run_with_unknown_gate_blocks_new_entries(dm):
     """UNKNOWN gate must return SUCCESS_EMPTY (no new-entry candidates)."""
     scanner = MarketScanner(dm, [])
-    scanner.check_spy_volatility = AsyncMock(return_value=SpyVolatilityState.UNKNOWN)
+    scanner._assess_market_risk = AsyncMock(return_value=(MarketRiskState.UNKNOWN, 0.0, ["mock_reason"]))
     outcome, watchlist = await scanner.run()
     assert outcome is ScannerOutcome.SUCCESS_EMPTY
     assert watchlist == []
@@ -210,7 +215,7 @@ async def test_run_with_unknown_gate_blocks_new_entries(dm):
 async def test_run_with_panic_gate_returns_defensive_watchlist(dm):
     """PANIC gate must return DEFENSIVE_WATCHLIST immediately."""
     scanner = MarketScanner(dm, [])
-    scanner.check_spy_volatility = AsyncMock(return_value=SpyVolatilityState.PANIC)
+    scanner._assess_market_risk = AsyncMock(return_value=(MarketRiskState.PANIC, 0.85, ["mock_reason"]))
     outcome, watchlist = await scanner.run()
     assert outcome is ScannerOutcome.SUCCESS_NONEMPTY
     assert watchlist == DEFENSIVE_WATCHLIST
@@ -220,7 +225,7 @@ async def test_run_with_panic_gate_returns_defensive_watchlist(dm):
 async def test_run_with_safe_gate_proceeds_to_pipeline(dm, monkeypatch):
     """SAFE gate must let the normal candidate pipeline execute."""
     scanner = MarketScanner(dm, [])
-    scanner.check_spy_volatility = AsyncMock(return_value=SpyVolatilityState.SAFE)
+    scanner._assess_market_risk = AsyncMock(return_value=(MarketRiskState.NORMAL, 0.85, ["mock_reason"]))
     monkeypatch.setattr(scanner, "_stage1_symbols", AsyncMock(return_value=["AAPL"]))
     monkeypatch.setattr(scanner, "_stage1_prefilter_parallel", AsyncMock(return_value=[]))
     outcome, watchlist = await scanner.run()
@@ -232,10 +237,8 @@ async def test_run_with_safe_gate_proceeds_to_pipeline(dm, monkeypatch):
 @pytest.mark.anyio
 async def test_run_exception_in_gate_does_not_propagate_as_safe(dm):
     """If gate itself raises, run() must not proceed as SAFE."""
-    async def _raising_gate(as_of=None):
-        raise RuntimeError("gate exploded")
     scanner = MarketScanner(dm, [])
-    scanner.check_spy_volatility = _raising_gate
+    scanner._assess_market_risk = AsyncMock(side_effect=RuntimeError("gate exploded"))
     # run() outer try/except catches and returns FAILED — never SUCCESS_NONEMPTY with live candidates
     outcome, watchlist = await scanner.run()
     assert outcome is ScannerOutcome.FAILED

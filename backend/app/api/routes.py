@@ -345,7 +345,7 @@ async def post_backtest(body: BacktestBody, request: Request) -> dict:
     # Atomically attempt to acquire the lock without queuing.
     # timeout=0 means: succeed immediately if free, raise TimeoutError if not.
     try:
-        await asyncio.wait_for(lock.acquire(), timeout=0)
+        await asyncio.wait_for(lock.acquire(), timeout=1e-6)
     except asyncio.TimeoutError:
         raise HTTPException(status_code=409, detail="A backtest is already running")
 

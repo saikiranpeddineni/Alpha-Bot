@@ -86,3 +86,85 @@ async def test_alpaca_discovery_failure_returns_empty_universe():
     provider._trading_client = TradingClient()
 
     assert await provider.discover_assets() == ()
+
+
+@pytest.mark.asyncio
+async def test_alpaca_discovery_screener_success(monkeypatch):
+    class MockActiveStock:
+        def __init__(self, symbol):
+            self.symbol = symbol
+
+    class MockMover:
+        def __init__(self, symbol):
+            self.symbol = symbol
+
+    class MockActivesResponse:
+        def __init__(self):
+            self.most_actives = [MockActiveStock("AAPL"), MockActiveStock("MSFT")]
+
+    class MockMoversResponse:
+        def __init__(self):
+            self.gainers = [MockMover("NVDA"), MockMover("TSLA")]
+
+    class MockScreenerClient:
+        def get_most_actives(self, request):
+            return MockActivesResponse()
+
+        def get_market_movers(self, request):
+            return MockMoversResponse()
+
+    provider = AlpacaDataProvider.__new__(AlpacaDataProvider)
+    provider._screener_client = MockScreenerClient()
+
+    assets = await provider.discover_assets()
+    assert len(assets) == 4
+    assert [a.symbol for a in assets] == ["AAPL", "MSFT", "NVDA", "TSLA"]
+    for asset in assets:
+        assert asset.active is True
+        assert asset.tradable is True
+        assert asset.asset_class == "us_equity"
+
+
+@pytest.mark.asyncio
+async def test_alpaca_discovery_screener_failure_fallback(monkeypatch):
+    class AssetStatus:
+        ACTIVE = "active"
+
+    class AssetClass:
+        US_EQUITY = "us_equity"
+
+    class GetAssetsRequest:
+        def __init__(self, *, status, asset_class):
+            self.status = status
+            self.asset_class = asset_class
+
+    monkeypatch.setattr("alpaca.trading.enums.AssetStatus", AssetStatus)
+    monkeypatch.setattr("alpaca.trading.enums.AssetClass", AssetClass)
+    monkeypatch.setattr("alpaca.trading.requests.GetAssetsRequest", GetAssetsRequest)
+
+    class MockScreenerClient:
+        def get_most_actives(self, request):
+            raise RuntimeError("Screener failed")
+
+        def get_market_movers(self, request):
+            raise RuntimeError("Screener failed")
+
+    class TradingClient:
+        def get_all_assets(self, request):
+            return [
+                SimpleNamespace(
+                    symbol="QQQ",
+                    status=AssetStatus.ACTIVE,
+                    tradable=True,
+                    asset_class=AssetClass.US_EQUITY,
+                    exchange="NASDAQ",
+                )
+            ]
+
+    provider = AlpacaDataProvider.__new__(AlpacaDataProvider)
+    provider._screener_client = MockScreenerClient()
+    provider._trading_client = TradingClient()
+
+    assets = await provider.discover_assets()
+    assert len(assets) == 1
+    assert assets[0].symbol == "QQQ"

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -105,6 +106,8 @@ async def test_tick_reuses_authoritative_positions_snapshot_for_broadcast(engine
         provider_calls += 1
         return await original_positions()
 
+    engine.run_market_scanner = AsyncMock()
+    engine.run_event_monitor = AsyncMock()
     engine.broker.positions = counted_positions  # type: ignore[method-assign]
 
     await engine._tick()

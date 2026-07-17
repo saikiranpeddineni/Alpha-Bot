@@ -15,6 +15,8 @@ if TYPE_CHECKING:
         Position,
     )
 
+from app.core.domain import OrderSide
+
 
 class BrokerTimeoutError(RuntimeError):
     """Raised when a broker HTTP call exceeds its configured wall-clock budget.
@@ -26,14 +28,17 @@ class BrokerTimeoutError(RuntimeError):
 
 @dataclass
 class Fill:
+    order_id: str
     symbol: str
-    side: str  # 'BUY' | 'SELL'
+    side: OrderSide | str  # 'BUY' | 'SELL' or OrderSide enum
     qty: float
     price: float
-    strategy: str = ""
+    commission: float = 0.0
+    strategy: str = "manual"
     reason: str = ""
-    order_id: str = ""
     ts: datetime = field(default_factory=lambda: datetime.now(UTC))
+    signal_timestamp_utc: datetime | None = None
+    decision_bar_timestamp_utc: datetime | None = None
 
 
 class Broker:
@@ -97,7 +102,11 @@ def make_broker(broker_name: str, settings: Settings) -> Broker:
         )
     if name in ("paper_sim", "paper", "demo"):
         from app.brokers.paper import PaperBroker
-        return PaperBroker(settings)
+        return PaperBroker(
+            starting_cash=settings.paper_starting_cash,
+            slippage_bps=settings.paper_slippage_bps,
+            commission_per_share=settings.paper_commission_per_share,
+        )
     raise ValueError(
         f"Unknown broker {broker_name!r}. "
         "Valid choices are: 'alpaca', 'paper_sim'."
