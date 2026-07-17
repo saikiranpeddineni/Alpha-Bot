@@ -4,14 +4,20 @@ Maps the platform's order model onto Alpaca's REST API. Entries with a stop
 and target become native bracket orders so protective exits live server-side
 at the broker even if this machine goes offline. Fills are detected by
 polling order state each engine tick and surfaced through drain_fills().
+
+All Alpaca SDK calls are wrapped with asyncio.wait_for(asyncio.to_thread(...))
+using a bounded wall-clock budget (ALPACA_API_TIMEOUT_SECONDS, default 10 s).
+A timeout raises BrokerTimeoutError so callers treat it as an ambiguous state
+rather than success or clean failure, preserving engine-tick liveness.
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
 from datetime import UTC, datetime, timedelta
 
-from app.brokers.base import Broker, Fill
+from app.brokers.base import Broker, BrokerTimeoutError, Fill
 from app.core.domain import (
     AccountSnapshot,
     Order,
@@ -23,6 +29,9 @@ from app.core.domain import (
 )
 from app.core.logging import applog
 
+# Wall-clock budget for every Alpaca HTTP call. Tune via env var if needed.
+_API_TIMEOUT: float = float(os.environ.get("ALPACA_API_TIMEOUT_SECONDS", "10"))
+
 _STATUS_MAP = {
     "new": OrderStatus.SUBMITTED,
     "accepted": OrderStatus.SUBMITTED,
@@ -33,6 +42,25 @@ _STATUS_MAP = {
     "expired": OrderStatus.CANCELED,
     "rejected": OrderStatus.REJECTED,
 }
+
+
+async def _call(fn, *args, timeout: float = _API_TIMEOUT, label: str = ""):
+    """Run a synchronous Alpaca SDK call in a thread with a bounded timeout.
+
+    Raises BrokerTimeoutError (not asyncio.TimeoutError) so callers can
+    distinguish this from other failures without catching the base exception.
+    """
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(fn, *args),
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError as exc:
+        msg = f"Alpaca API call timed out after {timeout:.0f}s"
+        if label:
+            msg += f" [{label}]"
+        applog.error("broker.alpaca", msg)
+        raise BrokerTimeoutError(msg) from exc
 
 
 class AlpacaBroker(Broker):
@@ -54,7 +82,7 @@ class AlpacaBroker(Broker):
         self._symbol_strategies: dict[str, str] = {}
 
     async def connect(self) -> None:
-        acct = await asyncio.to_thread(self._client.get_account)
+        acct = await _call(self._client.get_account, label="get_account")
         applog.info(
             "broker.alpaca",
             f"Connected to Alpaca ({'paper' if self.is_paper else 'LIVE'}) -- equity ${float(acct.equity):,.2f}",
@@ -62,9 +90,10 @@ class AlpacaBroker(Broker):
         try:
             from alpaca.trading.requests import GetOrdersRequest
             after = datetime.now(UTC) - timedelta(hours=24)
-            raw = await asyncio.to_thread(
+            raw = await _call(
                 self._client.get_orders,
                 GetOrdersRequest(status="closed", after=after, limit=200),
+                label="get_orders/connect",
             )
             for o in raw:
                 oid = str(o.id)
@@ -73,11 +102,13 @@ class AlpacaBroker(Broker):
                     self._processed_fill_qty[oid] = filled_qty
                 if str(o.status).split(".")[-1].lower() == "filled":
                     self._emitted_fill_ids.add(oid)
+        except BrokerTimeoutError:
+            raise
         except Exception as exc:
             applog.warning("broker.alpaca", f"failed to pre-populate emitted fill IDs: {exc}")
 
     async def account(self) -> AccountSnapshot:
-        acct = await asyncio.to_thread(self._client.get_account)
+        acct = await _call(self._client.get_account, label="get_account")
         return AccountSnapshot(
             equity=float(acct.equity),
             cash=float(acct.cash),
@@ -85,7 +116,7 @@ class AlpacaBroker(Broker):
         )
 
     async def positions(self) -> list[Position]:
-        raw = await asyncio.to_thread(self._client.get_all_positions)
+        raw = await _call(self._client.get_all_positions, label="get_all_positions")
         out = []
         for p in raw:
             qty = float(p.qty)
@@ -105,8 +136,10 @@ class AlpacaBroker(Broker):
     async def open_orders(self) -> list[Order]:
         from alpaca.trading.requests import GetOrdersRequest
 
-        raw = await asyncio.to_thread(
-            self._client.get_orders, GetOrdersRequest(status="open", limit=200)
+        raw = await _call(
+            self._client.get_orders,
+            GetOrdersRequest(status="open", limit=200),
+            label="get_orders/open",
         )
         return [self._to_order(o) for o in raw]
 
@@ -161,7 +194,10 @@ class AlpacaBroker(Broker):
             request = MarketOrderRequest(**kwargs)
 
         try:
-            raw = await asyncio.to_thread(self._client.submit_order, request)
+            raw = await _call(self._client.submit_order, request, label=f"submit_order/{req.symbol}")
+        except BrokerTimeoutError:
+            # Propagate: caller must treat as ambiguous order state, not rejected.
+            raise
         except Exception as exc:  # noqa: BLE001
             applog.error("broker.alpaca", f"Order rejected {req.symbol} {req.side} {qty}: {exc}")
             return Order(
@@ -187,10 +223,14 @@ class AlpacaBroker(Broker):
 
         after = datetime.now(UTC) - timedelta(hours=24)
         try:
-            raw = await asyncio.to_thread(
+            raw = await _call(
                 self._client.get_orders,
                 GetOrdersRequest(status="all", after=after, limit=200),
+                label="get_orders/poll_fills",
             )
+        except BrokerTimeoutError:
+            applog.warning("broker.alpaca", "poll_fills skipped: API call timed out")
+            return
         except Exception as exc:  # noqa: BLE001
             applog.warning("broker.alpaca", f"fill poll failed: {exc}")
             return
@@ -230,26 +270,34 @@ class AlpacaBroker(Broker):
 
     async def cancel(self, order_id: str) -> bool:
         try:
-            await asyncio.to_thread(self._client.cancel_order_by_id, order_id)
+            await _call(self._client.cancel_order_by_id, order_id, label=f"cancel/{order_id}")
             return True
+        except BrokerTimeoutError:
+            applog.warning("broker.alpaca", f"cancel {order_id} timed out; state is ambiguous")
+            return False
         except Exception as exc:  # noqa: BLE001
             applog.warning("broker.alpaca", f"cancel {order_id} failed: {exc}")
             return False
 
     async def close_position(self, symbol: str, reason: str = "manual") -> Order | None:
         try:
-            raw = await asyncio.to_thread(self._client.close_position, symbol.upper())
+            raw = await _call(self._client.close_position, symbol.upper(), label=f"close_position/{symbol}")
             self._meta[str(raw.id)] = ("engine", reason)
             applog.trade("broker.alpaca", f"Closing {symbol} ({reason})")
             return self._to_order(raw)
+        except BrokerTimeoutError:
+            applog.warning("broker.alpaca", f"close_position {symbol} timed out; state is ambiguous")
+            return None
         except Exception as exc:  # noqa: BLE001
             applog.warning("broker.alpaca", f"close {symbol} failed: {exc}")
             return None
 
     async def flatten_all(self, reason: str = "flatten") -> list[Order]:
         try:
-            await asyncio.to_thread(self._client.close_all_positions, cancel_orders=True)
+            await _call(self._client.close_all_positions, cancel_orders=True, label="close_all_positions")
             applog.trade("broker.alpaca", f"Flattened all positions ({reason})")
+        except BrokerTimeoutError:
+            applog.error("broker.alpaca", "flatten_all timed out; manual intervention may be required")
         except Exception as exc:  # noqa: BLE001
             applog.error("broker.alpaca", f"flatten failed: {exc}")
         return []
