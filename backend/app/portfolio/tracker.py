@@ -107,13 +107,28 @@ class PortfolioTracker:
 
     @property
     def day_trades_today(self) -> int:  # noqa: D102  (backwards-compat property)
-        """Backwards-compatible property: rolling count as of today.
+        """Backwards-compatible property: count for the current session.
 
         New code should prefer :meth:`day_trades_in_window` with an explicit
-        reference date.  This property exists so legacy callers (stats(),
-        UI serialisation) continue to work without modification.
+        reference date for PDT checks.  This property exists so legacy callers
+        continue to get the intraday session trade count.
         """
-        return self.day_trades_in_window()
+        ref = self.session_date
+        if ref is None:
+            if self._day_trade_dates:
+                ref = self._day_trade_dates[-1]
+            else:
+                from datetime import date
+                ref = date.today()
+        return sum(1 for d in self._day_trade_dates if d == ref)
+
+    @day_trades_today.setter
+    def day_trades_today(self, val: int) -> None:
+        from datetime import date
+        today = self.session_date or date.today()
+        self._day_trade_dates = [d for d in self._day_trade_dates if d != today]
+        for _ in range(val):
+            self._day_trade_dates.append(today)
 
     def roll_session(self, session: date, equity: float) -> RollResult:
         """Advance to a new trading session.
