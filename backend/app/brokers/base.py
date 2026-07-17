@@ -65,6 +65,9 @@ class Broker:
     async def submit(self, req: OrderRequest) -> Order:  # pragma: no cover
         ...
 
+    async def get_order_by_client_id(self, client_order_id: str) -> Order | None:  # pragma: no cover
+        return None
+
     async def poll_fills(self) -> None:  # pragma: no cover
         ...
 

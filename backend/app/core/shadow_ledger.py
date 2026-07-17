@@ -155,6 +155,7 @@ class ShadowLedger:
         vwap_telemetry: dict,
         mode: str = "backtest",
         candidate_id: str | None = None,
+        strategy_params: dict | None = None,
     ) -> dict:
         """Assembles a telemetry record, computes future outcomes, and saves it to the DB."""
         if candidate_id is None:
@@ -228,6 +229,15 @@ class ShadowLedger:
             "slot_rvol": round(slot_rvol_val, 4) if slot_rvol_val is not None else None,
             "outcomes": outcomes,
             "vwap_telemetry": vwap_telemetry,
+            "strategy_params": strategy_params,
+            "replayed": False,
+            "replay_timestamp": None,
+            "simulated_pnl": None,
+            "mfe_pct": None,
+            "mae_pct": None,
+            "exit_reason": None,
+            "tp_hit": None,
+            "sl_hit": None,
         }
 
         # Save to SQLite database if available
@@ -246,3 +256,234 @@ class ShadowLedger:
                 pass
 
         return payload
+
+    @staticmethod
+    def replay_signal_60m(
+        df: pd.DataFrame,
+        entry_idx: int,
+        direction: str,
+        stop_loss: float | None,
+        take_profit: float | None,
+        entry_price: float,
+        strategy_name: str | None = None,
+        strategy_params: dict | None = None,
+    ) -> dict:
+        """Simulate a 60-minute trade path to calculate MFE, MAE, TP/SL triggers, trailing stops, and P&L.
+        Runs strategy-specific exits by instantiating the strategy and calling on_bar.
+        """
+        if entry_idx >= len(df):
+            return {}
+
+        # Set default stop loss if none is provided
+        if stop_loss is None or stop_loss == entry_price:
+            initial_stop = entry_price * (0.985 if direction == "long" else 1.015)
+        else:
+            initial_stop = stop_loss
+
+        # Sanity check stop loss
+        if direction == "long" and initial_stop >= entry_price:
+            initial_stop = entry_price * 0.985
+        elif direction == "short" and initial_stop <= entry_price:
+            initial_stop = entry_price * 1.015
+
+        # Path of the next 60 minutes
+        slice_df = df.iloc[entry_idx : entry_idx + 60]
+        if slice_df.empty:
+            return {}
+
+        # Instantiate strategy if strategy exit logic is needed
+        strategy_instance = None
+        if strategy_name and strategy_params is not None:
+            try:
+                from app.strategies.base import REGISTRY
+                strat_cls = REGISTRY.get(strategy_name)
+                if strat_cls:
+                    strategy_instance = strat_cls(params=strategy_params)
+            except Exception:
+                pass
+
+        # Set up simulated position for strategy.on_bar exits
+        from app.core.domain import Position, SignalAction
+        from app.strategies.base import StrategyContext
+        sim_pos = Position(
+            symbol=str(slice_df.iloc[0].get("symbol", "UNKNOWN")),
+            avg_entry_price=entry_price,
+            qty=100 if direction == "long" else -100,
+            market_price=entry_price,
+            unrealized_pnl=0.0,
+            realized_pnl=0.0,
+            stop_loss=initial_stop,
+            take_profit=take_profit,
+            strategy=strategy_name or "unknown",
+        )
+
+        mfe_price = entry_price
+        mae_price = entry_price
+        mfe_time = None
+        mae_time = None
+        tp_triggered = False
+        sl_triggered = False
+        exit_price = None
+        exit_reason = "time"
+        bars_held = 0
+
+        # Trailing stop peak/trough (same logic as TradingEngine)
+        position_peak = entry_price
+        ts_mult = strategy_params.get("trailing_stop_atr_mult", 0) if strategy_params else 0
+
+        for step, (ts, bar) in enumerate(slice_df.iterrows()):
+            bars_held = step + 1
+            high_val = float(bar["high"])
+            low_val = float(bar["low"])
+            close_val = float(bar["close"])
+
+            # Update trailing stop peaks/troughs
+            if direction == "long":
+                position_peak = max(position_peak, high_val)
+            else:
+                position_peak = min(position_peak, low_val)
+
+            # Track MFE and MAE
+            if direction == "long":
+                if high_val > mfe_price:
+                    mfe_price = high_val
+                    mfe_time = ts.strftime("%H:%M:%S")
+                if low_val < mae_price:
+                    mae_price = low_val
+                    mae_time = ts.strftime("%H:%M:%S")
+            else:
+                if low_val < mfe_price:
+                    mfe_price = low_val
+                    mfe_time = ts.strftime("%H:%M:%S")
+                if high_val > mae_price:
+                    mae_price = high_val
+                    mae_time = ts.strftime("%H:%M:%S")
+
+            # Update simulated position's current market price
+            sim_pos.market_price = close_val
+
+            # Check strategy-specific exit logic via on_bar
+            strategy_exit = False
+            if strategy_instance is not None:
+                try:
+                    sub_df = df.iloc[: entry_idx + step + 1]
+                    from app.core.domain import Regime
+                    regime = Regime.RANGE
+                    if "regime" in bar:
+                        regime = bar["regime"]
+                    
+                    sctx = StrategyContext(
+                        position=sim_pos,
+                        equity=100000.0,
+                        regime=regime,
+                        now=ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts,
+                    )
+                    exit_sig = strategy_instance.on_bar(sctx, sim_pos.symbol, sub_df)
+                    if exit_sig is not None and exit_sig.action == SignalAction.EXIT:
+                        strategy_exit = True
+                except Exception:
+                    pass
+
+            if strategy_exit:
+                exit_price = close_val
+                exit_reason = "strategy_exit"
+                break
+
+            # Check trailing stop trigger (same logic as TradingEngine)
+            trailing_stop_triggered = False
+            if ts_mult > 0:
+                atr = float(bar["atr14"]) if "atr14" in bar and pd.notna(bar["atr14"]) else 0.0
+                if atr > 0:
+                    if direction == "long":
+                        stop_price = position_peak - ts_mult * atr
+                        if close_val <= stop_price:
+                            exit_price = stop_price
+                            exit_reason = "trailing_stop"
+                            trailing_stop_triggered = True
+                    else:
+                        stop_price = position_peak + ts_mult * atr
+                        if close_val >= stop_price:
+                            exit_price = stop_price
+                            exit_reason = "trailing_stop"
+                            trailing_stop_triggered = True
+
+            if trailing_stop_triggered:
+                break
+
+            # Check standard bracket TP and SL triggers
+            sl_hit = False
+            tp_hit = False
+
+            if direction == "long":
+                if low_val <= initial_stop:
+                    sl_hit = True
+                if take_profit is not None and high_val >= take_profit:
+                    tp_hit = True
+            else:
+                if high_val >= initial_stop:
+                    sl_hit = True
+                if take_profit is not None and low_val <= take_profit:
+                    tp_hit = True
+
+            # Resolve triggers (stop-loss wins ties)
+            if sl_hit and tp_hit:
+                sl_triggered = True
+                exit_price = initial_stop
+                exit_reason = "sl"
+                if direction == "long":
+                    mae_price = min(mae_price, initial_stop)
+                else:
+                    mae_price = max(mae_price, initial_stop)
+                break
+            elif sl_hit:
+                sl_triggered = True
+                exit_price = initial_stop
+                exit_reason = "sl"
+                if direction == "long":
+                    mae_price = min(mae_price, initial_stop)
+                else:
+                    mae_price = max(mae_price, initial_stop)
+                break
+            elif tp_hit:
+                tp_triggered = True
+                exit_price = take_profit
+                exit_reason = "tp"
+                if direction == "long":
+                    mfe_price = max(mfe_price, take_profit)
+                else:
+                    mfe_price = min(mfe_price, take_profit)
+                break
+
+        # Fallback if trade did not exit via TP/SL/trailing stop/strategy exit
+        if exit_price is None:
+            exit_price = float(slice_df["close"].iloc[-1])
+            exit_reason = "time"
+
+        # Excursion and returns calculation
+        pnl = (exit_price - entry_price) if direction == "long" else (entry_price - exit_price)
+        pnl_pct = (pnl / entry_price * 100.0) if entry_price > 0 else 0.0
+
+        if direction == "long":
+            mfe = mfe_price - entry_price
+            mae = entry_price - mae_price
+        else:
+            mfe = entry_price - mfe_price
+            mae = mae_price - entry_price
+
+        mfe_pct = (mfe / entry_price * 100.0) if entry_price > 0 else 0.0
+        mae_pct = (mae / entry_price * 100.0) if entry_price > 0 else 0.0
+
+        return {
+            "entry_price": round(entry_price, 4),
+            "exit_price": round(exit_price, 4),
+            "exit_reason": exit_reason,
+            "bars_held": bars_held,
+            "mfe_pct": round(mfe_pct, 4),
+            "mae_pct": round(mae_pct, 4),
+            "mfe_time": mfe_time or slice_df.index[0].strftime("%H:%M:%S"),
+            "mae_time": mae_time or slice_df.index[0].strftime("%H:%M:%S"),
+            "tp_hit": tp_triggered,
+            "sl_hit": sl_triggered,
+            "pnl_pct": round(pnl_pct, 4),
+            "time_to_target_mins": bars_held if (tp_triggered or sl_triggered or exit_reason == "trailing_stop" or exit_reason == "strategy_exit") else None,
+        }

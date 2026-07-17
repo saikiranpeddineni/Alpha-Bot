@@ -75,6 +75,19 @@ class ShadowLedgerRow(Base):
     mode: Mapped[str] = mapped_column(String(10))
     payload: Mapped[str] = mapped_column(Text)
 
+    # New columns for structured replay outcomes and gating
+    replayed: Mapped[bool | None] = mapped_column(nullable=True)
+    replay_timestamp: Mapped[datetime | None] = mapped_column(nullable=True)
+    simulated_pnl: Mapped[float | None] = mapped_column(nullable=True)
+    mfe_pct: Mapped[float | None] = mapped_column(nullable=True)
+    mae_pct: Mapped[float | None] = mapped_column(nullable=True)
+    exit_reason: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    tp_hit: Mapped[bool | None] = mapped_column(nullable=True)
+    sl_hit: Mapped[bool | None] = mapped_column(nullable=True)
+    rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rejection_stage: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    final_decision: Mapped[str | None] = mapped_column(String(20), nullable=True)
+
 
 class FillProgressRow(Base):
     __tablename__ = "broker_fill_progress"
@@ -98,6 +111,38 @@ class Database:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.engine = create_engine(f"sqlite:///{path}", connect_args={"check_same_thread": False})
         Base.metadata.create_all(self.engine)
+
+        # Self-healing migration for shadow_ledger table columns
+        try:
+            with self.engine.connect() as conn:
+                cursor = conn.exec_driver_sql("PRAGMA table_info(shadow_ledger)")
+                existing_cols = {row[1] for row in cursor.fetchall()}
+
+                new_cols = {
+                    "replayed": "BOOLEAN",
+                    "replay_timestamp": "DATETIME",
+                    "simulated_pnl": "FLOAT",
+                    "mfe_pct": "FLOAT",
+                    "mae_pct": "FLOAT",
+                    "exit_reason": "VARCHAR(30)",
+                    "tp_hit": "BOOLEAN",
+                    "sl_hit": "BOOLEAN",
+                    "rejection_reason": "TEXT",
+                    "rejection_stage": "VARCHAR(40)",
+                    "final_decision": "VARCHAR(20)",
+                }
+
+                needs_commit = False
+                for col_name, col_type in new_cols.items():
+                    if col_name not in existing_cols:
+                        conn.exec_driver_sql(f"ALTER TABLE shadow_ledger ADD COLUMN {col_name} {col_type}")
+                        needs_commit = True
+                if needs_commit:
+                    conn.commit()
+        except Exception as exc:
+            # Avoid cyclical import for applog at early initialization
+            print(f"[Database Migration Warning] Failed to run self-healing migration: {exc}")
+
         _ACTIVE_DATABASE = self
 
     @staticmethod
@@ -265,6 +310,13 @@ class Database:
 
     def save_shadow_signal(self, candidate_id: str, ts: datetime, symbol: str, strategy: str, direction: str, mode: str, payload: dict) -> None:
         with self._session() as s:
+            replay_ts = None
+            if payload.get("replay_timestamp"):
+                try:
+                    replay_ts = datetime.fromisoformat(payload["replay_timestamp"])
+                except Exception:
+                    pass
+
             s.merge(
                 ShadowLedgerRow(
                     id=candidate_id,
@@ -274,6 +326,17 @@ class Database:
                     direction=direction,
                     mode=mode,
                     payload=json.dumps(payload, default=str),
+                    replayed=payload.get("replayed"),
+                    replay_timestamp=replay_ts,
+                    simulated_pnl=payload.get("simulated_pnl"),
+                    mfe_pct=payload.get("mfe_pct"),
+                    mae_pct=payload.get("mae_pct"),
+                    exit_reason=payload.get("exit_reason"),
+                    tp_hit=payload.get("tp_hit"),
+                    sl_hit=payload.get("sl_hit"),
+                    rejection_reason=payload.get("rejection_reason"),
+                    rejection_stage=payload.get("rejection_stage"),
+                    final_decision=payload.get("final_decision"),
                 )
             )
             s.commit()
@@ -283,7 +346,48 @@ class Database:
             stmt = select(ShadowLedgerRow).order_by(ShadowLedgerRow.ts.desc()).limit(limit)
             if mode:
                 stmt = stmt.where(ShadowLedgerRow.mode == mode)
-            return [json.loads(r.payload) for r in s.scalars(stmt)]
+
+            results = []
+            for r in s.scalars(stmt):
+                try:
+                    data = json.loads(r.payload)
+                    data["replayed"] = r.replayed
+                    data["replay_timestamp"] = r.replay_timestamp.isoformat() if r.replay_timestamp else None
+                    data["simulated_pnl"] = r.simulated_pnl
+                    data["mfe_pct"] = r.mfe_pct
+                    data["mae_pct"] = r.mae_pct
+                    data["exit_reason"] = r.exit_reason
+                    data["tp_hit"] = r.tp_hit
+                    data["sl_hit"] = r.sl_hit
+                    data["rejection_reason"] = r.rejection_reason
+                    data["rejection_stage"] = r.rejection_stage
+                    data["final_decision"] = r.final_decision
+                    results.append(data)
+                except Exception:
+                    pass
+            return results
+
+    def get_shadow_signal(self, candidate_id: str) -> dict | None:
+        with self._session() as s:
+            row = s.get(ShadowLedgerRow, candidate_id)
+            if row is None:
+                return None
+            try:
+                data = json.loads(row.payload)
+                data["replayed"] = row.replayed
+                data["replay_timestamp"] = row.replay_timestamp.isoformat() if row.replay_timestamp else None
+                data["simulated_pnl"] = row.simulated_pnl
+                data["mfe_pct"] = row.mfe_pct
+                data["mae_pct"] = row.mae_pct
+                data["exit_reason"] = row.exit_reason
+                data["tp_hit"] = row.tp_hit
+                data["sl_hit"] = row.sl_hit
+                data["rejection_reason"] = row.rejection_reason
+                data["rejection_stage"] = row.rejection_stage
+                data["final_decision"] = row.final_decision
+                return data
+            except Exception:
+                return None
 
     def close(self) -> None:
         global _ACTIVE_DATABASE

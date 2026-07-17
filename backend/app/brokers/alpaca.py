@@ -233,23 +233,75 @@ class AlpacaBroker(Broker):
             # Propagate: caller must treat as ambiguous order state, not rejected.
             raise
         except Exception as exc:  # noqa: BLE001
-            applog.error("broker.alpaca", f"Order rejected {req.symbol} {req.side} {qty}: {exc}")
-            return Order(
-                client_order_id=req.client_order_id,
-                symbol=req.symbol.upper(),
-                side=req.side,
-                qty=qty,
-                order_type=req.order_type,
-                limit_price=req.limit_price,
-                status=OrderStatus.REJECTED,
-                strategy=req.strategy,
-                reason=f"{req.reason} | rejected: {exc}",
-            )
+            if self._is_definitive_rejection(exc):
+                applog.error("broker.alpaca", f"Order rejected {req.symbol} {req.side} {qty}: {exc}")
+                return Order(
+                    client_order_id=req.client_order_id,
+                    symbol=req.symbol.upper(),
+                    side=req.side,
+                    qty=qty,
+                    order_type=req.order_type,
+                    limit_price=req.limit_price,
+                    status=OrderStatus.REJECTED,
+                    strategy=req.strategy,
+                    reason=f"{req.reason} | rejected: {exc}",
+                )
+            else:
+                msg = f"Ambiguous submission result for {req.symbol} ({req.client_order_id}): {exc}"
+                applog.error("broker.alpaca", msg)
+                raise BrokerTimeoutError(msg) from exc
         self._meta[str(raw.id)] = (req.strategy, req.reason)
         self._symbol_strategies[req.symbol.upper()] = req.strategy
         order = self._to_order(raw)
         applog.trade("broker.alpaca", f"Submitted {req.side.upper()} {qty} {req.symbol} ({req.strategy})")
         return order
+
+    def _is_definitive_rejection(self, exc: Exception) -> bool:
+        import asyncio
+        try:
+            import requests
+            if isinstance(exc, (requests.exceptions.RequestException, ConnectionError, TimeoutError, asyncio.TimeoutError)):
+                return False
+        except ImportError:
+            if isinstance(exc, (ConnectionError, TimeoutError, asyncio.TimeoutError)):
+                return False
+
+        try:
+            from alpaca.common.exceptions import APIError
+            if isinstance(exc, APIError):
+                status_code = getattr(exc, "status_code", None)
+                if status_code is not None:
+                    # 4xx are client/business rejections, 5xx are server/transport issues
+                    return 400 <= status_code < 500
+                return True
+        except ImportError:
+            pass
+
+        # If it's a timeout/connection description, treat as transport failure
+        err_str = str(exc).lower()
+        if "timeout" in err_str or "connect" in err_str or "connection" in err_str:
+            return False
+
+        return True
+
+    async def get_order_by_client_id(self, client_order_id: str) -> Order | None:
+        try:
+            raw = await _call(
+                self._client.get_order_by_client_id,
+                client_order_id,
+                label=f"get_order_by_client_id/{client_order_id}"
+            )
+            return self._to_order(raw)
+        except BrokerTimeoutError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            from alpaca.common.exceptions import APIError
+            if isinstance(exc, APIError) and getattr(exc, "status_code", None) == 404:
+                return None
+            err_str = str(exc).lower()
+            if "not found" in err_str or "404" in err_str:
+                return None
+            raise BrokerTimeoutError(f"Ambiguous query result for client ID {client_order_id}: {exc}") from exc
 
     async def poll_fills(self) -> None:
         """Surface every cumulative execution watermark not durably processed yet."""

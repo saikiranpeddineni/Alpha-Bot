@@ -39,6 +39,7 @@ from app.core.domain import (
     OrderRequest,
     OrderSide,
     OrderStatus,
+    OrderType,
     Regime,
     SignalAction,
     utcnow,
@@ -133,6 +134,7 @@ class TradingEngine:
         self.perf_tracker = StrategyPerformanceTracker()
         self.portfolio_gate = None
         self.portfolio_allocator = None
+        self.pending_reconciliation_orders: dict[str, dict] = db.get_setting("pending_reconciliation_orders") or {}
 
     # ------------------------------------------------------------------
     # kill-switch persistence helpers
@@ -527,6 +529,11 @@ class TradingEngine:
         self._tick_count += 1
         now = utcnow()
 
+        try:
+            await self._reconcile_pending_submissions()
+        except Exception as exc:
+            applog.error("engine", f"Failed to reconcile pending submissions: {exc}")
+
         # Run pre-market scanner (9:00 AM ET onwards) once per day
         # Run post-market trainer (>= 16:15 ET) once per day
         # Run event monitor every 5 minutes during active trading session (9:30 AM to 4:00 PM ET)
@@ -677,15 +684,18 @@ class TradingEngine:
                 for sig, reason in decision_outcome.gated_entries:
                     applog.info("engine", f"{sig.symbol}: Portfolio Gate/Allocator rejected -- {reason}")
                     self.publish("insight", self.insights.on_signal(sig, gated=True, gate_reason=reason).model_dump(mode="json"))
+                    if getattr(sig, "candidate_id", None) is not None:
+                        self._update_shadow_decision(sig.candidate_id, "rejected", reason, "portfolio_gate")
 
-                # Size and submit approved entries
-                if decision_outcome.approved_entries:
+                # Size and submit ap                if decision_outcome.approved_entries:
                     open_orders = await self.broker.open_orders()
                     pending_entries = [
                         o.symbol.upper() for o in open_orders
                         if is_entry_order(o, positions)
                     ]
                     effective_pending_entries = set(pending_entries)
+                    for info in self.pending_reconciliation_orders.values():
+                        effective_pending_entries.add(info["symbol"].upper())
                     reservations = SameCycleEntryReservations.from_snapshot(account.cash, positions)
 
                     for sig, kelly_val in decision_outcome.approved_entries:
@@ -706,13 +716,47 @@ class TradingEngine:
                         if not decision.approved:
                             applog.info("engine", f"{sig.symbol.upper()}: entry rejected by RiskManager — {decision.reason}")
                             self.publish("insight", self.insights.on_signal(sig, gated=True, gate_reason=decision.reason).model_dump(mode="json"))
+                            if getattr(sig, "candidate_id", None) is not None:
+                                self._update_shadow_decision(sig.candidate_id, "rejected", decision.reason, "risk_gate")
                             continue
-                        order = await self.broker.submit(decision.order)
-                        self.recent_orders.appendleft(order)
-                        self.db.save_order(order, self.mode)
-                        self.publish("insight", self.insights.on_signal(sig, gated=False).model_dump(mode="json"))
-                        self.publish("orders", self.orders_payload())
-                        
+
+                        client_order_id = decision.order.client_order_id
+                        self.pending_reconciliation_orders[client_order_id] = {
+                            "symbol": decision.order.symbol.upper(),
+                            "client_order_id": client_order_id,
+                            "side": str(decision.order.side),
+                            "qty": decision.order.qty,
+                            "order_type": str(decision.order.order_type),
+                            "limit_price": decision.order.limit_price,
+                            "submitted_at": utcnow().isoformat(),
+                        }
+                        self.db.set_setting("pending_reconciliation_orders", self.pending_reconciliation_orders)
+
+                        try:
+                            order = await self.broker.submit(decision.order)
+                            self.pending_reconciliation_orders.pop(client_order_id, None)
+                            self.db.set_setting("pending_reconciliation_orders", self.pending_reconciliation_orders)
+                            self.recent_orders.appendleft(order)
+                            self.db.save_order(order, self.mode)
+                            self.publish("insight", self.insights.on_signal(sig, gated=False).model_dump(mode="json"))
+                            self.publish("orders", self.orders_payload())
+                            if getattr(sig, "candidate_id", None) is not None:
+                                self._update_shadow_decision(sig.candidate_id, "accepted", "", "none")
+                        except Exception as exc:
+                            applog.error("engine", f"Ambiguous submission exception for {decision.order.symbol} ({client_order_id}): {exc}")
+                            order = Order(
+                                id=client_order_id,
+                                client_order_id=client_order_id,
+                                symbol=decision.order.symbol,
+                                side=decision.order.side,
+                                qty=decision.order.qty,
+                                order_type=decision.order.order_type,
+                                limit_price=decision.order.limit_price,
+                                status=OrderStatus.PENDING,
+                                reason=f"Ambiguous submit: {exc}"
+                            )
+                            self.db.save_order(order, self.mode)
+
                         # Reserve active same-cycle submissions before evaluating the next candidate.
                         # This overlays the stale broker snapshot for cash, position-count, and sector checks.
                         reference_price = sig.price or float(df["close"].iloc[-1])
@@ -720,6 +764,13 @@ class TradingEngine:
                             effective_pending_entries.add(sig.symbol.upper())
 
             await self._drain_fills(now)
+
+        # 5.5 Periodic background replay of pending shadow signals
+        if self._tick_count % 10 == 0:
+            try:
+                await self._replay_pending_signals(now)
+            except Exception as e:
+                applog.error("engine", f"Background replay error: {e}")
 
         # 6. mark equity + persist
         account = await self.broker.account() if new_closed else account
@@ -807,6 +858,7 @@ class TradingEngine:
                 applog.error("engine", f"strategy {strat.name} failed on {symbol}: {exc}")
                 continue
             if sig is not None:
+                sig.strategy_params = getattr(strat, "params", {})
                 signals.append(sig)
         if not signals:
             return []
@@ -825,11 +877,12 @@ class TradingEngine:
         accepted, rejected = self.pipeline.process(symbol, df, signals, regime, sector_strength=rs_score)
         
         # Save signals to shadow ledger
+        import uuid
         for sig in signals:
             if sig.action == SignalAction.EXIT:
                 continue
             is_accepted = sig in accepted
-            final_decision = "accepted" if is_accepted else "rejected"
+            final_decision = "pipeline_approved" if is_accepted else "rejected"
             rejection_stage = "none"
             rejection_reason = ""
             if not is_accepted:
@@ -846,6 +899,10 @@ class TradingEngine:
                     rejection_stage = "conflict_resolution"
                 else:
                     rejection_stage = "other"
+
+            if getattr(sig, "candidate_id", None) is None:
+                prefix = f"{symbol}_{sig.strategy}_{now.strftime('%Y%m%d_%H%M%S')}"
+                sig.candidate_id = f"{prefix}_{uuid.uuid4().hex[:6]}".upper()
 
             try:
                 slot_engine = SlotVolumeEngine(df, lookback_sessions=20, min_observations=5)
@@ -876,6 +933,8 @@ class TradingEngine:
                 slot_rvol_val=slot_rvol_val,
                 vwap_telemetry=vwap_tel,
                 mode=self.mode,
+                candidate_id=sig.candidate_id,
+                strategy_params=getattr(sig, "strategy_params", {}),
             )
 
         for sig, reason in rejected:
@@ -1087,6 +1146,197 @@ class TradingEngine:
             "tick": self._tick_count,
             "last_error": self.last_error,
         }
+
+    async def _reconcile_pending_submissions(self) -> None:
+        """Query the broker for ambiguous order submissions and resolve their status."""
+        if not self.pending_reconciliation_orders:
+            return
+
+        client_ids = list(self.pending_reconciliation_orders.keys())
+        applog.info("engine", f"Checking status of {len(client_ids)} ambiguous order submissions: {client_ids}")
+
+        for cid in client_ids:
+            order_info = self.pending_reconciliation_orders[cid]
+            symbol = order_info["symbol"]
+            try:
+                order = await self.broker.get_order_by_client_id(cid)
+                if order is not None:
+                    applog.info("engine", f"Ambiguous order resolved: {symbol} ({cid}) is active/filled at broker.")
+                    self.pending_reconciliation_orders.pop(cid, None)
+                    self.db.set_setting("pending_reconciliation_orders", self.pending_reconciliation_orders)
+                    self.db.save_order(order, self.mode)
+                else:
+                    applog.info("engine", f"Ambiguous order resolved: {symbol} ({cid}) was NEVER received by broker. Treating as REJECTED.")
+                    self.pending_reconciliation_orders.pop(cid, None)
+                    self.db.set_setting("pending_reconciliation_orders", self.pending_reconciliation_orders)
+                    rejected_order = Order(
+                        id=cid,
+                        client_order_id=cid,
+                        symbol=symbol,
+                        side=OrderSide.BUY if order_info["side"].lower() == "buy" else OrderSide.SELL,
+                        qty=order_info["qty"],
+                        order_type=OrderType.LIMIT if order_info["order_type"].lower() == "limit" else OrderType.MARKET,
+                        limit_price=order_info["limit_price"],
+                        status=OrderStatus.REJECTED,
+                        reason="Ambiguous submit resolved to not found at broker."
+                    )
+                    self.db.save_order(rejected_order, self.mode)
+            except Exception as exc:
+                applog.warning("engine", f"Reconciliation query failed for client ID {cid}: {exc}. Retaining guard.")
+
+    def _update_shadow_decision(self, candidate_id: str, final_decision: str, rejection_reason: str, rejection_stage: str) -> None:
+        """Update a candidate signal's gating decision in the database."""
+        if not self.db:
+            return
+        try:
+            payload = self.db.get_shadow_signal(candidate_id)
+            if payload:
+                payload["final_decision"] = final_decision
+                payload["rejection_reason"] = rejection_reason
+                payload["rejection_stage"] = rejection_stage
+                
+                ts = datetime.fromisoformat(payload["timestamp"])
+                symbol = payload["symbol"]
+                strategy = payload["strategy"]
+                direction = payload["direction"]
+                
+                self.db.save_shadow_signal(
+                    candidate_id=candidate_id,
+                    ts=ts,
+                    symbol=symbol,
+                    strategy=strategy,
+                    direction=direction,
+                    mode=self.mode,
+                    payload=payload,
+                )
+        except Exception as exc:
+            applog.error("engine", f"Failed to update shadow signal decision {candidate_id}: {exc}")
+
+    async def _replay_pending_signals(self, now: datetime) -> None:
+        """Scan SQLite database for pending rejected signals, replay them, and update records."""
+        if not self.db or not self.data:
+            return
+
+        import numpy as np
+        try:
+            signals = self.db.get_shadow_signals(mode=self.mode, limit=300)
+            pending = []
+            for s in signals:
+                if s.get("final_decision") == "rejected" and not s.get("replayed"):
+                    try:
+                        ts = datetime.fromisoformat(s["timestamp"])
+                        if now - ts >= timedelta(minutes=60) and ts >= now - timedelta(days=7):
+                            if s.get("replay_attempts", 0) < 5:
+                                pending.append(s)
+                    except Exception:
+                        pass
+
+            if not pending:
+                return
+
+            pending.sort(
+                key=lambda x: (
+                    x.get("timestamp", ""),
+                    x.get("ml_confidence") or 0.0,
+                    x.get("score") or 0.0
+                ),
+                reverse=True
+            )
+
+            batch = pending[:5]
+            applog.info("engine", f"Found {len(pending)} pending signals for replay. Executing batch of {len(batch)}.")
+
+            for s in batch:
+                candidate_id = s["candidate_id"]
+                symbol = s["symbol"]
+                ts = datetime.fromisoformat(s["timestamp"])
+                direction = s["direction"]
+                stop_loss = s.get("stop_loss")
+                take_profit = s.get("take_profit")
+                entry_price = s.get("entry_price") or s.get("signal_price")
+                strategy_name = s.get("strategy")
+                strategy_params = s.get("strategy_params")
+
+                s["replay_attempts"] = s.get("replay_attempts", 0) + 1
+
+                start_time = ts - timedelta(minutes=15)
+                end_time = ts + timedelta(minutes=90)
+                
+                applog.info("engine", f"Replaying signal {candidate_id} ({symbol} {direction}) at {ts.isoformat()}...")
+                
+                try:
+                    df = await self.data.history(symbol, "1Min", start=start_time, end=end_time)
+                except Exception as df_exc:
+                    applog.warning("engine", f"Failed to fetch history for replay of {candidate_id}: {df_exc}")
+                    self.db.save_shadow_signal(candidate_id, ts, symbol, strategy_name, direction, self.mode, s)
+                    continue
+
+                if df.empty:
+                    applog.warning("engine", f"History empty for replay of {candidate_id}. Skipping.")
+                    self.db.save_shadow_signal(candidate_id, ts, symbol, strategy_name, direction, self.mode, s)
+                    continue
+
+                ts_pd = pd.Timestamp(ts).tz_convert("UTC")
+                i = -1
+                if ts_pd in df.index:
+                    i = df.index.get_loc(ts_pd)
+                else:
+                    diffs = np.abs(df.index - ts_pd)
+                    min_diff_idx = diffs.argmin()
+                    if diffs[min_diff_idx] <= pd.Timedelta(minutes=2):
+                        i = min_diff_idx
+
+                if i == -1 or i + 1 >= len(df):
+                    applog.warning("engine", f"Cannot locate entry bar index for replay of {candidate_id} (i={i}). Skipping.")
+                    self.db.save_shadow_signal(candidate_id, ts, symbol, strategy_name, direction, self.mode, s)
+                    continue
+
+                replay_res = ShadowLedger.replay_signal_60m(
+                    df=df,
+                    entry_idx=i + 1,
+                    direction=direction,
+                    stop_loss=stop_loss,
+                    take_profit=take_profit,
+                    entry_price=entry_price,
+                    strategy_name=strategy_name,
+                    strategy_params=strategy_params,
+                )
+
+                if not replay_res:
+                    applog.warning("engine", f"Replay simulation returned empty result for {candidate_id}.")
+                    self.db.save_shadow_signal(candidate_id, ts, symbol, strategy_name, direction, self.mode, s)
+                    continue
+
+                s["replayed"] = True
+                s["replay_timestamp"] = utcnow().isoformat()
+                s["simulated_pnl"] = replay_res["pnl_pct"]
+                s["mfe_pct"] = replay_res["mfe_pct"]
+                s["mae_pct"] = replay_res["mae_pct"]
+                s["exit_reason"] = replay_res["exit_reason"]
+                s["tp_hit"] = replay_res["tp_hit"]
+                s["sl_hit"] = replay_res["sl_hit"]
+                s["replay_60m"] = replay_res
+
+                if not s.get("outcomes") or not s["outcomes"]:
+                    try:
+                        s["outcomes"] = ShadowLedger.calculate_forward_outcomes(
+                            df, i, direction, stop_loss, replay_res["entry_price"]
+                        )
+                    except Exception:
+                        pass
+
+                self.db.save_shadow_signal(
+                    candidate_id=candidate_id,
+                    ts=ts,
+                    symbol=symbol,
+                    strategy=strategy_name,
+                    direction=direction,
+                    mode=self.mode,
+                    payload=s,
+                )
+                applog.info("engine", f"Replay successful for {candidate_id}: P&L={replay_res['pnl_pct']}% via {replay_res['exit_reason']}")
+        except Exception as exc:
+            applog.error("engine", f"Failed in _replay_pending_signals loop: {exc}")
 
     # ------------------------------------------------------------------
     # manual operations (REST)

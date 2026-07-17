@@ -450,3 +450,134 @@ async def run_scanner(request: Request) -> dict:
         return {"status": "success", "watchlist": new_watchlist}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/shadow-ledger")
+async def get_shadow_ledger(request: Request, limit: int = 200) -> list[dict]:
+    engine = _engine(request)
+    return _db(request).get_shadow_signals(mode=engine.mode, limit=limit)
+
+
+@router.get("/shadow-ledger/analytics")
+async def get_shadow_ledger_analytics(request: Request) -> dict:
+    engine = _engine(request)
+    signals = _db(request).get_shadow_signals(mode=engine.mode, limit=5000)
+    
+    total_signals = len(signals)
+    rejected_signals = [s for s in signals if s.get("final_decision") == "rejected"]
+    accepted_signals = [s for s in signals if s.get("final_decision") == "accepted"]
+    replayed_signals = [s for s in signals if s.get("replayed")]
+    
+    winning_replayed = [s for s in replayed_signals if s.get("simulated_pnl", 0) > 0]
+    
+    total_replayed = len(replayed_signals)
+    win_rate = (len(winning_replayed) / total_replayed * 100.0) if total_replayed > 0 else 0.0
+    
+    avg_pnl = (sum(s.get("simulated_pnl", 0) for s in replayed_signals) / total_replayed) if total_replayed > 0 else 0.0
+    avg_mfe = (sum(s.get("mfe_pct", 0) for s in replayed_signals) / total_replayed) if total_replayed > 0 else 0.0
+    avg_mae = (sum(s.get("mae_pct", 0) for s in replayed_signals) / total_replayed) if total_replayed > 0 else 0.0
+    
+    by_strategy = {}
+    for s in signals:
+        strat = s.get("strategy", "unknown")
+        if strat not in by_strategy:
+            by_strategy[strat] = {
+                "total": 0,
+                "rejected": 0,
+                "accepted": 0,
+                "replayed": 0,
+                "wins": 0,
+                "losses": 0,
+                "total_pnl": 0.0,
+                "total_mfe": 0.0,
+                "total_mae": 0.0,
+            }
+        
+        stat = by_strategy[strat]
+        stat["total"] += 1
+        dec = s.get("final_decision")
+        if dec == "rejected":
+            stat["rejected"] += 1
+        elif dec == "accepted":
+            stat["accepted"] += 1
+            
+        if s.get("replayed"):
+            stat["replayed"] += 1
+            pnl = s.get("simulated_pnl", 0.0)
+            stat["total_pnl"] += pnl
+            stat["total_mfe"] += s.get("mfe_pct", 0.0)
+            stat["total_mae"] += s.get("mae_pct", 0.0)
+            if pnl > 0:
+                stat["wins"] += 1
+            else:
+                stat["losses"] += 1
+
+    strategy_breakdown = {}
+    for strat, data in by_strategy.items():
+        rep = data["replayed"]
+        strategy_breakdown[strat] = {
+            "total_signals": data["total"],
+            "rejected_signals": data["rejected"],
+            "accepted_signals": data["accepted"],
+            "replayed_signals": rep,
+            "win_rate": round(data["wins"] / rep * 100.0, 2) if rep > 0 else 0.0,
+            "avg_simulated_return": round(data["total_pnl"] / rep, 4) if rep > 0 else 0.0,
+            "avg_mfe": round(data["total_mfe"] / rep, 4) if rep > 0 else 0.0,
+            "avg_mae": round(data["total_mae"] / rep, 4) if rep > 0 else 0.0,
+        }
+
+    by_rejection = {}
+    for s in signals:
+        if s.get("final_decision") != "rejected":
+            continue
+        stage = s.get("rejection_stage") or "unknown"
+        if stage not in by_rejection:
+            by_rejection[stage] = {
+                "count": 0,
+                "replayed": 0,
+                "wins": 0,
+                "losses": 0,
+                "total_pnl": 0.0,
+                "total_mfe": 0.0,
+                "total_mae": 0.0,
+            }
+        
+        stat = by_rejection[stage]
+        stat["count"] += 1
+        if s.get("replayed"):
+            stat["replayed"] += 1
+            pnl = s.get("simulated_pnl", 0.0)
+            stat["total_pnl"] += pnl
+            stat["total_mfe"] += s.get("mfe_pct", 0.0)
+            stat["total_mae"] += s.get("mae_pct", 0.0)
+            if pnl > 0:
+                stat["wins"] += 1
+            else:
+                stat["losses"] += 1
+
+    rejection_breakdown = {}
+    for stage, data in by_rejection.items():
+        rep = data["replayed"]
+        rejection_breakdown[stage] = {
+            "count": data["count"],
+            "replayed_count": rep,
+            "win_rate": round(data["wins"] / rep * 100.0, 2) if rep > 0 else 0.0,
+            "avg_simulated_return_if_traded": round(data["total_pnl"] / rep, 4) if rep > 0 else 0.0,
+            "avg_mfe": round(data["total_mfe"] / rep, 4) if rep > 0 else 0.0,
+            "avg_mae": round(data["total_mae"] / rep, 4) if rep > 0 else 0.0,
+        }
+
+    return {
+        "summary": {
+            "total_signals": total_signals,
+            "rejected_signals": len(rejected_signals),
+            "accepted_signals": len(accepted_signals),
+            "replayed_signals": total_replayed,
+            "win_rate_pct": round(win_rate, 2),
+            "avg_simulated_return_pct": round(avg_pnl, 4),
+            "avg_mfe_pct": round(avg_mfe, 4),
+            "avg_mae_pct": round(avg_mae, 4),
+        },
+        "by_strategy": strategy_breakdown,
+        "by_rejection_stage": rejection_breakdown,
+    }
