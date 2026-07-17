@@ -33,7 +33,7 @@ from app.core.domain import (
 from app.core.logging import applog
 
 PDT_EQUITY_MIN = 25_000.0
-PDT_MAX_DAY_TRADES = 3  # in 5 business days; we conservatively apply per-day count
+PDT_MAX_DAY_TRADES = 3  # allowed day trades in any rolling 5-business-day window
 
 
 def is_entry_order(order: Order, positions: list[Position]) -> bool:
@@ -64,6 +64,9 @@ class AccountContext:
     session_start_equity: float
     peak_equity: float
     day_trades_today: int
+    # Rolling 5-calendar-day day-trade count for PDT guard (does not reset on
+    # session roll — supplied by PortfolioTracker.rolling_day_trade_count()).
+    rolling_day_trades: int
     is_paper: bool
     pending_entry_symbols: list[str] = field(default_factory=list)
 
@@ -246,10 +249,12 @@ class RiskManager:
         if avg_dollar_vol < cfg.min_avg_dollar_volume:
             return RiskDecision(False, f"illiquid: avg ${avg_dollar_vol:,.0f}/min below minimum")
 
-        # PDT protection: block only for small LIVE accounts; warn on paper
-        if ctx.day_trades_today >= PDT_MAX_DAY_TRADES and ctx.equity < PDT_EQUITY_MIN:
+        # PDT protection: block only for small LIVE accounts; warn on paper.
+        # Use the rolling 5-calendar-day count so session rollover does not
+        # restore consumed PDT capacity.
+        if ctx.rolling_day_trades >= PDT_MAX_DAY_TRADES and ctx.equity < PDT_EQUITY_MIN:
             if not ctx.is_paper:
-                return RiskDecision(False, "PDT guard: 3 day trades used and equity < $25k (live)")
+                return RiskDecision(False, "PDT guard: 3 day trades used in rolling window and equity < $25k (live)")
             if not self._pdt_warned:
                 self._pdt_warned = True
                 applog.warning(
