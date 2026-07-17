@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import os
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 
 from app.brokers.base import Broker, BrokerTimeoutError, Fill
 from app.core.domain import (
@@ -28,6 +29,9 @@ from app.core.domain import (
     Position,
 )
 from app.core.logging import applog
+
+if TYPE_CHECKING:
+    from app.config import Settings
 
 # Wall-clock budget for every Alpaca HTTP call. Tune via env var if needed.
 _API_TIMEOUT: float = float(os.environ.get("ALPACA_API_TIMEOUT_SECONDS", "10"))
@@ -66,7 +70,10 @@ async def _call(fn, *args, timeout: float = _API_TIMEOUT, label: str = ""):
 class AlpacaBroker(Broker):
     name = "alpaca"
 
-    def __init__(self, api_key: str, api_secret: str, paper: bool = True) -> None:
+    def __init__(self, settings: Settings) -> None:  # fix(#42): accept Settings object
+        api_key = settings.alpaca_api_key
+        api_secret = settings.alpaca_api_secret
+        paper = settings.alpaca_paper
         if not (api_key and api_secret):
             raise RuntimeError("Alpaca broker requires ALPACA_API_KEY and ALPACA_API_SECRET")
         try:
@@ -82,6 +89,15 @@ class AlpacaBroker(Broker):
         self._symbol_strategies: dict[str, str] = {}
 
     async def connect(self) -> None:
+        """Establish broker connection and bootstrap fill watermark.
+
+        fix(#46): BrokerTimeoutError is always re-raised — an ambiguous
+        broker state at connect time must not be silently swallowed.
+        Other bootstrap exceptions are logged as ERROR for visibility but
+        are treated as non-fatal: fill-ID pre-population is a best-effort
+        optimisation and the engine can start without it. The durable fill
+        cursor (issue #47) is the full solution for post-outage recovery.
+        """
         acct = await _call(self._client.get_account, label="get_account")
         applog.info(
             "broker.alpaca",
@@ -102,10 +118,29 @@ class AlpacaBroker(Broker):
                     self._processed_fill_qty[oid] = filled_qty
                 if str(o.status).split(".")[-1].lower() == "filled":
                     self._emitted_fill_ids.add(oid)
+            applog.info(
+                "broker.alpaca",
+                f"Bootstrap complete: watermarked {len(self._processed_fill_qty)} prior fill(s) from last 24 h",
+            )
         except BrokerTimeoutError:
+            # fix(#46): ambiguous broker state — always propagate, never swallow.
+            applog.error(
+                "broker.alpaca",
+                "Bootstrap FAILED: Alpaca API timed out during fill history pre-population. "
+                "Engine start aborted to avoid operating with an un-bootstrapped fill watermark.",
+            )
             raise
         except Exception as exc:
-            applog.warning("broker.alpaca", f"failed to pre-populate emitted fill IDs: {exc}")
+            # Non-timeout bootstrap failure: log prominently but allow start.
+            # The engine will start with an empty fill watermark and rely on
+            # poll_fills() to catch up on any recent fills in its 24-h window.
+            # This is non-ideal but safer than blocking all restarts on transient
+            # API errors. Issue #47 (durable fill cursor) is the robust fix.
+            applog.error(
+                "broker.alpaca",
+                f"Bootstrap WARNING: fill history pre-population failed ({exc}). "
+                "Starting with empty fill watermark — poll_fills() will recover recent fills.",
+            )
 
     async def account(self) -> AccountSnapshot:
         acct = await _call(self._client.get_account, label="get_account")
@@ -116,6 +151,14 @@ class AlpacaBroker(Broker):
         )
 
     async def positions(self) -> list[Position]:
+        """Return authoritative broker positions.
+
+        fix(#42): Positions are ALWAYS derived from the live Alpaca API
+        (get_all_positions). DB checkpoints are strictly internal accounting
+        state and must never override broker-authoritative qty, side, or
+        symbol membership. This prevents ghost lots, hidden real exposure,
+        stale qty, and direction inversions after restarts.
+        """
         raw = await _call(self._client.get_all_positions, label="get_all_positions")
         out = []
         for p in raw:
@@ -278,6 +321,19 @@ class AlpacaBroker(Broker):
         except Exception as exc:  # noqa: BLE001
             applog.warning("broker.alpaca", f"cancel {order_id} failed: {exc}")
             return False
+
+    async def cancel_all(self) -> None:
+        """Cancel all open orders. Used by emergency flatten and EOD liquidation."""
+        try:
+            await _call(
+                self._client.cancel_orders,
+                label="cancel_all_orders",
+            )
+            applog.info("broker.alpaca", "cancel_all: all open orders cancelled")
+        except BrokerTimeoutError:
+            applog.error("broker.alpaca", "cancel_all timed out; state is ambiguous")
+        except Exception as exc:  # noqa: BLE001
+            applog.warning("broker.alpaca", f"cancel_all failed: {exc}")
 
     async def close_position(self, symbol: str, reason: str = "manual") -> Order | None:
         try:
