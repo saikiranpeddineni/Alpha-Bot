@@ -90,7 +90,11 @@ def make_broker(broker_name: str, settings: Settings) -> Broker:
     name = broker_name.lower().strip()
     if name == "alpaca":
         from app.brokers.alpaca import AlpacaBroker
-        return AlpacaBroker(settings)
+        return AlpacaBroker(
+            api_key=settings.alpaca_api_key,
+            api_secret=settings.alpaca_api_secret,
+            paper=settings.alpaca_paper,
+        )
     if name in ("paper_sim", "paper", "demo"):
         from app.brokers.paper import PaperBroker
         return PaperBroker(settings)
