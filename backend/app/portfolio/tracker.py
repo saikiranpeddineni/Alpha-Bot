@@ -9,16 +9,12 @@ Alpaca, and the backtester.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from typing import NamedTuple
 
 from app.brokers.base import Fill
 from app.core.domain import OrderSide, TradeRecord
 from app.core.logging import applog
-
-# Rolling window used for PDT capacity accounting (calendar days; conservative
-# upper bound that always covers any 5-business-day stretch).
-_PDT_ROLLING_CALENDAR_DAYS = 5
 
 
 class RollResult(NamedTuple):
@@ -37,6 +33,29 @@ class RollResult(NamedTuple):
 
     def __bool__(self) -> bool:  # noqa: D105
         return self.rolled
+
+
+# ---------------------------------------------------------------------------
+# PDT rolling-window helpers
+# ---------------------------------------------------------------------------
+_PDT_WINDOW_BUSINESS_DAYS = 5
+
+
+def _business_days_ago(reference: date, n: int) -> date:
+    """Return the date that is *n* business days (Mon-Fri) before *reference*.
+
+    This is a simple calendar walk; it does not account for market holidays
+    because the SEC PDT rule counts calendar business days, not exchange
+    trading days.  Using exchange-holiday awareness here would be over-
+    engineering and potentially unsafe (wrong direction).
+    """
+    remaining = n
+    cursor = reference
+    while remaining > 0:
+        cursor = date.fromordinal(cursor.toordinal() - 1)
+        if cursor.weekday() < 5:  # Mon=0 … Fri=4
+            remaining -= 1
+    return cursor
 
 
 @dataclass
@@ -58,57 +77,52 @@ class PortfolioTracker:
     session_date: date | None = None
     session_start_equity: float | None = None
     peak_equity: float = 0.0
-    # Per-session counter (display / stats only — reset each roll).
-    day_trades_today: int = 0
-    # Rolling log of dates on which an intraday round-trip was closed.
-    # NOT cleared on session roll so the PDT guard sees the full window.
+    # Rolling log of dates on which an intraday round-trip was completed.
+    # Entries older than _PDT_WINDOW_BUSINESS_DAYS business days are pruned
+    # during roll_session so the list stays bounded.
     _day_trade_dates: list[date] = field(default_factory=list)
     trades: list[TradeRecord] = field(default_factory=list)
     equity_curve: list[tuple[datetime, float]] = field(default_factory=list)
     _lots: dict[str, _OpenLot] = field(default_factory=dict)
 
     # ------------------------------------------------------------------
-    # PDT helpers
+    # PDT rolling-window counter
     # ------------------------------------------------------------------
 
-    def rolling_day_trade_count(self, as_of: date | None = None) -> int:
-        """Number of intraday round-trips in the last *_PDT_ROLLING_CALENDAR_DAYS* days.
+    def day_trades_in_window(self, as_of: date | None = None) -> int:
+        """Count intraday round-trips inside the rolling 5-business-day window.
 
-        Uses a 5-calendar-day window which is a conservative superset of any
-        5-business-day window and avoids an exchange-calendar dependency.
+        *as_of* defaults to ``date.today()`` when omitted, but callers that
+        know the authoritative session date (e.g. the trading engine) should
+        pass it explicitly so the count is deterministic in tests and replay.
 
-        Parameters
-        ----------
-        as_of:
-            The reference date for the window.  Defaults to today.  Pass the
-            current session date when calling from within a live tick so the
-            result is deterministic and independent of wall-clock drift.
+        The window is *inclusive* of *as_of* and extends back to the date
+        returned by :func:`_business_days_ago(as_of, 4)` (i.e., today plus
+        4 prior business days = 5 business days total), matching the SEC PDT
+        rolling-window definition.
         """
-        ref = as_of or date.today()
-        cutoff = ref - timedelta(days=_PDT_ROLLING_CALENDAR_DAYS - 1)
-        return sum(1 for d in self._day_trade_dates if d >= cutoff)
+        ref = as_of if as_of is not None else date.today()
+        window_start = _business_days_ago(ref, _PDT_WINDOW_BUSINESS_DAYS - 1)
+        return sum(1 for d in self._day_trade_dates if d >= window_start)
 
-    def _prune_day_trade_log(self, as_of: date) -> None:
-        """Drop entries older than the rolling window to bound memory usage."""
-        cutoff = as_of - timedelta(days=_PDT_ROLLING_CALENDAR_DAYS)
-        self._day_trade_dates = [d for d in self._day_trade_dates if d >= cutoff]
+    @property
+    def day_trades_today(self) -> int:  # noqa: D102  (backwards-compat property)
+        """Backwards-compatible property: rolling count as of today.
 
-    # ------------------------------------------------------------------
-    # Session management
-    # ------------------------------------------------------------------
+        New code should prefer :meth:`day_trades_in_window` with an explicit
+        reference date.  This property exists so legacy callers (stats(),
+        UI serialisation) continue to work without modification.
+        """
+        return self.day_trades_in_window()
 
     def roll_session(self, session: date, equity: float) -> RollResult:
         """Advance to a new trading session.
 
         If open lots exist at the session boundary they are logged at WARNING
         level so operators can see the overnight carry-forward exposure.
-        Intraday counters (``day_realized_pnl``, ``day_trades_today``) are
-        reset; the new session's ``session_start_equity`` captures any
-        overnight unrealised move in the equity baseline.
-
-        NOTE: ``_day_trade_dates`` is intentionally **not** cleared here.
-        The PDT rolling-window guard must see day-trade events from prior
-        sessions that are still inside the 5-business-day window.
+        Intraday P&L counter (``day_realized_pnl``) is reset; the PDT
+        rolling log is *not* cleared — only entries older than the 5-
+        business-day window are pruned to bound memory growth.
 
         Returns a :class:`RollResult` that is truthy when the session
         actually advanced (backwards-compatible with the previous ``bool``
@@ -134,13 +148,10 @@ class PortfolioTracker:
         self.session_date = session
         self.session_start_equity = equity
         self.day_realized_pnl = 0.0
-        self.day_trades_today = 0  # per-session display counter only
-        self._prune_day_trade_log(session)  # trim stale entries
+        # Prune day-trade log: keep only entries within the rolling window.
+        window_start = _business_days_ago(session, _PDT_WINDOW_BUSINESS_DAYS - 1)
+        self._day_trade_dates = [d for d in self._day_trade_dates if d >= window_start]
         return RollResult(rolled=True, open_symbols=tuple(carry))
-
-    # ------------------------------------------------------------------
-    # Equity / drawdown helpers
-    # ------------------------------------------------------------------
 
     def mark_equity(self, equity: float, ts: datetime) -> None:
         self.peak_equity = max(self.peak_equity, equity)
@@ -162,10 +173,6 @@ class PortfolioTracker:
         if self.peak_equity <= 0:
             return 0.0
         return max(0.0, (self.peak_equity - equity) / self.peak_equity * 100.0)
-
-    # ------------------------------------------------------------------
-    # Lot / fill helpers
-    # ------------------------------------------------------------------
 
     def note_stop(self, symbol: str, stop_loss: float | None) -> None:
         lot = self._lots.get(symbol.upper())
@@ -232,9 +239,8 @@ class PortfolioTracker:
         self.trades.append(trade)
         self.realized_pnl += pnl
         self.day_realized_pnl += pnl
+        # PDT: record the date of every intraday round-trip.
         if trade.entry_at.date() == trade.exit_at.date():
-            self.day_trades_today += 1
-            # Also append to the rolling log so the PDT window survives session rolls.
             self._day_trade_dates.append(trade.exit_at.date())
 
         remainder = lot.qty + signed
