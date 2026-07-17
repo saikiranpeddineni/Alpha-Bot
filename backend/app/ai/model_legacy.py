@@ -275,7 +275,7 @@ class SignalModel:
             fallback_reason=fallback_reason,
         )
 
-    def _get_base_result(self, features: pd.Series, action: SignalAction, specialist_status: str, auc: float | None, min_auc: float, fallback_reason: str | None, symbol: str | None = None) -> ScoreActionResult:
+    def _get_base_result(self, features: pd.Series, action: SignalAction, specialist_status: str, auc: float | None, min_auc: float, fallback_reason: str | None, symbol: str | None = None, regime_key: str | None = None) -> ScoreActionResult:
         bt_start = self.backtest_start_time
         base_trained_at_str = self.meta.get("trained_at")
         base_trained_at = None
@@ -303,13 +303,13 @@ class SignalModel:
                     fallback_reason="BASE model temporal leakage"
                 )
                 
-        raw_prob = self.p_down(features) if action == SignalAction.ENTER_SHORT else self.p_up(features)
+        raw_prob = self.p_down(features, regime_key=regime_key) if action == SignalAction.ENTER_SHORT else self.p_up(features, regime_key=regime_key)
         return self._make_validated_result(
             raw_prob, "BASE", specialist_status, auc, min_auc, fallback_reason, symbol=symbol
         )
 
     def score_action_detailed(
-        self, features: pd.Series | None, action: SignalAction, symbol: str | None = None
+        self, features: pd.Series | None, action: SignalAction, symbol: str | None = None, regime_key: str | None = None
     ) -> ScoreActionResult:
         """Probability the move is favorable for the proposed action, with detailed routing metadata."""
         from app.config import get_settings
@@ -392,6 +392,7 @@ class SignalModel:
                         features, action, "REJECTED_LOW_AUC", auc, min_auc,
                         f"Specialist AUC {auc:.4f} below minimum threshold {min_auc:.2f}",
                         symbol=symbol,
+                        regime_key=regime_key,
                     )
 
                 # Use the specialist model for inference
@@ -423,15 +424,15 @@ class SignalModel:
                     f"[specialist] {sym_upper} no specialist artifact found in "
                     f"{self.models_dir / 'specialists'} — using global model",
                 )
-                return self._get_base_result(features, action, "NO_ARTIFACT", None, min_auc, None, symbol=symbol)
+                return self._get_base_result(features, action, "NO_ARTIFACT", None, min_auc, None, symbol=symbol, regime_key=regime_key)
 
-        return self._get_base_result(features, action, "NO_SYMBOL", None, min_auc, None, symbol=symbol)
+        return self._get_base_result(features, action, "NO_SYMBOL", None, min_auc, None, symbol=symbol, regime_key=regime_key)
 
     def score_action(
-        self, features: pd.Series | None, action: SignalAction, symbol: str | None = None
+        self, features: pd.Series | None, action: SignalAction, symbol: str | None = None, regime_key: str | None = None
     ) -> float | None:
         """Probability the move is favorable for the proposed action."""
-        return self.score_action_detailed(features, action, symbol).probability
+        return self.score_action_detailed(features, action, symbol, regime_key=regime_key).probability
 
 
     def train_adaptive(

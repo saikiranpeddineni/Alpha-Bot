@@ -317,7 +317,6 @@ class TradingEngine:
         self._consec_errors = 0
         self.last_error = ""
 
-        await self.data.warmup(self.watchlist)
         if isinstance(self.broker, PaperBroker):
             now = utcnow()
             for symbol, price in self.data.last_prices(self.watchlist).items():
@@ -756,7 +755,7 @@ class TradingEngine:
             if strat is not None:
                 ts_mult = strat.params.get("trailing_stop_atr_mult")
                 if ts_mult is not None and ts_mult > 0:
-                    atr = float(df["atr14"].iloc[-1]) if pd.notna(df.get("atr14").iloc[-1]) else 0.0
+                    atr = float(df["atr14"].iloc[-1]) if "atr14" in df.columns and len(df) > 0 and pd.notna(df["atr14"].iloc[-1]) else 0.0
                     if atr > 0:
                         if position.qty > 0:
                             stop_price = self._position_peaks[symbol] - ts_mult * atr
@@ -919,7 +918,7 @@ class TradingEngine:
             
             symbol = fill.symbol.upper()
             # Release pending-close guard when sell fill arrives
-            if fill.side == OrderSide.SELL and hasattr(self, "_pending_close_symbols"):
+            if fill.side == OrderSide.SELL:
                 self._pending_close_symbols.discard(symbol)
             peak = self._position_peaks.get(symbol)
             trough = self._position_troughs.get(symbol)

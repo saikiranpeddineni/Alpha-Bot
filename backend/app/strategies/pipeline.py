@@ -167,9 +167,9 @@ class SignalPipeline:
                     use_detailed = True
 
             if use_detailed:
-                score_res = self.model.score_action_detailed(features, sig.action, symbol=symbol)
+                score_res = self.model.score_action_detailed(features, sig.action, symbol=symbol, regime_key=regime_key)
             else:
-                prob = self.model.score_action(features, sig.action, symbol=symbol)
+                prob = self.model.score_action(features, sig.action, symbol=symbol, regime_key=regime_key)
                 from app.ai.model import ScoreActionResult
                 score_res = ScoreActionResult(
                     probability=prob,
