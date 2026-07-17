@@ -6,6 +6,7 @@ Everything the dashboard does goes through these routes; the WebSocket at
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, HTTPException, Request
@@ -323,14 +324,39 @@ class BacktestBody(BaseModel):
 
 @router.post("/backtest")
 async def post_backtest(body: BacktestBody, request: Request) -> dict:
+    """Run a historical backtest.
+
+    Concurrency contract
+    --------------------
+    Only one backtest may execute at a time because ``run_backtest`` reads and
+    temporarily mutates shared ``DataManager`` and ``SignalModel`` state.
+
+    The guard uses a non-blocking ``asyncio.Lock.acquire()`` via
+    ``asyncio.wait_for(..., timeout=0)`` so that the *check* and the
+    *acquisition* are a single indivisible operation with no ``await`` gap
+    between them.  A second concurrent request that arrives while the lock is
+    held receives **409 Conflict** immediately rather than queuing and later
+    running against potentially mutated engine state.
+    """
     engine = _engine(request)
     hub = request.app.state.hub
-    lock = request.app.state.backtest_lock
-    if lock.locked():
+    lock: asyncio.Lock = request.app.state.backtest_lock
+
+    # Atomically attempt to acquire the lock without queuing.
+    # timeout=0 means: succeed immediately if free, raise TimeoutError if not.
+    try:
+        await asyncio.wait_for(lock.acquire(), timeout=0)
+    except asyncio.TimeoutError:
         raise HTTPException(status_code=409, detail="A backtest is already running")
-    async with lock:
+
+    # Lock is now held by this coroutine. All shared engine state access
+    # (ensure_data, model reads, run_backtest) happens inside this try/finally
+    # so the lock is always released, even on exception.
+    try:
+        # ensure_data() is called inside the lock: no shared state is touched
+        # before acquisition, eliminating the pre-lock shared-state race.
         data = await engine.ensure_data()
-        
+
         if body.start_date and body.end_date:
             try:
                 from datetime import timezone
@@ -387,6 +413,8 @@ async def post_backtest(body: BacktestBody, request: Request) -> dict:
         _db(request).save_backtest(result.id, result.created_at, summary, payload)
         hub.publish("backtest_progress", {"progress": 1.0})
         return payload
+    finally:
+        lock.release()
 
 
 @router.get("/backtests")
