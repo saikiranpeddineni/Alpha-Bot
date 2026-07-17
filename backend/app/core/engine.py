@@ -560,7 +560,11 @@ class TradingEngine:
             self.reconciliation_failed = True
             applog.error("engine", f"Failed to fetch account/positions during tick: {exc}. Marking reconciliation uncertain.")
             from types import SimpleNamespace
-            account = SimpleNamespace(equity=self.portfolio.equity, cash=self.portfolio.equity)
+            account = SimpleNamespace(
+                equity=self.portfolio.equity,
+                cash=self.portfolio.equity,
+                buying_power=self.portfolio.equity * 4.0,
+            )
             positions = []
 
         # 2. session roll
@@ -748,7 +752,13 @@ class TradingEngine:
                 applog.error("engine", f"Background replay error: {e}")
 
         # 6. mark equity + persist
-        account = await self.broker.account() if new_closed else account
+        if not getattr(self, "reconciliation_failed", False) and new_closed:
+            try:
+                account = await self.broker.account()
+            except Exception as exc:
+                self.reconciliation_failed = True
+                applog.error("engine", f"Failed to fetch account during mark equity: {exc}")
+
         self.portfolio.mark_equity(account.equity, now)
         if self._tick_count % EQUITY_PERSIST_EVERY_TICKS == 0:
             self.db.save_equity(account.equity, account.cash, self.mode, now)

@@ -203,6 +203,14 @@ class PortfolioTracker:
             return 0.0
         return max(0.0, (self.peak_equity - equity) / self.peak_equity * 100.0)
 
+    @property
+    def equity(self) -> float:
+        if self.equity_curve:
+            return self.equity_curve[-1][1]
+        if self.session_start_equity is not None:
+            return self.session_start_equity
+        return 100000.0
+
     def note_stop(self, symbol: str, stop_loss: float | None) -> None:
         lot = self._lots.get(symbol.upper())
         if lot and stop_loss is not None:
