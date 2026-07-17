@@ -6,7 +6,8 @@ Pipeline:
   Stage 3  ML AUC validate  (asyncio.gather, semaphore=8)   top 25 -> final 10-15
 
 Safety gates:
-  - Global SPY panic halt (>= 85th volatility percentile)
+  - Global SPY panic halt (>= 85th volatility percentile) — tri-state: SAFE/PANIC/UNKNOWN
+  - UNKNOWN fails closed: blocks new scanner-driven entries, preserves position management
   - Sector diversity cap (max 3 symbols per sector)
   - Tiered AUC selection (Tier-1 >= 0.55, Tier-2 > 0.50 best-of)
   - Fallback to core watchlist if nothing beats random chance
@@ -27,10 +28,24 @@ from app.core.universe_discovery import DiscoveryCoordinator
 from app.ai.features import FEATURE_COLUMNS, build_training_set
 from app.data.manager import DataManager
 
+
 class ScannerOutcome(Enum):
     SUCCESS_NONEMPTY = "SUCCESS_NONEMPTY"
     SUCCESS_EMPTY = "SUCCESS_EMPTY"
     FAILED = "FAILED"
+
+
+class SpyVolatilityState(Enum):
+    """Tri-state result of the global SPY panic gate.
+
+    SAFE    -- fresh authoritative SPY data confirms normal volatility regime.
+    PANIC   -- confirmed >= 85th-percentile ATR; deploy defensive watchlist.
+    UNKNOWN -- data unavailable, insufficient, or provider error; fail closed.
+               Missing evidence of PANIC must never be treated as evidence of SAFE.
+    """
+    SAFE = "SAFE"
+    PANIC = "PANIC"
+    UNKNOWN = "UNKNOWN"
 
 
 # ---------------------------------------------------------------------------
@@ -133,24 +148,48 @@ class MarketScanner:
         return list(symbols)
 
     # ------------------------------------------------------------------
-    # Global safety gate
+    # Global safety gate — tri-state, fail-closed on UNKNOWN
     # ------------------------------------------------------------------
 
-    async def check_spy_volatility(self, as_of: datetime | None = None) -> bool:
-        """True = safe to trade. False = panic state, deploy defensives."""
+    async def check_spy_volatility(self, as_of: datetime | None = None) -> SpyVolatilityState:
+        """Assess the global SPY volatility regime.
+
+        Returns
+        -------
+        SpyVolatilityState.SAFE
+            Fresh authoritative SPY history confirms normal volatility.
+        SpyVolatilityState.PANIC
+            Confirmed >= 85th-percentile ATR; caller should deploy defensive watchlist.
+        SpyVolatilityState.UNKNOWN
+            SPY data unavailable, insufficient, non-finite, or any provider/processing
+            error occurred.  Callers MUST treat UNKNOWN as fail-closed: do not authorise
+            new scanner-driven entries.  Missing evidence of PANIC is NOT evidence of SAFE.
+        """
         try:
             end = as_of or datetime.now(UTC)
             start = end - timedelta(days=20)
             df = await self.data.history("SPY", "1Min", start, end, prefer_cache=True)
+
             if df.empty or len(df) < 200:
-                return True
+                applog.warning(
+                    "scanner",
+                    f"SPY volatility gate: insufficient 1-min bars ({len(df)}). "
+                    "State=UNKNOWN — failing closed.",
+                )
+                return SpyVolatilityState.UNKNOWN
 
             df_h = df.resample("1h").agg({
                 "open": "first", "high": "max", "low": "min",
                 "close": "last", "volume": "sum",
             }).dropna()
+
             if len(df_h) < 20:
-                return True
+                applog.warning(
+                    "scanner",
+                    f"SPY volatility gate: insufficient hourly bars ({len(df_h)}). "
+                    "State=UNKNOWN — failing closed.",
+                )
+                return SpyVolatilityState.UNKNOWN
 
             prev = df_h["close"].shift(1)
             tr = pd.concat([
@@ -160,6 +199,16 @@ class MarketScanner:
             ], axis=1).max(axis=1)
             atr_pct = tr.ewm(alpha=1.0 / 14, adjust=False).mean() / df_h["close"] * 100.0
 
+            # Reject non-finite values: NaN/Inf in price or ATR means we cannot
+            # make an authoritative volatility determination.
+            if not atr_pct.iloc[-1:].apply(lambda x: pd.notna(x) and not (x == float("inf") or x == float("-inf"))).all():
+                applog.warning(
+                    "scanner",
+                    "SPY volatility gate: non-finite ATR value detected. "
+                    "State=UNKNOWN — failing closed.",
+                )
+                return SpyVolatilityState.UNKNOWN
+
             if atr_pct.std() < 1e-6:
                 vol_pct = 0.0
             else:
@@ -168,16 +217,24 @@ class MarketScanner:
             if vol_pct >= 0.85:
                 applog.warning(
                     "scanner",
-                    f"Market panic: SPY volatility at {vol_pct*100:.1f}th percentile. "
-                    "Deploying defensive ETFs.",
+                    f"Market PANIC: SPY volatility at {vol_pct*100:.1f}th percentile. "
+                    "Deploying defensive ETFs. State=PANIC.",
                 )
-                return False
+                return SpyVolatilityState.PANIC
 
-            applog.info("scanner", f"Market volatility normal (SPY Volatility Percentile: {vol_pct*100:.1f}%)")
-            return True
+            applog.info(
+                "scanner",
+                f"Market volatility normal (SPY Volatility Percentile: {vol_pct*100:.1f}%). State=SAFE.",
+            )
+            return SpyVolatilityState.SAFE
+
         except Exception as exc:
-            applog.warning("scanner", f"SPY volatility check failed: {exc}. Assuming safe.")
-            return True
+            applog.warning(
+                "scanner",
+                f"SPY volatility gate: provider/processing error ({exc.__class__.__name__}: {exc}). "
+                "State=UNKNOWN — failing closed. (DATA_UNAVAILABLE)",
+            )
+            return SpyVolatilityState.UNKNOWN
 
     # ------------------------------------------------------------------
     # Stage 1 — Parallel pre-filter
@@ -224,8 +281,6 @@ class MarketScanner:
             async with semaphore:
                 try:
                     df = await history_fn(symbol, "1Day", start, end, prefer_cache=True)
-                    # Diagnostics describe the authoritative Stage-1 dataset. They
-                    # must never issue a second provider request just to count raw bars.
                     record["bars_raw"] = len(df)
                     record["bars_asof"] = len(df)
 
@@ -252,7 +307,6 @@ class MarketScanner:
                     now_et = now_tz.astimezone(ZoneInfo("America/New_York"))
                     et_mins = now_et.hour * 60 + now_et.minute
                     
-                    # Allow up to 100 hours before 9:30 AM to account for weekends and holidays
                     allowed_lag = timedelta(hours=100) if et_mins < 9 * 60 + 30 else timedelta(hours=1)
                     
                     raw_lag = now_tz - latest_bar_ts
@@ -369,7 +423,6 @@ class MarketScanner:
         scores = 0.30 * rvol_rank + 0.20 * gap_rank + 0.20 * atr_rank + 0.30 * mom_rank
         for i, c in enumerate(candidates):
             c["tech_score"] = float(scores[i])
-            # Log component scores
             applog.info(
                 "scanner",
                 f"SCAN_SCORE: symbol={c['symbol']}, T={T.isoformat()}, "
@@ -411,7 +464,6 @@ class MarketScanner:
                         candidate["auc"] = 0.0
                         return candidate
 
-                    # Time-series cross-validation: 3 folds, expanding window
                     tscv = TimeSeriesSplit(n_splits=3)
                     aucs: list[float] = []
                     for train_idx, val_idx in tscv.split(X):
@@ -448,7 +500,6 @@ class MarketScanner:
         if not candidates:
             return []
 
-        # Sort by AUC descending
         ranked = sorted(candidates, key=lambda c: c.get("auc", 0.0), reverse=True)
         selected: list[str] = []
         sector_counts: dict[str, int] = {}
@@ -464,14 +515,12 @@ class MarketScanner:
             sector_counts[sector] = sector_counts.get(sector, 0) + 1
             return True
 
-        # Tier 1: AUC >= 0.55
         for c in ranked:
             if c.get("auc", 0.0) >= _AUC_TIER1:
                 _try_add(c)
             if len(selected) >= _TARGET_SYMBOLS:
                 break
 
-        # Tier 2: AUC > 0.50, fill remaining slots
         if len(selected) < _TARGET_SYMBOLS:
             for c in ranked:
                 if c["symbol"] in selected:
@@ -493,13 +542,30 @@ class MarketScanner:
         return await self._stage1_prefilter_parallel(as_of=as_of, symbols=symbols)
 
     async def run(self, as_of: datetime | None = None) -> tuple[ScannerOutcome, list[str]]:
-        """Execute the full 3-stage scan. Returns (outcome, watchlist)."""
+        """Execute the full 3-stage scan. Returns (outcome, watchlist).
+
+        SPY gate behaviour:
+          SAFE    -- proceed with normal candidate pipeline.
+          PANIC   -- return DEFENSIVE_WATCHLIST immediately.
+          UNKNOWN -- fail closed: return SUCCESS_EMPTY so the engine preserves
+                     existing-position management without authorising new entries.
+        """
         try:
-            # Global panic gate first
-            safe = await self.check_spy_volatility(as_of=as_of)
-            if not safe:
+            spy_state = await self.check_spy_volatility(as_of=as_of)
+
+            if spy_state is SpyVolatilityState.PANIC:
                 return ScannerOutcome.SUCCESS_NONEMPTY, DEFENSIVE_WATCHLIST.copy()
 
+            if spy_state is SpyVolatilityState.UNKNOWN:
+                applog.warning(
+                    "scanner",
+                    "SPY gate returned UNKNOWN (DATA_UNAVAILABLE). "
+                    "Failing closed: blocking new scanner-driven entries. "
+                    "Existing-position management continues unaffected.",
+                )
+                return ScannerOutcome.SUCCESS_EMPTY, []
+
+            # spy_state is SAFE — proceed with normal pipeline
             stage1_symbols = await self._stage1_symbols(as_of=as_of)
             stage1 = await self._stage1_prefilter_parallel(as_of=as_of, symbols=stage1_symbols)
             if not stage1:
