@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import sys
-import asyncio
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -12,64 +11,85 @@ from app.config import Settings
 from app.core.domain import Order, OrderRequest, OrderSide, OrderStatus, OrderType, Position, Signal, SignalAction
 from app.core.engine import TradingEngine, EngineState
 from app.db.database import Database
+from app.risk.manager import RiskDecision
 from app.strategies.base import Strategy
 
 
 class _FakeData:
     provider = SimpleNamespace(name="synthetic")
+
     async def warmup(self, _watchlist):
         return None
+
     async def poll(self, _watchlist):
         return {"AAPL": self.frame("AAPL", "1Min")}
+
     def frame(self, symbol, *args, **kwargs):
-        import pandas as pd
         idx = pd.date_range("2026-07-17 09:30:00", periods=60, freq="min", tz="UTC")
-        val = 15.0 if symbol.upper() == "VIX" else 100.0
-        return pd.DataFrame({
-            "open": [val]*60,
-            "high": [val]*60,
-            "low": [val]*60,
-            "close": [val]*60,
-            "volume": [1000.0]*60
-        }, index=idx)
+        # Use low VIX value for VIX-like symbols to avoid PANIC market regime
+        sym_upper = symbol.upper().lstrip("^")
+        val = 15.0 if sym_upper == "VIX" else 100.0
+        return pd.DataFrame(
+            {"open": [val]*60, "high": [val]*60, "low": [val]*60, "close": [val]*60, "volume": [1000.0]*60},
+            index=idx,
+        )
+
     async def history(self, symbol, *args, **kwargs):
-        import pandas as pd
-        start = kwargs.get("start") or (args[2] if len(args) > 2 else "2026-07-17 09:30:00")
-        end = kwargs.get("end") or (args[3] if len(args) > 3 else "2026-07-17 10:30:00")
-        start_ts = pd.Timestamp(start).tz_localize("UTC") if pd.Timestamp(start).tz is None else pd.Timestamp(start).tz_convert("UTC")
-        end_ts = pd.Timestamp(end).tz_localize("UTC") if pd.Timestamp(end).tz is None else pd.Timestamp(end).tz_convert("UTC")
+        start = kwargs.get("start") or "2026-07-17 09:30:00"
+        end = kwargs.get("end") or "2026-07-17 10:30:00"
+        start_ts = pd.Timestamp(start)
+        if start_ts.tz is None:
+            start_ts = start_ts.tz_localize("UTC")
+        else:
+            start_ts = start_ts.tz_convert("UTC")
+        end_ts = pd.Timestamp(end)
+        if end_ts.tz is None:
+            end_ts = end_ts.tz_localize("UTC")
+        else:
+            end_ts = end_ts.tz_convert("UTC")
         idx = pd.date_range(start_ts, end_ts, freq="min")
-        val = 15.0 if symbol.upper() == "VIX" else 100.0
-        return pd.DataFrame({
-            "open": [val]*len(idx),
-            "high": [val]*len(idx),
-            "low": [val]*len(idx),
-            "close": [val]*len(idx),
-            "volume": [1000.0]*len(idx)
-        }, index=idx)
+        # Use low VIX value for both 'VIX' and '^VIX' to avoid PANIC market regime
+        sym_upper = symbol.upper().lstrip("^")
+        val = 15.0 if sym_upper == "VIX" else 100.0
+        return pd.DataFrame(
+            {"open": [val]*len(idx), "high": [val]*len(idx), "low": [val]*len(idx),
+             "close": [val]*len(idx), "volume": [1000.0]*len(idx)},
+            index=idx,
+        )
 
 
 class _FakeBroker:
     name = "fake_broker"
     is_paper = True
+
     def __init__(self):
         self.should_fail_positions = False
-        self.mock_positions = []
-        self.submitted_orders = []
-        self.closed_positions = []
+        self.mock_positions: list[Position] = []
+        self.submitted_orders: list[Order] = []
+        self.closed_positions: list[tuple[str, str]] = []
 
-    async def connect(self):
-        pass
+    async def connect(self): pass
+
     async def account(self):
         return SimpleNamespace(equity=100_000.0, cash=100_000.0, buying_power=300_000.0)
+
     async def positions(self):
         if self.should_fail_positions:
             raise RuntimeError("Simulated positions fetch failure")
         return self.mock_positions
+
     async def open_orders(self):
         return []
+
+    async def get_order_by_client_id(self, client_id: str):
+        return None
+
+    async def flatten_all(self, reason: str = ""):
+        pass
+
     def drain_fills(self):
         return []
+
     async def submit(self, req: OrderRequest) -> Order:
         order = Order(
             id=req.client_order_id,
@@ -82,6 +102,7 @@ class _FakeBroker:
         )
         self.submitted_orders.append(order)
         return order
+
     async def close_position(self, symbol: str, reason: str = "manual") -> Order | None:
         self.closed_positions.append((symbol, reason))
         return Order(
@@ -97,15 +118,56 @@ class _FakeBroker:
 class _FakeStrategy(Strategy):
     name = "test_strat"
     enabled = True
+
     def __init__(self):
         super().__init__({})
-        self.signals_to_return = []
+        self.signals_to_return: list[Signal] = []
+
     def on_bar(self, ctx, symbol, df):
         return self.signals_to_return.pop(0) if self.signals_to_return else None
 
 
+def _patch_pipeline_accept_all(pipeline):
+    """Bypass all pipeline ML/meta-label/trade-score gates: accept every signal."""
+    def permissive_process(symbol, df, signals, regime, features=None, sector_strength=None):
+        accepted, rejected = [], []
+        for sig in signals:
+            sig.ml_probability = sig.ml_probability or 0.99
+            sig.score = sig.score if sig.score is not None else 0.9
+            accepted.append(sig)
+        return accepted, rejected
+    pipeline.process = permissive_process
+
+
+def _patch_portfolio_gate_accept_all(engine):
+    """Bypass portfolio correlation/sector gate: always approve."""
+    engine.portfolio_gate.gate = lambda symbol, positions, sector_override=None: (True, "ok")
+
+
+def _patch_risk_accept_all(engine):
+    """Bypass RiskManager gates: always approve with a minimal market order."""
+    import uuid
+
+    def fake_evaluate_entry(sig, ctx, bars, now=None, kelly_override=None):
+        req = OrderRequest(
+            client_order_id=uuid.uuid4().hex,
+            symbol=sig.symbol.upper(),
+            side=OrderSide.BUY if sig.action == SignalAction.ENTER_LONG else OrderSide.SELL_SHORT,
+            qty=1,
+            order_type=OrderType.MARKET,
+        )
+        return RiskDecision(approved=True, reason="", order=req)
+
+    engine.risk.evaluate_entry = fake_evaluate_entry
+
+
 @pytest.mark.asyncio
 async def test_reconciliation_failure_blocks_entries_but_allows_exits(tmp_path, monkeypatch):
+    """Verify the fail-closed reconciliation gate:
+    - Exits always execute regardless of reconciliation state.
+    - Entries are blocked while reconciliation_failed=True.
+    - Entries resume normally once reconciliation_failed is cleared.
+    """
     settings = Settings(
         ALPHADESK_MODE="paper",
         DATA_PROVIDER="synthetic",
@@ -115,10 +177,11 @@ async def test_reconciliation_failure_blocks_entries_but_allows_exits(tmp_path, 
     )
     db = Database(settings.resolved_db_path)
     engine = TradingEngine(settings, db)
-    
+
     async def fake_ensure_data(self, mode=None):
         self.data = _FakeData()
         return self.data
+
     async def fake_run_loop(self):
         pass
 
@@ -126,112 +189,75 @@ async def test_reconciliation_failure_blocks_entries_but_allows_exits(tmp_path, 
     monkeypatch.setattr(TradingEngine, "_run_loop", fake_run_loop)
 
     broker = _FakeBroker()
-    broker.should_fail_positions = True  # Make startup reconciliation fail!
+    broker.should_fail_positions = True  # Trigger startup reconciliation failure
 
-    # Override broker instance right after creation
-    def fake_make_broker(name, settings):
-        return broker
-    monkeypatch.setattr("app.core.engine.make_broker", fake_make_broker)
+    monkeypatch.setattr("app.core.engine.make_broker", lambda name, settings: broker)
 
-    # 1. Start engine
+    # ── 1. Start engine — reconciliation must fail ──────────────────────────
     await engine.start("paper")
 
-    # Now that modules are loaded, perform the broad sys.modules patch for latest_feature_row
-    from app.ai.features import FEATURE_COLUMNS
-    dummy_features = pd.Series({col: 0.0 for col in FEATURE_COLUMNS})
-    for mod_name, mod in list(sys.modules.items()):
-        if mod and hasattr(mod, "latest_feature_row"):
-            monkeypatch.setattr(mod, "latest_feature_row", lambda df: dummy_features)
+    # Bypass pipeline gates, portfolio gate, and risk-manager entry checks so
+    # only the reconciliation guard (engine-level) is exercised by this test.
+    _patch_pipeline_accept_all(engine.pipeline)
+    _patch_portfolio_gate_accept_all(engine)
+    _patch_risk_accept_all(engine)
 
-    # Mock model score_action and score_action_detailed to return high probability
-    monkeypatch.setattr(engine.model, "score_action", lambda *args, **kwargs: 0.99)
-    from app.ai.model import ScoreActionResult
-    mock_res = ScoreActionResult(0.99, "BASE", "NO_ARTIFACT", None, 0.53, None)
-    monkeypatch.setattr(engine.model, "score_action_detailed", lambda *args, **kwargs: mock_res)
-
-    print("\n[TEST DEBUG] engine.model:", engine.model)
-    print("[TEST DEBUG] engine.pipeline.model:", engine.pipeline.model)
-    print("[TEST DEBUG] engine.model.score_action_detailed:", engine.model.score_action_detailed)
-    print("[TEST DEBUG] engine.pipeline.model.score_action_detailed:", engine.pipeline.model.score_action_detailed)
-
-    # Verify startup reconciliation failed and status reports it
     assert engine.reconciliation_failed is True
-    status = engine.status()
-    assert status["reconciliation_failed"] is True
+    assert engine.status()["reconciliation_failed"] is True
 
-    # 2. Inject a custom strategy to test signal evaluation
+    # ── 2. EXIT signals must still execute despite reconciliation failure ───
     strat = _FakeStrategy()
     engine.strategies = [strat]
 
-    # Inject exit signal (exits must work!)
     exit_sig = Signal(
-        symbol="AAPL",
-        action=SignalAction.EXIT,
-        confidence=1.0,
-        strategy="test_strat",
-        reason="take_profit_hit",
+        symbol="AAPL", action=SignalAction.EXIT, confidence=1.0,
+        strategy="test_strat", reason="take_profit_hit",
     )
     strat.signals_to_return.append(exit_sig)
 
-    # Mock an active position for AAPL inside positions
-    broker.mock_positions = [
-        Position(symbol="AAPL", qty=10, avg_entry_price=100.0, market_price=100.0)
-    ]
+    broker.mock_positions = [Position(symbol="AAPL", qty=10, avg_entry_price=100.0, market_price=100.0)]
     broker.should_fail_positions = False
-    
-    # Save reference to real _reconcile_positions and mock it to do nothing
-    real_reconcile = engine._reconcile_positions
-    engine._reconcile_positions = lambda positions: None
 
-    # Execute a tick:
+    real_reconcile = engine._reconcile_positions
+    engine._reconcile_positions = lambda positions: None  # keep flag True
+
     await engine._tick()
 
-    # Verify that the strategy EXIT signal was successfully evaluated and submitted
     assert len(broker.closed_positions) == 1
     assert broker.closed_positions[0] == ("AAPL", "take_profit_hit")
 
-    # 3. Test that entry signals are BLOCKED/GATED while reconciliation is failed (flag is still True)
+    # ── 3. ENTRY signals must be BLOCKED while reconciliation_failed is True ─
     entry_sig = Signal(
-        symbol="AAPL",
-        action=SignalAction.ENTER_LONG,
-        confidence=1.0,
-        strategy="test_strat",
-        reason="test_entry",
-        price=100.0,
-        stop_loss=90.0,
-        take_profit=120.0,
-        ml_probability=0.9,
+        symbol="AAPL", action=SignalAction.ENTER_LONG, confidence=1.0,
+        strategy="test_strat", reason="test_entry",
+        price=100.0, stop_loss=90.0, take_profit=120.0, ml_probability=0.9,
     )
     strat.signals_to_return.append(entry_sig)
-
     broker.submitted_orders.clear()
-    
-    # Run tick
+
     await engine._tick()
 
-    # Verify no order was submitted
-    assert len(broker.submitted_orders) == 0
+    assert len(broker.submitted_orders) == 0, (
+        "Entry order must be blocked while reconciliation_failed is True"
+    )
 
-    # 4. Restore the real _reconcile_positions and clear reconciliation failed state (simulate successful tick reconciliation)
+    # ── 4. Restore reconciler — next tick clears the flag ──────────────────
     engine._reconcile_positions = real_reconcile
 
-    # We run another tick, since should_fail_positions is False, it should clear reconciliation_failed
     await engine._tick()
     assert engine.reconciliation_failed is False
     assert engine.status()["reconciliation_failed"] is False
 
-    # Now verify entries are ACCEPTED and submitted after clearing active positions and lots
+    # ── 5. ENTRY signals must now be ACCEPTED ────────────────────────────────
     broker.mock_positions = []
     engine.portfolio._lots.clear()
     strat.signals_to_return.append(entry_sig)
-    
-    print("\n[TEST DEBUG] reconciliation_failed BEFORE final tick:", engine.reconciliation_failed)
-    try:
-        await engine._tick()
-    except Exception as exc:
-        print("[TEST DEBUG] Exception during final tick:", exc)
-        raise exc
-    print("[TEST DEBUG] reconciliation_failed AFTER final tick:", engine.reconciliation_failed)
-    
-    assert len(broker.submitted_orders) == 1
+    broker.submitted_orders.clear()
+
+    await engine._tick()
+
+    assert len(broker.submitted_orders) == 1, (
+        f"Expected 1 submitted order after reconciliation cleared, "
+        f"got {len(broker.submitted_orders)}. reconciliation_failed={engine.reconciliation_failed}"
+    )
     assert broker.submitted_orders[0].symbol == "AAPL"

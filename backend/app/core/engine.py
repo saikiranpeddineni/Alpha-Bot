@@ -661,7 +661,8 @@ class TradingEngine:
                     if getattr(sig, "candidate_id", None) is not None:
                         self._update_shadow_decision(sig.candidate_id, "rejected", reason, "portfolio_gate")
 
-                # Size and submit ap                if decision_outcome.approved_entries:
+                # Size and submit approved entries
+                if decision_outcome.approved_entries:
                     open_orders = await self.broker.open_orders()
                     pending_entries = [
                         o.symbol.upper() for o in open_orders
