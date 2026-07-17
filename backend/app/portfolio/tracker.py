@@ -10,10 +10,29 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date, datetime
+from typing import NamedTuple
 
 from app.brokers.base import Fill
 from app.core.domain import OrderSide, TradeRecord
 from app.core.logging import applog
+
+
+class RollResult(NamedTuple):
+    """Return value of :meth:`PortfolioTracker.roll_session`.
+
+    Backwards-compatible with the previous ``bool`` return: callers that
+    do ``if portfolio.roll_session(...)`` continue to work because
+    ``bool(RollResult(rolled=True, ...))`` is ``True`` and
+    ``bool(RollResult(rolled=False, ...))`` is ``False``.
+    """
+
+    rolled: bool
+    """True when the session actually advanced to a new date."""
+    open_symbols: tuple[str, ...] = ()
+    """Symbols with open lots at the session boundary (empty when rolled=False)."""
+
+    def __bool__(self) -> bool:  # noqa: D105
+        return self.rolled
 
 
 @dataclass
@@ -40,14 +59,41 @@ class PortfolioTracker:
     equity_curve: list[tuple[datetime, float]] = field(default_factory=list)
     _lots: dict[str, _OpenLot] = field(default_factory=dict)
 
-    def roll_session(self, session: date, equity: float) -> bool:
+    def roll_session(self, session: date, equity: float) -> RollResult:
+        """Advance to a new trading session.
+
+        If open lots exist at the session boundary they are logged at WARNING
+        level so operators can see the overnight carry-forward exposure.
+        Intraday counters (``day_realized_pnl``, ``day_trades_today``) are
+        reset; the new session's ``session_start_equity`` captures any
+        overnight unrealised move in the equity baseline.
+
+        Returns a :class:`RollResult` that is truthy when the session
+        actually advanced (backwards-compatible with the previous ``bool``
+        return contract).
+        """
         if self.session_date == session:
-            return False
+            return RollResult(rolled=False)
+
+        # Identify open lots being carried into the new session.
+        carry: list[str] = []
+        for symbol, lot in self._lots.items():
+            if abs(lot.qty) >= 1e-9:
+                carry.append(symbol)
+                direction = "LONG" if lot.qty > 0 else "SHORT"
+                applog.warning(
+                    "portfolio",
+                    f"Session roll {self.session_date} -> {session}: carrying "
+                    f"{direction} {abs(lot.qty):g} {symbol} @ avg "
+                    f"{lot.avg_price:.4f} into new session. "
+                    "New session_start_equity reflects overnight P&L in equity baseline.",
+                )
+
         self.session_date = session
         self.session_start_equity = equity
         self.day_realized_pnl = 0.0
         self.day_trades_today = 0
-        return True
+        return RollResult(rolled=True, open_symbols=tuple(carry))
 
     def mark_equity(self, equity: float, ts: datetime) -> None:
         self.peak_equity = max(self.peak_equity, equity)
@@ -75,6 +121,10 @@ class PortfolioTracker:
         if lot and stop_loss is not None:
             lot.stop_loss = stop_loss
             lot.initial_risk_per_share = abs(lot.avg_price - stop_loss)
+
+    def open_positions(self) -> dict[str, _OpenLot]:
+        """Return a snapshot of all symbols with non-zero open lots."""
+        return {s: lot for s, lot in self._lots.items() if abs(lot.qty) >= 1e-9}
 
     def on_fill(self, fill: Fill, peak_price: float | None = None, trough_price: float | None = None, initial_stop: float | None = None) -> TradeRecord | None:
         symbol = fill.symbol.upper()
