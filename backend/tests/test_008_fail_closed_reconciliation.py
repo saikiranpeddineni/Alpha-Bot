@@ -195,6 +195,7 @@ async def test_reconciliation_failure_blocks_entries_but_allows_exits(tmp_path, 
 
     # ── 1. Start engine — reconciliation must fail ──────────────────────────
     await engine.start("paper")
+    engine.clock.always_open = True  # Force market to be open during test to avoid EOD liquidation
 
     # Bypass pipeline gates, portfolio gate, and risk-manager entry checks so
     # only the reconciliation guard (engine-level) is exercised by this test.

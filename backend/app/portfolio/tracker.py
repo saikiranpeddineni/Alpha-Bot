@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import NamedTuple
 
 from app.brokers.base import Fill
@@ -250,8 +250,8 @@ class PortfolioTracker:
             symbol.upper(): _OpenLot(
                 qty=float(lot["qty"]),
                 avg_price=float(lot["avg_price"]),
-                entry_ts=datetime.fromisoformat(lot["entry_ts"]),
-                strategy=lot["strategy"],
+                entry_ts=datetime.fromisoformat(lot["entry_ts"]) if lot.get("entry_ts") else datetime.now(UTC),
+                strategy=lot.get("strategy", "reconciled"),
                 stop_loss=lot.get("stop_loss"),
                 initial_risk_per_share=lot.get("initial_risk_per_share"),
                 commission_basis=float(lot.get("commission_basis", 0.0)),
@@ -312,6 +312,9 @@ class PortfolioTracker:
             lot.avg_price = (lot.avg_price * lot.qty + fill.price * signed) / total
             lot.qty = total
             lot.commission_basis += fill.commission
+            if initial_stop is not None:
+                lot.stop_loss = initial_stop
+                lot.initial_risk_per_share = abs(lot.avg_price - initial_stop)
             side_str = "BOUGHT MORE" if signed > 0 else "SOLD MORE SHORT"
             total_amt = abs(signed) * fill.price
             applog.info("portfolio", f"[{fill.ts}] {side_str} {symbol}: {abs(signed):g} shares @ {fill.price:.2f} (Total Amt: ${total_amt:,.2f} | {fill.strategy})")
@@ -325,8 +328,6 @@ class PortfolioTracker:
         basis = lot.avg_price * closed_qty
         r_multiple = None
         init_risk = lot.initial_risk_per_share
-        if initial_stop is not None:
-            init_risk = abs(lot.avg_price - initial_stop)
         if init_risk:
             r_multiple = round(pnl / (init_risk * closed_qty), 2)
         if direction > 0:

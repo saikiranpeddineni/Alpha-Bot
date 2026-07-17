@@ -164,6 +164,16 @@ class Database:
                 row.payload = payload
             s.commit()
 
+    def get_order(self, order_id: str) -> Order | None:
+        with self._session() as s:
+            row = s.get(OrderRow, order_id)
+            if row is not None:
+                try:
+                    return Order.model_validate_json(row.payload)
+                except Exception:
+                    pass
+        return None
+
     def save_trade(self, trade: TradeRecord, mode: str) -> None:
         with self._session() as s:
             s.merge(

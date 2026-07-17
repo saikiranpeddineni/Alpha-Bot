@@ -927,8 +927,6 @@ class TradingEngine:
                 applog.warning("engine", f"{symbol}: entry signal {sig.strategy} rejected -- engine position/broker reconciliation state is uncertain")
                 continue
 
-            # Record initial stop-loss when entries are accepted
-            self._position_initial_stops[symbol] = sig.stop_loss
             candidate_entries.append((sig, df))
         return candidate_entries
 
@@ -950,9 +948,17 @@ class TradingEngine:
         fills = self.broker.drain_fills()
         if not fills:
             return
-        order_by_id = {o.id: o for o in self.recent_orders}
+        order_by_id = {}
+        for o in self.recent_orders:
+            order_by_id[o.id] = o
+            if o.client_order_id:
+                order_by_id[o.client_order_id] = o
+
         for fill in fills:
             order = order_by_id.get(fill.order_id)
+            if order is None and fill.order_id:
+                order = self.db.get_order(fill.order_id)
+
             if order is not None and order.status != OrderStatus.FILLED:
                 # Paper orders share objects and are already updated; Alpaca
                 # orders are snapshots that need their fill state applied.
@@ -967,7 +973,12 @@ class TradingEngine:
                 self._pending_close_symbols.discard(symbol)
             peak = self._position_peaks.get(symbol)
             trough = self._position_troughs.get(symbol)
-            init_stop = self._position_initial_stops.get(symbol)
+            
+            init_stop = order.stop_loss if order is not None else None
+            if init_stop is None:
+                init_stop = self._position_initial_stops.get(symbol)
+            else:
+                self._position_initial_stops[symbol] = init_stop
 
             trade = self.portfolio.on_fill(fill, peak_price=peak, trough_price=trough, initial_stop=init_stop)
             if trade is not None:
