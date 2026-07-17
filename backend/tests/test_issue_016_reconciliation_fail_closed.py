@@ -13,6 +13,11 @@ Tests follow the 5-phase state machine pattern from the dev guide:
 
 Design: mirrors test_008_fail_closed_reconciliation.py — real TradingEngine
 + monkeypatch so all engine attributes are properly initialised via start().
+
+NOTE: engine is started in "demo" mode (MarketClock always_open=True) so
+that _tick()'s can_trade gate does not suppress signal evaluation based on
+wall-clock time.  The reconciliation behaviour under test is identical across
+all modes; demo is the correct mode for deterministic unit tests.
 """
 from __future__ import annotations
 
@@ -30,7 +35,7 @@ from app.strategies.base import Strategy
 
 
 # ---------------------------------------------------------------------------
-# Shared fakes (same design as test_008)
+# Shared fakes (identical to test_008)
 # ---------------------------------------------------------------------------
 
 class _FakeData:
@@ -145,7 +150,7 @@ class _FakeStrategy(Strategy):
 
 
 # ---------------------------------------------------------------------------
-# Patch helpers (same design as test_008)
+# Patch helpers (identical to test_008)
 # ---------------------------------------------------------------------------
 
 def _patch_pipeline_accept_all(pipeline):
@@ -180,14 +185,20 @@ def _patch_risk_accept_all(engine):
 
 
 # ---------------------------------------------------------------------------
-# Fixture: fully started engine with reconciliation pre-failed
+# Fixture: fully started engine (demo mode = always-open clock) with
+# reconciliation pre-failed via a broker.positions() raise at startup.
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
 async def engine_with_failed_reconciliation(tmp_path, monkeypatch):
-    """Provides a fully started TradingEngine whose startup reconciliation failed."""
+    """Provides a fully started TradingEngine whose startup reconciliation failed.
+
+    Started in demo mode so MarketClock.is_open() is always True and
+    _tick()'s can_trade gate never suppresses signal evaluation based on
+    wall-clock time.
+    """
     settings = Settings(
-        ALPHADESK_MODE="paper",
+        ALPHADESK_MODE="demo",
         DATA_PROVIDER="synthetic",
         ALPHADESK_DB_PATH=str(tmp_path / "bot.db"),
         DEFAULT_WATCHLIST="AAPL",
@@ -210,7 +221,7 @@ async def engine_with_failed_reconciliation(tmp_path, monkeypatch):
     broker.should_fail_positions = True  # trigger startup reconciliation failure
     monkeypatch.setattr("app.core.engine.make_broker", lambda name, settings: broker)
 
-    await engine.start("paper")
+    await engine.start("demo")
 
     _patch_pipeline_accept_all(engine.pipeline)
     _patch_portfolio_gate_accept_all(engine)
