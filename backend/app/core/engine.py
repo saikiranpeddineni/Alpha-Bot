@@ -135,6 +135,7 @@ class TradingEngine:
         self.portfolio_gate = None
         self.portfolio_allocator = None
         self.pending_reconciliation_orders: dict[str, dict] = db.get_setting("pending_reconciliation_orders") or {}
+        self.reconciliation_failed = False
 
     # ------------------------------------------------------------------
     # kill-switch persistence helpers
@@ -275,46 +276,9 @@ class TradingEngine:
         # Restore strategy mapping & reconstruct portfolio lots for active positions from database
         try:
             positions = await self.broker.positions()
-            for p in positions:
-                strat = "manual"
-                if hasattr(self.broker, "_symbol_strategies"):
-                    db_strat = self.db.get_latest_order_strategy(p.symbol, self.mode)
-                    if db_strat:
-                        self.broker._symbol_strategies[p.symbol] = db_strat
-                        strat = db_strat
-                        applog.info("engine", f"Restored strategy '{db_strat}' for active position {p.symbol}")
-
-                # Fetch full latest order details to populate stop loss and initial risk units
-                order_payload = self.db.get_latest_order_payload(p.symbol, self.mode)
-                stop_loss = None
-                initial_risk = None
-                opened_at = p.opened_at if hasattr(p, "opened_at") and p.opened_at else utcnow()
-                if order_payload:
-                    stop_loss = order_payload.get("stop_loss")
-                    if stop_loss:
-                        initial_risk = abs(p.avg_entry_price - stop_loss)
-                    submitted_at_str = order_payload.get("submitted_at")
-                    if submitted_at_str:
-                        try:
-                            opened_at = datetime.fromisoformat(submitted_at_str)
-                        except Exception:
-                            pass
-
-                from app.portfolio.tracker import _OpenLot
-                self.portfolio._lots[p.symbol] = _OpenLot(
-                    qty=p.qty,
-                    avg_price=p.avg_entry_price,
-                    entry_ts=opened_at,
-                    strategy=strat,
-                    stop_loss=stop_loss,
-                    initial_risk_per_share=initial_risk,
-                )
-                applog.info(
-                    "engine",
-                    f"Reconstructed portfolio lot for {p.symbol}: qty={p.qty}, "
-                    f"avg_price={p.avg_entry_price}, strategy={strat}, stop_loss={stop_loss}",
-                )
+            self._reconcile_positions(positions)
         except Exception as exc:
+            self.reconciliation_failed = True
             applog.error("engine", f"Failed to restore and reconcile active positions: {exc}")
         self.pipeline = SignalPipeline(self.model, self.risk_config.ml_confidence_threshold)
         for s in self.strategies:
@@ -586,8 +550,18 @@ class TradingEngine:
             await self.broker.poll_fills()
         await self._drain_fills(now)
 
-        account = await self.broker.account()
-        positions = await self.broker.positions()
+        try:
+            account = await self.broker.account()
+            positions = await self.broker.positions()
+            if getattr(self, "reconciliation_failed", False):
+                applog.info("engine", "Reconciliation state was uncertain. Re-attempting position reconciliation...")
+                self._reconcile_positions(positions)
+        except Exception as exc:
+            self.reconciliation_failed = True
+            applog.error("engine", f"Failed to fetch account/positions during tick: {exc}. Marking reconciliation uncertain.")
+            from types import SimpleNamespace
+            account = SimpleNamespace(equity=self.portfolio.equity, cash=self.portfolio.equity)
+            positions = []
 
         # 2. session roll
         session = self.clock.session_date(now)
@@ -948,6 +922,10 @@ class TradingEngine:
                     await self._close_position_guarded(symbol, reason=sig.reason)
                 continue
             
+            if getattr(self, "reconciliation_failed", False):
+                applog.warning("engine", f"{symbol}: entry signal {sig.strategy} rejected -- engine position/broker reconciliation state is uncertain")
+                continue
+
             # Record initial stop-loss when entries are accepted
             self._position_initial_stops[symbol] = sig.stop_loss
             candidate_entries.append((sig, df))
@@ -1145,7 +1123,51 @@ class TradingEngine:
             "gemini_shadow": self.gemini_shadow.ranker.telemetry(),
             "tick": self._tick_count,
             "last_error": self.last_error,
+            "reconciliation_failed": getattr(self, "reconciliation_failed", False),
         }
+
+    def _reconcile_positions(self, positions: list[Position]) -> None:
+        """Reconcile and reconstruct database portfolio lot states from broker positions."""
+        self.portfolio._lots.clear()
+        for p in positions:
+            strat = "manual"
+            if hasattr(self.broker, "_symbol_strategies"):
+                db_strat = self.db.get_latest_order_strategy(p.symbol, self.mode)
+                if db_strat:
+                    self.broker._symbol_strategies[p.symbol] = db_strat
+                    strat = db_strat
+                    applog.info("engine", f"Restored strategy '{db_strat}' for active position {p.symbol}")
+
+            order_payload = self.db.get_latest_order_payload(p.symbol, self.mode)
+            stop_loss = None
+            initial_risk = None
+            opened_at = p.opened_at if hasattr(p, "opened_at") and p.opened_at else utcnow()
+            if order_payload:
+                stop_loss = order_payload.get("stop_loss")
+                if stop_loss:
+                    initial_risk = abs(p.avg_entry_price - stop_loss)
+                submitted_at_str = order_payload.get("submitted_at")
+                if submitted_at_str:
+                    try:
+                        opened_at = datetime.fromisoformat(submitted_at_str)
+                    except Exception:
+                        pass
+
+            from app.portfolio.tracker import _OpenLot
+            self.portfolio._lots[p.symbol] = _OpenLot(
+                qty=p.qty,
+                avg_price=p.avg_entry_price,
+                entry_ts=opened_at,
+                strategy=strat,
+                stop_loss=stop_loss,
+                initial_risk_per_share=initial_risk,
+            )
+            applog.info(
+                "engine",
+                f"Reconstructed portfolio lot for {p.symbol}: qty={p.qty}, "
+                f"avg_price={p.avg_entry_price}, strategy={strat}, stop_loss={stop_loss}",
+            )
+        self.reconciliation_failed = False
 
     async def _reconcile_pending_submissions(self) -> None:
         """Query the broker for ambiguous order submissions and resolve their status."""
