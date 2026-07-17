@@ -331,10 +331,9 @@ class AlpacaBroker(Broker):
             if cumulative <= 0 or not o.filled_avg_price:
                 continue
             oid = str(o.id)
+            processed = self._processed_fill_qty.get(oid, 0.0)
             if db:
-                processed = db.processed_fill_qty(mode=self._broker_mode, account_id=self.account_id, fill_key=oid)
-            else:
-                processed = self._processed_fill_qty.get(oid, 0.0)
+                processed = max(processed, db.processed_fill_qty(mode=self._broker_mode, account_id=self.account_id, fill_key=oid))
             if cumulative <= processed + 1e-9:
                 continue
             candidates.append(o)
@@ -349,10 +348,10 @@ class AlpacaBroker(Broker):
                 continue
             if oid in local_watermarks:
                 processed = local_watermarks[oid]
-            elif db:
-                processed = db.processed_fill_qty(mode=self._broker_mode, account_id=self.account_id, fill_key=oid)
             else:
                 processed = self._processed_fill_qty.get(oid, 0.0)
+                if db:
+                    processed = max(processed, db.processed_fill_qty(mode=self._broker_mode, account_id=self.account_id, fill_key=oid))
             delta = cumulative - processed
             if delta <= 1e-9:
                 continue
