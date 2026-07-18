@@ -1942,9 +1942,12 @@ class TradingEngine:
         TTL_MINUTES = 30
         MAX_RETRIES = 3
 
+        from datetime import UTC
         for item in self.resurrection_queue:
             ts_rejected = item["ts_rejected"]
-            if (now - ts_rejected).total_seconds() / 60.0 > TTL_MINUTES:
+            dt_now = now.astimezone(UTC) if now.tzinfo else now.replace(tzinfo=UTC)
+            dt_rejected = ts_rejected.astimezone(UTC) if ts_rejected.tzinfo else ts_rejected.replace(tzinfo=UTC)
+            if (dt_now - dt_rejected).total_seconds() / 60.0 > TTL_MINUTES:
                 applog.info("engine.resurrection", f"Resurrected candidate {item['symbol']} expired (TTL {TTL_MINUTES}m hit).")
                 continue
 
