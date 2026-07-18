@@ -470,14 +470,14 @@ async def get_shadow_ledger_analytics(request: Request) -> dict:
     accepted_signals = [s for s in signals if s.get("final_decision") == "accepted"]
     replayed_signals = [s for s in signals if s.get("replayed")]
     
-    winning_replayed = [s for s in replayed_signals if s.get("simulated_pnl", 0) > 0]
+    winning_replayed = [s for s in replayed_signals if (s.get("simulated_pnl") or 0.0) > 0.0]
     
     total_replayed = len(replayed_signals)
     win_rate = (len(winning_replayed) / total_replayed * 100.0) if total_replayed > 0 else 0.0
     
-    avg_pnl = (sum(s.get("simulated_pnl", 0) for s in replayed_signals) / total_replayed) if total_replayed > 0 else 0.0
-    avg_mfe = (sum(s.get("mfe_pct", 0) for s in replayed_signals) / total_replayed) if total_replayed > 0 else 0.0
-    avg_mae = (sum(s.get("mae_pct", 0) for s in replayed_signals) / total_replayed) if total_replayed > 0 else 0.0
+    avg_pnl = (sum((s.get("simulated_pnl") or 0.0) for s in replayed_signals) / total_replayed) if total_replayed > 0 else 0.0
+    avg_mfe = (sum((s.get("mfe_pct") or 0.0) for s in replayed_signals) / total_replayed) if total_replayed > 0 else 0.0
+    avg_mae = (sum((s.get("mae_pct") or 0.0) for s in replayed_signals) / total_replayed) if total_replayed > 0 else 0.0
     
     by_strategy = {}
     for s in signals:
@@ -505,10 +505,10 @@ async def get_shadow_ledger_analytics(request: Request) -> dict:
             
         if s.get("replayed"):
             stat["replayed"] += 1
-            pnl = s.get("simulated_pnl", 0.0)
+            pnl = s.get("simulated_pnl") or 0.0
             stat["total_pnl"] += pnl
-            stat["total_mfe"] += s.get("mfe_pct", 0.0)
-            stat["total_mae"] += s.get("mae_pct", 0.0)
+            stat["total_mfe"] += s.get("mfe_pct") or 0.0
+            stat["total_mae"] += s.get("mae_pct") or 0.0
             if pnl > 0:
                 stat["wins"] += 1
             else:
@@ -548,10 +548,10 @@ async def get_shadow_ledger_analytics(request: Request) -> dict:
         stat["count"] += 1
         if s.get("replayed"):
             stat["replayed"] += 1
-            pnl = s.get("simulated_pnl", 0.0)
+            pnl = s.get("simulated_pnl") or 0.0
             stat["total_pnl"] += pnl
-            stat["total_mfe"] += s.get("mfe_pct", 0.0)
-            stat["total_mae"] += s.get("mae_pct", 0.0)
+            stat["total_mfe"] += s.get("mfe_pct") or 0.0
+            stat["total_mae"] += s.get("mae_pct") or 0.0
             if pnl > 0:
                 stat["wins"] += 1
             else:
@@ -622,8 +622,8 @@ async def get_shadow_performance(request: Request) -> list[dict]:
         rejected = [s for s in sigs if s.get("final_decision") == "rejected"]
         
         trades = [s for s in sigs if s.get("replayed")]
-        wins = [s for s in trades if s.get("simulated_pnl", 0.0) > 0.0]
-        total_realized = sum(s.get("simulated_pnl", 0.0) for s in trades)
+        wins = [s for s in trades if (s.get("simulated_pnl") or 0.0) > 0.0]
+        total_realized = sum((s.get("simulated_pnl") or 0.0) for s in trades)
         
         win_rate = (len(wins) / len(trades) * 100.0) if trades else 0.0
         avg_expectancy = (total_realized / len(trades)) if trades else 0.0
