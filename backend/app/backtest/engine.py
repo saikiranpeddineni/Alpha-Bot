@@ -843,6 +843,12 @@ async def run_backtest(
                 flattened_sessions.add(session)
                 await broker.flatten_all(reason="end of day")
                 drain(now)
+                # Compile EOD policy reflection report and auto-promote if qualified (CR-146 Phase 7)
+                try:
+                    from app.strategies import generate_eod_reflection_report
+                    generate_eod_reflection_report(params.db if hasattr(params, "db") else None, now=now, engine=None)
+                except Exception as _exc:
+                    applog.debug("backtest", f"Backtest EOD reflection skipped: {_exc}")
             elif not risk.hard_halted and not risk.daily_halted:
                 candidates_this_tick = []
                 for symbol in symbols_here:

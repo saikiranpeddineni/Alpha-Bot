@@ -489,10 +489,10 @@ class TradingEngine:
             except Exception as exc:
                 applog.error("engine", f"Failed contextual aggregates refresh: {exc}")
             
-            # Compile EOD policy reflection report
+            # Compile EOD policy reflection report (CR-146 Phase 7: auto-promotion enabled)
             try:
                 from app.strategies import generate_eod_reflection_report
-                generate_eod_reflection_report(self.db)
+                generate_eod_reflection_report(self.db, now=now, engine=self)
             except Exception as exc:
                 applog.error("engine", f"Failed EOD reflection report generation: {exc}")
             self.publish("status", self.status())
