@@ -2,9 +2,32 @@ from __future__ import annotations
 
 import collections
 import json
+import math
 from datetime import UTC, datetime
 from app.db.database import Database
 from app.core.logging import applog
+
+
+# Strategy-specific evaluation horizons for canonical realized_r attribution.
+# Horizons are tried in priority order; first match in the outcomes dict wins.
+# Fallback: "close" if none of the listed horizons are present.
+STRATEGY_HORIZON: dict[str, list[str]] = {
+    "rsi_reversion":  ["15m", "30m", "close"],
+    "vwap_reversion": ["15m", "30m", "close"],
+    "orb":            ["60m", "close"],
+    "momentum":       ["60m", "close"],
+    "bb_squeeze":     ["60m", "close"],
+}
+_DEFAULT_HORIZON = ["15m", "close"]  # fallback for unknown strategies
+
+
+def _canonical_realized_r(strategy: str | None, outcomes: dict) -> float:
+    """Returns the canonical realized R for a candidate using strategy-specific horizon priority."""
+    horizons = STRATEGY_HORIZON.get(strategy or "", _DEFAULT_HORIZON)
+    for h in horizons:
+        if h in outcomes:
+            return float(outcomes[h].get("realized_r", 0.0))
+    return 0.0
 
 
 def get_rvol_bucket(rvol: float | None) -> str:
@@ -86,12 +109,8 @@ def refresh_contextual_memory(db: Database) -> None:
         rvol_b = get_rvol_bucket(rvol)
         vol_b = get_vol_bucket(spy_vol)
 
-        # Retrieve realized R from 15m outcome or fallback to close realized R
-        realized_r = 0.0
-        if "15m" in outcomes:
-            realized_r = outcomes["15m"].get("realized_r", 0.0)
-        elif "close" in outcomes:
-            realized_r = outcomes["close"].get("realized_r", 0.0)
+        # Retrieve canonical realized R using strategy-specific horizon priority (Fix 8)
+        realized_r = _canonical_realized_r(strategy, outcomes)
 
         is_win = 1 if realized_r > 0.0 else 0
 
@@ -199,14 +218,20 @@ def get_episodic_nearest_neighbors(
     current_features: dict,
     k: int = 5,
 ) -> list[dict]:
-    """Retrieves the k nearest historical candidates using Euclidean distance over continuous features.
-    
+    """Retrieves the k nearest historical candidates using z-score normalized Euclidean distance.
+
     Features compared: slot_rvol, spy_vol, vwap_distance_atr, ml_confidence.
+
+    Fix 7 changes vs original:
+    - Records are first partitioned by (strategy, direction) to prevent cross-strategy contamination
+      (e.g., 'ORB long TREND' cannot be similar to 'vwap_reversion short RANGE').
+    - Euclidean distance is computed over z-score normalized features so that RVOL (range 0.3–3.0)
+      does not dominate ml_confidence (range 0.45–0.65) purely due to scale difference.
+    - Falls back to raw distance if any feature's std dev is zero.
     """
     if db is None:
         return []
 
-    import math
     try:
         # Load past candidate records
         records = db.get_shadow_signals(limit=2000)
@@ -220,33 +245,54 @@ def get_episodic_nearest_neighbors(
         except Exception:
             return default
 
-    t_rvol = clean(current_features.get("slot_rvol"), 1.0)
-    t_vol = clean(current_features.get("spy_vol"), 0.08)
-    t_vwap = clean(current_features.get("vwap_distance_atr"), 0.0)
-    t_ml = clean(current_features.get("ml_confidence"), 0.5)
+    # Step 1: Partition by (strategy, direction) — cross-strategy neighbors are meaningless
+    target_strategy = current_features.get("strategy")
+    target_direction = current_features.get("direction")
 
-    target_vector = [t_rvol, t_vol, t_vwap, t_ml]
+    candidate_pool = [
+        r for r in records
+        if r.get("outcomes")  # must have completed outcomes
+        and (target_strategy is None or r.get("strategy") == target_strategy)
+        and (target_direction is None or r.get("direction") == target_direction)
+    ]
 
+    if not candidate_pool:
+        return []
+
+    # Step 2: Collect raw feature vectors from the partitioned pool
+    FEATURE_KEYS = ["slot_rvol", "spy_vol", "vwap_distance_atr", "ml_confidence"]
+    FEATURE_DEFAULTS = {"slot_rvol": 1.0, "spy_vol": 0.08, "vwap_distance_atr": 0.0, "ml_confidence": 0.5}
+
+    pool_vectors: list[list[float]] = []
+    for r in candidate_pool:
+        pool_vectors.append([clean(r.get(k), FEATURE_DEFAULTS[k]) for k in FEATURE_KEYS])
+
+    # Step 3: Compute per-feature mean and std across the pool for z-score normalization
+    n_pool = len(pool_vectors)
+    feat_means = [sum(v[i] for v in pool_vectors) / n_pool for i in range(len(FEATURE_KEYS))]
+    feat_stds = [
+        math.sqrt(sum((v[i] - feat_means[i]) ** 2 for v in pool_vectors) / n_pool)
+        for i in range(len(FEATURE_KEYS))
+    ]
+
+    def z_normalize(raw_vector: list[float]) -> list[float]:
+        """Z-score normalize; falls back to raw value if std is zero (constant feature)."""
+        return [
+            (raw_vector[i] - feat_means[i]) / feat_stds[i] if feat_stds[i] > 1e-9 else raw_vector[i]
+            for i in range(len(FEATURE_KEYS))
+        ]
+
+    # Step 4: Normalize the query vector
+    target_raw = [clean(current_features.get(k), FEATURE_DEFAULTS[k]) for k in FEATURE_KEYS]
+    target_vector = z_normalize(target_raw)
+
+    # Step 5: Score each candidate using normalized Euclidean distance
     scored_neighbors = []
-    for r in records:
-        outcomes = r.get("outcomes")
-        if not outcomes:
-            continue
-
-        rvol = clean(r.get("slot_rvol"), 1.0)
-        vol = clean(r.get("spy_vol"), 0.08)
-        vwap = clean(r.get("vwap_distance_atr"), 0.0)
-        ml = clean(r.get("ml_confidence"), 0.5)
-
-        vector = [rvol, vol, vwap, ml]
-        dist = math.sqrt(sum((x - y) ** 2 for x, y in zip(target_vector, vector)))
-
-        # Retrieve outcomes
-        realized_r = 0.0
-        if "15m" in outcomes:
-            realized_r = outcomes["15m"].get("realized_r", 0.0)
-        elif "close" in outcomes:
-            realized_r = outcomes["close"].get("realized_r", 0.0)
+    for r, raw_vec in zip(candidate_pool, pool_vectors):
+        norm_vec = z_normalize(raw_vec)
+        dist = math.sqrt(sum((x - y) ** 2 for x, y in zip(target_vector, norm_vec)))
+        outcomes = r.get("outcomes", {})
+        realized_r = _canonical_realized_r(r.get("strategy"), outcomes)
 
         scored_neighbors.append({
             "candidate_id": r.get("candidate_id"),

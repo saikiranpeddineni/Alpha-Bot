@@ -54,3 +54,40 @@ def test_promote_policy(client):
     # Verify promoting "champion" raises 400
     r = client.post("/api/strategies/promote", json={"policy_id": "champion"})
     assert r.status_code == 400
+
+
+def test_engine_restart_restores_snapshot(tmp_path):
+    # Setup settings with a shared database path
+    db_path = tmp_path / "test_restart_promotion.db"
+    settings = Settings(
+        ALPHADESK_MODE="demo",
+        DATA_PROVIDER="synthetic",
+        ALPHADESK_DB_PATH=str(db_path),
+        DEFAULT_WATCHLIST="SPY,QQQ",
+        DEMO_BAR_SECONDS=3600,
+    )
+    
+    # 1. Start initial app, promote "challenger_low_ml"
+    app1 = create_app(settings)
+    with TestClient(app1) as c1:
+        # Start engine to initialize
+        r_start = c1.post("/api/engine/start", json={"mode": "demo"})
+        assert r_start.status_code == 200
+
+        r = c1.post("/api/strategies/promote", json={"policy_id": "challenger_low_ml"})
+        assert r.status_code == 200
+        assert r.json()["config"]["ml_threshold"] == 0.48
+
+    # 2. Simulate restart: create a new app instance pointing to the same DB
+    app2 = create_app(settings)
+    
+    # Verify new app's engine has restored the promoted snapshot state after lifespan start and engine start
+    with TestClient(app2) as c2:
+        r_start2 = c2.post("/api/engine/start", json={"mode": "demo"})
+        assert r_start2.status_code == 200
+        
+        engine = app2.state.engine
+        assert engine.pipeline is not None
+        assert engine.pipeline.ml_threshold == 0.48
+        assert engine.evidence_evaluator.ml_threshold == 0.48
+

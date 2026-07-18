@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 from app.db.database import Database
 from app.core.logging import applog
+from app.strategies.memory import _canonical_realized_r
 
 
 def generate_eod_reflection_report(db: Database, now: datetime | None = None, engine: Any | None = None) -> str:
@@ -36,6 +37,7 @@ def generate_eod_reflection_report(db: Database, now: datetime | None = None, en
         policy_id = r.get("policy_id") or "unknown"
         final_decision = r.get("final_decision")
         outcomes = r.get("outcomes")
+        strategy = r.get("strategy")
 
         stats = policy_stats[policy_id]
         stats["total"] += 1
@@ -43,12 +45,8 @@ def generate_eod_reflection_report(db: Database, now: datetime | None = None, en
         if final_decision == "pipeline_approved":
             stats["approved"] += 1
             if outcomes:
-                realized_r = 0.0
-                if "15m" in outcomes:
-                    realized_r = outcomes["15m"].get("realized_r", 0.0)
-                elif "close" in outcomes:
-                    realized_r = outcomes["close"].get("realized_r", 0.0)
-
+                # Use strategy-specific horizon for canonical realized R (Fix 8)
+                realized_r = _canonical_realized_r(strategy, outcomes)
                 stats["total_r"] += realized_r
                 if realized_r > 0.0:
                     stats["wins"] += 1
@@ -98,59 +96,59 @@ def generate_eod_reflection_report(db: Database, now: datetime | None = None, en
                     best_policy = policy_id
 
     report.append("")
-    report.append("## Promotion Analysis & Recommendations")
-    
+    report.append("## Promotion Analysis & Nominations")
+
     if best_policy:
         stats = policy_stats[best_policy]
+        edge = best_expectancy - champ_expectancy
         report.append(
             f"> [!IMPORTANT]\n"
-            f"> **AUTOMATED PROMOTION TRIGGERED!**\n"
-            f"> Policy `{best_policy}` satisfied all auto-promotion rules:\n"
+            f"> **PROMOTION CANDIDATE NOMINATED — Human Approval Required**\n"
+            f"> Policy `{best_policy}` has satisfied the statistical nomination criteria:\n"
             f"> - Simulated Trades: {stats['approved']} (Required: >= 15)\n"
-            f"> - Expectancy: {best_expectancy:+.4f}R (Champion: {champ_expectancy:+.4f}R, Edge: {best_expectancy - champ_expectancy:+.4f}R, Required: >= +0.15R)\n"
+            f"> - Expectancy: {best_expectancy:+.4f}R (Champion: {champ_expectancy:+.4f}R, Edge: {edge:+.4f}R, Required: >= +0.15R)\n"
             f"> \n"
-            f"> Dynamic swapping has been executed. Policy `{best_policy}` is now promoted to the Champion production state."
+            f"> **No production configuration has been changed.**\n"
+            f"> Review the shadow performance dashboard and use `POST /strategies/promote` to approve."
         )
 
-        # Execute dynamic promotion in DB and live engine
+        # Persist the nomination to DB for the dashboard to surface (no production config touched)
         try:
-            from app.strategies.challenger import get_active_challengers
-            challengers = get_active_challengers()
-            target_challenger = next((c for c in challengers if c.policy_id == best_policy), None)
-            
-            if target_challenger:
-                db.set_setting("ml_threshold", target_challenger.ml_threshold)
-                
-                current_risk = db.get_setting("risk_config") or {}
-                if best_policy == "challenger_aggressive_score":
-                    current_risk["midday_score_boost"] = 25.0
-                    db.set_setting("risk_config", current_risk)
-                
-                if engine is not None:
-                    pipeline = getattr(engine, "pipeline", None)
-                    if pipeline:
-                        pipeline.ml_threshold = target_challenger.ml_threshold
-                        
-                    evaluator = getattr(engine, "evidence_evaluator", None)
-                    if evaluator:
-                        evaluator.ml_threshold = target_challenger.ml_threshold
-                        
-                    risk_config = getattr(engine, "risk_config", None)
-                    if best_policy == "challenger_aggressive_score" and risk_config:
-                        risk_config.midday_score_boost = 25.0
-                        
-                    publish = getattr(engine, "publish", None)
-                    if publish:
-                        publish("insight", {
-                            "id": f"autopromotion-{best_policy}-{now.timestamp()}",
-                            "ts": now.isoformat(),
-                            "severity": "success",
-                            "title": f"Automated Promotion Triggered: {best_policy}",
-                            "detail": f"Policy {best_policy} promoted to Champion production state. Expectancy: {best_expectancy:+.4f}R (Champion was {champ_expectancy:+.4f}R)."
-                        })
-                applog.info("reflection", f"SUCCESS: Autopromoted policy {best_policy!r} to Champion production state.")
+            db.save_policy_nominee({
+                "policy_id": best_policy,
+                "nominated_at": now.isoformat(),
+                "approved_count": stats["approved"],
+                "expectancy": round(best_expectancy, 4),
+                "edge_over_champion": round(edge, 4),
+                "champion_expectancy": round(champ_expectancy, 4),
+                "status": "pending",
+            })
+            applog.info(
+                "reflection",
+                f"Nomination recorded: policy {best_policy!r} nominated for promotion review. "
+                f"Expectancy: {best_expectancy:+.4f}R (edge: {edge:+.4f}R over Champion)."
+            )
         except Exception as exc:
-            applog.error("reflection", f"Failed executing automated promotion for {best_policy}: {exc}")
+            applog.error("reflection", f"Failed to save policy nomination for {best_policy}: {exc}")
+
+        # Fire a warning-severity UI insight for operator review (no config mutation)
+        try:
+            publish = getattr(engine, "publish", None) if engine is not None else None
+            if publish:
+                publish("insight", {
+                    "id": f"nomination-{best_policy}-{now.timestamp()}",
+                    "ts": now.isoformat(),
+                    "severity": "warning",
+                    "title": f"Promotion Candidate Nominated: {best_policy}",
+                    "detail": (
+                        f"Policy '{best_policy}' has qualified for promotion review. "
+                        f"Expectancy: {best_expectancy:+.4f}R vs Champion {champ_expectancy:+.4f}R "
+                        f"(edge: {edge:+.4f}R) over {stats['approved']} simulated trades. "
+                        f"No production config changed. Use POST /strategies/promote to approve."
+                    ),
+                })
+        except Exception as exc:
+            applog.error("reflection", f"Failed to publish nomination insight for {best_policy}: {exc}")
     else:
         # Fallback recommendations logic for manual review if rules aren't met
         manual_best = None

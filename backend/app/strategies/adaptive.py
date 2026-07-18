@@ -2,28 +2,46 @@ from __future__ import annotations
 
 from app.core.logging import applog
 
+# Minimum statistical sample size before any adaptation is allowed.
+# N < 30: no adaptation (noise-to-signal ratio too high)
+# N >= 30: adaptation eligible (Challenger research zone only)
+# ponytail: CR-146-vps — full Challenger-only adaptation (N>=250) deferred until virtual
+#           portfolio simulation (CR-146-vps) is implemented to validate portfolio-level impact.
+_MIN_ADAPTATION_SAMPLES = 30
+
 
 def get_adaptive_ml_threshold(base_threshold: float, exp_info: dict) -> float:
-    """Adjusts the ML confidence gate threshold dynamically based on context performance memory."""
+    """Adjusts the ML confidence gate threshold dynamically based on context performance memory.
+
+    Only active in the research zone (ParallelEvidenceEvaluator / Challenger paths).
+    Requires a minimum sample size of 30 to suppress noise-driven adjustments.
+    """
     trades = exp_info.get("trades_count", 0)
     expectancy = exp_info.get("shrunk_expectancy", 0.0)
 
-    # Require minimum statistical sample size of 10 to activate adaptation
-    if trades >= 10:
-        if expectancy > 0.3:
-            adjusted = base_threshold - 0.02
-            applog.info(
-                "adaptive",
-                f"High local context expectancy (+{expectancy:.4f}R) detected. Lowering ML threshold from {base_threshold:.3f} to {adjusted:.3f}"
-            )
-            return max(0.45, adjusted)
-        elif expectancy < -0.1:
-            adjusted = base_threshold + 0.03
-            applog.info(
-                "adaptive",
-                f"Negative local context expectancy ({expectancy:.4f}R) detected. Raising ML threshold from {base_threshold:.3f} to {adjusted:.3f}"
-            )
-            return min(0.60, adjusted)
+    if trades < _MIN_ADAPTATION_SAMPLES:
+        applog.debug(
+            "adaptive",
+            f"ML threshold adaptation suppressed: only {trades} samples (required >= {_MIN_ADAPTATION_SAMPLES})."
+        )
+        return base_threshold
+
+    if expectancy > 0.3:
+        adjusted = base_threshold - 0.02
+        applog.info(
+            "adaptive",
+            f"High local context expectancy (+{expectancy:.4f}R) detected. "
+            f"Lowering ML threshold from {base_threshold:.3f} to {adjusted:.3f}"
+        )
+        return max(0.45, adjusted)
+    elif expectancy < -0.1:
+        adjusted = base_threshold + 0.03
+        applog.info(
+            "adaptive",
+            f"Negative local context expectancy ({expectancy:.4f}R) detected. "
+            f"Raising ML threshold from {base_threshold:.3f} to {adjusted:.3f}"
+        )
+        return min(0.60, adjusted)
 
     return base_threshold
 
@@ -45,20 +63,29 @@ def get_adaptive_specialist_min_auc(strategy: str, regime_key: str, rs_score: fl
 
 
 def get_adaptive_signal_score(base_score: float, exp_info: dict) -> float:
-    """Adjusts the entry signal score based on historical context performance memory."""
+    """Adjusts the entry signal score based on historical context performance memory.
+
+    NOTE: This function result is stored in a research-zone side-dict only.
+    It is NEVER written back to the Champion's sig.score.
+    Requires a minimum sample size of 30 to suppress noise-driven adjustments.
+    """
     trades = exp_info.get("trades_count", 0)
     expectancy = exp_info.get("shrunk_expectancy", 0.0)
 
-    if trades >= 10:
-        # Scale score: expectancy > 0 increases score (boosts allocation priority)
-        # Expectancy < 0 decreases score (deprioritizes or filters out allocation)
-        multiplier = 1.0 + expectancy
-        multiplier = min(1.5, max(0.2, multiplier))
-        adjusted_score = base_score * multiplier
-        applog.info(
+    if trades < _MIN_ADAPTATION_SAMPLES:
+        applog.debug(
             "adaptive",
-            f"Scaling signal score via local expectancy ({expectancy:+.4f}R): {base_score:.2f} -> {adjusted_score:.2f}"
+            f"Signal score adaptation suppressed: only {trades} samples (required >= {_MIN_ADAPTATION_SAMPLES})."
         )
-        return round(adjusted_score, 2)
+        return base_score
 
-    return base_score
+    # Scale score: expectancy > 0 increases score (boosts allocation priority)
+    # Expectancy < 0 decreases score (deprioritizes allocation in research zone)
+    multiplier = 1.0 + expectancy
+    multiplier = min(1.5, max(0.2, multiplier))
+    adjusted_score = base_score * multiplier
+    applog.info(
+        "adaptive",
+        f"Scaling signal score via local expectancy ({expectancy:+.4f}R): {base_score:.2f} -> {adjusted_score:.2f}"
+    )
+    return round(adjusted_score, 2)
