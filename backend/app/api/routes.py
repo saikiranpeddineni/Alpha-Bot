@@ -581,3 +581,114 @@ async def get_shadow_ledger_analytics(request: Request) -> dict:
         "by_strategy": strategy_breakdown,
         "by_rejection_stage": rejection_breakdown,
     }
+
+
+class PromoteRequest(BaseModel):
+    policy_id: str
+
+
+@router.get("/strategies/challengers")
+async def get_challengers(request: Request) -> list[dict]:
+    from app.strategies.challenger import get_active_challengers
+    res = []
+    for c in get_active_challengers():
+        res.append({
+            "policy_id": c.policy_id,
+            "ml_threshold": c.ml_threshold,
+            "risk_multiplier": getattr(c, "risk_multiplier", 1.0),
+            "description": f"Challenger policy with threshold={c.ml_threshold}"
+        })
+    return res
+
+
+@router.get("/strategies/shadow-performance")
+async def get_shadow_performance(request: Request) -> list[dict]:
+    db = _db(request)
+    signals = db.get_shadow_signals(limit=5000)
+    
+    by_policy = {}
+    for sig in signals:
+        policy_id = sig.get("policy_id", "champion")
+        if policy_id not in by_policy:
+            by_policy[policy_id] = []
+        by_policy[policy_id].append(sig)
+        
+    res = []
+    for policy_id, sigs in by_policy.items():
+        total_signals = len(sigs)
+        accepted = [s for s in sigs if s.get("final_decision") == "pipeline_approved"]
+        rejected = [s for s in sigs if s.get("final_decision") == "rejected"]
+        
+        trades = [s for s in sigs if s.get("replayed")]
+        wins = [s for s in trades if s.get("simulated_pnl", 0.0) > 0.0]
+        total_realized = sum(s.get("simulated_pnl", 0.0) for s in trades)
+        
+        win_rate = (len(wins) / len(trades) * 100.0) if trades else 0.0
+        avg_expectancy = (total_realized / len(trades)) if trades else 0.0
+        
+        res.append({
+            "policy_id": policy_id,
+            "total_signals": total_signals,
+            "accepted_count": len(accepted),
+            "rejected_count": len(rejected),
+            "total_trades": len(trades),
+            "win_rate": round(win_rate, 2),
+            "total_realized_r": round(total_realized, 4),
+            "average_expectancy": round(avg_expectancy, 4),
+        })
+    return res
+
+
+@router.post("/strategies/promote")
+async def promote_policy(request: Request, body: PromoteRequest) -> dict:
+    engine = _engine(request)
+    db = _db(request)
+    policy_id = body.policy_id
+    
+    if policy_id == "champion":
+        raise HTTPException(status_code=400, detail="Champion is already production.")
+        
+    from app.strategies.challenger import get_active_challengers
+    challengers = get_active_challengers()
+    target_challenger = next((c for c in challengers if c.policy_id == policy_id), None)
+    if not target_challenger:
+        raise HTTPException(status_code=404, detail=f"Challenger policy {policy_id!r} not found.")
+        
+    try:
+        db.set_setting("ml_threshold", target_challenger.ml_threshold)
+        
+        current_risk = db.get_setting("risk_config") or {}
+        if policy_id == "challenger_aggressive_score":
+            current_risk["midday_score_boost"] = 25.0
+            db.set_setting("risk_config", current_risk)
+        
+        # Update running engine properties in-place
+        pipeline = getattr(engine, "pipeline", None)
+        if pipeline:
+            pipeline.ml_threshold = target_challenger.ml_threshold
+            
+        evaluator = getattr(engine, "evidence_evaluator", None)
+        if evaluator:
+            evaluator.ml_threshold = target_challenger.ml_threshold
+            
+        risk_config = getattr(engine, "risk_config", None)
+        if policy_id == "challenger_aggressive_score" and risk_config:
+            risk_config.midday_score_boost = 25.0
+            
+        applog.info(
+            "engine.promotion",
+            f"SUCCESS: Promoted policy {policy_id!r} to Champion production state in-place. "
+            f"New ML Threshold: {target_challenger.ml_threshold:.3f}"
+        )
+        
+        return {
+            "status": "success",
+            "message": f"Promoted policy {policy_id!r} successfully.",
+            "config": {
+                "ml_threshold": target_challenger.ml_threshold,
+                "midday_score_boost": getattr(engine.risk_config, "midday_score_boost", None) if engine.risk_config else None,
+            }
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to promote policy: {exc}") from exc
+
