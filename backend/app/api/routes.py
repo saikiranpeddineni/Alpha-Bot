@@ -316,6 +316,7 @@ class BacktestBody(BaseModel):
     starting_cash: float = Field(default=100_000.0, gt=0)
     use_ml_gate: bool = True
     use_dynamic_scanner: bool = False
+    ignore_temporal_leakage: bool = False
     debug_mode: bool = False
     strategies: dict[str, dict] | None = None
     start_date: str | None = None
@@ -388,6 +389,7 @@ async def post_backtest(body: BacktestBody, request: Request) -> dict:
             starting_cash=body.starting_cash,
             use_ml_gate=body.use_ml_gate,
             use_dynamic_scanner=body.use_dynamic_scanner,
+            ignore_temporal_leakage=body.ignore_temporal_leakage,
             debug_mode=body.debug_mode,
             strategies=merged_strategies,
             risk=engine.risk_config,

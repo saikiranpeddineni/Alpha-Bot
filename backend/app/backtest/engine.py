@@ -60,6 +60,7 @@ class BacktestParams(BaseModel):
     strategies: dict[str, dict] | None = None  # {name: {enabled: bool, params: {...}}}
     risk: RiskConfig | None = None
     use_corrected_trailing: bool = True
+    ignore_temporal_leakage: bool = False
     cache_policy: str = "default"  # "default" or "immutable_cache_only"
     verify_dataset_immutability: bool = False
 
@@ -457,14 +458,18 @@ async def run_backtest(
         current_watchlist = list(core_watchlist)
         risk.core_watchlist = core_watchlist
         # Set backtest_start_time on the replay clone to enforce temporal leakage
-        # protection. The live engine.model singleton is never touched here because
-        # model was already deep-copied at the top of run_backtest() and
-        # model.backtest_start_time was explicitly reset to None before this line.
-        model.backtest_start_time = params.start
+        # protection, unless explicitly bypassed by ignore_temporal_leakage.
+        if params.ignore_temporal_leakage:
+            model.backtest_start_time = None
+        else:
+            model.backtest_start_time = params.start
         pipeline = SignalPipeline(model, risk_cfg.ml_confidence_threshold if params.use_ml_gate else 0.0)
         # Set backtest_start_time on meta label engine to prevent MetaLabel temporal leakage
         if hasattr(pipeline, "meta_label_engine") and pipeline.meta_label_engine is not None:
-            pipeline.meta_label_engine.backtest_start_time = params.start
+            if params.ignore_temporal_leakage:
+                pipeline.meta_label_engine.backtest_start_time = None
+            else:
+                pipeline.meta_label_engine.backtest_start_time = params.start
         from app.strategies.evaluator import ParallelEvidenceEvaluator
         evidence_evaluator = ParallelEvidenceEvaluator(
             model=model,
