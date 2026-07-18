@@ -154,3 +154,34 @@ async def test_heartbeat_sector_leadership(temp_db: Database):
     # Executing again with same hour index should return early
     engine._run_heartbeat_tasks(now + timedelta(minutes=5))
     assert engine._last_heartbeat_hour == 15
+
+
+@pytest.mark.asyncio
+async def test_resurrection_queue_timezone_safety(temp_db: Database):
+    settings = MagicMock()
+    settings.mode = "demo"
+    settings.watchlist_symbols.return_value = ["AAPL", "SPY"]
+    settings.risk_config().model_dump.return_value = {}
+
+    engine = TradingEngine(settings, temp_db)
+    engine.state = EngineState.RUNNING
+    engine.data = MagicMock()
+    engine.data.frame.return_value = make_bars(n=10)
+
+    # Insert one candidate with timezone-naive ts_rejected
+    naive_ts = datetime(2026, 1, 6, 15, 0)
+    sig = Signal(symbol="AAPL", action=SignalAction.ENTER_LONG, strategy="orb", price=100.0, confidence=0.6, reason="")
+    sig.candidate_id = "TEST_NAIVE_TZ"
+    engine.resurrection_queue.append({
+        "symbol": "AAPL",
+        "ts_rejected": naive_ts,
+        "original_signal": sig,
+        "retry_count": 0,
+    })
+
+    # Call _process_resurrection_queue with timezone-aware 'now'
+    aware_now = datetime(2026, 1, 6, 15, 10, tzinfo=UTC)
+    resurrected = await engine._process_resurrection_queue(10000.0, aware_now)
+    # Should not raise TypeError, but instead process safely (expired or evaluated)
+    assert isinstance(resurrected, list)
+
