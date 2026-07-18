@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+from datetime import datetime, UTC
 from app.ai.prediction import TradeScoreEngine
 
 
@@ -32,6 +33,19 @@ class ChallengerConfig:
             }
         )
         return TradeScoreEngine(weights=base_engine.w, risk_config=custom_risk)
+
+    def to_snapshot(self) -> dict:
+        """Serializes the full policy configuration as an immutable versioned snapshot.
+        This snapshot is persisted to DB before promotion so the exact tested config
+        is auditable and reproducible. Prevents config drift between tested and deployed policy.
+        """
+        return {
+            "policy_id": self.policy_id,
+            "ml_threshold": self.ml_threshold,
+            "score_threshold_offset": self.score_threshold_offset,
+            "snapshot_version": "1.0",
+            "snapshot_at": datetime.now(UTC).isoformat(),
+        }
 
 
 def get_active_challengers() -> list[ChallengerConfig]:

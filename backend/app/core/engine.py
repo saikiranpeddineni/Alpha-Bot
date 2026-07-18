@@ -282,10 +282,23 @@ class TradingEngine:
         except Exception as exc:
             self.reconciliation_failed = True
             applog.error("engine", f"Failed to restore and reconcile active positions: {exc}")
-        self.pipeline = SignalPipeline(self.model, self.risk_config.ml_confidence_threshold)
+        # Restore active promoted policy snapshot or threshold settings from the database (Fix 10)
+        active_snapshot = self.db.get_setting("active_policy_snapshot")
+        ml_thresh = self.risk_config.ml_confidence_threshold
+        if active_snapshot and "ml_threshold" in active_snapshot:
+            ml_thresh = float(active_snapshot["ml_threshold"])
+            applog.info("engine", f"Restored active promoted policy snapshot on startup: {active_snapshot}")
+            # If the snapshot is for the aggressive score policy, restore the midday score boost
+            if active_snapshot.get("policy_id") == "challenger_aggressive_score":
+                self.risk_config.midday_score_boost = 25.0
+        elif self.db.get_setting("ml_threshold") is not None:
+            ml_thresh = float(self.db.get_setting("ml_threshold"))
+            applog.info("engine", f"Restored active promoted ML threshold setting on startup: {ml_thresh}")
+
+        self.pipeline = SignalPipeline(self.model, ml_thresh)
         self.evidence_evaluator = ParallelEvidenceEvaluator(
             model=self.model,
-            ml_threshold=self.risk_config.ml_confidence_threshold,
+            ml_threshold=ml_thresh,
             meta_label_engine=self.pipeline.meta_label_engine,
             trade_score_engine=self.pipeline.trade_score_engine,
         )
@@ -655,7 +668,18 @@ class TradingEngine:
             candidates = []
 
             # Process resurrected signals from queue (CR-146 Phase 4)
-            resurrected = await self._process_resurrection_queue(account.equity, now)
+            # SAFETY: Resurrection uses stale signal price/SL/TP from the original rejection tick.
+            # Enabled only for paper/shadow sessions. Live sessions skip entirely to avoid stale orders.
+            _resurrection_enabled = getattr(self.broker, "is_paper", False)
+            resurrected = []
+            if _resurrection_enabled:
+                resurrected = await self._process_resurrection_queue(account.equity, now)
+            elif self.resurrection_queue:
+                applog.debug(
+                    "engine.resurrection",
+                    f"Resurrection queue skipped for live session ({len(self.resurrection_queue)} items pending). "
+                    "Enable paper mode or validate signal freshness before re-enabling for live."
+                )
             candidates.extend(resurrected)
 
             for symbol in new_closed:
@@ -905,10 +929,13 @@ class TradingEngine:
                 spy_vol = None
 
         # Fetch Level 1 Context expectancy for each strategy and log/adapt (CR-146 Phase 5)
+        # SAFETY: adaptive_scores is a RESEARCH-ZONE side-dict. sig.score is NEVER mutated here.
+        # The Champion's SignalPipeline always receives the original, unmodified sig object.
         from app.strategies import get_contextual_expectancy, get_adaptive_ml_threshold, get_adaptive_signal_score
         from app.core.phase import classify_clock_phase
         clock_phase = classify_clock_phase(now)
-        adaptive_ml_thresholds = {}
+        adaptive_ml_thresholds: dict[str, float] = {}
+        adaptive_scores: dict[str, float] = {}  # research-zone only — never written back to sig
         for sig in signals:
             if sig.action != SignalAction.EXIT:
                 try:
@@ -928,12 +955,13 @@ class TradingEngine:
                         f"shrunk_expectancy={exp_info['shrunk_expectancy']} (source: {exp_info['source']})"
                     )
 
-                    # Compute adaptive ML threshold and signal score scaling
+                    # Compute adaptive ML threshold (research-zone, fed only to ParallelEvidenceEvaluator)
                     dyn_ml_threshold = get_adaptive_ml_threshold(self.pipeline.ml_threshold, exp_info)
                     adaptive_ml_thresholds[sig.candidate_id] = dyn_ml_threshold
-                    
+
+                    # Compute adaptive score (research-zone, stored in side-dict — NOT written back to sig)
                     if sig.score is not None:
-                        sig.score = get_adaptive_signal_score(sig.score, exp_info)
+                        adaptive_scores[sig.candidate_id] = get_adaptive_signal_score(sig.score, exp_info)
                 except Exception as exc:
                     applog.error("engine.memory", f"Failed memory expectancy lookup / adaptation: {exc}")
 
@@ -1023,9 +1051,12 @@ class TradingEngine:
             )
 
             # Run and record all active Challengers (CR-146 Phase 3)
+            # SAFETY: Each challenger receives an independent deep copy of the original signal
+            # so Champion's sig object is never shared with or contaminated by Challenger paths.
             from app.strategies.challenger import get_active_challengers
             for challenger in get_active_challengers():
                 try:
+                    challenger_sig = sig.model_copy(deep=True)  # pristine deep copy for this challenger
                     challenger_eval = ParallelEvidenceEvaluator(
                         model=self.model,
                         ml_threshold=challenger.ml_threshold,
@@ -1035,7 +1066,7 @@ class TradingEngine:
                     c_evidence = challenger_eval.evaluate(
                         symbol=symbol,
                         df=df,
-                        sig=sig,
+                        sig=challenger_sig,
                         regime=regime,
                         sector_strength=rs_score,
                         is_event_day=is_event_day,
@@ -1057,12 +1088,12 @@ class TradingEngine:
                         db_engine=self.db,
                         symbol=symbol,
                         ts=now,
-                        strategy=sig.strategy,
-                        direction="long" if sig.action == SignalAction.ENTER_LONG else "short",
-                        signal_price=sig.price or float(df["close"].iloc[-1]),
-                        stop_loss=sig.stop_loss,
-                        take_profit=sig.take_profit,
-                        ml_confidence=sig.ml_probability,
+                        strategy=challenger_sig.strategy,
+                        direction="long" if challenger_sig.action == SignalAction.ENTER_LONG else "short",
+                        signal_price=challenger_sig.price or float(df["close"].iloc[-1]),
+                        stop_loss=challenger_sig.stop_loss,
+                        take_profit=challenger_sig.take_profit,
+                        ml_confidence=challenger_sig.ml_probability,
                         final_decision=c_final_decision,
                         rejection_stage=c_rejection_stage,
                         rejection_reason=c_rejection_reason,
@@ -1086,14 +1117,21 @@ class TradingEngine:
             applog.debug("pipeline", f"{symbol} {sig.strategy} {sig.action}: rejected -- {reason}")
             if sig.action != SignalAction.EXIT:
                 in_queue = any(
-                    q["symbol"] == sig.symbol and q["original_signal"].strategy == sig.strategy
+                    q["symbol"] == sig.symbol and q["strategy"] == sig.strategy
                     for q in self.resurrection_queue
                 )
                 if not in_queue:
+                    # Store resurrection INTENT only — not the full sig object.
+                    # Stale price/SL/TP are intentionally excluded to prevent stale-data orders.
+                    # When retried, the live pipeline will gate fresh market data through all gates.
                     self.resurrection_queue.append({
                         "symbol": sig.symbol,
+                        "strategy": sig.strategy,
+                        "direction": "long" if sig.action == SignalAction.ENTER_LONG else "short",
+                        "candidate_id": sig.candidate_id,
+                        "original_rejection_reason": reason,
                         "ts_rejected": now,
-                        "original_signal": sig,
+                        "original_signal": sig,   # kept for paper-mode pipeline re-evaluation only
                         "retry_count": 0,
                     })
                     applog.info(
