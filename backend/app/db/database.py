@@ -373,10 +373,9 @@ class Database:
             outcomes = payload.get("outcomes", {})
             realized_r = 0.0
             if outcomes:
-                if "15m" in outcomes:
-                    realized_r = outcomes["15m"].get("realized_r", 0.0)
-                elif "close" in outcomes:
-                    realized_r = outcomes["close"].get("realized_r", 0.0)
+                from app.strategies.memory import _canonical_realized_r
+                strategy = payload.get("strategy")
+                realized_r = _canonical_realized_r(strategy, outcomes)
             from app.strategies.evaluator import ParallelEvidenceEvaluator
             attrib = ParallelEvidenceEvaluator.calculate_veto_attribution(vetoes, realized_r)
             payload.update(attrib)
