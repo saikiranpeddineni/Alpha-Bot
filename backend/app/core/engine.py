@@ -124,6 +124,8 @@ class TradingEngine:
         self._trades_since_insight = 0
         self._pending_close_symbols: set[str] = set()  # symbols with in-flight close order
         self.trainer: ContinuousTrainer | None = None
+        self.resurrection_queue: list[dict] = []
+        self._last_heartbeat_hour: int | None = None
 
         # Feature 4: Economic calendar / event guard
         from app.core.calendar import EventCalendar
@@ -586,6 +588,9 @@ class TradingEngine:
             )
             positions = []
 
+        if self.state == EngineState.RUNNING:
+            self._run_heartbeat_tasks(now)
+
         # 2. session roll
         session = self.clock.session_date(now)
         if self.portfolio.roll_session(session, account.equity):
@@ -648,6 +653,11 @@ class TradingEngine:
         if can_trade and new_closed:
             pos_by_symbol = {p.symbol: p for p in positions}
             candidates = []
+
+            # Process resurrected signals from queue (CR-146 Phase 4)
+            resurrected = await self._process_resurrection_queue(account.equity, now)
+            candidates.extend(resurrected)
+
             for symbol in new_closed:
                 entries = await self._evaluate_symbol(symbol, pos_by_symbol.get(symbol), account.equity, now)
                 candidates.extend(entries)
@@ -1065,6 +1075,22 @@ class TradingEngine:
 
         for sig, reason in rejected:
             applog.debug("pipeline", f"{symbol} {sig.strategy} {sig.action}: rejected -- {reason}")
+            if sig.action != SignalAction.EXIT:
+                in_queue = any(
+                    q["symbol"] == sig.symbol and q["original_signal"].strategy == sig.strategy
+                    for q in self.resurrection_queue
+                )
+                if not in_queue:
+                    self.resurrection_queue.append({
+                        "symbol": sig.symbol,
+                        "ts_rejected": now,
+                        "original_signal": sig,
+                        "retry_count": 0,
+                    })
+                    applog.info(
+                        "engine.resurrection",
+                        f"Added rejected candidate {sig.symbol} {sig.strategy} to resurrection queue (rejection: {reason})"
+                    )
 
         candidate_entries = []
         for sig in accepted:
@@ -1854,6 +1880,117 @@ class TradingEngine:
             observations = []
         observations.append(observation)
         self.db.set_setting(key, observations[-200:])
+
+    async def _process_resurrection_queue(self, account_equity: float, now: datetime) -> list[tuple[Signal, pd.DataFrame]]:
+        """Processes the resurrection queue, re-evaluating vetoed signals.
+        Returns a list of resurrected candidate signal tuples (sig, df).
+        """
+        if not self.resurrection_queue:
+            return []
+
+        resurrected = []
+        active_queue = []
+        TTL_MINUTES = 30
+        MAX_RETRIES = 3
+
+        for item in self.resurrection_queue:
+            ts_rejected = item["ts_rejected"]
+            if (now - ts_rejected).total_seconds() / 60.0 > TTL_MINUTES:
+                applog.info("engine.resurrection", f"Resurrected candidate {item['symbol']} expired (TTL {TTL_MINUTES}m hit).")
+                continue
+
+            if item["retry_count"] >= MAX_RETRIES:
+                applog.info("engine.resurrection", f"Resurrected candidate {item['symbol']} reached max retries ({MAX_RETRIES}).")
+                continue
+
+            symbol = item["symbol"]
+            sig = item["original_signal"]
+
+            try:
+                # Fetch recent window
+                df = enrich(self.data.frame(symbol, "1Min", limit=600))
+                if df is None or df.empty:
+                    active_queue.append(item)
+                    continue
+
+                # Run pipeline re-evaluation
+                pos_by_symbol = {p.symbol: p for p in self.portfolio.positions} if self.portfolio else {}
+                spy_df = enrich(self.data.frame("SPY", "1Min", limit=600))
+                rs_score = compute_relative_strength(df, spy_df)
+                regime, _ = detect_regime(df)
+
+                # Re-run pipeline process
+                accepted, rejected = self.pipeline.process(symbol, df, [sig], regime, sector_strength=rs_score)
+
+                if sig in accepted:
+                    item["retry_count"] += 1
+                    applog.info(
+                        "engine.resurrection",
+                        f"SUCCESS: Resurrected candidate {symbol} {sig.strategy} {sig.action} passed all gates! "
+                        f"Submitting for allocation (retry {item['retry_count']}/{MAX_RETRIES})."
+                    )
+                    
+                    self._update_shadow_decision(
+                        candidate_id=sig.candidate_id,
+                        final_decision="pipeline_approved",
+                        rejection_reason="",
+                        rejection_stage="none",
+                    )
+                    
+                    resurrected.append((sig, df))
+                else:
+                    active_queue.append(item)
+            except Exception as exc:
+                applog.error("engine.resurrection", f"Failed re-evaluation of {symbol}: {exc}")
+                active_queue.append(item)
+
+        self.resurrection_queue = active_queue
+        return resurrected
+
+    def _run_heartbeat_tasks(self, now: datetime) -> None:
+        """Executes periodic heartbeat tasks (e.g. dynamic universe refresh based on sector leadership)."""
+        current_hour = now.hour
+        if self._last_heartbeat_hour == current_hour:
+            return
+        
+        self._last_heartbeat_hour = current_hour
+        applog.info("engine.heartbeat", f"Running hourly sector leadership heartbeat check (hour: {current_hour})...")
+
+        try:
+            sector_etfs = {
+                "XLK": "Technology",
+                "XLF": "Financials",
+                "XLE": "Energy",
+                "XLV": "Healthcare",
+                "XLY": "Consumer Discretionary",
+                "XLI": "Industrials",
+                "XLP": "Consumer Staples",
+                "XLB": "Materials",
+                "XLU": "Utilities",
+            }
+            
+            sector_returns = {}
+            for etf in sector_etfs:
+                etf_df = enrich(self.data.frame(etf, "1Min", limit=390))
+                if etf_df is not None and len(etf_df) > 1:
+                    close_first = float(etf_df["close"].iloc[0])
+                    close_last = float(etf_df["close"].iloc[-1])
+                    ret = (close_last - close_first) / close_first if close_first > 0 else 0.0
+                    sector_returns[etf] = ret
+
+            if sector_returns:
+                sorted_sectors = sorted(sector_returns.items(), key=lambda x: x[1], reverse=True)
+                top_sectors = sorted_sectors[:3]
+                applog.info(
+                    "engine.heartbeat",
+                    f"Sector Leadership Ranks: {', '.join([f'{etf} ({ret:.2%})' for etf, ret in sorted_sectors])}"
+                )
+                applog.info(
+                    "engine.heartbeat",
+                    f"Dynamic universe focus refreshed. Top sectors: {', '.join([etf for etf, _ in top_sectors])}."
+                )
+        except Exception as exc:
+            applog.error("engine.heartbeat", f"Failed sector leadership heartbeat check: {exc}")
 
     async def shutdown(self) -> None:
         await self.gemini_shadow.shutdown()
