@@ -8,6 +8,7 @@ from typing import Any
 from app.db.database import Database
 from app.core.logging import applog
 from app.strategies.memory import _canonical_realized_r
+from app.config import DATA_DIR
 
 
 def generate_eod_reflection_report(db: Database, now: datetime | None = None, engine: Any | None = None) -> str:
@@ -180,7 +181,7 @@ def generate_eod_reflection_report(db: Database, now: datetime | None = None, en
 
     # Save to file
     try:
-        report_dir = Path("backend/data/reports")
+        report_dir = DATA_DIR / "reports"
         report_dir.mkdir(parents=True, exist_ok=True)
         report_file = report_dir / f"reflection_{now.strftime('%Y%m%d')}.md"
         report_file.write_text(report_text, encoding="utf-8")
