@@ -150,6 +150,11 @@ async def run_backtest(
     import copy
     import hashlib
     model_orig = model
+    # Refresh specialist models from disk before deepcopying. This ensures
+    # the backtest always uses the latest trained artifacts even when training
+    # ran after the server was started (avoids NO_ARTIFACT for new specialists).
+    if hasattr(model, "reload_specialists"):
+        model.reload_specialists()
     model = copy.deepcopy(model)
 
     # --- FIX #69: Explicitly reset backtest_start_time on the clone to None

@@ -172,6 +172,32 @@ class SignalModel:
                     applog.debug("ai.model", f"Could not load specialist {pkl.name}: {exc}")
         self._auc_warned_symbols = set()
 
+    def reload_specialists(self) -> None:
+        """Reload specialist models from disk into the in-memory cache.
+
+        Called before a backtest deepcopy so the backtest always sees the
+        most recently trained specialist artifacts, even if they were trained
+        after this server process started.
+        """
+        import joblib
+        specialists_dir = self.models_dir / "specialists"
+        self._specialists.clear()
+        if specialists_dir.exists():
+            for pkl in specialists_dir.glob("*.pkl"):
+                try:
+                    artifact = joblib.load(pkl)
+                    if isinstance(artifact, dict):
+                        if "auc" in artifact:
+                            if "auc_long" not in artifact:
+                                artifact["auc_long"] = artifact["auc"]
+                            if "auc_short" not in artifact:
+                                artifact["auc_short"] = artifact["auc"]
+                    self._specialists[pkl.stem.upper()] = artifact
+                except Exception as exc:
+                    applog.debug("ai.model", f"Could not reload specialist {pkl.name}: {exc}")
+        self._auc_warned_symbols = set()
+        applog.info("ai.model", f"reload_specialists: loaded {len(self._specialists)} specialist(s) from disk")
+
     @property
     def is_trained(self) -> bool:
         return self._model_long is not None
