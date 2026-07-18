@@ -196,3 +196,87 @@ def test_database_lineage_and_evidence_persistence(temp_db: Database):
     assert "unique_veto_alpha" in loaded
     assert loaded["coalition_veto_count"] == 1
     assert loaded["unique_veto_alpha"]["meta_label_gate"] is not None
+
+
+async def test_evaluator_failure_fail_open(tmp_path):
+    from app.config import Settings
+    from app.core.engine import TradingEngine
+    from app.db.database import Database
+    from unittest.mock import MagicMock
+    
+    settings = Settings(
+        ALPHADESK_MODE="demo",
+        DATA_PROVIDER="synthetic",
+        ALPHADESK_DB_PATH=str(tmp_path / "engine.db"),
+        DEFAULT_WATCHLIST="SPY,NVDA",
+        DEMO_BAR_SECONDS=3600,
+        RISK_PER_TRADE_PCT=1.0,
+    )
+    db = Database(settings.resolved_db_path)
+    engine = TradingEngine(settings, db)
+    await engine.start("demo")
+    
+    # Mock evaluator to raise an exception
+    engine.evidence_evaluator.evaluate = MagicMock(side_effect=Exception("Evaluator simulated error"))
+    
+    # Assert that _tick runs successfully without raising the exception
+    try:
+        await engine._tick()
+    except Exception as exc:
+        pytest.fail(f"TradingEngine._tick failed instead of failing open: {exc}")
+        
+    await engine.shutdown()
+
+
+def test_attribution_recomputation_at_replay(temp_db: Database):
+    ts = datetime(2026, 1, 6, 15, 30, tzinfo=UTC)
+    gate_evidence = {
+        "ml_probability": 0.58,
+        "ml_passed": True,
+        "meta_passed": False,
+        "vetoes": {"meta_label_gate": "Meta-label rejected"},
+        "veto_count": 1,
+    }
+    
+    payload = {
+        "candidate_id": "REPLAY_TEST_123",
+        "symbol": "AAPL",
+        "strategy": "orb",
+        "direction": "long",
+        "outcomes": {},  # empty at first
+        "gate_evidence_json": gate_evidence,
+    }
+    
+    # First save (outcomes empty)
+    temp_db.save_shadow_signal(
+        candidate_id="REPLAY_TEST_123",
+        ts=ts,
+        symbol="AAPL",
+        strategy="orb",
+        direction="long",
+        mode="backtest",
+        payload=payload,
+    )
+    
+    loaded = temp_db.get_shadow_signal("REPLAY_TEST_123")
+    assert loaded["unique_veto_alpha"]["meta_label_gate"] == 0.0
+    
+    # Second save (outcomes filled)
+    payload["outcomes"] = {
+        "15m": {"realized_r": 3.0}
+    }
+    
+    temp_db.save_shadow_signal(
+        candidate_id="REPLAY_TEST_123",
+        ts=ts,
+        symbol="AAPL",
+        strategy="orb",
+        direction="long",
+        mode="backtest",
+        payload=payload,
+    )
+    
+    loaded = temp_db.get_shadow_signal("REPLAY_TEST_123")
+    # For a winner (+3.0R) vetoed uniquely by meta_label_gate, unique_veto_alpha should update to -3.0
+    assert loaded["unique_veto_alpha"]["meta_label_gate"] == -3.0
+

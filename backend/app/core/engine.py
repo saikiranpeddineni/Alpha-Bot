@@ -890,7 +890,7 @@ class TradingEngine:
                         midday_active=midday_active,
                     )
                     if evidence:
-                        parallel_evidences[sig.strategy] = evidence
+                        parallel_evidences[sig.candidate_id] = evidence
                 except Exception as exc:
                     applog.error("engine.evaluator", f"ParallelEvidenceEvaluator failed for {symbol} {sig.strategy}: {exc}")
 
@@ -953,7 +953,7 @@ class TradingEngine:
                 policy_id="champion",
                 parent_policy_id=None,
                 policy_version="1.0.0",
-                gate_evidence_json=parallel_evidences.get(sig.strategy),
+                gate_evidence_json=parallel_evidences.get(sig.candidate_id),
             )
 
         for sig, reason in rejected:
