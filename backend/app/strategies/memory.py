@@ -12,7 +12,7 @@ from app.core.logging import applog
 # Horizons are tried in priority order; first match in the outcomes dict wins.
 # Fallback: "close" if none of the listed horizons are present.
 STRATEGY_HORIZON: dict[str, list[str]] = {
-    "rsi_reversion":  ["15m", "30m", "close"],
+    "rsi2_reversion": ["15m", "30m", "close"],
     "vwap_reversion": ["15m", "30m", "close"],
     "orb":            ["60m", "close"],
     "momentum":       ["60m", "close"],
