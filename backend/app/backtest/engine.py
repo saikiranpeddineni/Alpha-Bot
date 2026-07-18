@@ -843,6 +843,12 @@ async def run_backtest(
                 flattened_sessions.add(session)
                 await broker.flatten_all(reason="end of day")
                 drain(now)
+                # Compile EOD policy reflection report and auto-promote if qualified (CR-146 Phase 7)
+                try:
+                    from app.strategies import generate_eod_reflection_report
+                    generate_eod_reflection_report(params.db if hasattr(params, "db") else None, now=now, engine=None)
+                except Exception as _exc:
+                    applog.debug("backtest", f"Backtest EOD reflection skipped: {_exc}")
             elif not risk.hard_halted and not risk.daily_halted:
                 candidates_this_tick = []
                 for symbol in symbols_here:
@@ -931,6 +937,50 @@ async def run_backtest(
                     if not signals:
                         continue
                     feature_row = window.iloc[-1]
+                    slot_engine = slot_volume_engines.get(symbol)
+                    slot_rvol_val = slot_engine.get_slot_rvol(now) if slot_engine else None
+
+                    # Estimate SPY 30-bar rolling volatility
+                    spy_vol: float | None = None
+                    if spy_df is not None:
+                        spy_i = positions_index["SPY"].get(ts)
+                        if spy_i is not None:
+                            spy_window = spy_df.iloc[max(0, spy_i - SLICE_WINDOW + 1) : spy_i + 1]
+                            try:
+                                spy_vol = float(spy_window["close"].pct_change().rolling(30).std().iloc[-1] * 100)
+                            except Exception:
+                                spy_vol = None
+
+                    # Fetch Level 1 Context expectancy for each strategy and log/adapt (CR-146 Phase 5)
+                    from app.strategies import get_contextual_expectancy, get_adaptive_ml_threshold, get_adaptive_signal_score
+                    from app.core.phase import classify_clock_phase
+                    clock_phase = classify_clock_phase(now)
+                    adaptive_ml_thresholds = {}
+                    for sig in signals:
+                        if sig.action != SignalAction.EXIT:
+                            try:
+                                exp_info = get_contextual_expectancy(
+                                    db=None,  # No DB in backtest engine
+                                    strategy=sig.strategy,
+                                    direction="long" if sig.action == SignalAction.ENTER_LONG else "short",
+                                    regime=regime.name if hasattr(regime, "name") else str(regime),
+                                    clock_phase=clock_phase.value if hasattr(clock_phase, "value") else str(clock_phase),
+                                    rvol=slot_rvol_val,
+                                    spy_vol=spy_vol,
+                                )
+                                applog.debug(
+                                    "backtest.memory",
+                                    f"Context memory lookup for {sig.symbol} {sig.strategy} {sig.action}: "
+                                    f"expectancy={exp_info['expectancy']}, shrunk_expectancy={exp_info['shrunk_expectancy']}"
+                                )
+                                
+                                dyn_ml_threshold = get_adaptive_ml_threshold(pipeline.ml_threshold, exp_info)
+                                adaptive_ml_thresholds[sig.candidate_id] = dyn_ml_threshold
+                                
+                                if sig.score is not None:
+                                    sig.score = get_adaptive_signal_score(sig.score, exp_info)
+                            except Exception as exc:
+                                applog.error("backtest.memory", f"Failed memory expectancy lookup / adaptation: {exc}")
                     # Assign a unique candidate ID to all candidate entry signals first (shared UUID)
                     import uuid
                     for sig in signals:
@@ -954,6 +1004,7 @@ async def run_backtest(
                                     sector_strength=rs_score,
                                     is_event_day=is_event_day,
                                     midday_active=midday_active,
+                                    ml_threshold=adaptive_ml_thresholds.get(sig.candidate_id),
                                 )
                                 if evidence:
                                     parallel_evidences[sig.candidate_id] = evidence
@@ -1009,8 +1060,6 @@ async def run_backtest(
                                 f"(strategy: {sig.strategy}) -- Stage: {rejection_stage}, Reason: {rejection_reason}"
                             )
 
-                        slot_engine = slot_volume_engines.get(symbol)
-                        slot_rvol_val = slot_engine.get_slot_rvol(now) if slot_engine else None
                         vwap_tel = compute_vwap_telemetry(window, now, slot_rvol_val)
 
                         payload = ShadowLedger.record_candidate(
@@ -1037,8 +1086,70 @@ async def run_backtest(
                             parent_policy_id=None,
                             policy_version="1.0.0",
                             gate_evidence_json=parallel_evidences.get(sig.candidate_id),
+                            spy_vol=spy_vol,
                         )
                         shadow_signals_log.append(payload)
+
+                        # Run and record all active Challengers in backtesting (CR-146 Phase 3)
+                        from app.strategies.challenger import get_active_challengers
+                        for challenger in get_active_challengers():
+                            try:
+                                challenger_eval = ParallelEvidenceEvaluator(
+                                    model=model,
+                                    ml_threshold=challenger.ml_threshold,
+                                    meta_label_engine=pipeline.meta_label_engine,
+                                    trade_score_engine=challenger.create_custom_trade_score_engine(pipeline.trade_score_engine),
+                                )
+                                c_evidence = challenger_eval.evaluate(
+                                    symbol=symbol,
+                                    df=window,
+                                    sig=sig,
+                                    regime=regime,
+                                    sector_strength=rs_score,
+                                    is_event_day=is_event_day,
+                                    midday_active=midday_active,
+                                )
+                                
+                                c_vetoes = c_evidence.get("vetoes", {})
+                                c_accepted = len(c_vetoes) == 0
+                                c_final_decision = "pipeline_approved" if c_accepted else "rejected"
+                                
+                                c_rejection_stage = "none"
+                                c_rejection_reason = ""
+                                if not c_accepted:
+                                    stage = list(c_vetoes.keys())[0]
+                                    c_rejection_stage = stage
+                                    c_rejection_reason = c_vetoes[stage]
+
+                                c_payload = ShadowLedger.record_candidate(
+                                    db_engine=None,
+                                    symbol=symbol,
+                                    ts=now,
+                                    strategy=sig.strategy,
+                                    direction="long" if sig.action == SignalAction.ENTER_LONG else "short",
+                                    signal_price=sig.price or float(window["close"].iloc[-1]),
+                                    stop_loss=sig.stop_loss,
+                                    take_profit=sig.take_profit,
+                                    ml_confidence=sig.ml_probability,
+                                    final_decision=c_final_decision,
+                                    rejection_stage=c_rejection_stage,
+                                    rejection_reason=c_rejection_reason,
+                                    df=frame,
+                                    spy_df=spy_df,
+                                    slot_rvol_val=slot_rvol_val,
+                                    vwap_telemetry=vwap_tel,
+                                    mode="challenger",
+                                    candidate_id=sig.candidate_id,
+                                    strategy_params=getattr(sig, "strategy_params", {}),
+                                    policy_id=challenger.policy_id,
+                                    parent_policy_id="champion",
+                                    policy_version="1.0.0",
+                                    gate_evidence_json=c_evidence,
+                                    spy_vol=spy_vol,
+                                )
+                                shadow_signals_log.append(c_payload)
+                            except Exception as exc:
+                                applog.error("backtest.challenger", f"Challenger {challenger.policy_id} failed for {symbol}: {exc}")
 
                     for sig in accepted:
                         if sig.action == SignalAction.EXIT:

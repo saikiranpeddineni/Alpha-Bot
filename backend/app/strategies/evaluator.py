@@ -34,6 +34,7 @@ class ParallelEvidenceEvaluator:
         sector_strength: float | None = None,
         is_event_day: bool = False,
         midday_active: bool = False,
+        ml_threshold: float | None = None,
     ) -> dict[str, Any]:
         """Runs parallel gate evaluation for a candidate signal.
         Fails open on exceptions to protect live trading stability.
@@ -45,6 +46,8 @@ class ParallelEvidenceEvaluator:
             features = latest_feature_row(df)
             if features is None:
                 return {"error": "features unavailable", "veto_count": 0, "vetoes": {}}
+
+            target_ml_threshold = ml_threshold if ml_threshold is not None else self.ml_threshold
 
             # ---- Gate 1: ML Probability Gate ----
             from app.strategies.pipeline import _REGIME_KEY
@@ -69,6 +72,14 @@ class ParallelEvidenceEvaluator:
                     specialist_min_auc=0.53,
                     fallback_reason=None if prob is not None else "score_action returned None"
                 )
+            import dataclasses
+            from app.strategies.adaptive import get_adaptive_specialist_min_auc
+            dyn_min_auc = get_adaptive_specialist_min_auc(
+                sig.strategy,
+                regime_key or "RANGE",
+                sector_strength
+            )
+            score_res = dataclasses.replace(score_res, specialist_min_auc=dyn_min_auc)
 
             ml = score_res.probability
             ml_passed = False
@@ -79,8 +90,8 @@ class ParallelEvidenceEvaluator:
                 if val_reason is not None:
                     ml = None
                     ml_rejection_reason = f"INVALID_SCORE: {val_reason}"
-                elif ml < self.ml_threshold:
-                    ml_rejection_reason = f"ML confidence {ml:.4f} < threshold {self.ml_threshold:.4f}"
+                elif ml < target_ml_threshold:
+                    ml_rejection_reason = f"ML confidence {ml:.4f} < threshold {target_ml_threshold:.4f}"
                 else:
                     ml_passed = True
             else:

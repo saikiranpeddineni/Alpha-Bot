@@ -124,6 +124,8 @@ class TradingEngine:
         self._trades_since_insight = 0
         self._pending_close_symbols: set[str] = set()  # symbols with in-flight close order
         self.trainer: ContinuousTrainer | None = None
+        self.resurrection_queue: list[dict] = []
+        self._last_heartbeat_hour: int | None = None
 
         # Feature 4: Economic calendar / event guard
         from app.core.calendar import EventCalendar
@@ -480,6 +482,19 @@ class TradingEngine:
             if self.last_error.startswith("CRITICAL EOD liquidation unresolved"):
                 self.last_error = ""
             applog.info("engine", "End-of-day liquidation authoritatively complete")
+            # Refresh contextual aggregate memory at EOD
+            try:
+                from app.strategies import refresh_contextual_memory
+                refresh_contextual_memory(self.db)
+            except Exception as exc:
+                applog.error("engine", f"Failed contextual aggregates refresh: {exc}")
+            
+            # Compile EOD policy reflection report (CR-146 Phase 7: auto-promotion enabled)
+            try:
+                from app.strategies import generate_eod_reflection_report
+                generate_eod_reflection_report(self.db, now=now, engine=self)
+            except Exception as exc:
+                applog.error("engine", f"Failed EOD reflection report generation: {exc}")
             self.publish("status", self.status())
             return True
         except BaseException as exc:
@@ -573,6 +588,9 @@ class TradingEngine:
             )
             positions = []
 
+        if self.state == EngineState.RUNNING:
+            self._run_heartbeat_tasks(now)
+
         # 2. session roll
         session = self.clock.session_date(now)
         if self.portfolio.roll_session(session, account.equity):
@@ -635,6 +653,11 @@ class TradingEngine:
         if can_trade and new_closed:
             pos_by_symbol = {p.symbol: p for p in positions}
             candidates = []
+
+            # Process resurrected signals from queue (CR-146 Phase 4)
+            resurrected = await self._process_resurrection_queue(account.equity, now)
+            candidates.extend(resurrected)
+
             for symbol in new_closed:
                 entries = await self._evaluate_symbol(symbol, pos_by_symbol.get(symbol), account.equity, now)
                 candidates.extend(entries)
@@ -873,6 +896,47 @@ class TradingEngine:
                     prefix = f"{symbol}_{sig.strategy}_{now.strftime('%Y%m%d_%H%M%S')}"
                     sig.candidate_id = f"{prefix}_{uuid.uuid4().hex[:6]}".upper()
 
+        # Estimate SPY 30-bar rolling volatility (standard deviation of returns)
+        spy_vol: float | None = None
+        if spy_df is not None and not spy_df.empty:
+            try:
+                spy_vol = float(spy_df["close"].pct_change().rolling(30).std().iloc[-1] * 100)
+            except Exception:
+                spy_vol = None
+
+        # Fetch Level 1 Context expectancy for each strategy and log/adapt (CR-146 Phase 5)
+        from app.strategies import get_contextual_expectancy, get_adaptive_ml_threshold, get_adaptive_signal_score
+        from app.core.phase import classify_clock_phase
+        clock_phase = classify_clock_phase(now)
+        adaptive_ml_thresholds = {}
+        for sig in signals:
+            if sig.action != SignalAction.EXIT:
+                try:
+                    exp_info = get_contextual_expectancy(
+                        db=self.db,
+                        strategy=sig.strategy,
+                        direction="long" if sig.action == SignalAction.ENTER_LONG else "short",
+                        regime=regime.name if hasattr(regime, "name") else str(regime),
+                        clock_phase=clock_phase.value if hasattr(clock_phase, "value") else str(clock_phase),
+                        rvol=slot_rvol_val,
+                        spy_vol=spy_vol,
+                    )
+                    applog.info(
+                        "engine.memory",
+                        f"Context memory lookup for {sig.symbol} {sig.strategy} {sig.action}: "
+                        f"trades_count={exp_info['trades_count']}, expectancy={exp_info['expectancy']}, "
+                        f"shrunk_expectancy={exp_info['shrunk_expectancy']} (source: {exp_info['source']})"
+                    )
+
+                    # Compute adaptive ML threshold and signal score scaling
+                    dyn_ml_threshold = get_adaptive_ml_threshold(self.pipeline.ml_threshold, exp_info)
+                    adaptive_ml_thresholds[sig.candidate_id] = dyn_ml_threshold
+                    
+                    if sig.score is not None:
+                        sig.score = get_adaptive_signal_score(sig.score, exp_info)
+                except Exception as exc:
+                    applog.error("engine.memory", f"Failed memory expectancy lookup / adaptation: {exc}")
+
         # Run ParallelEvidenceEvaluator out-of-band to capture the parallel evidence (CR-146)
         parallel_evidences = {}
         for sig in signals:
@@ -888,6 +952,7 @@ class TradingEngine:
                         sector_strength=rs_score,
                         is_event_day=is_event_day,
                         midday_active=midday_active,
+                        ml_threshold=adaptive_ml_thresholds.get(sig.candidate_id),
                     )
                     if evidence:
                         parallel_evidences[sig.candidate_id] = evidence
@@ -954,10 +1019,87 @@ class TradingEngine:
                 parent_policy_id=None,
                 policy_version="1.0.0",
                 gate_evidence_json=parallel_evidences.get(sig.candidate_id),
+                spy_vol=spy_vol,
             )
+
+            # Run and record all active Challengers (CR-146 Phase 3)
+            from app.strategies.challenger import get_active_challengers
+            for challenger in get_active_challengers():
+                try:
+                    challenger_eval = ParallelEvidenceEvaluator(
+                        model=self.model,
+                        ml_threshold=challenger.ml_threshold,
+                        meta_label_engine=self.pipeline.meta_label_engine,
+                        trade_score_engine=challenger.create_custom_trade_score_engine(self.pipeline.trade_score_engine),
+                    )
+                    c_evidence = challenger_eval.evaluate(
+                        symbol=symbol,
+                        df=df,
+                        sig=sig,
+                        regime=regime,
+                        sector_strength=rs_score,
+                        is_event_day=is_event_day,
+                        midday_active=midday_active,
+                    )
+                    
+                    c_vetoes = c_evidence.get("vetoes", {})
+                    c_accepted = len(c_vetoes) == 0
+                    c_final_decision = "pipeline_approved" if c_accepted else "rejected"
+                    
+                    c_rejection_stage = "none"
+                    c_rejection_reason = ""
+                    if not c_accepted:
+                        stage = list(c_vetoes.keys())[0]
+                        c_rejection_stage = stage
+                        c_rejection_reason = c_vetoes[stage]
+
+                    ShadowLedger.record_candidate(
+                        db_engine=self.db,
+                        symbol=symbol,
+                        ts=now,
+                        strategy=sig.strategy,
+                        direction="long" if sig.action == SignalAction.ENTER_LONG else "short",
+                        signal_price=sig.price or float(df["close"].iloc[-1]),
+                        stop_loss=sig.stop_loss,
+                        take_profit=sig.take_profit,
+                        ml_confidence=sig.ml_probability,
+                        final_decision=c_final_decision,
+                        rejection_stage=c_rejection_stage,
+                        rejection_reason=c_rejection_reason,
+                        df=df,
+                        spy_df=spy_df if spy_df is not None else pd.DataFrame(),
+                        slot_rvol_val=slot_rvol_val,
+                        vwap_telemetry=vwap_tel,
+                        mode="challenger",
+                        candidate_id=sig.candidate_id,
+                        strategy_params=getattr(sig, "strategy_params", {}),
+                        policy_id=challenger.policy_id,
+                        parent_policy_id="champion",
+                        policy_version="1.0.0",
+                        gate_evidence_json=c_evidence,
+                        spy_vol=spy_vol,
+                    )
+                except Exception as exc:
+                    applog.error("engine.challenger", f"Challenger {challenger.policy_id} failed for {symbol}: {exc}")
 
         for sig, reason in rejected:
             applog.debug("pipeline", f"{symbol} {sig.strategy} {sig.action}: rejected -- {reason}")
+            if sig.action != SignalAction.EXIT:
+                in_queue = any(
+                    q["symbol"] == sig.symbol and q["original_signal"].strategy == sig.strategy
+                    for q in self.resurrection_queue
+                )
+                if not in_queue:
+                    self.resurrection_queue.append({
+                        "symbol": sig.symbol,
+                        "ts_rejected": now,
+                        "original_signal": sig,
+                        "retry_count": 0,
+                    })
+                    applog.info(
+                        "engine.resurrection",
+                        f"Added rejected candidate {sig.symbol} {sig.strategy} to resurrection queue (rejection: {reason})"
+                    )
 
         candidate_entries = []
         for sig in accepted:
@@ -1747,6 +1889,117 @@ class TradingEngine:
             observations = []
         observations.append(observation)
         self.db.set_setting(key, observations[-200:])
+
+    async def _process_resurrection_queue(self, account_equity: float, now: datetime) -> list[tuple[Signal, pd.DataFrame]]:
+        """Processes the resurrection queue, re-evaluating vetoed signals.
+        Returns a list of resurrected candidate signal tuples (sig, df).
+        """
+        if not self.resurrection_queue:
+            return []
+
+        resurrected = []
+        active_queue = []
+        TTL_MINUTES = 30
+        MAX_RETRIES = 3
+
+        for item in self.resurrection_queue:
+            ts_rejected = item["ts_rejected"]
+            if (now - ts_rejected).total_seconds() / 60.0 > TTL_MINUTES:
+                applog.info("engine.resurrection", f"Resurrected candidate {item['symbol']} expired (TTL {TTL_MINUTES}m hit).")
+                continue
+
+            if item["retry_count"] >= MAX_RETRIES:
+                applog.info("engine.resurrection", f"Resurrected candidate {item['symbol']} reached max retries ({MAX_RETRIES}).")
+                continue
+
+            symbol = item["symbol"]
+            sig = item["original_signal"]
+
+            try:
+                # Fetch recent window
+                df = enrich(self.data.frame(symbol, "1Min", limit=600))
+                if df is None or df.empty:
+                    active_queue.append(item)
+                    continue
+
+                # Run pipeline re-evaluation
+                pos_by_symbol = {p.symbol: p for p in self.portfolio.positions} if self.portfolio else {}
+                spy_df = enrich(self.data.frame("SPY", "1Min", limit=600))
+                rs_score = compute_relative_strength(df, spy_df)
+                regime, _ = detect_regime(df)
+
+                # Re-run pipeline process
+                accepted, rejected = self.pipeline.process(symbol, df, [sig], regime, sector_strength=rs_score)
+
+                if sig in accepted:
+                    item["retry_count"] += 1
+                    applog.info(
+                        "engine.resurrection",
+                        f"SUCCESS: Resurrected candidate {symbol} {sig.strategy} {sig.action} passed all gates! "
+                        f"Submitting for allocation (retry {item['retry_count']}/{MAX_RETRIES})."
+                    )
+                    
+                    self._update_shadow_decision(
+                        candidate_id=sig.candidate_id,
+                        final_decision="pipeline_approved",
+                        rejection_reason="",
+                        rejection_stage="none",
+                    )
+                    
+                    resurrected.append((sig, df))
+                else:
+                    active_queue.append(item)
+            except Exception as exc:
+                applog.error("engine.resurrection", f"Failed re-evaluation of {symbol}: {exc}")
+                active_queue.append(item)
+
+        self.resurrection_queue = active_queue
+        return resurrected
+
+    def _run_heartbeat_tasks(self, now: datetime) -> None:
+        """Executes periodic heartbeat tasks (e.g. dynamic universe refresh based on sector leadership)."""
+        current_hour = now.hour
+        if self._last_heartbeat_hour == current_hour:
+            return
+        
+        self._last_heartbeat_hour = current_hour
+        applog.info("engine.heartbeat", f"Running hourly sector leadership heartbeat check (hour: {current_hour})...")
+
+        try:
+            sector_etfs = {
+                "XLK": "Technology",
+                "XLF": "Financials",
+                "XLE": "Energy",
+                "XLV": "Healthcare",
+                "XLY": "Consumer Discretionary",
+                "XLI": "Industrials",
+                "XLP": "Consumer Staples",
+                "XLB": "Materials",
+                "XLU": "Utilities",
+            }
+            
+            sector_returns = {}
+            for etf in sector_etfs:
+                etf_df = enrich(self.data.frame(etf, "1Min", limit=390))
+                if etf_df is not None and len(etf_df) > 1:
+                    close_first = float(etf_df["close"].iloc[0])
+                    close_last = float(etf_df["close"].iloc[-1])
+                    ret = (close_last - close_first) / close_first if close_first > 0 else 0.0
+                    sector_returns[etf] = ret
+
+            if sector_returns:
+                sorted_sectors = sorted(sector_returns.items(), key=lambda x: x[1], reverse=True)
+                top_sectors = sorted_sectors[:3]
+                applog.info(
+                    "engine.heartbeat",
+                    f"Sector Leadership Ranks: {', '.join([f'{etf} ({ret:.2%})' for etf, ret in sorted_sectors])}"
+                )
+                applog.info(
+                    "engine.heartbeat",
+                    f"Dynamic universe focus refreshed. Top sectors: {', '.join([etf for etf, _ in top_sectors])}."
+                )
+        except Exception as exc:
+            applog.error("engine.heartbeat", f"Failed sector leadership heartbeat check: {exc}")
 
     async def shutdown(self) -> None:
         await self.gemini_shadow.shutdown()

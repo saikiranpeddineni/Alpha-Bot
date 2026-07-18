@@ -160,6 +160,7 @@ class ShadowLedger:
         parent_policy_id: str | None = None,
         policy_version: str | None = None,
         gate_evidence_json: dict | None = None,
+        spy_vol: float | None = None,
     ) -> dict:
         """Assembles a telemetry record, computes future outcomes, and saves it to the DB."""
         if candidate_id is None:
@@ -246,6 +247,7 @@ class ShadowLedger:
             "parent_policy_id": parent_policy_id,
             "policy_version": policy_version,
             "gate_evidence_json": gate_evidence_json,
+            "spy_vol": spy_vol,
         }
 
         # Calculate unique/shared/redundant veto attribution if gate_evidence_json is present

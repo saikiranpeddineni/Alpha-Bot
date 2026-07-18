@@ -11,7 +11,7 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
-from sqlalchemy import Float, String, Text, create_engine, select
+from sqlalchemy import Float, String, Text, Integer, DateTime, create_engine, select, delete
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 from app.core.domain import Order, TradeRecord
@@ -93,6 +93,22 @@ class ShadowLedgerRow(Base):
     parent_policy_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     policy_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
     gate_evidence_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class ContextualPerformanceMemoryRow(Base):
+    __tablename__ = "contextual_performance_memory"
+    strategy: Mapped[str] = mapped_column(String(32), primary_key=True)
+    direction: Mapped[str] = mapped_column(String(10), primary_key=True)
+    regime: Mapped[str] = mapped_column(String(20), primary_key=True)
+    clock_phase: Mapped[str] = mapped_column(String(20), primary_key=True)
+    rvol_bucket: Mapped[str] = mapped_column(String(20), primary_key=True)
+    vol_bucket: Mapped[str] = mapped_column(String(20), primary_key=True)
+
+    trades_count: Mapped[int] = mapped_column(Integer, default=0)
+    wins_count: Mapped[int] = mapped_column(Integer, default=0)
+    total_realized_r: Mapped[float] = mapped_column(Float, default=0.0)
+    shrunk_expectancy: Mapped[float] = mapped_column(Float, default=0.0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
 class FillProgressRow(Base):
@@ -360,7 +376,7 @@ class Database:
 
             s.merge(
                 ShadowLedgerRow(
-                    id=candidate_id,
+                    id=f"{candidate_id}_{payload.get('policy_id') or 'champion'}",
                     ts=ts,
                     symbol=symbol,
                     strategy=strategy,
@@ -416,9 +432,9 @@ class Database:
                     pass
             return results
 
-    def get_shadow_signal(self, candidate_id: str) -> dict | None:
+    def get_shadow_signal(self, candidate_id: str, policy_id: str = "champion") -> dict | None:
         with self._session() as s:
-            row = s.get(ShadowLedgerRow, candidate_id)
+            row = s.get(ShadowLedgerRow, f"{candidate_id}_{policy_id}")
             if row is None:
                 return None
             try:
@@ -441,6 +457,60 @@ class Database:
                 return data
             except Exception:
                 return None
+
+    def save_context_aggregates(self, rows: list[dict]) -> None:
+        with self._session() as s:
+            for row in rows:
+                s.merge(
+                    ContextualPerformanceMemoryRow(
+                        strategy=row["strategy"],
+                        direction=row["direction"],
+                        regime=row["regime"],
+                        clock_phase=row["clock_phase"],
+                        rvol_bucket=row["rvol_bucket"],
+                        vol_bucket=row["vol_bucket"],
+                        trades_count=row["trades_count"],
+                        wins_count=row["wins_count"],
+                        total_realized_r=row["total_realized_r"],
+                        shrunk_expectancy=row["shrunk_expectancy"],
+                        updated_at=datetime.utcnow(),
+                    )
+                )
+            s.commit()
+
+    def get_context_aggregate(self, key_dict: dict) -> dict | None:
+        with self._session() as s:
+            row = s.get(
+                ContextualPerformanceMemoryRow,
+                (
+                    key_dict["strategy"],
+                    key_dict["direction"],
+                    key_dict["regime"],
+                    key_dict["clock_phase"],
+                    key_dict["rvol_bucket"],
+                    key_dict["vol_bucket"],
+                ),
+            )
+            if row is None:
+                return None
+            return {
+                "strategy": row.strategy,
+                "direction": row.direction,
+                "regime": row.regime,
+                "clock_phase": row.clock_phase,
+                "rvol_bucket": row.rvol_bucket,
+                "vol_bucket": row.vol_bucket,
+                "trades_count": row.trades_count,
+                "wins_count": row.wins_count,
+                "total_realized_r": row.total_realized_r,
+                "shrunk_expectancy": row.shrunk_expectancy,
+                "updated_at": row.updated_at,
+            }
+
+    def clear_context_aggregates(self) -> None:
+        with self._session() as s:
+            s.execute(delete(ContextualPerformanceMemoryRow))
+            s.commit()
 
     def close(self) -> None:
         global _ACTIVE_DATABASE
