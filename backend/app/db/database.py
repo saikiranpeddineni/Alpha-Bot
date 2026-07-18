@@ -88,6 +88,12 @@ class ShadowLedgerRow(Base):
     rejection_stage: Mapped[str | None] = mapped_column(String(40), nullable=True)
     final_decision: Mapped[str | None] = mapped_column(String(20), nullable=True)
 
+    # Lineage & parallel gate evidence (CR-146)
+    policy_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    parent_policy_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    policy_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    gate_evidence_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
 
 class FillProgressRow(Base):
     __tablename__ = "broker_fill_progress"
@@ -130,6 +136,10 @@ class Database:
                     "rejection_reason": "TEXT",
                     "rejection_stage": "VARCHAR(40)",
                     "final_decision": "VARCHAR(20)",
+                    "policy_id": "VARCHAR(64)",
+                    "parent_policy_id": "VARCHAR(64)",
+                    "policy_version": "VARCHAR(20)",
+                    "gate_evidence_json": "TEXT",
                 }
 
                 needs_commit = False
@@ -347,6 +357,10 @@ class Database:
                     rejection_reason=payload.get("rejection_reason"),
                     rejection_stage=payload.get("rejection_stage"),
                     final_decision=payload.get("final_decision"),
+                    policy_id=payload.get("policy_id"),
+                    parent_policy_id=payload.get("parent_policy_id"),
+                    policy_version=payload.get("policy_version"),
+                    gate_evidence_json=json.dumps(payload["gate_evidence_json"]) if payload.get("gate_evidence_json") is not None else None,
                 )
             )
             s.commit()

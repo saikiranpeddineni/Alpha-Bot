@@ -156,6 +156,10 @@ class ShadowLedger:
         mode: str = "backtest",
         candidate_id: str | None = None,
         strategy_params: dict | None = None,
+        policy_id: str | None = None,
+        parent_policy_id: str | None = None,
+        policy_version: str | None = None,
+        gate_evidence_json: dict | None = None,
     ) -> dict:
         """Assembles a telemetry record, computes future outcomes, and saves it to the DB."""
         if candidate_id is None:
@@ -238,7 +242,24 @@ class ShadowLedger:
             "exit_reason": None,
             "tp_hit": None,
             "sl_hit": None,
+            "policy_id": policy_id,
+            "parent_policy_id": parent_policy_id,
+            "policy_version": policy_version,
+            "gate_evidence_json": gate_evidence_json,
         }
+
+        # Calculate unique/shared/redundant veto attribution if gate_evidence_json is present
+        if gate_evidence_json and "vetoes" in gate_evidence_json:
+            vetoes = gate_evidence_json["vetoes"]
+            realized_r = 0.0
+            if outcomes:
+                if "15m" in outcomes:
+                    realized_r = outcomes["15m"].get("realized_r", 0.0)
+                elif "close" in outcomes:
+                    realized_r = outcomes["close"].get("realized_r", 0.0)
+            from app.strategies.evaluator import ParallelEvidenceEvaluator
+            attrib = ParallelEvidenceEvaluator.calculate_veto_attribution(vetoes, realized_r)
+            payload.update(attrib)
 
         # Save to SQLite database if available
         if db_engine is not None:

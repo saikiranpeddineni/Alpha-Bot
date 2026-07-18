@@ -51,7 +51,7 @@ from app.db.database import Database
 from app.indicators.ta import enrich, compute_relative_strength
 from app.portfolio.tracker import PortfolioTracker
 from app.risk.manager import AccountContext, RiskManager
-from app.strategies import SignalPipeline, Strategy, create_strategies
+from app.strategies import SignalPipeline, Strategy, create_strategies, ParallelEvidenceEvaluator
 from app.strategies.base import StrategyContext
 
 from app.indicators.slot_volume import SlotVolumeEngine
@@ -281,6 +281,12 @@ class TradingEngine:
             self.reconciliation_failed = True
             applog.error("engine", f"Failed to restore and reconcile active positions: {exc}")
         self.pipeline = SignalPipeline(self.model, self.risk_config.ml_confidence_threshold)
+        self.evidence_evaluator = ParallelEvidenceEvaluator(
+            model=self.model,
+            ml_threshold=self.risk_config.ml_confidence_threshold,
+            meta_label_engine=self.pipeline.meta_label_engine,
+            trade_score_engine=self.pipeline.trade_score_engine,
+        )
         for s in self.strategies:
             s.reset()
         self._regimes.clear()
@@ -480,7 +486,7 @@ class TradingEngine:
             self.last_error = f"CRITICAL EOD liquidation unresolved: {type(exc).__name__}: {exc}"
             applog.error("engine", self.last_error)
             self.publish("status", self.status())
-            if isinstance(exc, (KeyboardInterrupt, SystemExit, asyncio.CancelledError)):\
+            if isinstance(exc, (KeyboardInterrupt, SystemExit, asyncio.CancelledError)):
                 raise
             return False
 
@@ -859,10 +865,38 @@ class TradingEngine:
         except Exception:
             rs_score = None  # graceful fallback — pipeline treats None as neutral 50
 
+        # Assign a unique candidate ID to all candidate entry signals first (shared UUID)
+        import uuid
+        for sig in signals:
+            if sig.action != SignalAction.EXIT:
+                if getattr(sig, "candidate_id", None) is None:
+                    prefix = f"{symbol}_{sig.strategy}_{now.strftime('%Y%m%d_%H%M%S')}"
+                    sig.candidate_id = f"{prefix}_{uuid.uuid4().hex[:6]}".upper()
+
+        # Run ParallelEvidenceEvaluator out-of-band to capture the parallel evidence (CR-146)
+        parallel_evidences = {}
+        for sig in signals:
+            if sig.action != SignalAction.EXIT:
+                try:
+                    midday_active = getattr(self.pipeline, "_midday_active", False)
+                    is_event_day = getattr(self.pipeline, "_is_event_day", False)
+                    evidence = self.evidence_evaluator.evaluate(
+                        symbol=symbol,
+                        df=df,
+                        sig=sig,
+                        regime=regime,
+                        sector_strength=rs_score,
+                        is_event_day=is_event_day,
+                        midday_active=midday_active,
+                    )
+                    if evidence:
+                        parallel_evidences[sig.strategy] = evidence
+                except Exception as exc:
+                    applog.error("engine.evaluator", f"ParallelEvidenceEvaluator failed for {symbol} {sig.strategy}: {exc}")
+
         accepted, rejected = self.pipeline.process(symbol, df, signals, regime, sector_strength=rs_score)
         
         # Save signals to shadow ledger
-        import uuid
         for sig in signals:
             if sig.action == SignalAction.EXIT:
                 continue
@@ -884,10 +918,6 @@ class TradingEngine:
                     rejection_stage = "conflict_resolution"
                 else:
                     rejection_stage = "other"
-
-            if getattr(sig, "candidate_id", None) is None:
-                prefix = f"{symbol}_{sig.strategy}_{now.strftime('%Y%m%d_%H%M%S')}"
-                sig.candidate_id = f"{prefix}_{uuid.uuid4().hex[:6]}".upper()
 
             try:
                 slot_engine = SlotVolumeEngine(df, lookback_sessions=20, min_observations=5)
@@ -920,6 +950,10 @@ class TradingEngine:
                 mode=self.mode,
                 candidate_id=sig.candidate_id,
                 strategy_params=getattr(sig, "strategy_params", {}),
+                policy_id="champion",
+                parent_policy_id=None,
+                policy_version="1.0.0",
+                gate_evidence_json=parallel_evidences.get(sig.strategy),
             )
 
         for sig, reason in rejected:
