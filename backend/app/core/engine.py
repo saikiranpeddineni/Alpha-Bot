@@ -724,15 +724,26 @@ class TradingEngine:
 
                 # Size and submit approved entries
                 if decision_outcome.approved_entries:
-                    open_orders = await self.broker.open_orders()
-                    pending_entries = [
-                        o.symbol.upper() for o in open_orders
-                        if is_entry_order(o, positions)
-                    ]
-                    effective_pending_entries = set(pending_entries)
-                    for info in self.pending_reconciliation_orders.values():
-                        effective_pending_entries.add(info["symbol"].upper())
-                    reservations = SameCycleEntryReservations.from_snapshot(account.cash, positions)
+                    if getattr(self, "reconciliation_failed", False):
+                        applog.warning("engine", "Skipping entry sizing and submission while reconciliation is uncertain.")
+                        for sig, _ in decision_outcome.approved_entries:
+                            if getattr(sig, "candidate_id", None) is not None:
+                                self._update_shadow_decision(
+                                    sig.candidate_id,
+                                    "rejected",
+                                    "engine position/broker reconciliation state is uncertain",
+                                    "risk_gate",
+                                )
+                    else:
+                        open_orders = await self.broker.open_orders()
+                        pending_entries = [
+                            o.symbol.upper() for o in open_orders
+                            if is_entry_order(o, positions)
+                        ]
+                        effective_pending_entries = set(pending_entries)
+                        for info in self.pending_reconciliation_orders.values():
+                            effective_pending_entries.add(info["symbol"].upper())
+                        reservations = SameCycleEntryReservations.from_snapshot(account.cash, positions)
 
                     for sig, kelly_val in decision_outcome.approved_entries:
                         df = df_by_symbol[sig.symbol]
