@@ -108,7 +108,7 @@ class ContextualPerformanceMemoryRow(Base):
     wins_count: Mapped[int] = mapped_column(Integer, default=0)
     total_realized_r: Mapped[float] = mapped_column(Float, default=0.0)
     shrunk_expectancy: Mapped[float] = mapped_column(Float, default=0.0)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
 
 
 class FillProgressRow(Base):
@@ -487,7 +487,7 @@ class Database:
                         wins_count=row["wins_count"],
                         total_realized_r=row["total_realized_r"],
                         shrunk_expectancy=row["shrunk_expectancy"],
-                        updated_at=datetime.utcnow(),
+                        updated_at=datetime.now(UTC),
                     )
                 )
             s.commit()
