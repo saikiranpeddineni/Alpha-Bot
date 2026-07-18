@@ -138,6 +138,13 @@ class AlpacaBroker(Broker):
             }
             db.bootstrap_broker_checkpoint(mode=self._broker_mode, account_id=self.account_id, checkpoint=checkpoint, fill_watermarks=watermarks)
             applog.info("broker.alpaca", "Initialized durable Alpaca fill baseline from authoritative broker state")
+        except BrokerTimeoutError:
+            applog.error(
+                "broker.alpaca",
+                "Bootstrap FAILED: Alpaca API timed out during durable fill baseline initialization. "
+                "Engine start aborted to avoid operating without authoritative baseline.",
+            )
+            raise
         except Exception as exc:
             applog.warning("broker.alpaca", f"failed to initialize durable fill baseline: {exc}")
 
