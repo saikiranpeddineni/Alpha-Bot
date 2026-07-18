@@ -181,3 +181,30 @@ def test_compute_relative_strength():
     # rs_raw = 0.40 * (0.01 - 0.005) + 0.60 * (0.02 - 0.01) = 0.40 * 0.005 + 0.60 * 0.01 = 0.002 + 0.006 = 0.008
     # rs_normalized = 0.008 / 2.0 + 0.5 = 0.004 + 0.5 = 0.504
     assert rs == pytest.approx(0.504)
+
+
+async def test_run_backtest_temporal_leakage_gating(data, model, risk_config):
+    # Case 1: ignore_temporal_leakage is False -> backtest_start_time is enforced
+    params_enforce = BacktestParams(
+        symbols=["SPY"],
+        start=datetime(2026, 1, 5, tzinfo=UTC),
+        end=datetime(2026, 1, 9, 23, 59, tzinfo=UTC),
+        starting_cash=100_000.0,
+        risk=risk_config,
+        ignore_temporal_leakage=False,
+    )
+    res_enforce = await run_backtest(data, model, params_enforce)
+    assert res_enforce.bars_processed > 0
+
+    # Case 2: ignore_temporal_leakage is True -> backtest_start_time is bypassed/None
+    params_ignore = BacktestParams(
+        symbols=["SPY"],
+        start=datetime(2026, 1, 5, tzinfo=UTC),
+        end=datetime(2026, 1, 9, 23, 59, tzinfo=UTC),
+        starting_cash=100_000.0,
+        risk=risk_config,
+        ignore_temporal_leakage=True,
+    )
+    res_ignore = await run_backtest(data, model, params_ignore)
+    assert res_ignore.bars_processed > 0
+

@@ -69,6 +69,8 @@ class Signal(BaseModel):
     ml_probability: float | None = None
     regime: Regime | None = None
     score: float | None = None
+    candidate_id: str | None = None
+    strategy_params: dict | None = None
 
 
 class OrderRequest(BaseModel):
