@@ -904,10 +904,11 @@ class TradingEngine:
             except Exception:
                 spy_vol = None
 
-        # Fetch Level 1 Context expectancy for each strategy and log
-        from app.strategies import get_contextual_expectancy
+        # Fetch Level 1 Context expectancy for each strategy and log/adapt (CR-146 Phase 5)
+        from app.strategies import get_contextual_expectancy, get_adaptive_ml_threshold, get_adaptive_signal_score
         from app.core.phase import classify_clock_phase
         clock_phase = classify_clock_phase(now)
+        adaptive_ml_thresholds = {}
         for sig in signals:
             if sig.action != SignalAction.EXIT:
                 try:
@@ -926,8 +927,15 @@ class TradingEngine:
                         f"trades_count={exp_info['trades_count']}, expectancy={exp_info['expectancy']}, "
                         f"shrunk_expectancy={exp_info['shrunk_expectancy']} (source: {exp_info['source']})"
                     )
+
+                    # Compute adaptive ML threshold and signal score scaling
+                    dyn_ml_threshold = get_adaptive_ml_threshold(self.pipeline.ml_threshold, exp_info)
+                    adaptive_ml_thresholds[sig.candidate_id] = dyn_ml_threshold
+                    
+                    if sig.score is not None:
+                        sig.score = get_adaptive_signal_score(sig.score, exp_info)
                 except Exception as exc:
-                    applog.error("engine.memory", f"Failed memory expectancy lookup: {exc}")
+                    applog.error("engine.memory", f"Failed memory expectancy lookup / adaptation: {exc}")
 
         # Run ParallelEvidenceEvaluator out-of-band to capture the parallel evidence (CR-146)
         parallel_evidences = {}
@@ -944,6 +952,7 @@ class TradingEngine:
                         sector_strength=rs_score,
                         is_event_day=is_event_day,
                         midday_active=midday_active,
+                        ml_threshold=adaptive_ml_thresholds.get(sig.candidate_id),
                     )
                     if evidence:
                         parallel_evidences[sig.candidate_id] = evidence

@@ -945,10 +945,11 @@ async def run_backtest(
                             except Exception:
                                 spy_vol = None
 
-                    # Fetch Level 1 Context expectancy for each strategy and log
-                    from app.strategies import get_contextual_expectancy
+                    # Fetch Level 1 Context expectancy for each strategy and log/adapt (CR-146 Phase 5)
+                    from app.strategies import get_contextual_expectancy, get_adaptive_ml_threshold, get_adaptive_signal_score
                     from app.core.phase import classify_clock_phase
                     clock_phase = classify_clock_phase(now)
+                    adaptive_ml_thresholds = {}
                     for sig in signals:
                         if sig.action != SignalAction.EXIT:
                             try:
@@ -966,8 +967,14 @@ async def run_backtest(
                                     f"Context memory lookup for {sig.symbol} {sig.strategy} {sig.action}: "
                                     f"expectancy={exp_info['expectancy']}, shrunk_expectancy={exp_info['shrunk_expectancy']}"
                                 )
+                                
+                                dyn_ml_threshold = get_adaptive_ml_threshold(pipeline.ml_threshold, exp_info)
+                                adaptive_ml_thresholds[sig.candidate_id] = dyn_ml_threshold
+                                
+                                if sig.score is not None:
+                                    sig.score = get_adaptive_signal_score(sig.score, exp_info)
                             except Exception as exc:
-                                applog.error("backtest.memory", f"Failed memory expectancy lookup: {exc}")
+                                applog.error("backtest.memory", f"Failed memory expectancy lookup / adaptation: {exc}")
                     # Assign a unique candidate ID to all candidate entry signals first (shared UUID)
                     import uuid
                     for sig in signals:
@@ -991,6 +998,7 @@ async def run_backtest(
                                     sector_strength=rs_score,
                                     is_event_day=is_event_day,
                                     midday_active=midday_active,
+                                    ml_threshold=adaptive_ml_thresholds.get(sig.candidate_id),
                                 )
                                 if evidence:
                                     parallel_evidences[sig.candidate_id] = evidence

@@ -7,3 +7,4 @@ from app.strategies.evaluator import ParallelEvidenceEvaluator  # noqa: F401
 from app.strategies.memory import get_contextual_expectancy, refresh_contextual_memory, get_episodic_nearest_neighbors  # noqa: F401
 from app.strategies.challenger import get_active_challengers  # noqa: F401
 from app.strategies.reflection import generate_eod_reflection_report  # noqa: F401
+from app.strategies.adaptive import get_adaptive_ml_threshold, get_adaptive_specialist_min_auc, get_adaptive_signal_score  # noqa: F401
