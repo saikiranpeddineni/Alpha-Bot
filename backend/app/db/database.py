@@ -88,6 +88,12 @@ class ShadowLedgerRow(Base):
     rejection_stage: Mapped[str | None] = mapped_column(String(40), nullable=True)
     final_decision: Mapped[str | None] = mapped_column(String(20), nullable=True)
 
+    # Lineage & parallel gate evidence (CR-146)
+    policy_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    parent_policy_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    policy_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    gate_evidence_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
 
 class FillProgressRow(Base):
     __tablename__ = "broker_fill_progress"
@@ -130,6 +136,10 @@ class Database:
                     "rejection_reason": "TEXT",
                     "rejection_stage": "VARCHAR(40)",
                     "final_decision": "VARCHAR(20)",
+                    "policy_id": "VARCHAR(64)",
+                    "parent_policy_id": "VARCHAR(64)",
+                    "policy_version": "VARCHAR(20)",
+                    "gate_evidence_json": "TEXT",
                 }
 
                 needs_commit = False
@@ -319,6 +329,27 @@ class Database:
         return None
 
     def save_shadow_signal(self, candidate_id: str, ts: datetime, symbol: str, strategy: str, direction: str, mode: str, payload: dict) -> None:
+        # Calculate/update unique/shared/redundant veto attribution based on outcomes if evidence is present
+        gate_evidence = payload.get("gate_evidence_json")
+        if isinstance(gate_evidence, str):
+            try:
+                gate_evidence = json.loads(gate_evidence)
+            except Exception:
+                gate_evidence = None
+
+        if gate_evidence and "vetoes" in gate_evidence:
+            vetoes = gate_evidence["vetoes"]
+            outcomes = payload.get("outcomes", {})
+            realized_r = 0.0
+            if outcomes:
+                if "15m" in outcomes:
+                    realized_r = outcomes["15m"].get("realized_r", 0.0)
+                elif "close" in outcomes:
+                    realized_r = outcomes["close"].get("realized_r", 0.0)
+            from app.strategies.evaluator import ParallelEvidenceEvaluator
+            attrib = ParallelEvidenceEvaluator.calculate_veto_attribution(vetoes, realized_r)
+            payload.update(attrib)
+
         with self._session() as s:
             replay_ts = None
             if payload.get("replay_timestamp"):
@@ -347,6 +378,10 @@ class Database:
                     rejection_reason=payload.get("rejection_reason"),
                     rejection_stage=payload.get("rejection_stage"),
                     final_decision=payload.get("final_decision"),
+                    policy_id=payload.get("policy_id"),
+                    parent_policy_id=payload.get("parent_policy_id"),
+                    policy_version=payload.get("policy_version"),
+                    gate_evidence_json=json.dumps(payload["gate_evidence_json"]) if payload.get("gate_evidence_json") is not None else None,
                 )
             )
             s.commit()
@@ -372,6 +407,10 @@ class Database:
                     data["rejection_reason"] = r.rejection_reason
                     data["rejection_stage"] = r.rejection_stage
                     data["final_decision"] = r.final_decision
+                    data["policy_id"] = r.policy_id
+                    data["parent_policy_id"] = r.parent_policy_id
+                    data["policy_version"] = r.policy_version
+                    data["gate_evidence_json"] = json.loads(r.gate_evidence_json) if r.gate_evidence_json else None
                     results.append(data)
                 except Exception:
                     pass
@@ -395,6 +434,10 @@ class Database:
                 data["rejection_reason"] = row.rejection_reason
                 data["rejection_stage"] = row.rejection_stage
                 data["final_decision"] = row.final_decision
+                data["policy_id"] = row.policy_id
+                data["parent_policy_id"] = row.parent_policy_id
+                data["policy_version"] = row.policy_version
+                data["gate_evidence_json"] = json.loads(row.gate_evidence_json) if row.gate_evidence_json else None
                 return data
             except Exception:
                 return None

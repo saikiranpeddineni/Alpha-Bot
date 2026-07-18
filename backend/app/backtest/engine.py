@@ -465,6 +465,13 @@ async def run_backtest(
         # Set backtest_start_time on meta label engine to prevent MetaLabel temporal leakage
         if hasattr(pipeline, "meta_label_engine") and pipeline.meta_label_engine is not None:
             pipeline.meta_label_engine.backtest_start_time = params.start
+        from app.strategies.evaluator import ParallelEvidenceEvaluator
+        evidence_evaluator = ParallelEvidenceEvaluator(
+            model=model,
+            ml_threshold=risk_cfg.ml_confidence_threshold if params.use_ml_gate else 0.0,
+            meta_label_engine=pipeline.meta_label_engine,
+            trade_score_engine=pipeline.trade_score_engine,
+        )
         strategies = create_strategies(params.strategies)
         for s in strategies:
             s.reset()
@@ -924,6 +931,35 @@ async def run_backtest(
                     if not signals:
                         continue
                     feature_row = window.iloc[-1]
+                    # Assign a unique candidate ID to all candidate entry signals first (shared UUID)
+                    import uuid
+                    for sig in signals:
+                        if sig.action != SignalAction.EXIT:
+                            if getattr(sig, "candidate_id", None) is None:
+                                prefix = f"{symbol}_{sig.strategy}_{now.strftime('%Y%m%d_%H%M%S')}"
+                                sig.candidate_id = f"{prefix}_{uuid.uuid4().hex[:6]}".upper()
+
+                    # Run ParallelEvidenceEvaluator out-of-band to capture the parallel evidence (CR-146)
+                    parallel_evidences = {}
+                    for sig in signals:
+                        if sig.action != SignalAction.EXIT:
+                            try:
+                                midday_active = getattr(pipeline, "_midday_active", False)
+                                is_event_day = getattr(pipeline, "_is_event_day", False)
+                                evidence = evidence_evaluator.evaluate(
+                                    symbol=symbol,
+                                    df=window,
+                                    sig=sig,
+                                    regime=regime,
+                                    sector_strength=rs_score,
+                                    is_event_day=is_event_day,
+                                    midday_active=midday_active,
+                                )
+                                if evidence:
+                                    parallel_evidences[sig.candidate_id] = evidence
+                            except Exception as exc:
+                                applog.error("backtest.evaluator", f"ParallelEvidenceEvaluator failed for {symbol} {sig.strategy}: {exc}")
+
                     accepted, rejected = pipeline.process(symbol, window, signals, regime, features=feature_row, sector_strength=rs_score)
 
                     # Record candidate signals to the shadow ledger
@@ -995,6 +1031,12 @@ async def run_backtest(
                             slot_rvol_val=slot_rvol_val,
                             vwap_telemetry=vwap_tel,
                             mode="backtest",
+                            candidate_id=sig.candidate_id,
+                            strategy_params=getattr(sig, "strategy_params", {}),
+                            policy_id="champion",
+                            parent_policy_id=None,
+                            policy_version="1.0.0",
+                            gate_evidence_json=parallel_evidences.get(sig.candidate_id),
                         )
                         shadow_signals_log.append(payload)
 
