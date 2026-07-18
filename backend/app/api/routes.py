@@ -667,8 +667,6 @@ async def promote_policy(request: Request, body: PromoteRequest) -> dict:
         raise HTTPException(status_code=404, detail=f"Challenger policy {policy_id!r} not found.")
         
     try:
-        # Fix 4: Persist an immutable snapshot of the exact tested config BEFORE applying anything.
-        # This ensures the promoted configuration is auditable and that tested != deployed drift is caught.
         snapshot = target_challenger.to_snapshot()
         db.set_setting("active_policy_snapshot", snapshot)
         applog.info(
@@ -679,23 +677,36 @@ async def promote_policy(request: Request, body: PromoteRequest) -> dict:
         # Apply settings from the snapshot (not individual field references) for atomicity
         db.set_setting("ml_threshold", snapshot["ml_threshold"])
         
-        current_risk = db.get_setting("risk_config") or {}
-        if policy_id == "challenger_aggressive_score":
-            current_risk["midday_score_boost"] = 25.0
-            db.set_setting("risk_config", current_risk)
+        # Reset engine risk config back to base settings from the DB first (without prior offsets)
+        stored_risk = db.get_setting("risk_config") or {}
+        default_risk = engine.settings.risk_config().model_dump()
+        merged_risk = {**default_risk, **stored_risk}
         
+        # Apply the new offset to the merged base risk config in-memory
+        from app.config import RiskConfig
+        engine.risk_config = RiskConfig(**merged_risk)
+        
+        offset = float(snapshot.get("score_threshold_offset", 0.0))
+        if offset != 0.0:
+            engine.risk_config.score_threshold_event = max(0.0, engine.risk_config.score_threshold_event + offset)
+            engine.risk_config.score_threshold_trend = max(0.0, engine.risk_config.score_threshold_trend + offset)
+            engine.risk_config.score_threshold_range = max(0.0, engine.risk_config.score_threshold_range + offset)
+            engine.risk_config.score_threshold_volatile = max(0.0, engine.risk_config.score_threshold_volatile + offset)
+            
+        # Synchronize risk manager and pipeline engines
+        if engine.risk:
+            engine.risk.config = engine.risk_config
+            
         # Update running engine properties in-place from the snapshot
         pipeline = getattr(engine, "pipeline", None)
         if pipeline:
             pipeline.ml_threshold = snapshot["ml_threshold"]
+            if hasattr(pipeline, "trade_score_engine") and pipeline.trade_score_engine is not None:
+                pipeline.trade_score_engine.risk_config = engine.risk_config
             
         evaluator = getattr(engine, "evidence_evaluator", None)
         if evaluator:
             evaluator.ml_threshold = snapshot["ml_threshold"]
-            
-        risk_config = getattr(engine, "risk_config", None)
-        if policy_id == "challenger_aggressive_score" and risk_config:
-            risk_config.midday_score_boost = 25.0
             
         applog.info(
             "engine.promotion",
@@ -708,7 +719,7 @@ async def promote_policy(request: Request, body: PromoteRequest) -> dict:
             "message": f"Promoted policy {policy_id!r} successfully.",
             "config": {
                 "ml_threshold": snapshot["ml_threshold"],
-                "midday_score_boost": 25.0 if policy_id == "challenger_aggressive_score" else None,
+                "score_threshold_offset": offset,
             },
             "snapshot": snapshot,
         }

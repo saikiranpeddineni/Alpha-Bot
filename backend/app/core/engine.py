@@ -288,9 +288,13 @@ class TradingEngine:
         if active_snapshot and "ml_threshold" in active_snapshot:
             ml_thresh = float(active_snapshot["ml_threshold"])
             applog.info("engine", f"Restored active promoted policy snapshot on startup: {active_snapshot}")
-            # If the snapshot is for the aggressive score policy, restore the midday score boost
-            if active_snapshot.get("policy_id") == "challenger_aggressive_score":
-                self.risk_config.midday_score_boost = 25.0
+            offset = float(active_snapshot.get("score_threshold_offset", 0.0))
+            if offset != 0.0:
+                self.risk_config.score_threshold_event = max(0.0, self.risk_config.score_threshold_event + offset)
+                self.risk_config.score_threshold_trend = max(0.0, self.risk_config.score_threshold_trend + offset)
+                self.risk_config.score_threshold_range = max(0.0, self.risk_config.score_threshold_range + offset)
+                self.risk_config.score_threshold_volatile = max(0.0, self.risk_config.score_threshold_volatile + offset)
+                applog.info("engine", f"Applied score threshold offset of {offset:+.1f} points to RiskConfig thresholds.")
         elif self.db.get_setting("ml_threshold") is not None:
             ml_thresh = float(self.db.get_setting("ml_threshold"))
             applog.info("engine", f"Restored active promoted ML threshold setting on startup: {ml_thresh}")
@@ -1701,7 +1705,16 @@ class TradingEngine:
     def update_risk_config(self, partial: dict) -> RiskConfig:
         merged = {**self.risk_config.model_dump(), **partial}
         self.risk_config = RiskConfig(**merged)  # validates bounds
-        self.db.set_setting("risk_config", self.risk_config.model_dump())
+        
+        # Calculate clean base risk configuration by stripping active policy offset
+        active_snapshot = self.db.get_setting("active_policy_snapshot")
+        offset = float(active_snapshot.get("score_threshold_offset", 0.0)) if active_snapshot else 0.0
+        base_risk = self.risk_config.model_dump()
+        if offset != 0.0:
+            for key in ["score_threshold_event", "score_threshold_trend", "score_threshold_range", "score_threshold_volatile"]:
+                base_risk[key] = max(0.0, float(base_risk[key]) - offset)
+                
+        self.db.set_setting("risk_config", base_risk)
         if self.risk is not None:
             self.risk.config = self.risk_config
         if self.pipeline is not None:
