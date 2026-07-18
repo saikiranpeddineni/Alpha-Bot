@@ -1076,6 +1076,67 @@ async def run_backtest(
                         )
                         shadow_signals_log.append(payload)
 
+                        # Run and record all active Challengers in backtesting (CR-146 Phase 3)
+                        from app.strategies.challenger import get_active_challengers
+                        for challenger in get_active_challengers():
+                            try:
+                                challenger_eval = ParallelEvidenceEvaluator(
+                                    model=model,
+                                    ml_threshold=challenger.ml_threshold,
+                                    meta_label_engine=pipeline.meta_label_engine,
+                                    trade_score_engine=challenger.create_custom_trade_score_engine(pipeline.trade_score_engine),
+                                )
+                                c_evidence = challenger_eval.evaluate(
+                                    symbol=symbol,
+                                    df=window,
+                                    sig=sig,
+                                    regime=regime,
+                                    sector_strength=rs_score,
+                                    is_event_day=is_event_day,
+                                    midday_active=midday_active,
+                                )
+                                
+                                c_vetoes = c_evidence.get("vetoes", {})
+                                c_accepted = len(c_vetoes) == 0
+                                c_final_decision = "pipeline_approved" if c_accepted else "rejected"
+                                
+                                c_rejection_stage = "none"
+                                c_rejection_reason = ""
+                                if not c_accepted:
+                                    stage = list(c_vetoes.keys())[0]
+                                    c_rejection_stage = stage
+                                    c_rejection_reason = c_vetoes[stage]
+
+                                c_payload = ShadowLedger.record_candidate(
+                                    db_engine=None,
+                                    symbol=symbol,
+                                    ts=now,
+                                    strategy=sig.strategy,
+                                    direction="long" if sig.action == SignalAction.ENTER_LONG else "short",
+                                    signal_price=sig.price or float(window["close"].iloc[-1]),
+                                    stop_loss=sig.stop_loss,
+                                    take_profit=sig.take_profit,
+                                    ml_confidence=sig.ml_probability,
+                                    final_decision=c_final_decision,
+                                    rejection_stage=c_rejection_stage,
+                                    rejection_reason=c_rejection_reason,
+                                    df=frame,
+                                    spy_df=spy_df,
+                                    slot_rvol_val=slot_rvol_val,
+                                    vwap_telemetry=vwap_tel,
+                                    mode="challenger",
+                                    candidate_id=sig.candidate_id,
+                                    strategy_params=getattr(sig, "strategy_params", {}),
+                                    policy_id=challenger.policy_id,
+                                    parent_policy_id="champion",
+                                    policy_version="1.0.0",
+                                    gate_evidence_json=c_evidence,
+                                    spy_vol=spy_vol,
+                                )
+                                shadow_signals_log.append(c_payload)
+                            except Exception as exc:
+                                applog.error("backtest.challenger", f"Challenger {challenger.policy_id} failed for {symbol}: {exc}")
+
                     for sig in accepted:
                         if sig.action == SignalAction.EXIT:
                             if position is not None:

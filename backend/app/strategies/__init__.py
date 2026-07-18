@@ -4,4 +4,6 @@ from app.strategies import bb_squeeze, momentum, orb, rsi_reversion, vwap_revers
 from app.strategies.base import REGISTRY, Strategy, StrategyContext, create_strategies  # noqa: F401
 from app.strategies.pipeline import SignalPipeline  # noqa: F401
 from app.strategies.evaluator import ParallelEvidenceEvaluator  # noqa: F401
-from app.strategies.memory import get_contextual_expectancy, refresh_contextual_memory  # noqa: F401
+from app.strategies.memory import get_contextual_expectancy, refresh_contextual_memory, get_episodic_nearest_neighbors  # noqa: F401
+from app.strategies.challenger import get_active_challengers  # noqa: F401
+from app.strategies.reflection import generate_eod_reflection_report  # noqa: F401

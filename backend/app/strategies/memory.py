@@ -192,3 +192,73 @@ def get_contextual_expectancy(
         "shrunk_expectancy": 0.0,
         "source": "default_prior",
     }
+
+
+def get_episodic_nearest_neighbors(
+    db: Database | None,
+    current_features: dict,
+    k: int = 5,
+) -> list[dict]:
+    """Retrieves the k nearest historical candidates using Euclidean distance over continuous features.
+    
+    Features compared: slot_rvol, spy_vol, vwap_distance_atr, ml_confidence.
+    """
+    if db is None:
+        return []
+
+    import math
+    try:
+        # Load past candidate records
+        records = db.get_shadow_signals(limit=2000)
+    except Exception as exc:
+        applog.error("memory", f"Failed to load shadow signals for Level 2 episodic search: {exc}")
+        return []
+
+    def clean(val: float | None, default: float) -> float:
+        try:
+            return float(val) if val is not None else default
+        except Exception:
+            return default
+
+    t_rvol = clean(current_features.get("slot_rvol"), 1.0)
+    t_vol = clean(current_features.get("spy_vol"), 0.08)
+    t_vwap = clean(current_features.get("vwap_distance_atr"), 0.0)
+    t_ml = clean(current_features.get("ml_confidence"), 0.5)
+
+    target_vector = [t_rvol, t_vol, t_vwap, t_ml]
+
+    scored_neighbors = []
+    for r in records:
+        outcomes = r.get("outcomes")
+        if not outcomes:
+            continue
+
+        rvol = clean(r.get("slot_rvol"), 1.0)
+        vol = clean(r.get("spy_vol"), 0.08)
+        vwap = clean(r.get("vwap_distance_atr"), 0.0)
+        ml = clean(r.get("ml_confidence"), 0.5)
+
+        vector = [rvol, vol, vwap, ml]
+        dist = math.sqrt(sum((x - y) ** 2 for x, y in zip(target_vector, vector)))
+
+        # Retrieve outcomes
+        realized_r = 0.0
+        if "15m" in outcomes:
+            realized_r = outcomes["15m"].get("realized_r", 0.0)
+        elif "close" in outcomes:
+            realized_r = outcomes["close"].get("realized_r", 0.0)
+
+        scored_neighbors.append({
+            "candidate_id": r.get("candidate_id"),
+            "strategy": r.get("strategy"),
+            "direction": r.get("direction"),
+            "distance": round(dist, 4),
+            "realized_r": realized_r,
+            "final_decision": r.get("final_decision"),
+            "timestamp": r.get("timestamp"),
+        })
+
+    # Sort by distance ascending and take top k
+    scored_neighbors.sort(key=lambda x: x["distance"])
+    return scored_neighbors[:k]
+

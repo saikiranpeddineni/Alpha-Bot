@@ -376,7 +376,7 @@ class Database:
 
             s.merge(
                 ShadowLedgerRow(
-                    id=candidate_id,
+                    id=f"{candidate_id}_{payload.get('policy_id') or 'champion'}",
                     ts=ts,
                     symbol=symbol,
                     strategy=strategy,
@@ -432,9 +432,9 @@ class Database:
                     pass
             return results
 
-    def get_shadow_signal(self, candidate_id: str) -> dict | None:
+    def get_shadow_signal(self, candidate_id: str, policy_id: str = "champion") -> dict | None:
         with self._session() as s:
-            row = s.get(ShadowLedgerRow, candidate_id)
+            row = s.get(ShadowLedgerRow, f"{candidate_id}_{policy_id}")
             if row is None:
                 return None
             try:
