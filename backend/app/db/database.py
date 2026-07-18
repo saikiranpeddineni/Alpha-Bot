@@ -428,9 +428,9 @@ class Database:
                     data = json.loads(r.payload)
                     data["replayed"] = r.replayed
                     data["replay_timestamp"] = r.replay_timestamp.isoformat() if r.replay_timestamp else None
-                    data["simulated_pnl"] = r.simulated_pnl
-                    data["mfe_pct"] = r.mfe_pct
-                    data["mae_pct"] = r.mae_pct
+                    data["simulated_pnl"] = r.simulated_pnl if r.simulated_pnl is not None else 0.0
+                    data["mfe_pct"] = r.mfe_pct if r.mfe_pct is not None else 0.0
+                    data["mae_pct"] = r.mae_pct if r.mae_pct is not None else 0.0
                     data["exit_reason"] = r.exit_reason
                     data["tp_hit"] = r.tp_hit
                     data["sl_hit"] = r.sl_hit
@@ -455,9 +455,9 @@ class Database:
                 data = json.loads(row.payload)
                 data["replayed"] = row.replayed
                 data["replay_timestamp"] = row.replay_timestamp.isoformat() if row.replay_timestamp else None
-                data["simulated_pnl"] = row.simulated_pnl
-                data["mfe_pct"] = row.mfe_pct
-                data["mae_pct"] = row.mae_pct
+                data["simulated_pnl"] = row.simulated_pnl if row.simulated_pnl is not None else 0.0
+                data["mfe_pct"] = row.mfe_pct if row.mfe_pct is not None else 0.0
+                data["mae_pct"] = row.mae_pct if row.mae_pct is not None else 0.0
                 data["exit_reason"] = row.exit_reason
                 data["tp_hit"] = row.tp_hit
                 data["sl_hit"] = row.sl_hit
