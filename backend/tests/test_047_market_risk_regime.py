@@ -46,7 +46,7 @@ from app.core.scanner import MarketScanner, ScannerOutcome, SpyVolatilityState
 # Fixtures / helpers
 # ---------------------------------------------------------------------------
 
-def _make_normal_1min(n: int = 300) -> pd.DataFrame:
+def _make_normal_1min(n: int = 1440) -> pd.DataFrame:
     """Minimal 1-min OHLCV frame with low, stable ATR (normal regime)."""
     idx = pd.date_range("2025-01-02 09:30", periods=n, freq="1min", tz="UTC")
     price = 500.0
@@ -60,11 +60,11 @@ def _make_normal_1min(n: int = 300) -> pd.DataFrame:
     return df
 
 
-def _make_panic_1min(n: int = 300) -> pd.DataFrame:
+def _make_panic_1min(n: int = 1440) -> pd.DataFrame:
     """1-min frame with extreme ATR ensuring >= 85th-percentile volatility."""
     idx = pd.date_range("2025-01-02 09:30", periods=n, freq="1min", tz="UTC")
     price = 500.0
-    # First 270 bars: tiny range (build historical baseline)
+    # First n - 30 bars: tiny range (build historical baseline)
     highs  = [price + 0.05] * n
     lows   = [price - 0.05] * n
     closes = [price] * n
@@ -270,16 +270,13 @@ def _make_scanner_all_down(err):
 @pytest.mark.asyncio
 async def test_ac8_unknown_to_normal_requires_fresh_data():
     """First assess() with bad data → UNKNOWN; second with good data → not UNKNOWN."""
-    call_count = 0
     normal_df = _make_normal_1min()
     daily_df = _make_daily()
+    provider_down = True
 
     async def _history(symbol, timeframe, start, end, prefer_cache=True):
-        nonlocal call_count
-        call_count += 1
-        if call_count <= 5:  # first assess(): all families fail
+        if provider_down:
             raise ConnectionError("provider down")
-        # second assess(): return good data
         if timeframe == "1Min":
             return normal_df
         return daily_df
@@ -290,6 +287,7 @@ async def test_ac8_unknown_to_normal_requires_fresh_data():
     state1, _, _, _, _ = await agg.assess()
     assert state1 is MarketRiskState.UNKNOWN
 
+    provider_down = False
     state2, conf2, _, _, _ = await agg.assess()
     assert state2 is not MarketRiskState.UNKNOWN
     assert conf2 > 0.0
@@ -415,7 +413,7 @@ async def test_046_regression_panic_atr_returns_panic():
     """High ATR% → check_spy_volatility returns PANIC."""
     async def _history(symbol, timeframe, start, end, prefer_cache=True):
         if timeframe == "1Min" and symbol in ("SPY", "QQQ"):
-            return _make_panic_1min(300)
+            return _make_panic_1min()
         return _make_daily()
 
     dm = SimpleNamespace(
@@ -432,7 +430,7 @@ async def test_046_regression_normal_atr_returns_safe():
     """Normal ATR% → check_spy_volatility returns SAFE."""
     async def _history(symbol, timeframe, start, end, prefer_cache=True):
         if timeframe == "1Min":
-            return _make_normal_1min(300)
+            return _make_normal_1min()
         return _make_daily()
 
     dm = SimpleNamespace(

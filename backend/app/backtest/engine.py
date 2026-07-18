@@ -60,6 +60,7 @@ class BacktestParams(BaseModel):
     strategies: dict[str, dict] | None = None  # {name: {enabled: bool, params: {...}}}
     risk: RiskConfig | None = None
     use_corrected_trailing: bool = True
+    ignore_temporal_leakage: bool = False
     cache_policy: str = "default"  # "default" or "immutable_cache_only"
     verify_dataset_immutability: bool = False
 
@@ -149,6 +150,11 @@ async def run_backtest(
     import copy
     import hashlib
     model_orig = model
+    # Refresh specialist models from disk before deepcopying. This ensures
+    # the backtest always uses the latest trained artifacts even when training
+    # ran after the server was started (avoids NO_ARTIFACT for new specialists).
+    if hasattr(model, "reload_specialists"):
+        model.reload_specialists()
     model = copy.deepcopy(model)
 
     # --- FIX #69: Explicitly reset backtest_start_time on the clone to None
@@ -188,16 +194,26 @@ async def run_backtest(
     applog.info("backtest", f"Strategy params: {params.strategies}")
     applog.info("backtest", f"=================================")
 
-    # Reset run-scoped provenance and set cache policy
+    # --- FIX #67: Capture ALL live DataManager state that the backtest mutates
+    # so every attribute is unconditionally restored in the finally block,
+    # regardless of success, exception, or cancellation.
+    #
+    # Mutated attributes:
+    #   data.provenance     - reset to {} by backtest, never restored before this fix
+    #   data.cache_policy   - set to params.cache_policy, never restored before this fix
+    #   data.history        - monkey-patched to custom_history, restored by prior fix
+    #
+    # Capturing original_ values here before any mutation guarantees the live
+    # engine always resumes with its own data semantics after backtest completion.
     from app.data.base import CachePolicy
+    original_provenance = dict(data.provenance)  # shallow copy is sufficient
+    original_cache_policy = data.cache_policy
+    original_history = data.history
+    # Apply run-scoped backtest state
     data.provenance = {}
     data.cache_policy = params.cache_policy
-    
-    # --- FIX #69: Wrap the data.history monkey-patch in try/finally so the
-    # live DataManager is always restored on success, exception, and
-    # cancellation. Previously only the success path restored data.history.
-    original_history = data.history
-    data.original_history = original_history
+    # fix(#129): removed stale data.original_history = original_history assignment
+    # (it was a debug holdover; original_history is captured as a local variable above)
     current_backtest_ts = [params.start]
     daily_frames = {}
 
@@ -266,8 +282,8 @@ async def run_backtest(
 
     data.history = custom_history
 
-    # All replay logic is wrapped in try/finally to guarantee data.history is
-    # always restored even on exception or cancellation (fixes #69 / #67).
+    # All replay logic is wrapped in try/finally to guarantee ALL mutated
+    # DataManager attributes are restored on success, exception, and cancellation.
     try:
         before_hash = None
         if params.cache_policy == CachePolicy.IMMUTABLE_CACHE_ONLY and getattr(params, "verify_dataset_immutability", False):
@@ -457,14 +473,25 @@ async def run_backtest(
         current_watchlist = list(core_watchlist)
         risk.core_watchlist = core_watchlist
         # Set backtest_start_time on the replay clone to enforce temporal leakage
-        # protection. The live engine.model singleton is never touched here because
-        # model was already deep-copied at the top of run_backtest() and
-        # model.backtest_start_time was explicitly reset to None before this line.
-        model.backtest_start_time = params.start
+        # protection, unless explicitly bypassed by ignore_temporal_leakage.
+        if params.ignore_temporal_leakage:
+            model.backtest_start_time = None
+        else:
+            model.backtest_start_time = params.start
         pipeline = SignalPipeline(model, risk_cfg.ml_confidence_threshold if params.use_ml_gate else 0.0)
         # Set backtest_start_time on meta label engine to prevent MetaLabel temporal leakage
         if hasattr(pipeline, "meta_label_engine") and pipeline.meta_label_engine is not None:
-            pipeline.meta_label_engine.backtest_start_time = params.start
+            if params.ignore_temporal_leakage:
+                pipeline.meta_label_engine.backtest_start_time = None
+            else:
+                pipeline.meta_label_engine.backtest_start_time = params.start
+        from app.strategies.evaluator import ParallelEvidenceEvaluator
+        evidence_evaluator = ParallelEvidenceEvaluator(
+            model=model,
+            ml_threshold=risk_cfg.ml_confidence_threshold if params.use_ml_gate else 0.0,
+            meta_label_engine=pipeline.meta_label_engine,
+            trade_score_engine=pipeline.trade_score_engine,
+        )
         strategies = create_strategies(params.strategies)
         for s in strategies:
             s.reset()
@@ -707,7 +734,7 @@ async def run_backtest(
 
             # Intraday Watchlist updates (only if dynamic scanner is enabled)
             if params.use_dynamic_scanner:
-                # Intraday Watchlist Refresh (9:30 AM – 3:30 PM ET, every 30 minutes)
+                # Intraday Watchlist Refresh (9:30 AM - 3:30 PM ET, every 30 minutes)
                 if (
                     9 * 60 + 30 <= et_mins <= 15 * 60 + 30
                     and et_mins % 30 == 0
@@ -730,7 +757,7 @@ async def run_backtest(
                             if new_watchlist != current_watchlist:
                                 current_watchlist = new_watchlist
                                 risk.core_watchlist = list(current_watchlist)
-                                applog.info("backtest", f"Intraday watchlist refresh: +{list(to_add)} −{list(to_remove)}")
+                                applog.info("backtest", f"Intraday watchlist refresh: +{list(to_add)} -{list(to_remove)}")
                         
                         elif outcome == ScannerOutcome.SUCCESS_EMPTY:
                             open_symbols = {p.symbol.upper() for p in broker._positions.values() if abs(p.qty) > 1e-9}
@@ -741,7 +768,7 @@ async def run_backtest(
                             if new_watchlist != current_watchlist:
                                 current_watchlist = new_watchlist
                                 risk.core_watchlist = list(current_watchlist)
-                                applog.info("backtest", f"Intraday watchlist refresh: +[] −{list(to_remove)}")
+                                applog.info("backtest", f"Intraday watchlist refresh: +[] -{list(to_remove)}")
                                 
                         elif outcome == ScannerOutcome.FAILED:
                             applog.warning("backtest", "Intraday scanner FAILED; retaining last-known-good dynamic candidates.")
@@ -771,8 +798,6 @@ async def run_backtest(
                                 avg_vol_5m = avg_vol_1m * 5.0
                                 rvol = vol_5m / avg_vol_5m if avg_vol_5m > 0 else 0.0
                                 
-                                # Thresholds: 1.5% in 5 min is a notable intraday move for any liquid US equity;
-                                # 3x rvol vs same-session mean is a genuine volume surge
                                 if ret_5m >= 1.5 or rvol >= 3.0:
                                     df_enriched = enrich(df)
                                     row = df_enriched.iloc[-1]
@@ -792,7 +817,7 @@ async def run_backtest(
                             except Exception as _exc:
                                 applog.debug(
                                     "backtest",
-                                    f"[{now}] [Event Monitor] {symbol} skipped — transient error: {type(_exc).__name__}: {_exc}",
+                                    f"[{now}] [Event Monitor] {symbol} skipped - transient error: {type(_exc).__name__}: {_exc}",
                                 )
 
             # Check event calendar every 5 minutes (aligned with live event monitor)
@@ -802,7 +827,7 @@ async def run_backtest(
                     is_event, reason = await calendar.check(now, current_watchlist)
                     pipeline.set_event_day(is_event)
                     if is_event:
-                        applog.info("backtest", f"[{now}] Event guard ACTIVE — score threshold raised to event level ({reason[:60]})")
+                        applog.info("backtest", f"[{now}] Event guard ACTIVE - score threshold raised to event level ({reason[:60]})")
                 except Exception as exc:
                     applog.debug("backtest", f"Calendar check error: {exc}")
 
@@ -813,10 +838,6 @@ async def run_backtest(
                 bars_processed += 1
             drain(now)
 
-            # Match the live decision cycle: observe/process all as-of-T fills first,
-            # then roll session state before account context, halts, and decisions.
-            # This makes a boundary fill on the first processed bar of D+1 land in
-            # identical portfolio/risk state in live and replay.
             if portfolio.roll_session(session, broker.equity()):
                 risk.roll_session(session)
 
@@ -836,6 +857,12 @@ async def run_backtest(
                 flattened_sessions.add(session)
                 await broker.flatten_all(reason="end of day")
                 drain(now)
+                # Compile EOD policy reflection report and auto-promote if qualified (CR-146 Phase 7)
+                try:
+                    from app.strategies import generate_eod_reflection_report
+                    generate_eod_reflection_report(params.db if hasattr(params, "db") else None, now=now, engine=None)
+                except Exception as _exc:
+                    applog.debug("backtest", f"Backtest EOD reflection skipped: {_exc}")
             elif not risk.hard_halted and not risk.daily_halted:
                 candidates_this_tick = []
                 for symbol in symbols_here:
@@ -846,7 +873,6 @@ async def run_backtest(
                     window = frame.iloc[max(0, i - SLICE_WINDOW + 1) : i + 1]
                     position = broker._positions.get(symbol)
 
-                    # --- Trailing Stop check (aligned with live close-only evaluation) ---
                     if position is not None:
                         close = float(window["close"].iloc[-1])
                         high_val = float(window["high"].iloc[-1])
@@ -901,7 +927,6 @@ async def run_backtest(
                         if symbol in position_initial_stops:
                             del position_initial_stops[symbol]
 
-                    # --- Compute Relative Strength vs SPY (causally) ---
                     rs_score = None
                     spy_df = frames.get("SPY")
                     if spy_df is not None:
@@ -924,13 +949,85 @@ async def run_backtest(
                     if not signals:
                         continue
                     feature_row = window.iloc[-1]
+                    slot_engine = slot_volume_engines.get(symbol)
+                    slot_rvol_val = slot_engine.get_slot_rvol(now) if slot_engine else None
+
+                    # Estimate SPY 30-bar rolling volatility
+                    spy_vol: float | None = None
+                    if spy_df is not None:
+                        spy_i = positions_index["SPY"].get(ts)
+                        if spy_i is not None:
+                            spy_window = spy_df.iloc[max(0, spy_i - SLICE_WINDOW + 1) : spy_i + 1]
+                            try:
+                                spy_vol = float(spy_window["close"].pct_change().rolling(30).std().iloc[-1] * 100)
+                            except Exception:
+                                spy_vol = None
+
+                    # Fetch Level 1 Context expectancy for each strategy and log/adapt (CR-146 Phase 5)
+                    from app.strategies import get_contextual_expectancy, get_adaptive_ml_threshold, get_adaptive_signal_score
+                    from app.core.phase import classify_clock_phase
+                    clock_phase = classify_clock_phase(now)
+                    adaptive_ml_thresholds = {}
+                    for sig in signals:
+                        if sig.action != SignalAction.EXIT:
+                            try:
+                                exp_info = get_contextual_expectancy(
+                                    db=None,  # No DB in backtest engine
+                                    strategy=sig.strategy,
+                                    direction="long" if sig.action == SignalAction.ENTER_LONG else "short",
+                                    regime=regime.name if hasattr(regime, "name") else str(regime),
+                                    clock_phase=clock_phase.value if hasattr(clock_phase, "value") else str(clock_phase),
+                                    rvol=slot_rvol_val,
+                                    spy_vol=spy_vol,
+                                )
+                                applog.debug(
+                                    "backtest.memory",
+                                    f"Context memory lookup for {sig.symbol} {sig.strategy} {sig.action}: "
+                                    f"expectancy={exp_info['expectancy']}, shrunk_expectancy={exp_info['shrunk_expectancy']}"
+                                )
+                                
+                                dyn_ml_threshold = get_adaptive_ml_threshold(pipeline.ml_threshold, exp_info)
+                                adaptive_ml_thresholds[sig.candidate_id] = dyn_ml_threshold
+                                
+                                if sig.score is not None:
+                                    sig.score = get_adaptive_signal_score(sig.score, exp_info)
+                            except Exception as exc:
+                                applog.error("backtest.memory", f"Failed memory expectancy lookup / adaptation: {exc}")
+                    # Assign a unique candidate ID to all candidate entry signals first (shared UUID)
+                    import uuid
+                    for sig in signals:
+                        if sig.action != SignalAction.EXIT:
+                            if getattr(sig, "candidate_id", None) is None:
+                                prefix = f"{symbol}_{sig.strategy}_{now.strftime('%Y%m%d_%H%M%S')}"
+                                sig.candidate_id = f"{prefix}_{uuid.uuid4().hex[:6]}".upper()
+
+                    # Run ParallelEvidenceEvaluator out-of-band to capture the parallel evidence (CR-146)
+                    parallel_evidences = {}
+                    for sig in signals:
+                        if sig.action != SignalAction.EXIT:
+                            try:
+                                midday_active = getattr(pipeline, "_midday_active", False)
+                                is_event_day = getattr(pipeline, "_is_event_day", False)
+                                evidence = evidence_evaluator.evaluate(
+                                    symbol=symbol,
+                                    df=window,
+                                    sig=sig,
+                                    regime=regime,
+                                    sector_strength=rs_score,
+                                    is_event_day=is_event_day,
+                                    midday_active=midday_active,
+                                    ml_threshold=adaptive_ml_thresholds.get(sig.candidate_id),
+                                )
+                                if evidence:
+                                    parallel_evidences[sig.candidate_id] = evidence
+                            except Exception as exc:
+                                applog.error("backtest.evaluator", f"ParallelEvidenceEvaluator failed for {symbol} {sig.strategy}: {exc}")
+
                     accepted, rejected = pipeline.process(symbol, window, signals, regime, features=feature_row, sector_strength=rs_score)
 
-                    # Record candidate signals to the shadow ledger
                     spy_df = frames.get("SPY")
 
                     for sig in signals:
-                        # Ignore exits in shadow candidate ledger
                         if sig.action == SignalAction.EXIT:
                             continue
 
@@ -973,8 +1070,6 @@ async def run_backtest(
                                 f"(strategy: {sig.strategy}) -- Stage: {rejection_stage}, Reason: {rejection_reason}"
                             )
 
-                        slot_engine = slot_volume_engines.get(symbol)
-                        slot_rvol_val = slot_engine.get_slot_rvol(now) if slot_engine else None
                         vwap_tel = compute_vwap_telemetry(window, now, slot_rvol_val)
 
                         payload = ShadowLedger.record_candidate(
@@ -995,8 +1090,76 @@ async def run_backtest(
                             slot_rvol_val=slot_rvol_val,
                             vwap_telemetry=vwap_tel,
                             mode="backtest",
+                            candidate_id=sig.candidate_id,
+                            strategy_params=getattr(sig, "strategy_params", {}),
+                            policy_id="champion",
+                            parent_policy_id=None,
+                            policy_version="1.0.0",
+                            gate_evidence_json=parallel_evidences.get(sig.candidate_id),
+                            spy_vol=spy_vol,
                         )
                         shadow_signals_log.append(payload)
+
+                        # Run and record all active Challengers in backtesting (CR-146 Phase 3)
+                        from app.strategies.challenger import get_active_challengers
+                        for challenger in get_active_challengers():
+                            try:
+                                challenger_eval = ParallelEvidenceEvaluator(
+                                    model=model,
+                                    ml_threshold=challenger.ml_threshold,
+                                    meta_label_engine=pipeline.meta_label_engine,
+                                    trade_score_engine=challenger.create_custom_trade_score_engine(pipeline.trade_score_engine),
+                                )
+                                c_evidence = challenger_eval.evaluate(
+                                    symbol=symbol,
+                                    df=window,
+                                    sig=sig,
+                                    regime=regime,
+                                    sector_strength=rs_score,
+                                    is_event_day=is_event_day,
+                                    midday_active=midday_active,
+                                )
+                                
+                                c_vetoes = c_evidence.get("vetoes", {})
+                                c_accepted = len(c_vetoes) == 0
+                                c_final_decision = "pipeline_approved" if c_accepted else "rejected"
+                                
+                                c_rejection_stage = "none"
+                                c_rejection_reason = ""
+                                if not c_accepted:
+                                    stage = list(c_vetoes.keys())[0]
+                                    c_rejection_stage = stage
+                                    c_rejection_reason = c_vetoes[stage]
+
+                                c_payload = ShadowLedger.record_candidate(
+                                    db_engine=None,
+                                    symbol=symbol,
+                                    ts=now,
+                                    strategy=sig.strategy,
+                                    direction="long" if sig.action == SignalAction.ENTER_LONG else "short",
+                                    signal_price=sig.price or float(window["close"].iloc[-1]),
+                                    stop_loss=sig.stop_loss,
+                                    take_profit=sig.take_profit,
+                                    ml_confidence=sig.ml_probability,
+                                    final_decision=c_final_decision,
+                                    rejection_stage=c_rejection_stage,
+                                    rejection_reason=c_rejection_reason,
+                                    df=frame,
+                                    spy_df=spy_df,
+                                    slot_rvol_val=slot_rvol_val,
+                                    vwap_telemetry=vwap_tel,
+                                    mode="challenger",
+                                    candidate_id=sig.candidate_id,
+                                    strategy_params=getattr(sig, "strategy_params", {}),
+                                    policy_id=challenger.policy_id,
+                                    parent_policy_id="champion",
+                                    policy_version="1.0.0",
+                                    gate_evidence_json=c_evidence,
+                                    spy_vol=spy_vol,
+                                )
+                                shadow_signals_log.append(c_payload)
+                            except Exception as exc:
+                                applog.error("backtest.challenger", f"Challenger {challenger.policy_id} failed for {symbol}: {exc}")
 
                     for sig in accepted:
                         if sig.action == SignalAction.EXIT:
@@ -1005,7 +1168,6 @@ async def run_backtest(
                         else:
                             candidates_this_tick.append((sig, window))
 
-                # Run shared portfolio gate and allocation across all entries this tick
                 if candidates_this_tick:
                     from app.portfolio.allocator import process_portfolio_allocations
                     from app.risk.manager import is_entry_order
@@ -1023,14 +1185,12 @@ async def run_backtest(
                         portfolio_allocator=portfolio_allocator,
                     )
 
-                    # Process gated/rejected entries from Portfolio Allocator
                     for sig, reason in decision_outcome.gated_entries:
                         applog.info(
                             "backtest",
                             f"[{now}] {sig.symbol}: Portfolio Gate/Allocator rejected -- {reason}"
                         )
 
-                    # Query pending orders from PaperBroker to populate pending_entry_symbols
                     pending_entries = [
                         broker._orders[oid].symbol.upper() for oid in broker._resting
                         if is_entry_order(broker._orders[oid], open_positions)
@@ -1045,7 +1205,6 @@ async def run_backtest(
                             position_initial_stops[sig.symbol] = decision.order.stop_loss
                             order = await broker.submit(decision.order)
                             
-                            # Add to effective pending set if successfully submitted into an active state
                             if order is not None and order.status not in (OrderStatus.CANCELED, OrderStatus.REJECTED):
                                 effective_pending_entries.add(sig.symbol.upper())
                         else:
@@ -1079,7 +1238,6 @@ async def run_backtest(
         actual_data_start = all_ts[0].to_pydatetime() if all_ts else None
         actual_data_end = all_ts[-1].to_pydatetime() if all_ts else None
         
-        # requested session count
         from zoneinfo import ZoneInfo
         ET_TZ = ZoneInfo("America/New_York")
         curr_d = params.start.astimezone(ET_TZ).date()
@@ -1090,7 +1248,6 @@ async def run_backtest(
                 requested_session_count += 1
             curr_d += timedelta(days=1)
             
-        # actual session count
         actual_session_dates = sorted(list(set(clock.session_date(ts) for ts in all_ts)))
         actual_session_count = len(actual_session_dates)
         
@@ -1100,14 +1257,12 @@ async def run_backtest(
                 f"processed {actual_session_count} actual sessions."
             )
 
-        # shared session count
         symbol_session_dates = []
         for sym, frame in frames.items():
             sym_dates = set(clock.session_date(ts) for ts in frame.index)
             symbol_session_dates.append(sym_dates)
         shared_session_count = len(set.intersection(*symbol_session_dates)) if symbol_session_dates else 0
 
-        # derive data source mode
         sources = set(p.get("source") for p in data.provenance.values())
         if len(sources) == 1:
             data_source_mode = "CACHE_ONLY" if "cache" in sources else "NETWORK_ONLY"
@@ -1116,7 +1271,6 @@ async def run_backtest(
         else:
             data_source_mode = "CACHE_ONLY"
 
-        # config and model sha256
         config_fields = {
             "symbols": sorted(params.symbols),
             "start": params.start.strftime("%Y-%m-%d"),
@@ -1170,7 +1324,6 @@ async def run_backtest(
             counterfactuals=counterfactuals_log,
             gate_value_report=gate_value_report,
             
-            # Manifest fields
             requested_start=params.start,
             requested_end=params.end,
             actual_data_start=actual_data_start,
@@ -1188,12 +1341,10 @@ async def run_backtest(
         
         if params.debug_mode:
             from app.core.benchmark import run_benchmark_attribution
-            # Get the history for all scanned symbols for the duration of the backtest
             bars_dict = {}
             for sym in set(params.symbols + risk.core_watchlist):
                 if sym in frames:
                     bars_dict[sym] = frames[sym]
-            
             run_benchmark_attribution(result, bars_dict)
 
         applog.info(
@@ -1204,7 +1355,13 @@ async def run_backtest(
         return result
 
     finally:
-        # --- FIX #69 / #67: Unconditionally restore data.history on success,
-        # exception, and cancellation so a failed replay can never leave the
-        # historical closure installed on the live DataManager.
+        # --- FIX #67 / #69 / #129: Unconditionally restore ALL mutated DataManager
+        # attributes on success, exception, and cancellation.
+        # A failed or cancelled backtest can never leave the live DataManager
+        # in a corrupted or history-patched state.
         data.history = original_history
+        data.provenance = original_provenance
+        data.cache_policy = original_cache_policy
+        # Remove stale debug attribute if it was previously set by an older run
+        if hasattr(data, "original_history"):
+            del data.original_history

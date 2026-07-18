@@ -93,6 +93,7 @@ export const api = {
     starting_cash?: number;
     use_ml_gate?: boolean;
     use_dynamic_scanner?: boolean;
+    ignore_temporal_leakage?: boolean;
     start_date?: string | null;
     end_date?: string | null;
   }) => request<BacktestResult>("/api/backtest", { method: "POST", body: JSON.stringify(body) }),

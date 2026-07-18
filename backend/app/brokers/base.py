@@ -15,6 +15,8 @@ if TYPE_CHECKING:
         Position,
     )
 
+from app.core.domain import OrderSide
+
 
 class BrokerTimeoutError(RuntimeError):
     """Raised when a broker HTTP call exceeds its configured wall-clock budget.
@@ -26,14 +28,21 @@ class BrokerTimeoutError(RuntimeError):
 
 @dataclass
 class Fill:
+    order_id: str
     symbol: str
-    side: str  # 'BUY' | 'SELL'
+    side: OrderSide | str  # 'BUY' | 'SELL' or OrderSide enum
     qty: float
     price: float
-    strategy: str = ""
+    commission: float = 0.0
+    strategy: str = "manual"
     reason: str = ""
-    order_id: str = ""
     ts: datetime = field(default_factory=lambda: datetime.now(UTC))
+    signal_timestamp_utc: datetime | None = None
+    decision_bar_timestamp_utc: datetime | None = None
+    broker_fill_key: str | None = None
+    cumulative_qty: float | None = None
+    broker_mode: str | None = None
+    broker_account_id: str | None = None
 
 
 class Broker:
@@ -55,6 +64,9 @@ class Broker:
 
     async def submit(self, req: OrderRequest) -> Order:  # pragma: no cover
         ...
+
+    async def get_order_by_client_id(self, client_order_id: str) -> Order | None:  # pragma: no cover
+        return None
 
     async def poll_fills(self) -> None:  # pragma: no cover
         ...
@@ -90,10 +102,18 @@ def make_broker(broker_name: str, settings: Settings) -> Broker:
     name = broker_name.lower().strip()
     if name == "alpaca":
         from app.brokers.alpaca import AlpacaBroker
-        return AlpacaBroker(settings)
+        return AlpacaBroker(
+            api_key=settings.alpaca_api_key,
+            api_secret=settings.alpaca_api_secret,
+            paper=settings.alpaca_paper,
+        )
     if name in ("paper_sim", "paper", "demo"):
         from app.brokers.paper import PaperBroker
-        return PaperBroker(settings)
+        return PaperBroker(
+            starting_cash=settings.paper_starting_cash,
+            slippage_bps=settings.paper_slippage_bps,
+            commission_per_share=settings.paper_commission_per_share,
+        )
     raise ValueError(
         f"Unknown broker {broker_name!r}. "
         "Valid choices are: 'alpaca', 'paper_sim'."

@@ -166,8 +166,8 @@ async def test_4_mixed_source_provenance_tracking(tmp_path, empty_cache):
     
     result = await run_backtest(dm, model, params)
     assert result.data_source_mode == "MIXED"
-    assert dm.provenance["SPY"]["source"] == "cache"
-    assert dm.provenance["QQQ"]["source"] == "network"
+    assert result.provenance["SPY"]["source"] == "cache"
+    assert result.provenance["QQQ"]["source"] == "network"
 
 
 @pytest.mark.asyncio

@@ -27,9 +27,9 @@ async def test_second_request_gets_409_when_lock_held():
     lock = asyncio.Lock()
     await lock.acquire()  # simulate first request holding the lock
 
-    # A second coroutine trying to acquire with timeout=0 must fail immediately
+    # A second coroutine trying to acquire with timeout=1e-6 must fail immediately
     with pytest.raises(asyncio.TimeoutError):
-        await asyncio.wait_for(lock.acquire(), timeout=0)
+        await asyncio.wait_for(lock.acquire(), timeout=1e-6)
 
     lock.release()
 
@@ -39,7 +39,7 @@ async def test_lock_acquired_when_free():
     """When no backtest is running, the lock is acquired immediately."""
     lock = asyncio.Lock()
     # Should not raise
-    await asyncio.wait_for(lock.acquire(), timeout=0)
+    await asyncio.wait_for(lock.acquire(), timeout=1e-6)
     assert lock.locked()
     lock.release()
     assert not lock.locked()
@@ -49,7 +49,7 @@ async def test_lock_acquired_when_free():
 async def test_lock_released_after_normal_completion():
     """Lock is released via finally block after successful execution."""
     lock = asyncio.Lock()
-    await asyncio.wait_for(lock.acquire(), timeout=0)
+    await asyncio.wait_for(lock.acquire(), timeout=1e-6)
     try:
         pass  # simulate guarded work
     finally:
@@ -61,7 +61,7 @@ async def test_lock_released_after_normal_completion():
 async def test_lock_released_after_exception():
     """Lock is released even when an exception is raised inside the guard."""
     lock = asyncio.Lock()
-    await asyncio.wait_for(lock.acquire(), timeout=0)
+    await asyncio.wait_for(lock.acquire(), timeout=1e-6)
     try:
         try:
             raise ValueError("simulated failure")
@@ -84,7 +84,7 @@ async def test_concurrent_requests_second_is_rejected():
 
     async def backtest_coroutine(delay_before_release: float = 0.05):
         try:
-            await asyncio.wait_for(lock.acquire(), timeout=0)
+            await asyncio.wait_for(lock.acquire(), timeout=1e-6)
         except asyncio.TimeoutError:
             results.append("rejected")
             return
@@ -112,11 +112,11 @@ async def test_after_first_completes_second_can_run():
     lock = asyncio.Lock()
 
     # First request
-    await asyncio.wait_for(lock.acquire(), timeout=0)
+    await asyncio.wait_for(lock.acquire(), timeout=1e-6)
     lock.release()
 
     # Second request (sequential, not concurrent)
-    await asyncio.wait_for(lock.acquire(), timeout=0)
+    await asyncio.wait_for(lock.acquire(), timeout=1e-6)
     assert lock.locked()
     lock.release()
     assert not lock.locked()
@@ -157,5 +157,5 @@ def test_no_lock_locked_check_before_acquire():
     src = inspect.getsource(post_backtest)
     # The racy pattern must be gone
     assert "lock.locked()" not in src, (
-        "lock.locked() TOCTOU guard must be removed; use atomic wait_for(lock.acquire(), timeout=0) instead"
+        "lock.locked() TOCTOU guard must be removed; use atomic wait_for(lock.acquire(), timeout=1e-6) instead"
     )

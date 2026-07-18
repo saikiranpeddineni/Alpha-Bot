@@ -1,0 +1,873 @@
+﻿backend-tests	Set up job	∩╗┐2026-07-17T20:24:10.7794286Z Current runner version: '2.335.1'
+backend-tests	Set up job	2026-07-17T20:24:10.7834924Z ##[group]Runner Image Provisioner
+backend-tests	Set up job	2026-07-17T20:24:10.7836767Z Hosted Compute Agent
+backend-tests	Set up job	2026-07-17T20:24:10.7837763Z Version: 20260707.563
+backend-tests	Set up job	2026-07-17T20:24:10.7839735Z Commit: 02667638d2b423fbc733a8e32a88b44996a3ba6e
+backend-tests	Set up job	2026-07-17T20:24:10.7841151Z Build Date: 2026-07-07T19:33:50Z
+backend-tests	Set up job	2026-07-17T20:24:10.7842364Z Worker ID: {6dd8e311-e2c3-43a7-80f4-e3cbb2e3b99c}
+backend-tests	Set up job	2026-07-17T20:24:10.7843720Z Azure Region: westus2
+backend-tests	Set up job	2026-07-17T20:24:10.7844957Z ##[endgroup]
+backend-tests	Set up job	2026-07-17T20:24:10.7847381Z ##[group]Operating System
+backend-tests	Set up job	2026-07-17T20:24:10.7848704Z Ubuntu
+backend-tests	Set up job	2026-07-17T20:24:10.7850042Z 24.04.4
+backend-tests	Set up job	2026-07-17T20:24:10.7851040Z LTS
+backend-tests	Set up job	2026-07-17T20:24:10.7851988Z ##[endgroup]
+backend-tests	Set up job	2026-07-17T20:24:10.7853071Z ##[group]Runner Image
+backend-tests	Set up job	2026-07-17T20:24:10.7854298Z Image: ubuntu-24.04
+backend-tests	Set up job	2026-07-17T20:24:10.7855293Z Version: 20260714.240.1
+backend-tests	Set up job	2026-07-17T20:24:10.7857208Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260714.240/images/ubuntu/Ubuntu2404-Readme.md
+backend-tests	Set up job	2026-07-17T20:24:10.7860738Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260714.240
+backend-tests	Set up job	2026-07-17T20:24:10.7862671Z ##[endgroup]
+backend-tests	Set up job	2026-07-17T20:24:10.7864719Z ##[group]GITHUB_TOKEN Permissions
+backend-tests	Set up job	2026-07-17T20:24:10.7867992Z Contents: read
+backend-tests	Set up job	2026-07-17T20:24:10.7869265Z Metadata: read
+backend-tests	Set up job	2026-07-17T20:24:10.7870233Z ##[endgroup]
+backend-tests	Set up job	2026-07-17T20:24:10.7873805Z Secret source: Actions
+backend-tests	Set up job	2026-07-17T20:24:10.7875038Z Prepare workflow directory
+backend-tests	Set up job	2026-07-17T20:24:10.8435847Z Prepare all required actions
+backend-tests	Set up job	2026-07-17T20:24:10.8499806Z Getting action download info
+backend-tests	Set up job	2026-07-17T20:24:11.2754660Z Download action repository 'actions/checkout@v4' (SHA:34e114876b0b11c390a56381ad16ebd13914f8d5)
+backend-tests	Set up job	2026-07-17T20:24:12.2846756Z Download action repository 'actions/setup-python@v5' (SHA:a26af69be951a213d495a4c3e4e4022e16d87065)
+backend-tests	Set up job	2026-07-17T20:24:12.3767330Z Download action repository 'actions/upload-artifact@v4' (SHA:ea165f8d65b6e75b540449e92b4886f43607fa02)
+backend-tests	Set up job	2026-07-17T20:24:12.7580710Z Complete job name: backend-tests
+backend-tests	Run actions/checkout@v4	∩╗┐2026-07-17T20:24:12.8341789Z Node 20 is being deprecated. This workflow is running with Node 24 by default. If you need to temporarily use Node 20, you can set the ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION=true environment variable. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:12.8350683Z ##[group]Run actions/checkout@v4
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:12.8351258Z with:
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:12.8351562Z   repository: saikiranpeddineni/Alpha-Bot
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:12.8354326Z   token: ***
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:12.8354595Z   ssh-strict: true
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:12.8354857Z   ssh-user: git
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:12.8355144Z   persist-credentials: true
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:12.8355444Z   clean: true
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:12.8355727Z   sparse-checkout-cone-mode: true
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:12.8356047Z   fetch-depth: 1
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:12.8356309Z   fetch-tags: false
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:12.8356608Z   show-progress: true
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:12.8356872Z   lfs: false
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:12.8357138Z   submodules: false
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:12.8357464Z   set-safe-directory: true
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:12.8358008Z ##[endgroup]
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:12.9633075Z Syncing repository: saikiranpeddineni/Alpha-Bot
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:12.9636288Z ##[group]Getting Git version info
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:12.9637936Z Working directory is '/home/runner/work/Alpha-Bot/Alpha-Bot'
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:12.9641032Z [command]/usr/bin/git version
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:12.9785858Z git version 2.54.0
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:12.9801438Z ##[endgroup]
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:12.9815400Z Temporarily overriding HOME='/home/runner/work/_temp/9fa25615-f014-4e08-b4eb-166b8670dcc6' before making global git config changes
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:12.9817370Z Adding repository directory to the temporary git global config as a safe directory
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:12.9819552Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/Alpha-Bot/Alpha-Bot
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:12.9899919Z Deleting the contents of '/home/runner/work/Alpha-Bot/Alpha-Bot'
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:12.9901962Z ##[group]Initializing the repository
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:12.9903883Z [command]/usr/bin/git init /home/runner/work/Alpha-Bot/Alpha-Bot
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:13.0060678Z hint: Using 'master' as the name for the initial branch. This default branch name
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:13.0062403Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:13.0178644Z hint: to use in all of your new repositories, which will suppress this warning,
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:13.0179943Z hint: call:
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:13.0180335Z hint:
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:13.0180925Z hint: 	git config --global init.defaultBranch <name>
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:13.0181591Z hint:
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:13.0182219Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:13.0183197Z hint: 'development'. The just-created branch can be renamed via this command:
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:13.0183933Z hint:
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:13.0184336Z hint: 	git branch -m <name>
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:13.0184788Z hint:
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:13.0185416Z hint: Disable this message with "git config set advice.defaultBranchName false"
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:13.0186597Z Initialized empty Git repository in /home/runner/work/Alpha-Bot/Alpha-Bot/.git/
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:13.0188616Z [command]/usr/bin/git remote add origin https://github.com/saikiranpeddineni/Alpha-Bot
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:13.0190718Z ##[endgroup]
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:13.0191545Z ##[group]Disabling automatic garbage collection
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:13.0192143Z [command]/usr/bin/git config --local gc.auto 0
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:13.0342110Z ##[endgroup]
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:13.0343488Z ##[group]Setting up auth
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:13.0344996Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:13.0351017Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:13.0970620Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:13.0976039Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:13.1205546Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:13.1249182Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:13.1522177Z [command]/usr/bin/git config --local http.https://github.com/.extraheader AUTHORIZATION: basic ***
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:13.1568711Z ##[endgroup]
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:13.1570778Z ##[group]Fetching the repository
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:13.1581169Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +a08518583c30fe09f22f816e1b865e379aacf375:refs/remotes/origin/master
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:13.6194818Z From https://github.com/saikiranpeddineni/Alpha-Bot
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:13.6196266Z  * [new ref]         a08518583c30fe09f22f816e1b865e379aacf375 -> origin/master
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:13.6239587Z ##[endgroup]
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:13.6241260Z ##[group]Determining the checkout info
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:13.6243176Z ##[endgroup]
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:13.6248405Z [command]/usr/bin/git sparse-checkout disable
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:13.6307781Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:13.6348665Z ##[group]Checking out the ref
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:13.6354630Z [command]/usr/bin/git checkout --progress --force -B master refs/remotes/origin/master
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:13.6539601Z Reset branch 'master'
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:13.6543679Z branch 'master' set up to track 'origin/master'.
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:13.6551072Z ##[endgroup]
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:13.6608647Z [command]/usr/bin/git log -1 --format=%H
+backend-tests	Run actions/checkout@v4	2026-07-17T20:24:13.6657180Z a08518583c30fe09f22f816e1b865e379aacf375
+backend-tests	Run actions/setup-python@v5	∩╗┐2026-07-17T20:24:13.6947747Z Node 20 is being deprecated. This workflow is running with Node 24 by default. If you need to temporarily use Node 20, you can set the ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION=true environment variable. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+backend-tests	Run actions/setup-python@v5	2026-07-17T20:24:13.6950467Z ##[group]Run actions/setup-python@v5
+backend-tests	Run actions/setup-python@v5	2026-07-17T20:24:13.6950817Z with:
+backend-tests	Run actions/setup-python@v5	2026-07-17T20:24:13.6951063Z   python-version: 3.12
+backend-tests	Run actions/setup-python@v5	2026-07-17T20:24:13.7021297Z   cache: pip
+backend-tests	Run actions/setup-python@v5	2026-07-17T20:24:13.7022000Z   check-latest: false
+backend-tests	Run actions/setup-python@v5	2026-07-17T20:24:13.7026820Z   token: ***
+backend-tests	Run actions/setup-python@v5	2026-07-17T20:24:13.7027128Z   update-environment: true
+backend-tests	Run actions/setup-python@v5	2026-07-17T20:24:13.7027428Z   allow-prereleases: false
+backend-tests	Run actions/setup-python@v5	2026-07-17T20:24:13.7027710Z   freethreaded: false
+backend-tests	Run actions/setup-python@v5	2026-07-17T20:24:13.7027972Z ##[endgroup]
+backend-tests	Run actions/setup-python@v5	2026-07-17T20:24:13.8737593Z ##[group]Installed versions
+backend-tests	Run actions/setup-python@v5	2026-07-17T20:24:13.8861709Z (node:2053) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+backend-tests	Run actions/setup-python@v5	2026-07-17T20:24:13.8862896Z Successfully set up CPython (3.12.13)
+backend-tests	Run actions/setup-python@v5	2026-07-17T20:24:13.8863700Z (Use `node --trace-deprecation ...` to show where the warning was created)
+backend-tests	Run actions/setup-python@v5	2026-07-17T20:24:13.8881233Z ##[endgroup]
+backend-tests	Run actions/setup-python@v5	2026-07-17T20:24:13.9738351Z [command]/opt/hostedtoolcache/Python/3.12.13/x64/bin/pip cache dir
+backend-tests	Run actions/setup-python@v5	2026-07-17T20:24:14.4400275Z /home/runner/.cache/pip
+backend-tests	Run actions/setup-python@v5	2026-07-17T20:24:14.7682215Z Cache hit for: setup-python-Linux-x64-24.04-Ubuntu-python-3.12.13-pip-1c49a38b0ba1c6d4b62c33e10128fb249852ae9169c7e65aeb52ecc76cc8597a
+backend-tests	Run actions/setup-python@v5	2026-07-17T20:24:14.7773203Z (node:2053) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+backend-tests	Run actions/setup-python@v5	2026-07-17T20:24:16.0706749Z Received 0 of 591793268 (0.0%), 0.0 MBs/sec
+backend-tests	Run actions/setup-python@v5	2026-07-17T20:24:17.0780770Z Received 88080384 of 591793268 (14.9%), 41.9 MBs/sec
+backend-tests	Run actions/setup-python@v5	2026-07-17T20:24:18.0730783Z Received 192937984 of 591793268 (32.6%), 61.3 MBs/sec
+backend-tests	Run actions/setup-python@v5	2026-07-17T20:24:19.0741485Z Received 310378496 of 591793268 (52.4%), 73.9 MBs/sec
+backend-tests	Run actions/setup-python@v5	2026-07-17T20:24:20.0745861Z Received 436207616 of 591793268 (73.7%), 83.1 MBs/sec
+backend-tests	Run actions/setup-python@v5	2026-07-17T20:24:21.0840198Z Received 587598964 of 591793268 (99.3%), 93.2 MBs/sec
+backend-tests	Run actions/setup-python@v5	2026-07-17T20:24:21.1507647Z Received 591793268 of 591793268 (100.0%), 92.8 MBs/sec
+backend-tests	Run actions/setup-python@v5	2026-07-17T20:24:21.1509510Z Cache Size: ~564 MB (591793268 B)
+backend-tests	Run actions/setup-python@v5	2026-07-17T20:24:21.1560413Z [command]/usr/bin/tar -xf /home/runner/work/_temp/82239eeb-57ad-4fa4-8fb2-d36c3bb46a74/cache.tzst -P -C /home/runner/work/Alpha-Bot/Alpha-Bot --use-compress-program unzstd
+backend-tests	Run actions/setup-python@v5	2026-07-17T20:24:22.2897854Z Cache restored successfully
+backend-tests	Run actions/setup-python@v5	2026-07-17T20:24:22.5369558Z Cache restored from key: setup-python-Linux-x64-24.04-Ubuntu-python-3.12.13-pip-1c49a38b0ba1c6d4b62c33e10128fb249852ae9169c7e65aeb52ecc76cc8597a
+backend-tests	Install dependencies	∩╗┐2026-07-17T20:24:22.5621833Z ##[group]Run python -m pip install --upgrade pip
+backend-tests	Install dependencies	2026-07-17T20:24:22.5622368Z ^[[36;1mpython -m pip install --upgrade pip^[[0m
+backend-tests	Install dependencies	2026-07-17T20:24:22.5622812Z ^[[36;1mpip install -r requirements.txt -r requirements-dev.txt^[[0m
+backend-tests	Install dependencies	2026-07-17T20:24:23.2739236Z shell: /usr/bin/bash -e {0}
+backend-tests	Install dependencies	2026-07-17T20:24:23.2739920Z env:
+backend-tests	Install dependencies	2026-07-17T20:24:23.2740449Z   pythonLocation: /opt/hostedtoolcache/Python/3.12.13/x64
+backend-tests	Install dependencies	2026-07-17T20:24:23.2741501Z   PKG_CONFIG_PATH: /opt/hostedtoolcache/Python/3.12.13/x64/lib/pkgconfig
+backend-tests	Install dependencies	2026-07-17T20:24:23.2742428Z   Python_ROOT_DIR: /opt/hostedtoolcache/Python/3.12.13/x64
+backend-tests	Install dependencies	2026-07-17T20:24:23.2743250Z   Python2_ROOT_DIR: /opt/hostedtoolcache/Python/3.12.13/x64
+backend-tests	Install dependencies	2026-07-17T20:24:23.2744076Z   Python3_ROOT_DIR: /opt/hostedtoolcache/Python/3.12.13/x64
+backend-tests	Install dependencies	2026-07-17T20:24:23.2744914Z   LD_LIBRARY_PATH: /opt/hostedtoolcache/Python/3.12.13/x64/lib
+backend-tests	Install dependencies	2026-07-17T20:24:23.2745639Z ##[endgroup]
+backend-tests	Install dependencies	2026-07-17T20:24:24.2472436Z Requirement already satisfied: pip in /opt/hostedtoolcache/Python/3.12.13/x64/lib/python3.12/site-packages (26.1.2)
+backend-tests	Install dependencies	2026-07-17T20:24:24.8926064Z Collecting fastapi>=0.115 (from -r requirements.txt (line 2))
+backend-tests	Install dependencies	2026-07-17T20:24:24.9559290Z   Downloading fastapi-0.139.2-py3-none-any.whl.metadata (26 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:24.9960437Z Collecting uvicorn>=0.30 (from uvicorn[standard]>=0.30->-r requirements.txt (line 3))
+backend-tests	Install dependencies	2026-07-17T20:24:24.9979286Z   Using cached uvicorn-0.51.0-py3-none-any.whl.metadata (6.6 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:25.1199906Z Collecting pydantic>=2.8 (from -r requirements.txt (line 4))
+backend-tests	Install dependencies	2026-07-17T20:24:25.1215765Z   Using cached pydantic-2.13.4-py3-none-any.whl.metadata (109 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:25.1419216Z Collecting pydantic-settings>=2.4 (from -r requirements.txt (line 5))
+backend-tests	Install dependencies	2026-07-17T20:24:25.1435252Z   Using cached pydantic_settings-2.14.2-py3-none-any.whl.metadata (3.4 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:25.4042781Z Collecting SQLAlchemy>=2.0 (from -r requirements.txt (line 6))
+backend-tests	Install dependencies	2026-07-17T20:24:25.4059531Z   Using cached sqlalchemy-2.0.51-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (9.5 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:25.5214663Z Collecting pandas>=2.2 (from -r requirements.txt (line 7))
+backend-tests	Install dependencies	2026-07-17T20:24:25.5231128Z   Using cached pandas-3.0.3-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl.metadata (79 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:25.7463283Z Collecting numpy>=1.26 (from -r requirements.txt (line 8))
+backend-tests	Install dependencies	2026-07-17T20:24:25.7479537Z   Using cached numpy-2.5.1-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl.metadata (6.6 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:25.8500427Z Collecting scikit-learn>=1.5 (from -r requirements.txt (line 9))
+backend-tests	Install dependencies	2026-07-17T20:24:25.8516621Z   Using cached scikit_learn-1.9.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl.metadata (11 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:25.8772854Z Collecting joblib>=1.4 (from -r requirements.txt (line 10))
+backend-tests	Install dependencies	2026-07-17T20:24:25.8788055Z   Using cached joblib-1.5.3-py3-none-any.whl.metadata (5.5 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:25.8970862Z Collecting httpx>=0.27 (from -r requirements.txt (line 11))
+backend-tests	Install dependencies	2026-07-17T20:24:25.9004832Z   Using cached httpx-0.28.1-py3-none-any.whl.metadata (7.1 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:25.9176735Z Collecting python-dotenv>=1.0 (from -r requirements.txt (line 12))
+backend-tests	Install dependencies	2026-07-17T20:24:25.9192543Z   Using cached python_dotenv-1.2.2-py3-none-any.whl.metadata (27 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:26.0084456Z Collecting websockets>=12 (from -r requirements.txt (line 13))
+backend-tests	Install dependencies	2026-07-17T20:24:26.0101043Z   Using cached websockets-16.1-cp312-cp312-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl.metadata (6.8 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:26.0290100Z Collecting exchange-calendars>=4.5 (from -r requirements.txt (line 14))
+backend-tests	Install dependencies	2026-07-17T20:24:26.0320031Z   Using cached exchange_calendars-4.13.2-py3-none-any.whl.metadata (26 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:26.0555819Z Collecting yfinance>=0.2.40 (from -r requirements.txt (line 17))
+backend-tests	Install dependencies	2026-07-17T20:24:26.0580111Z   Using cached yfinance-1.5.1-py2.py3-none-any.whl.metadata (6.2 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:26.0811202Z Collecting alpaca-py>=0.30 (from -r requirements.txt (line 18))
+backend-tests	Install dependencies	2026-07-17T20:24:26.0826582Z   Using cached alpaca_py-0.43.5-py3-none-any.whl.metadata (13 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:26.1085593Z Collecting lightgbm>=4.3 (from -r requirements.txt (line 21))
+backend-tests	Install dependencies	2026-07-17T20:24:26.1100903Z   Using cached lightgbm-4.6.0-py3-none-manylinux_2_28_x86_64.whl.metadata (17 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:26.1421544Z Collecting xgboost>=2.0 (from -r requirements.txt (line 22))
+backend-tests	Install dependencies	2026-07-17T20:24:26.1437717Z   Using cached xgboost-3.3.0-py3-none-manylinux_2_28_x86_64.whl.metadata (2.0 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:26.1859816Z Collecting shap>=0.45 (from -r requirements.txt (line 23))
+backend-tests	Install dependencies	2026-07-17T20:24:26.1893043Z   Using cached shap-0.52.0-cp312-abi3-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl.metadata (26 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:26.2247020Z Collecting pytest>=8.0 (from -r requirements-dev.txt (line 3))
+backend-tests	Install dependencies	2026-07-17T20:24:26.2267775Z   Using cached pytest-9.1.1-py3-none-any.whl.metadata (7.6 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:26.2506484Z Collecting pytest-asyncio>=0.23 (from -r requirements-dev.txt (line 4))
+backend-tests	Install dependencies	2026-07-17T20:24:26.2522874Z   Using cached pytest_asyncio-1.4.0-py3-none-any.whl.metadata (4.1 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:26.6178540Z Collecting ruff>=0.5 (from -r requirements-dev.txt (line 5))
+backend-tests	Install dependencies	2026-07-17T20:24:26.6255907Z   Downloading ruff-0.15.22-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (26 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:26.6941359Z Collecting starlette>=0.46.0 (from fastapi>=0.115->-r requirements.txt (line 2))
+backend-tests	Install dependencies	2026-07-17T20:24:26.6956837Z   Using cached starlette-1.3.1-py3-none-any.whl.metadata (6.4 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:26.7175598Z Collecting typing-extensions>=4.8.0 (from fastapi>=0.115->-r requirements.txt (line 2))
+backend-tests	Install dependencies	2026-07-17T20:24:26.7195972Z   Using cached typing_extensions-4.16.0-py3-none-any.whl.metadata (3.3 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:26.7341653Z Collecting typing-inspection>=0.4.2 (from fastapi>=0.115->-r requirements.txt (line 2))
+backend-tests	Install dependencies	2026-07-17T20:24:26.7351901Z   Using cached typing_inspection-0.4.2-py3-none-any.whl.metadata (2.6 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:26.7485821Z Collecting annotated-doc>=0.0.2 (from fastapi>=0.115->-r requirements.txt (line 2))
+backend-tests	Install dependencies	2026-07-17T20:24:26.7500546Z   Using cached annotated_doc-0.0.4-py3-none-any.whl.metadata (6.6 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:26.7697164Z Collecting click>=7.0 (from uvicorn>=0.30->uvicorn[standard]>=0.30->-r requirements.txt (line 3))
+backend-tests	Install dependencies	2026-07-17T20:24:26.7714491Z   Using cached click-8.4.2-py3-none-any.whl.metadata (2.6 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:26.7850180Z Collecting h11>=0.8 (from uvicorn>=0.30->uvicorn[standard]>=0.30->-r requirements.txt (line 3))
+backend-tests	Install dependencies	2026-07-17T20:24:26.7900741Z   Using cached h11-0.16.0-py3-none-any.whl.metadata (8.3 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:26.8008636Z Collecting annotated-types>=0.6.0 (from pydantic>=2.8->-r requirements.txt (line 4))
+backend-tests	Install dependencies	2026-07-17T20:24:26.8023213Z   Using cached annotated_types-0.7.0-py3-none-any.whl.metadata (15 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:27.4788345Z Collecting pydantic-core==2.46.4 (from pydantic>=2.8->-r requirements.txt (line 4))
+backend-tests	Install dependencies	2026-07-17T20:24:27.4961058Z   Using cached pydantic_core-2.46.4-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (6.6 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:27.6296465Z Collecting greenlet>=1 (from SQLAlchemy>=2.0->-r requirements.txt (line 6))
+backend-tests	Install dependencies	2026-07-17T20:24:27.6305469Z   Using cached greenlet-3.5.3-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl.metadata (3.8 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:27.6466899Z Collecting python-dateutil>=2.8.2 (from pandas>=2.2->-r requirements.txt (line 7))
+backend-tests	Install dependencies	2026-07-17T20:24:27.6480360Z   Using cached python_dateutil-2.9.0.post0-py2.py3-none-any.whl.metadata (8.4 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:27.7760523Z Collecting scipy>=1.10.0 (from scikit-learn>=1.5->-r requirements.txt (line 9))
+backend-tests	Install dependencies	2026-07-17T20:24:27.7781081Z   Using cached scipy-1.18.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl.metadata (62 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:27.8233851Z Collecting narwhals>=2.0.1 (from scikit-learn>=1.5->-r requirements.txt (line 9))
+backend-tests	Install dependencies	2026-07-17T20:24:27.8248144Z   Using cached narwhals-2.24.0-py3-none-any.whl.metadata (15 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:27.8418443Z Collecting threadpoolctl>=3.5.0 (from scikit-learn>=1.5->-r requirements.txt (line 9))
+backend-tests	Install dependencies	2026-07-17T20:24:27.8433989Z   Using cached threadpoolctl-3.6.0-py3-none-any.whl.metadata (13 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:27.8656178Z Collecting anyio (from httpx>=0.27->-r requirements.txt (line 11))
+backend-tests	Install dependencies	2026-07-17T20:24:27.8670590Z   Using cached anyio-4.14.2-py3-none-any.whl.metadata (4.6 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:27.8887423Z Collecting certifi (from httpx>=0.27->-r requirements.txt (line 11))
+backend-tests	Install dependencies	2026-07-17T20:24:27.8902536Z   Using cached certifi-2026.6.17-py3-none-any.whl.metadata (2.5 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:27.9083371Z Collecting httpcore==1.* (from httpx>=0.27->-r requirements.txt (line 11))
+backend-tests	Install dependencies	2026-07-17T20:24:27.9100737Z   Using cached httpcore-1.0.9-py3-none-any.whl.metadata (21 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:27.9276194Z Collecting idna (from httpx>=0.27->-r requirements.txt (line 11))
+backend-tests	Install dependencies	2026-07-17T20:24:27.9299953Z   Using cached idna-3.18-py3-none-any.whl.metadata (6.1 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:27.9497602Z Collecting pyluach>=2.3.0 (from exchange-calendars>=4.5->-r requirements.txt (line 14))
+backend-tests	Install dependencies	2026-07-17T20:24:27.9511857Z   Using cached pyluach-2.3.0-py3-none-any.whl.metadata (4.3 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:27.9653344Z Collecting toolz>=1.0.0 (from exchange-calendars>=4.5->-r requirements.txt (line 14))
+backend-tests	Install dependencies	2026-07-17T20:24:27.9666540Z   Using cached toolz-1.1.0-py3-none-any.whl.metadata (5.1 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:27.9812503Z Collecting tzdata>=2025.2 (from exchange-calendars>=4.5->-r requirements.txt (line 14))
+backend-tests	Install dependencies	2026-07-17T20:24:27.9826072Z   Using cached tzdata-2026.3-py2.py3-none-any.whl.metadata (1.4 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:27.9963224Z Collecting korean_lunar_calendar>=0.3.1 (from exchange-calendars>=4.5->-r requirements.txt (line 14))
+backend-tests	Install dependencies	2026-07-17T20:24:27.9976204Z   Using cached korean_lunar_calendar-0.4.0-py3-none-any.whl.metadata (6.6 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:28.0247814Z Collecting requests>=2.31 (from yfinance>=0.2.40->-r requirements.txt (line 17))
+backend-tests	Install dependencies	2026-07-17T20:24:28.0262380Z   Using cached requests-2.34.2-py3-none-any.whl.metadata (4.8 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:28.0392307Z Collecting multitasking>=0.0.7 (from yfinance>=0.2.40->-r requirements.txt (line 17))
+backend-tests	Install dependencies	2026-07-17T20:24:28.0448004Z   Using cached multitasking-0.0.13-py3-none-any.whl.metadata (16 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:28.0632180Z Collecting platformdirs>=2.0.0 (from yfinance>=0.2.40->-r requirements.txt (line 17))
+backend-tests	Install dependencies	2026-07-17T20:24:28.0648517Z   Using cached platformdirs-4.10.0-py3-none-any.whl.metadata (5.5 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:28.0996065Z Collecting pytz>=2022.5 (from yfinance>=0.2.40->-r requirements.txt (line 17))
+backend-tests	Install dependencies	2026-07-17T20:24:28.1010157Z   Using cached pytz-2026.2-py2.py3-none-any.whl.metadata (22 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:28.1289810Z Collecting peewee>=3.16.2 (from yfinance>=0.2.40->-r requirements.txt (line 17))
+backend-tests	Install dependencies	2026-07-17T20:24:28.1367434Z   Downloading peewee-4.2.6-py3-none-any.whl.metadata (10 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:28.1598697Z Collecting beautifulsoup4>=4.11.1 (from yfinance>=0.2.40->-r requirements.txt (line 17))
+backend-tests	Install dependencies	2026-07-17T20:24:28.1619962Z   Using cached beautifulsoup4-4.15.0-py3-none-any.whl.metadata (3.8 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:28.2167869Z Collecting curl_cffi>=0.15 (from yfinance>=0.2.40->-r requirements.txt (line 17))
+backend-tests	Install dependencies	2026-07-17T20:24:28.2183384Z   Using cached curl_cffi-0.15.0-cp310-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl.metadata (18 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:28.3798632Z Collecting protobuf>=3.19.0 (from yfinance>=0.2.40->-r requirements.txt (line 17))
+backend-tests	Install dependencies	2026-07-17T20:24:28.3810839Z   Using cached protobuf-7.35.1-cp310-abi3-manylinux2014_x86_64.whl.metadata (595 bytes)
+backend-tests	Install dependencies	2026-07-17T20:24:28.6021366Z Collecting msgpack<2.0.0,>=1.0.3 (from alpaca-py>=0.30->-r requirements.txt (line 18))
+backend-tests	Install dependencies	2026-07-17T20:24:28.6036549Z   Using cached msgpack-1.2.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (8.3 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:28.6275526Z Collecting sseclient-py<2.0.0,>=1.7.2 (from alpaca-py>=0.30->-r requirements.txt (line 18))
+backend-tests	Install dependencies	2026-07-17T20:24:28.6290676Z   Using cached sseclient_py-1.9.0-py3-none-any.whl.metadata (1.9 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:28.7340502Z Collecting charset_normalizer<4,>=2 (from requests>=2.31->yfinance>=0.2.40->-r requirements.txt (line 17))
+backend-tests	Install dependencies	2026-07-17T20:24:28.7363723Z   Using cached charset_normalizer-3.4.9-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (41 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:28.7628602Z Collecting urllib3<3,>=1.26 (from requests>=2.31->yfinance>=0.2.40->-r requirements.txt (line 17))
+backend-tests	Install dependencies	2026-07-17T20:24:28.7643215Z   Using cached urllib3-2.7.0-py3-none-any.whl.metadata (6.9 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:28.7896192Z Collecting nvidia-nccl-cu12 (from xgboost>=2.0->-r requirements.txt (line 22))
+backend-tests	Install dependencies	2026-07-17T20:24:28.7910554Z   Using cached nvidia_nccl_cu12-2.30.7-py3-none-manylinux_2_18_x86_64.whl.metadata (2.1 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:28.8383167Z Collecting tqdm>=4.27.0 (from shap>=0.45->-r requirements.txt (line 23))
+backend-tests	Install dependencies	2026-07-17T20:24:28.8451799Z   Downloading tqdm-4.69.0-py3-none-any.whl.metadata (57 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:29.1545107Z Collecting packaging>20.9 (from shap>=0.45->-r requirements.txt (line 23))
+backend-tests	Install dependencies	2026-07-17T20:24:29.1570133Z   Using cached packaging-26.2-py3-none-any.whl.metadata (3.5 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:29.1718411Z Collecting slicer==0.0.8 (from shap>=0.45->-r requirements.txt (line 23))
+backend-tests	Install dependencies	2026-07-17T20:24:29.1732222Z   Using cached slicer-0.0.8-py3-none-any.whl.metadata (4.0 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:29.2723809Z Collecting numba (from shap>=0.45->-r requirements.txt (line 23))
+backend-tests	Install dependencies	2026-07-17T20:24:29.2735913Z   Using cached numba-0.66.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl.metadata (2.7 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:29.3364236Z Collecting llvmlite (from shap>=0.45->-r requirements.txt (line 23))
+backend-tests	Install dependencies	2026-07-17T20:24:29.3379482Z   Using cached llvmlite-0.48.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl.metadata (5.0 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:29.3549559Z Collecting cloudpickle (from shap>=0.45->-r requirements.txt (line 23))
+backend-tests	Install dependencies	2026-07-17T20:24:29.3563972Z   Using cached cloudpickle-3.1.2-py3-none-any.whl.metadata (7.1 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:29.3720844Z Collecting iniconfig>=1.0.1 (from pytest>=8.0->-r requirements-dev.txt (line 3))
+backend-tests	Install dependencies	2026-07-17T20:24:29.3735171Z   Using cached iniconfig-2.3.0-py3-none-any.whl.metadata (2.5 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:29.3887214Z Collecting pluggy<2,>=1.5 (from pytest>=8.0->-r requirements-dev.txt (line 3))
+backend-tests	Install dependencies	2026-07-17T20:24:29.3904059Z   Using cached pluggy-1.6.0-py3-none-any.whl.metadata (4.8 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:29.4130091Z Collecting pygments>=2.7.2 (from pytest>=8.0->-r requirements-dev.txt (line 3))
+backend-tests	Install dependencies	2026-07-17T20:24:29.4149747Z   Using cached pygments-2.20.0-py3-none-any.whl.metadata (2.5 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:29.4412378Z Collecting soupsieve>=1.6.1 (from beautifulsoup4>=4.11.1->yfinance>=0.2.40->-r requirements.txt (line 17))
+backend-tests	Install dependencies	2026-07-17T20:24:29.4428176Z   Using cached soupsieve-2.8.4-py3-none-any.whl.metadata (4.6 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:29.5460562Z Collecting cffi>=2.0.0 (from curl_cffi>=0.15->yfinance>=0.2.40->-r requirements.txt (line 17))
+backend-tests	Install dependencies	2026-07-17T20:24:29.5475450Z   Using cached cffi-2.1.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl.metadata (2.5 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:29.5854767Z Collecting rich (from curl_cffi>=0.15->yfinance>=0.2.40->-r requirements.txt (line 17))
+backend-tests	Install dependencies	2026-07-17T20:24:29.5871346Z   Using cached rich-15.0.0-py3-none-any.whl.metadata (18 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:29.6032716Z Collecting pycparser (from cffi>=2.0.0->curl_cffi>=0.15->yfinance>=0.2.40->-r requirements.txt (line 17))
+backend-tests	Install dependencies	2026-07-17T20:24:29.6047679Z   Using cached pycparser-3.0-py3-none-any.whl.metadata (8.2 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:29.6285461Z Collecting six>=1.5 (from python-dateutil>=2.8.2->pandas>=2.2->-r requirements.txt (line 7))
+backend-tests	Install dependencies	2026-07-17T20:24:29.6300706Z   Using cached six-1.17.0-py2.py3-none-any.whl.metadata (1.7 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:29.6883564Z Collecting httptools>=0.8.0 (from uvicorn[standard]>=0.30->-r requirements.txt (line 3))
+backend-tests	Install dependencies	2026-07-17T20:24:29.6899481Z   Using cached httptools-0.8.0-cp312-cp312-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl.metadata (3.5 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:29.7310448Z Collecting pyyaml>=5.1 (from uvicorn[standard]>=0.30->-r requirements.txt (line 3))
+backend-tests	Install dependencies	2026-07-17T20:24:29.7327018Z   Using cached pyyaml-6.0.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (2.4 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:29.7711781Z Collecting uvloop>=0.15.1 (from uvicorn[standard]>=0.30->-r requirements.txt (line 3))
+backend-tests	Install dependencies	2026-07-17T20:24:29.7727729Z   Using cached uvloop-0.22.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (4.9 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:29.8596095Z Collecting watchfiles>=0.20 (from uvicorn[standard]>=0.30->-r requirements.txt (line 3))
+backend-tests	Install dependencies	2026-07-17T20:24:29.8612176Z   Using cached watchfiles-1.2.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (4.9 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:29.8740757Z Collecting numpy>=1.26 (from -r requirements.txt (line 8))
+backend-tests	Install dependencies	2026-07-17T20:24:29.8756717Z   Using cached numpy-2.4.6-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl.metadata (6.6 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:29.8954499Z Collecting markdown-it-py>=2.2.0 (from rich->curl_cffi>=0.15->yfinance>=0.2.40->-r requirements.txt (line 17))
+backend-tests	Install dependencies	2026-07-17T20:24:29.8969585Z   Using cached markdown_it_py-4.2.0-py3-none-any.whl.metadata (7.4 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:29.9141079Z Collecting mdurl~=0.1 (from markdown-it-py>=2.2.0->rich->curl_cffi>=0.15->yfinance>=0.2.40->-r requirements.txt (line 17))
+backend-tests	Install dependencies	2026-07-17T20:24:29.9154709Z   Using cached mdurl-0.1.2-py3-none-any.whl.metadata (1.6 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:29.9279317Z Downloading fastapi-0.139.2-py3-none-any.whl (130 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:29.9424080Z Using cached uvicorn-0.51.0-py3-none-any.whl (73 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:29.9437734Z Using cached pydantic-2.13.4-py3-none-any.whl (472 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:29.9453225Z Using cached pydantic_core-2.46.4-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (2.1 MB)
+backend-tests	Install dependencies	2026-07-17T20:24:29.9474211Z Using cached pydantic_settings-2.14.2-py3-none-any.whl (61 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:29.9488080Z Using cached sqlalchemy-2.0.51-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (3.4 MB)
+backend-tests	Install dependencies	2026-07-17T20:24:29.9515638Z Using cached pandas-3.0.3-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl (10.9 MB)
+backend-tests	Install dependencies	2026-07-17T20:24:29.9576259Z Using cached scikit_learn-1.9.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl (9.1 MB)
+backend-tests	Install dependencies	2026-07-17T20:24:29.9625828Z Using cached joblib-1.5.3-py3-none-any.whl (309 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:29.9639728Z Using cached httpx-0.28.1-py3-none-any.whl (73 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:29.9652947Z Using cached httpcore-1.0.9-py3-none-any.whl (78 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:29.9666092Z Using cached python_dotenv-1.2.2-py3-none-any.whl (22 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:29.9679626Z Using cached websockets-16.1-cp312-cp312-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl (187 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:29.9693185Z Using cached exchange_calendars-4.13.2-py3-none-any.whl (213 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:29.9706474Z Using cached yfinance-1.5.1-py2.py3-none-any.whl (144 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:29.9719491Z Using cached alpaca_py-0.43.5-py3-none-any.whl (122 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:29.9733692Z Using cached msgpack-1.2.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (419 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:29.9747631Z Using cached requests-2.34.2-py3-none-any.whl (73 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:29.9761467Z Using cached charset_normalizer-3.4.9-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (224 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:29.9774441Z Using cached idna-3.18-py3-none-any.whl (65 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:29.9787623Z Using cached sseclient_py-1.9.0-py3-none-any.whl (8.4 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:29.9800795Z Using cached urllib3-2.7.0-py3-none-any.whl (131 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:29.9814592Z Using cached lightgbm-4.6.0-py3-none-manylinux_2_28_x86_64.whl (3.6 MB)
+backend-tests	Install dependencies	2026-07-17T20:24:29.9842725Z Using cached xgboost-3.3.0-py3-none-manylinux_2_28_x86_64.whl (98.7 MB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.0209877Z Using cached shap-0.52.0-cp312-abi3-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl (498 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.0223555Z Using cached slicer-0.0.8-py3-none-any.whl (15 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.0236255Z Using cached pytest-9.1.1-py3-none-any.whl (386 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.0251095Z Using cached pluggy-1.6.0-py3-none-any.whl (20 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.0263961Z Using cached pytest_asyncio-1.4.0-py3-none-any.whl (16 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.0338274Z Downloading ruff-0.15.22-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (11.4 MB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.3038354Z    ΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöü 11.4/11.4 MB 45.0 MB/s  0:00:00
+backend-tests	Install dependencies	2026-07-17T20:24:30.3054495Z Using cached annotated_doc-0.0.4-py3-none-any.whl (5.3 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.3069476Z Using cached annotated_types-0.7.0-py3-none-any.whl (13 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.3083846Z Using cached beautifulsoup4-4.15.0-py3-none-any.whl (109 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.3098101Z Using cached certifi-2026.6.17-py3-none-any.whl (133 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.3112325Z Using cached click-8.4.2-py3-none-any.whl (119 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.3126469Z Using cached curl_cffi-0.15.0-cp310-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (11.1 MB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.3184690Z Using cached cffi-2.1.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (221 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.3198726Z Using cached greenlet-3.5.3-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl (614 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.3214315Z Using cached h11-0.16.0-py3-none-any.whl (37 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.3227404Z Using cached iniconfig-2.3.0-py3-none-any.whl (7.5 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.3240567Z Using cached korean_lunar_calendar-0.4.0-py3-none-any.whl (11 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.3253350Z Using cached multitasking-0.0.13-py3-none-any.whl (16 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.3266222Z Using cached narwhals-2.24.0-py3-none-any.whl (461 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.3281388Z Using cached packaging-26.2-py3-none-any.whl (100 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.3377919Z Downloading peewee-4.2.6-py3-none-any.whl (173 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.3426085Z Using cached platformdirs-4.10.0-py3-none-any.whl (22 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.3440021Z Using cached protobuf-7.35.1-cp310-abi3-manylinux2014_x86_64.whl (327 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.3454022Z Using cached pygments-2.20.0-py3-none-any.whl (1.2 MB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.3470958Z Using cached pyluach-2.3.0-py3-none-any.whl (25 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.3483896Z Using cached python_dateutil-2.9.0.post0-py2.py3-none-any.whl (229 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.3497807Z Using cached pytz-2026.2-py2.py3-none-any.whl (510 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.3513069Z Using cached scipy-1.18.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl (35.3 MB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.3655607Z Using cached six-1.17.0-py2.py3-none-any.whl (11 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.3668516Z Using cached soupsieve-2.8.4-py3-none-any.whl (37 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.3681885Z Using cached starlette-1.3.1-py3-none-any.whl (73 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.3694830Z Using cached anyio-4.14.2-py3-none-any.whl (125 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.3708042Z Using cached threadpoolctl-3.6.0-py3-none-any.whl (18 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.3721197Z Using cached toolz-1.1.0-py3-none-any.whl (58 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.3797969Z Downloading tqdm-4.69.0-py3-none-any.whl (676 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.3915339Z    ΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöü 676.7/676.7 kB 48.4 MB/s  0:00:00
+backend-tests	Install dependencies	2026-07-17T20:24:30.3929773Z Using cached typing_extensions-4.16.0-py3-none-any.whl (45 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.3943513Z Using cached typing_inspection-0.4.2-py3-none-any.whl (14 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.3956643Z Using cached tzdata-2026.3-py2.py3-none-any.whl (348 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.3971368Z Using cached httptools-0.8.0-cp312-cp312-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl (523 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.3986378Z Using cached pyyaml-6.0.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (807 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.4002395Z Using cached uvloop-0.22.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (4.4 MB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.4033643Z Using cached watchfiles-1.2.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (456 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.4047933Z Using cached cloudpickle-3.1.2-py3-none-any.whl (22 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.4061534Z Using cached llvmlite-0.48.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (59.9 MB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.4338578Z Using cached numba-0.66.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (3.9 MB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.4367043Z Using cached numpy-2.4.6-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl (16.6 MB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.4444476Z Using cached nvidia_nccl_cu12-2.30.7-py3-none-manylinux_2_18_x86_64.whl (303.4 MB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.5616742Z Using cached pycparser-3.0-py3-none-any.whl (48 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.5632786Z Using cached rich-15.0.0-py3-none-any.whl (310 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.5647555Z Using cached markdown_it_py-4.2.0-py3-none-any.whl (91 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:30.5661153Z Using cached mdurl-0.1.2-py3-none-any.whl (10.0 kB)
+backend-tests	Install dependencies	2026-07-17T20:24:32.1670722Z Installing collected packages: pytz, peewee, multitasking, websockets, uvloop, urllib3, tzdata, typing-extensions, tqdm, toolz, threadpoolctl, sseclient-py, soupsieve, slicer, six, ruff, pyyaml, python-dotenv, pyluach, pygments, pycparser, protobuf, pluggy, platformdirs, packaging, nvidia-nccl-cu12, numpy, narwhals, msgpack, mdurl, llvmlite, korean_lunar_calendar, joblib, iniconfig, idna, httptools, h11, greenlet, cloudpickle, click, charset_normalizer, certifi, annotated-types, annotated-doc, uvicorn, typing-inspection, SQLAlchemy, scipy, requests, python-dateutil, pytest, pydantic-core, numba, markdown-it-py, httpcore, cffi, beautifulsoup4, anyio, xgboost, watchfiles, starlette, scikit-learn, rich, pytest-asyncio, pydantic, pandas, lightgbm, httpx, shap, pydantic-settings, fastapi, exchange-calendars, curl_cffi, alpaca-py, yfinance
+backend-tests	Install dependencies	2026-07-17T20:25:02.2939458Z 
+backend-tests	Install dependencies	2026-07-17T20:25:02.2997819Z Successfully installed SQLAlchemy-2.0.51 alpaca-py-0.43.5 annotated-doc-0.0.4 annotated-types-0.7.0 anyio-4.14.2 beautifulsoup4-4.15.0 certifi-2026.6.17 cffi-2.1.0 charset_normalizer-3.4.9 click-8.4.2 cloudpickle-3.1.2 curl_cffi-0.15.0 exchange-calendars-4.13.2 fastapi-0.139.2 greenlet-3.5.3 h11-0.16.0 httpcore-1.0.9 httptools-0.8.0 httpx-0.28.1 idna-3.18 iniconfig-2.3.0 joblib-1.5.3 korean_lunar_calendar-0.4.0 lightgbm-4.6.0 llvmlite-0.48.0 markdown-it-py-4.2.0 mdurl-0.1.2 msgpack-1.2.1 multitasking-0.0.13 narwhals-2.24.0 numba-0.66.0 numpy-2.4.6 nvidia-nccl-cu12-2.30.7 packaging-26.2 pandas-3.0.3 peewee-4.2.6 platformdirs-4.10.0 pluggy-1.6.0 protobuf-7.35.1 pycparser-3.0 pydantic-2.13.4 pydantic-core-2.46.4 pydantic-settings-2.14.2 pygments-2.20.0 pyluach-2.3.0 pytest-9.1.1 pytest-asyncio-1.4.0 python-dateutil-2.9.0.post0 python-dotenv-1.2.2 pytz-2026.2 pyyaml-6.0.3 requests-2.34.2 rich-15.0.0 ruff-0.15.22 scikit-learn-1.9.0 scipy-1.18.0 shap-0.52.0 six-1.17.0 slicer-0.0.8 soupsieve-2.8.4 sseclient-py-1.9.0 starlette-1.3.1 threadpoolctl-3.6.0 toolz-1.1.0 tqdm-4.69.0 typing-extensions-4.16.0 typing-inspection-0.4.2 tzdata-2026.3 urllib3-2.7.0 uvicorn-0.51.0 uvloop-0.22.1 watchfiles-1.2.0 websockets-16.1 xgboost-3.3.0 yfinance-1.5.1
+backend-tests	Compile backend	∩╗┐2026-07-17T20:25:02.7147719Z ##[group]Run python -m compileall -q backend/app
+backend-tests	Compile backend	2026-07-17T20:25:02.7148164Z ^[[36;1mpython -m compileall -q backend/app^[[0m
+backend-tests	Compile backend	2026-07-17T20:25:02.7215637Z shell: /usr/bin/bash -e {0}
+backend-tests	Compile backend	2026-07-17T20:25:02.7216011Z env:
+backend-tests	Compile backend	2026-07-17T20:25:02.7216681Z   pythonLocation: /opt/hostedtoolcache/Python/3.12.13/x64
+backend-tests	Compile backend	2026-07-17T20:25:02.7217356Z   PKG_CONFIG_PATH: /opt/hostedtoolcache/Python/3.12.13/x64/lib/pkgconfig
+backend-tests	Compile backend	2026-07-17T20:25:02.7218145Z   Python_ROOT_DIR: /opt/hostedtoolcache/Python/3.12.13/x64
+backend-tests	Compile backend	2026-07-17T20:25:02.7218660Z   Python2_ROOT_DIR: /opt/hostedtoolcache/Python/3.12.13/x64
+backend-tests	Compile backend	2026-07-17T20:25:02.7219513Z   Python3_ROOT_DIR: /opt/hostedtoolcache/Python/3.12.13/x64
+backend-tests	Compile backend	2026-07-17T20:25:02.7219984Z   LD_LIBRARY_PATH: /opt/hostedtoolcache/Python/3.12.13/x64/lib
+backend-tests	Compile backend	2026-07-17T20:25:02.7220368Z ##[endgroup]
+backend-tests	Run production invariant suite	∩╗┐2026-07-17T20:25:02.9515536Z ##[group]Run set -o pipefail
+backend-tests	Run production invariant suite	2026-07-17T20:25:02.9515908Z ^[[36;1mset -o pipefail^[[0m
+backend-tests	Run production invariant suite	2026-07-17T20:25:02.9516160Z ^[[36;1mpytest -q backend/tests \^[[0m
+backend-tests	Run production invariant suite	2026-07-17T20:25:02.9516503Z ^[[36;1m  --ignore=backend/tests/test_replay_loopholes.py \^[[0m
+backend-tests	Run production invariant suite	2026-07-17T20:25:02.9517112Z ^[[36;1m  -k 'not test_kelly_is_disabled_due_to_incompatibility and not test_backtest_uses_shared_allocation_path' \^[[0m
+backend-tests	Run production invariant suite	2026-07-17T20:25:02.9517816Z ^[[36;1m  --junitxml=production-invariants.xml 2>&1 | tee production-invariants.log^[[0m
+backend-tests	Run production invariant suite	2026-07-17T20:25:02.9578002Z shell: /usr/bin/bash -e {0}
+backend-tests	Run production invariant suite	2026-07-17T20:25:02.9578284Z env:
+backend-tests	Run production invariant suite	2026-07-17T20:25:02.9578586Z   pythonLocation: /opt/hostedtoolcache/Python/3.12.13/x64
+backend-tests	Run production invariant suite	2026-07-17T20:25:02.9579449Z   PKG_CONFIG_PATH: /opt/hostedtoolcache/Python/3.12.13/x64/lib/pkgconfig
+backend-tests	Run production invariant suite	2026-07-17T20:25:02.9579904Z   Python_ROOT_DIR: /opt/hostedtoolcache/Python/3.12.13/x64
+backend-tests	Run production invariant suite	2026-07-17T20:25:02.9580295Z   Python2_ROOT_DIR: /opt/hostedtoolcache/Python/3.12.13/x64
+backend-tests	Run production invariant suite	2026-07-17T20:25:02.9580692Z   Python3_ROOT_DIR: /opt/hostedtoolcache/Python/3.12.13/x64
+backend-tests	Run production invariant suite	2026-07-17T20:25:02.9581128Z   LD_LIBRARY_PATH: /opt/hostedtoolcache/Python/3.12.13/x64/lib
+backend-tests	Run production invariant suite	2026-07-17T20:25:02.9581462Z   PYTHONPATH: backend
+backend-tests	Run production invariant suite	2026-07-17T20:25:02.9581675Z ##[endgroup]
+backend-tests	Run production invariant suite	2026-07-17T20:25:40.0165813Z .FF..................................................................... [ 15%]
+backend-tests	Run production invariant suite	2026-07-17T20:25:42.2895758Z ........................................................................ [ 31%]
+backend-tests	Run production invariant suite	2026-07-17T20:27:16.3324499Z ........................................................................ [ 46%]
+backend-tests	Run production invariant suite	2026-07-17T20:27:25.4220387Z .............F.......................................................... [ 62%]
+backend-tests	Run production invariant suite	2026-07-17T20:27:40.3461255Z ........................................................................ [ 78%]
+backend-tests	Run production invariant suite	2026-07-17T20:27:52.3971010Z ........................................................................ [ 93%]
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0338588Z .............................                                            [100%]
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0340031Z =================================== FAILURES ===================================
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0341264Z _______ test_ambiguous_submit_retains_pending_entry_guard_and_reconciles _______
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0342190Z 
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0342917Z tmp_path = PosixPath('/tmp/pytest-of-runner/pytest-0/test_ambiguous_submit_retains_0')
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0344216Z monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f4947d0a120>
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0345012Z 
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0345348Z     @pytest.mark.asyncio
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0346324Z     async def test_ambiguous_submit_retains_pending_entry_guard_and_reconciles(tmp_path, monkeypatch):
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0347437Z         settings = Settings(
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0348100Z             ALPHADESK_MODE="paper",
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0349059Z             DATA_PROVIDER="synthetic",
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0349968Z             ALPHADESK_DB_PATH=str(tmp_path / "bot.db"),
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0350769Z             DEFAULT_WATCHLIST="AAPL",
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0351415Z             DEMO_BAR_SECONDS=3600,
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0351997Z         )
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0352524Z         db = Database(settings.resolved_db_path)
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0353197Z         engine = TradingEngine(settings, db)
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0353814Z     
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0354399Z         async def fake_ensure_data(self, mode=None):
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0355129Z             self.data = _FakeData()
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0355767Z             return self.data
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0356424Z         async def fake_run_loop(self):
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0357126Z             pass
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0357671Z     
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0358385Z         monkeypatch.setattr(TradingEngine, "ensure_data", fake_ensure_data)
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0359686Z         monkeypatch.setattr(TradingEngine, "_run_loop", fake_run_loop)
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0360507Z     
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0361239Z         # 1. Trigger start (will initialize with default empty database setting)
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0362141Z >       await engine.start("paper")
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0365588Z 
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0366059Z backend/tests/test_011_ambiguous_submit_failures.py:115: 
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0366872Z _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0367422Z 
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0367933Z self = <app.core.engine.TradingEngine object at 0x7f4947d08ce0>, mode = 'paper'
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0368750Z confirm = ''
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0369531Z 
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0370063Z     async def start(self, mode: str | None = None, confirm: str = "") -> None:
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0370885Z         if self.state == EngineState.RUNNING:
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0371574Z             raise RuntimeError("Engine is already running")
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0372247Z         if self.state == EngineState.HALTED:
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0373110Z             raise RuntimeError("Engine is halted by the risk kill switch -- reset the halt first")
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0374002Z         mode = (mode or self.mode).lower()
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0374627Z         if mode not in ("demo", "paper", "live"):
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0375288Z             raise ValueError(f"Unknown mode {mode!r}")
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0375880Z     
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0376313Z         if mode == "live":
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0376885Z             if not self.settings.enable_live_trading:
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0377806Z                 raise PermissionError("Live trading is disabled. Set ENABLE_LIVE_TRADING=true in .env")
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0378691Z             if confirm != "LIVE":
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0379666Z                 raise PermissionError("Live trading requires typed confirmation 'LIVE'")
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0380783Z             if not self.settings.has_alpaca_keys:
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0381597Z                 raise PermissionError("Live trading requires Alpaca API keys in .env")
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0382365Z     
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0382925Z         self.mode = mode
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0383543Z         self.clock = MarketClock(always_open=(mode == "demo"))
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0384235Z         await self.ensure_data(mode)
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0384794Z     
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0385217Z         if mode == "demo":
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0385747Z             broker_name = "paper_sim"
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0386303Z         elif mode == "paper":
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0387268Z             broker_name = "alpaca" if (self.settings.broker == "alpaca" and self.settings.has_alpaca_keys) else "paper_sim"
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0388266Z         else:
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0388733Z             broker_name = "alpaca"
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0389694Z         if mode == "live" and broker_name != "alpaca":
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0390537Z             raise PermissionError("Live mode requires a real broker (alpaca)")
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0391293Z     
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0391757Z         settings = self.settings
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0392528Z         if mode == "live" and not settings.alpaca_paper:
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0393470Z             applog.warning("engine", "Starting in LIVE trading mode -- real money at risk")
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0394594Z         self.broker = make_broker(broker_name, settings)
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0395440Z         if isinstance(self.broker, PaperBroker) and mode == "live":
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0396364Z             raise PermissionError("Refusing to run live mode on the paper simulator")
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0397200Z         await self.broker.connect()
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0397749Z     
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0398292Z         self.risk = RiskManager(self.risk_config, self.clock)
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0399269Z         self.risk.core_watchlist = self.core_watchlist
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0399904Z     
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0400549Z         # --- #115 fix: restore durable kill-switch state before doing anything else.
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0401543Z         # If a hard halt was persisted from a previous session (crash, OOM, restart)
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0402508Z         # the operator must explicitly call reset_halt() before trading can resume.
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0403315Z         if self._restore_halt_if_persisted(mode):
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0403943Z             self.state = EngineState.HALTED
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0404866Z             self.publish("status", self.status())
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0405472Z             raise RuntimeError(
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0406173Z                 f"Engine ({mode}): kill switch was active at last shutdown -- "
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0407018Z                 "call reset_halt() to acknowledge and re-enable trading"
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0407797Z             )
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0408222Z     
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0408650Z         restore_mode = None
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0409371Z         try:
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0409906Z             from app.brokers.alpaca import AlpacaBroker
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0410747Z             if isinstance(self.broker, AlpacaBroker) and mode in {"paper", "live"}:
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0411552Z                 restore_mode = mode
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0412116Z         except Exception:
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0412605Z             pass
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0413207Z         self.portfolio = PortfolioTracker(restore_mode=restore_mode)
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0413920Z     
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0414604Z         from app.portfolio.allocator import PortfolioAIGate, CapitalAllocationOptimizer
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0415491Z         self.portfolio_gate = PortfolioAIGate(
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0416202Z             max_correlation=self.risk_config.max_correlation_penalty,
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0417065Z             max_positions_per_sector=self.risk_config.max_positions_per_sector
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0417820Z         )
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0418396Z         self.portfolio_allocator = CapitalAllocationOptimizer(
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0419409Z             kelly_fraction_cap=self.risk_config.kelly_fraction_cap
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0420349Z         )
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0420779Z     
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0421416Z         # Feature 4: Attach Alpaca client to EventCalendar for live news checking
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0422169Z         try:
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0422682Z             from app.brokers.alpaca import AlpacaBroker
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0423517Z             if isinstance(self.broker, AlpacaBroker) and hasattr(self.broker, "_client"):
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0424402Z                 self.calendar._alpaca = self.broker._client
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0425057Z         except Exception:
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0426056Z             pass  # Non-Alpaca broker or no client ΓÇö calendar degrades gracefully
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0426797Z     
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0427536Z         # Restore strategy mapping & reconstruct portfolio lots for active positions from database
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0428403Z         try:
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0429088Z             positions = await self.broker.positions()
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0429823Z             self._reconcile_positions(positions)
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0430455Z         except Exception as exc:
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0431041Z             self.reconciliation_failed = True
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0431880Z             applog.error("engine", f"Failed to restore and reconcile active positions: {exc}")
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0432985Z         self.pipeline = SignalPipeline(self.model, self.risk_config.ml_confidence_threshold)
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0433872Z         for s in self.strategies:
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0434406Z             s.reset()
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0434897Z         self._regimes.clear()
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0435448Z         self._flattened_sessions.clear()
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0436037Z         self._last_scan_date = None
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0436590Z         self._tick_count = 0
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0437113Z         self._consec_errors = 0
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0437638Z         self.last_error = ""
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0438136Z     
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0438616Z         if isinstance(self.broker, PaperBroker):
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0441971Z             now = utcnow()
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0442973Z >           for symbol, price in self.data.last_prices(self.watchlist).items():
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0443805Z                                  ^^^^^^^^^^^^^^^^^^^^^
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0444594Z E           AttributeError: '_FakeData' object has no attribute 'last_prices'
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0445531Z 
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0445912Z backend/app/core/engine.py:295: AttributeError
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0446748Z _________________ test_ambiguous_submit_resolved_to_rejection __________________
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0447392Z 
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0447928Z tmp_path = PosixPath('/tmp/pytest-of-runner/pytest-0/test_ambiguous_submit_resolved0')
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0449368Z monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f4947d5a8a0>
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0450095Z 
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0450429Z     @pytest.mark.asyncio
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0451217Z     async def test_ambiguous_submit_resolved_to_rejection(tmp_path, monkeypatch):
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0452077Z         settings = Settings(
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0452655Z             ALPHADESK_MODE="paper",
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0453242Z             DATA_PROVIDER="synthetic",
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0453884Z             ALPHADESK_DB_PATH=str(tmp_path / "bot.db"),
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0454525Z             DEFAULT_WATCHLIST="AAPL",
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0455101Z         )
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0455662Z         db = Database(settings.resolved_db_path)
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0456343Z         engine = TradingEngine(settings, db)
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0456933Z     
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0457444Z         async def fake_ensure_data(self, mode=None):
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0458094Z             self.data = _FakeData()
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0458654Z             return self.data
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0459438Z         async def fake_run_loop(self):
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0460018Z             pass
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0460491Z     
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0461128Z         monkeypatch.setattr(TradingEngine, "ensure_data", fake_ensure_data)
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0462314Z         monkeypatch.setattr(TradingEngine, "_run_loop", fake_run_loop)
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0463051Z     
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0463514Z >       await engine.start("paper")
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0463970Z 
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0464376Z backend/tests/test_011_ambiguous_submit_failures.py:193: 
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0465158Z _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0465728Z 
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0466239Z self = <app.core.engine.TradingEngine object at 0x7f4947d5ab70>, mode = 'paper'
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0467027Z confirm = ''
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0467370Z 
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0467865Z     async def start(self, mode: str | None = None, confirm: str = "") -> None:
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0468666Z         if self.state == EngineState.RUNNING:
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0469719Z             raise RuntimeError("Engine is already running")
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0470431Z         if self.state == EngineState.HALTED:
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0471316Z             raise RuntimeError("Engine is halted by the risk kill switch -- reset the halt first")
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0472214Z         mode = (mode or self.mode).lower()
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0472837Z         if mode not in ("demo", "paper", "live"):
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0473519Z             raise ValueError(f"Unknown mode {mode!r}")
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0474139Z     
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.0474611Z         if mode == "live":
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.2994040Z             if not self.settings.enable_live_trading:
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.2995873Z                 raise PermissionError("Live trading is disabled. Set ENABLE_LIVE_TRADING=true in .env")
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.2997183Z             if confirm != "LIVE":
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.2997979Z                 raise PermissionError("Live trading requires typed confirmation 'LIVE'")
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.2999190Z             if not self.settings.has_alpaca_keys:
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3000183Z                 raise PermissionError("Live trading requires Alpaca API keys in .env")
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3001004Z     
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3001453Z         self.mode = mode
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3002052Z         self.clock = MarketClock(always_open=(mode == "demo"))
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3002751Z         await self.ensure_data(mode)
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3003305Z     
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3003739Z         if mode == "demo":
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3004268Z             broker_name = "paper_sim"
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3005121Z         elif mode == "paper":
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3006080Z             broker_name = "alpaca" if (self.settings.broker == "alpaca" and self.settings.has_alpaca_keys) else "paper_sim"
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3007049Z         else:
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3007527Z             broker_name = "alpaca"
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3008119Z         if mode == "live" and broker_name != "alpaca":
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3009124Z             raise PermissionError("Live mode requires a real broker (alpaca)")
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3009899Z     
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3010348Z         settings = self.settings
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3010990Z         if mode == "live" and not settings.alpaca_paper:
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3011853Z             applog.warning("engine", "Starting in LIVE trading mode -- real money at risk")
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3012704Z         self.broker = make_broker(broker_name, settings)
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3013452Z         if isinstance(self.broker, PaperBroker) and mode == "live":
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3014355Z             raise PermissionError("Refusing to run live mode on the paper simulator")
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3015172Z         await self.broker.connect()
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3015722Z     
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3016258Z         self.risk = RiskManager(self.risk_config, self.clock)
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3016990Z         self.risk.core_watchlist = self.core_watchlist
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3017604Z     
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3018209Z         # --- #115 fix: restore durable kill-switch state before doing anything else.
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3019458Z         # If a hard halt was persisted from a previous session (crash, OOM, restart)
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3020749Z         # the operator must explicitly call reset_halt() before trading can resume.
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3021586Z         if self._restore_halt_if_persisted(mode):
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3022227Z             self.state = EngineState.HALTED
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3022896Z             self.publish("status", self.status())
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3023508Z             raise RuntimeError(
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3024210Z                 f"Engine ({mode}): kill switch was active at last shutdown -- "
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3025059Z                 "call reset_halt() to acknowledge and re-enable trading"
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3025728Z             )
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3026175Z     
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3026608Z         restore_mode = None
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3027147Z         try:
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3027681Z             from app.brokers.alpaca import AlpacaBroker
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3028506Z             if isinstance(self.broker, AlpacaBroker) and mode in {"paper", "live"}:
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3029530Z                 restore_mode = mode
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3030097Z         except Exception:
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3030614Z             pass
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3031241Z         self.portfolio = PortfolioTracker(restore_mode=restore_mode)
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3031952Z     
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3032650Z         from app.portfolio.allocator import PortfolioAIGate, CapitalAllocationOptimizer
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3033551Z         self.portfolio_gate = PortfolioAIGate(
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3034290Z             max_correlation=self.risk_config.max_correlation_penalty,
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3035129Z             max_positions_per_sector=self.risk_config.max_positions_per_sector
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3035848Z         )
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3036401Z         self.portfolio_allocator = CapitalAllocationOptimizer(
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3037183Z             kelly_fraction_cap=self.risk_config.kelly_fraction_cap
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3037828Z         )
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3038240Z     
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3039022Z         # Feature 4: Attach Alpaca client to EventCalendar for live news checking
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3039889Z         try:
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3040416Z             from app.brokers.alpaca import AlpacaBroker
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3041262Z             if isinstance(self.broker, AlpacaBroker) and hasattr(self.broker, "_client"):
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3042117Z                 self.calendar._alpaca = self.broker._client
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3043007Z         except Exception:
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3044209Z             pass  # Non-Alpaca broker or no client ΓÇö calendar degrades gracefully
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3044984Z     
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3045708Z         # Restore strategy mapping & reconstruct portfolio lots for active positions from database
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3046567Z         try:
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3047111Z             positions = await self.broker.positions()
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3047768Z             self._reconcile_positions(positions)
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3048384Z         except Exception as exc:
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3049223Z             self.reconciliation_failed = True
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3050096Z             applog.error("engine", f"Failed to restore and reconcile active positions: {exc}")
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3051241Z         self.pipeline = SignalPipeline(self.model, self.risk_config.ml_confidence_threshold)
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3052132Z         for s in self.strategies:
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3052681Z             s.reset()
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3053184Z         self._regimes.clear()
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3053750Z         self._flattened_sessions.clear()
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3054341Z         self._last_scan_date = None
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3054906Z         self._tick_count = 0
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3055428Z         self._consec_errors = 0
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3055956Z         self.last_error = ""
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3056445Z     
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3056936Z         if isinstance(self.broker, PaperBroker):
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3057539Z             now = utcnow()
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3058309Z >           for symbol, price in self.data.last_prices(self.watchlist).items():
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3059539Z                                  ^^^^^^^^^^^^^^^^^^^^^
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3060310Z E           AttributeError: '_FakeData' object has no attribute 'last_prices'
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3060933Z 
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3061279Z backend/app/core/engine.py:295: AttributeError
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3062015Z ___________________________ test_engine_manual_flow ____________________________
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3062627Z 
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3063070Z engine = <app.core.engine.TradingEngine object at 0x7f494646de50>
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3063672Z 
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3064056Z     async def test_engine_manual_flow(engine: TradingEngine):
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3064824Z         from app.core.domain import OrderRequest, OrderSide
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3065467Z     
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3065915Z         await engine.start("demo")
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3066487Z         for _ in range(3):
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3067020Z             await engine._tick()
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3067539Z     
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3068253Z         order = await engine.manual_order(OrderRequest(symbol="SPY", side=OrderSide.BUY, qty=3))
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3069312Z         assert order.status == "filled"
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3069955Z         positions = await engine.broker.positions()
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3070669Z >       assert positions and positions[0].symbol == "SPY"
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3072612Z E       AssertionError: assert ([Position(symbol='IWM', qty=-91.0, avg_entry_price=218.5716997114217, market_price=218.46938822251602, stop_loss=219.7...e, take_profit=None, strategy='manual', opened_at=datetime.datetime(2026, 7, 17, 15, 5, tzinfo=datetime.timezone.utc))] and 'IWM' == 'SPY'
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3076164Z E         
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3076666Z E         - SPY
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3077139Z E         + IWM)
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3077483Z 
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3077845Z backend/tests/test_engine.py:101: AssertionError
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3078632Z ------------------------------ Captured log call -------------------------------
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3080303Z WARNING  alphadesk:logging.py:53 [scanner] Market regime=PANIC (confidence=1.00). Deploying defensive watchlist. reasons=['VIX:PANIC(71.41)']
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3081922Z WARNING  alphadesk:logging.py:53 [ai.model] Global model not trained. Adaptive model cannot be fine-tuned; training fresh models instead.
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3083124Z =============================== warnings summary ===============================
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3084552Z ../../../../../opt/hostedtoolcache/Python/3.12.13/x64/lib/python3.12/site-packages/fastapi/testclient.py:1
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3086474Z   /opt/hostedtoolcache/Python/3.12.13/x64/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3088194Z     from starlette.testclient import TestClient as TestClient  # noqa
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3089043Z 
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3089489Z backend/tests/test_ai.py: 4 warnings
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3090123Z backend/tests/test_quantitative.py: 14 warnings
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3091638Z   /opt/hostedtoolcache/Python/3.12.13/x64/lib/python3.12/site-packages/sklearn/utils/validation.py:2827: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3093132Z     warnings.warn(
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3093492Z 
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3093972Z -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3094830Z =========================== short test summary info ============================
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3096484Z FAILED backend/tests/test_011_ambiguous_submit_failures.py::test_ambiguous_submit_retains_pending_entry_guard_and_reconciles - AttributeError: '_FakeData' object has no attribute 'last_prices'
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3098663Z FAILED backend/tests/test_011_ambiguous_submit_failures.py::test_ambiguous_submit_resolved_to_rejection - AttributeError: '_FakeData' object has no attribute 'last_prices'
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3102110Z FAILED backend/tests/test_engine.py::test_engine_manual_flow - AssertionError: assert ([Position(symbol='IWM', qty=-91.0, avg_entry_price=218.5716997114217, market_price=218.46938822251602, stop_loss=219.7...e, take_profit=None, strategy='manual', opened_at=datetime.datetime(2026, 7, 17, 15, 5, tzinfo=datetime.timezone.utc))] and 'IWM' == 'SPY'
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3104470Z   
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3104881Z   - SPY
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3105275Z   + IWM)
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.3105820Z 3 failed, 458 passed, 2 deselected, 19 warnings in 167.82s (0:02:47)
+backend-tests	Run production invariant suite	2026-07-17T20:27:53.9372759Z ##[error]Process completed with exit code 1.
+backend-tests	Run production integrity regressions explicitly	∩╗┐2026-07-17T20:27:53.9426670Z ##[group]Run set -o pipefail
+backend-tests	Run production integrity regressions explicitly	2026-07-17T20:27:53.9427023Z ^[[36;1mset -o pipefail^[[0m
+backend-tests	Run production integrity regressions explicitly	2026-07-17T20:27:53.9427367Z ^[[36;1mpytest -q backend/tests/test_production_integrity.py \^[[0m
+backend-tests	Run production integrity regressions explicitly	2026-07-17T20:27:53.9427911Z ^[[36;1m  --junitxml=production-integrity.xml 2>&1 | tee production-integrity.log^[[0m
+backend-tests	Run production integrity regressions explicitly	2026-07-17T20:27:53.9487789Z shell: /usr/bin/bash -e {0}
+backend-tests	Run production integrity regressions explicitly	2026-07-17T20:27:53.9488127Z env:
+backend-tests	Run production integrity regressions explicitly	2026-07-17T20:27:53.9488420Z   pythonLocation: /opt/hostedtoolcache/Python/3.12.13/x64
+backend-tests	Run production integrity regressions explicitly	2026-07-17T20:27:53.9489345Z   PKG_CONFIG_PATH: /opt/hostedtoolcache/Python/3.12.13/x64/lib/pkgconfig
+backend-tests	Run production integrity regressions explicitly	2026-07-17T20:27:53.9489886Z   Python_ROOT_DIR: /opt/hostedtoolcache/Python/3.12.13/x64
+backend-tests	Run production integrity regressions explicitly	2026-07-17T20:27:53.9490318Z   Python2_ROOT_DIR: /opt/hostedtoolcache/Python/3.12.13/x64
+backend-tests	Run production integrity regressions explicitly	2026-07-17T20:27:53.9490752Z   Python3_ROOT_DIR: /opt/hostedtoolcache/Python/3.12.13/x64
+backend-tests	Run production integrity regressions explicitly	2026-07-17T20:27:53.9491193Z   LD_LIBRARY_PATH: /opt/hostedtoolcache/Python/3.12.13/x64/lib
+backend-tests	Run production integrity regressions explicitly	2026-07-17T20:27:53.9491571Z   PYTHONPATH: backend
+backend-tests	Run production integrity regressions explicitly	2026-07-17T20:27:53.9491810Z ##[endgroup]
+backend-tests	Run production integrity regressions explicitly	2026-07-17T20:27:54.7956557Z ....                                                                     [100%]
+backend-tests	Run production integrity regressions explicitly	2026-07-17T20:27:54.7958350Z 4 passed in 0.05s
+backend-tests	Run replay loophole invariants excluding local oracle fixtures	∩╗┐2026-07-17T20:27:54.9460867Z ##[group]Run set -o pipefail
+backend-tests	Run replay loophole invariants excluding local oracle fixtures	2026-07-17T20:27:54.9461221Z ^[[36;1mset -o pipefail^[[0m
+backend-tests	Run replay loophole invariants excluding local oracle fixtures	2026-07-17T20:27:54.9461549Z ^[[36;1mpytest -q backend/tests/test_replay_loopholes.py \^[[0m
+backend-tests	Run replay loophole invariants excluding local oracle fixtures	2026-07-17T20:27:54.9461937Z ^[[36;1m  -k 'not oracle_regression' \^[[0m
+backend-tests	Run replay loophole invariants excluding local oracle fixtures	2026-07-17T20:27:54.9462358Z ^[[36;1m  --junitxml=replay-invariants.xml 2>&1 | tee replay-invariants.log^[[0m
+backend-tests	Run replay loophole invariants excluding local oracle fixtures	2026-07-17T20:27:54.9523707Z shell: /usr/bin/bash -e {0}
+backend-tests	Run replay loophole invariants excluding local oracle fixtures	2026-07-17T20:27:54.9524101Z env:
+backend-tests	Run replay loophole invariants excluding local oracle fixtures	2026-07-17T20:27:54.9524420Z   pythonLocation: /opt/hostedtoolcache/Python/3.12.13/x64
+backend-tests	Run replay loophole invariants excluding local oracle fixtures	2026-07-17T20:27:54.9524965Z   PKG_CONFIG_PATH: /opt/hostedtoolcache/Python/3.12.13/x64/lib/pkgconfig
+backend-tests	Run replay loophole invariants excluding local oracle fixtures	2026-07-17T20:27:54.9525505Z   Python_ROOT_DIR: /opt/hostedtoolcache/Python/3.12.13/x64
+backend-tests	Run replay loophole invariants excluding local oracle fixtures	2026-07-17T20:27:54.9525974Z   Python2_ROOT_DIR: /opt/hostedtoolcache/Python/3.12.13/x64
+backend-tests	Run replay loophole invariants excluding local oracle fixtures	2026-07-17T20:27:54.9526450Z   Python3_ROOT_DIR: /opt/hostedtoolcache/Python/3.12.13/x64
+backend-tests	Run replay loophole invariants excluding local oracle fixtures	2026-07-17T20:27:54.9526931Z   LD_LIBRARY_PATH: /opt/hostedtoolcache/Python/3.12.13/x64/lib
+backend-tests	Run replay loophole invariants excluding local oracle fixtures	2026-07-17T20:27:54.9527340Z   PYTHONPATH: backend
+backend-tests	Run replay loophole invariants excluding local oracle fixtures	2026-07-17T20:27:54.9527648Z ##[endgroup]
+backend-tests	Run replay loophole invariants excluding local oracle fixtures	2026-07-17T20:28:01.3977831Z ........                                                                 [100%]
+backend-tests	Run replay loophole invariants excluding local oracle fixtures	2026-07-17T20:28:01.3979744Z 8 passed, 2 deselected in 5.58s
+backend-tests	Upload CI diagnostics	∩╗┐2026-07-17T20:28:01.7256614Z Node 20 is being deprecated. This workflow is running with Node 24 by default. If you need to temporarily use Node 20, you can set the ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION=true environment variable. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+backend-tests	Upload CI diagnostics	2026-07-17T20:28:01.7257953Z ##[group]Run actions/upload-artifact@v4
+backend-tests	Upload CI diagnostics	2026-07-17T20:28:01.7258229Z with:
+backend-tests	Upload CI diagnostics	2026-07-17T20:28:01.7258434Z   name: pytest-diagnostics
+backend-tests	Upload CI diagnostics	2026-07-17T20:28:01.7270746Z   path: *.log
+backend-tests	Upload CI diagnostics	*.xml
+backend-tests	Upload CI diagnostics	
+backend-tests	Upload CI diagnostics	2026-07-17T20:28:01.7271162Z   if-no-files-found: error
+backend-tests	Upload CI diagnostics	2026-07-17T20:28:01.7271560Z   compression-level: 6
+backend-tests	Upload CI diagnostics	2026-07-17T20:28:01.7271913Z   overwrite: false
+backend-tests	Upload CI diagnostics	2026-07-17T20:28:01.7272179Z   include-hidden-files: false
+backend-tests	Upload CI diagnostics	2026-07-17T20:28:01.7272426Z env:
+backend-tests	Upload CI diagnostics	2026-07-17T20:28:01.7272687Z   pythonLocation: /opt/hostedtoolcache/Python/3.12.13/x64
+backend-tests	Upload CI diagnostics	2026-07-17T20:28:01.7273154Z   PKG_CONFIG_PATH: /opt/hostedtoolcache/Python/3.12.13/x64/lib/pkgconfig
+backend-tests	Upload CI diagnostics	2026-07-17T20:28:01.7273860Z   Python_ROOT_DIR: /opt/hostedtoolcache/Python/3.12.13/x64
+backend-tests	Upload CI diagnostics	2026-07-17T20:28:01.7274281Z   Python2_ROOT_DIR: /opt/hostedtoolcache/Python/3.12.13/x64
+backend-tests	Upload CI diagnostics	2026-07-17T20:28:01.7274674Z   Python3_ROOT_DIR: /opt/hostedtoolcache/Python/3.12.13/x64
+backend-tests	Upload CI diagnostics	2026-07-17T20:28:01.7275067Z   LD_LIBRARY_PATH: /opt/hostedtoolcache/Python/3.12.13/x64/lib
+backend-tests	Upload CI diagnostics	2026-07-17T20:28:01.7275392Z ##[endgroup]
+backend-tests	Upload CI diagnostics	2026-07-17T20:28:01.9133539Z (node:2280) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+backend-tests	Upload CI diagnostics	2026-07-17T20:28:01.9135167Z (Use `node --trace-deprecation ...` to show where the warning was created)
+backend-tests	Upload CI diagnostics	2026-07-17T20:28:01.9464123Z With the provided path, there will be 6 files uploaded
+backend-tests	Upload CI diagnostics	2026-07-17T20:28:01.9509667Z Artifact name is valid!
+backend-tests	Upload CI diagnostics	2026-07-17T20:28:01.9534499Z Root directory input is valid!
+backend-tests	Upload CI diagnostics	2026-07-17T20:28:02.2984297Z Beginning upload of artifact content to blob storage
+backend-tests	Upload CI diagnostics	2026-07-17T20:28:02.3389709Z (node:2280) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+backend-tests	Upload CI diagnostics	2026-07-17T20:28:02.6959435Z Uploaded bytes 17102
+backend-tests	Upload CI diagnostics	2026-07-17T20:28:02.7774901Z Finished uploading artifact content to blob storage!
+backend-tests	Upload CI diagnostics	2026-07-17T20:28:02.7776696Z SHA256 digest of uploaded artifact zip is a964bf4cd505bfb6f287b13e08e2bbbd61765bdbb7692672117b9cf48a088bf7
+backend-tests	Upload CI diagnostics	2026-07-17T20:28:02.7778133Z Finalizing artifact upload
+backend-tests	Upload CI diagnostics	2026-07-17T20:28:03.0203328Z Artifact pytest-diagnostics.zip successfully finalized. Artifact ID 8418806990
+backend-tests	Upload CI diagnostics	2026-07-17T20:28:03.0205359Z Artifact pytest-diagnostics has been successfully uploaded! Final size is 17102 bytes. Artifact ID is 8418806990
+backend-tests	Upload CI diagnostics	2026-07-17T20:28:03.0212866Z Artifact download URL: https://github.com/saikiranpeddineni/Alpha-Bot/actions/runs/29611054715/artifacts/8418806990
+backend-tests	Upload clean-checkout source snapshot	∩╗┐2026-07-17T20:28:03.0357559Z Node 20 is being deprecated. This workflow is running with Node 24 by default. If you need to temporarily use Node 20, you can set the ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION=true environment variable. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+backend-tests	Upload clean-checkout source snapshot	2026-07-17T20:28:03.0359104Z ##[group]Run actions/upload-artifact@v4
+backend-tests	Upload clean-checkout source snapshot	2026-07-17T20:28:03.0359388Z with:
+backend-tests	Upload clean-checkout source snapshot	2026-07-17T20:28:03.0359593Z   name: clean-checkout-source
+backend-tests	Upload clean-checkout source snapshot	2026-07-17T20:28:03.0359855Z   path: backend/app
+backend-tests	Upload clean-checkout source snapshot	backend/tests
+backend-tests	Upload clean-checkout source snapshot	
+backend-tests	Upload clean-checkout source snapshot	2026-07-17T20:28:03.0360126Z   if-no-files-found: error
+backend-tests	Upload clean-checkout source snapshot	2026-07-17T20:28:03.0360368Z   compression-level: 6
+backend-tests	Upload clean-checkout source snapshot	2026-07-17T20:28:03.0360583Z   overwrite: false
+backend-tests	Upload clean-checkout source snapshot	2026-07-17T20:28:03.0360794Z   include-hidden-files: false
+backend-tests	Upload clean-checkout source snapshot	2026-07-17T20:28:03.0361032Z env:
+backend-tests	Upload clean-checkout source snapshot	2026-07-17T20:28:03.0361284Z   pythonLocation: /opt/hostedtoolcache/Python/3.12.13/x64
+backend-tests	Upload clean-checkout source snapshot	2026-07-17T20:28:03.0361721Z   PKG_CONFIG_PATH: /opt/hostedtoolcache/Python/3.12.13/x64/lib/pkgconfig
+backend-tests	Upload clean-checkout source snapshot	2026-07-17T20:28:03.0362153Z   Python_ROOT_DIR: /opt/hostedtoolcache/Python/3.12.13/x64
+backend-tests	Upload clean-checkout source snapshot	2026-07-17T20:28:03.0362570Z   Python2_ROOT_DIR: /opt/hostedtoolcache/Python/3.12.13/x64
+backend-tests	Upload clean-checkout source snapshot	2026-07-17T20:28:03.0362948Z   Python3_ROOT_DIR: /opt/hostedtoolcache/Python/3.12.13/x64
+backend-tests	Upload clean-checkout source snapshot	2026-07-17T20:28:03.0363349Z   LD_LIBRARY_PATH: /opt/hostedtoolcache/Python/3.12.13/x64/lib
+backend-tests	Upload clean-checkout source snapshot	2026-07-17T20:28:03.0363677Z ##[endgroup]
+backend-tests	Upload clean-checkout source snapshot	2026-07-17T20:28:03.2289065Z (node:2292) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+backend-tests	Upload clean-checkout source snapshot	2026-07-17T20:28:03.2290768Z (Use `node --trace-deprecation ...` to show where the warning was created)
+backend-tests	Upload clean-checkout source snapshot	2026-07-17T20:28:03.3448734Z Multiple search paths detected. Calculating the least common ancestor of all paths
+backend-tests	Upload clean-checkout source snapshot	2026-07-17T20:28:03.3451209Z The least common ancestor is /home/runner/work/Alpha-Bot/Alpha-Bot/backend. This will be the root directory of the artifact
+backend-tests	Upload clean-checkout source snapshot	2026-07-17T20:28:03.3452430Z With the provided path, there will be 284 files uploaded
+backend-tests	Upload clean-checkout source snapshot	2026-07-17T20:28:03.3453493Z Artifact name is valid!
+backend-tests	Upload clean-checkout source snapshot	2026-07-17T20:28:03.3454156Z Root directory input is valid!
+backend-tests	Upload clean-checkout source snapshot	2026-07-17T20:28:03.6689084Z Beginning upload of artifact content to blob storage
+backend-tests	Upload clean-checkout source snapshot	2026-07-17T20:28:04.0715494Z (node:2292) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+backend-tests	Upload clean-checkout source snapshot	2026-07-17T20:28:04.8006116Z Uploaded bytes 1184963
+backend-tests	Upload clean-checkout source snapshot	2026-07-17T20:28:04.8810293Z Finished uploading artifact content to blob storage!
+backend-tests	Upload clean-checkout source snapshot	2026-07-17T20:28:04.8811907Z SHA256 digest of uploaded artifact zip is 4fbaf9beb91dde6f7fdd0d10225211b8962016dcf76dc17794c8956585a02573
+backend-tests	Upload clean-checkout source snapshot	2026-07-17T20:28:04.8813511Z Finalizing artifact upload
+backend-tests	Upload clean-checkout source snapshot	2026-07-17T20:28:05.1226856Z Artifact clean-checkout-source.zip successfully finalized. Artifact ID 8418807747
+backend-tests	Upload clean-checkout source snapshot	2026-07-17T20:28:05.1229395Z Artifact clean-checkout-source has been successfully uploaded! Final size is 1184963 bytes. Artifact ID is 8418807747
+backend-tests	Upload clean-checkout source snapshot	2026-07-17T20:28:05.1250074Z Artifact download URL: https://github.com/saikiranpeddineni/Alpha-Bot/actions/runs/29611054715/artifacts/8418807747
+backend-tests	Enforce test success	∩╗┐2026-07-17T20:28:05.1391290Z ##[group]Run echo "production_invariants=$PRODUCTION_INVARIANTS"
+backend-tests	Enforce test success	2026-07-17T20:28:05.1391846Z ^[[36;1mecho "production_invariants=$PRODUCTION_INVARIANTS"^[[0m
+backend-tests	Enforce test success	2026-07-17T20:28:05.1392286Z ^[[36;1mecho "production_integrity=$PRODUCTION_INTEGRITY"^[[0m
+backend-tests	Enforce test success	2026-07-17T20:28:05.1392695Z ^[[36;1mecho "replay_invariants=$REPLAY_INVARIANTS"^[[0m
+backend-tests	Enforce test success	2026-07-17T20:28:05.1393044Z ^[[36;1mtest "$PRODUCTION_INVARIANTS" = success^[[0m
+backend-tests	Enforce test success	2026-07-17T20:28:05.1393383Z ^[[36;1mtest "$PRODUCTION_INTEGRITY" = success^[[0m
+backend-tests	Enforce test success	2026-07-17T20:28:05.1393733Z ^[[36;1mtest "$REPLAY_INVARIANTS" = success^[[0m
+backend-tests	Enforce test success	2026-07-17T20:28:05.1459077Z shell: /usr/bin/bash -e {0}
+backend-tests	Enforce test success	2026-07-17T20:28:05.1459484Z env:
+backend-tests	Enforce test success	2026-07-17T20:28:05.1459784Z   pythonLocation: /opt/hostedtoolcache/Python/3.12.13/x64
+backend-tests	Enforce test success	2026-07-17T20:28:05.1460265Z   PKG_CONFIG_PATH: /opt/hostedtoolcache/Python/3.12.13/x64/lib/pkgconfig
+backend-tests	Enforce test success	2026-07-17T20:28:05.1460728Z   Python_ROOT_DIR: /opt/hostedtoolcache/Python/3.12.13/x64
+backend-tests	Enforce test success	2026-07-17T20:28:05.1461154Z   Python2_ROOT_DIR: /opt/hostedtoolcache/Python/3.12.13/x64
+backend-tests	Enforce test success	2026-07-17T20:28:05.1461598Z   Python3_ROOT_DIR: /opt/hostedtoolcache/Python/3.12.13/x64
+backend-tests	Enforce test success	2026-07-17T20:28:05.1462003Z   LD_LIBRARY_PATH: /opt/hostedtoolcache/Python/3.12.13/x64/lib
+backend-tests	Enforce test success	2026-07-17T20:28:05.1462360Z   PRODUCTION_INVARIANTS: failure
+backend-tests	Enforce test success	2026-07-17T20:28:05.1462639Z   PRODUCTION_INTEGRITY: success
+backend-tests	Enforce test success	2026-07-17T20:28:05.1462891Z   REPLAY_INVARIANTS: success
+backend-tests	Enforce test success	2026-07-17T20:28:05.1463136Z ##[endgroup]
+backend-tests	Enforce test success	2026-07-17T20:28:05.1548283Z production_invariants=failure
+backend-tests	Enforce test success	2026-07-17T20:28:05.1549347Z production_integrity=success
+backend-tests	Enforce test success	2026-07-17T20:28:05.1550224Z replay_invariants=success
+backend-tests	Enforce test success	2026-07-17T20:28:05.1553961Z ##[error]Process completed with exit code 1.
+backend-tests	Post Run actions/checkout@v4	∩╗┐2026-07-17T20:28:05.1652496Z Node 20 is being deprecated. This workflow is running with Node 24 by default. If you need to temporarily use Node 20, you can set the ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION=true environment variable. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+backend-tests	Post Run actions/checkout@v4	2026-07-17T20:28:05.1653827Z Post job cleanup.
+backend-tests	Post Run actions/checkout@v4	2026-07-17T20:28:05.2719472Z [command]/usr/bin/git version
+backend-tests	Post Run actions/checkout@v4	2026-07-17T20:28:05.2810115Z git version 2.54.0
+backend-tests	Post Run actions/checkout@v4	2026-07-17T20:28:05.2865688Z Temporarily overriding HOME='/home/runner/work/_temp/b266524e-dbb2-4ed2-a086-50ca23b4570d' before making global git config changes
+backend-tests	Post Run actions/checkout@v4	2026-07-17T20:28:05.2867297Z Adding repository directory to the temporary git global config as a safe directory
+backend-tests	Post Run actions/checkout@v4	2026-07-17T20:28:05.2871679Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/Alpha-Bot/Alpha-Bot
+backend-tests	Post Run actions/checkout@v4	2026-07-17T20:28:05.2952668Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+backend-tests	Post Run actions/checkout@v4	2026-07-17T20:28:05.3027962Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+backend-tests	Post Run actions/checkout@v4	2026-07-17T20:28:05.3410907Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+backend-tests	Post Run actions/checkout@v4	2026-07-17T20:28:05.3470299Z http.https://github.com/.extraheader
+backend-tests	Post Run actions/checkout@v4	2026-07-17T20:28:05.3504134Z [command]/usr/bin/git config --local --unset-all http.https://github.com/.extraheader
+backend-tests	Post Run actions/checkout@v4	2026-07-17T20:28:05.3541409Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+backend-tests	Post Run actions/checkout@v4	2026-07-17T20:28:05.3982297Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+backend-tests	Post Run actions/checkout@v4	2026-07-17T20:28:05.4049966Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+backend-tests	Complete job	∩╗┐2026-07-17T20:28:05.4670791Z Cleaning up orphan processes
+backend-tests	Complete job	2026-07-17T20:28:05.4957245Z ##[warning]Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@v4, actions/setup-python@v5, actions/upload-artifact@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/

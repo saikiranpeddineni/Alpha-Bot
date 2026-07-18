@@ -4,7 +4,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.core.scanner import CANDIDATE_POOL, MarketScanner, ScannerOutcome, SpyVolatilityState
+from app.core.scanner import CANDIDATE_POOL, MarketScanner, ScannerOutcome
+from app.risk.market_regime import MarketRiskState
 
 HISTORICAL_T = datetime(2026, 7, 14, 14, 0, tzinfo=UTC)
 
@@ -28,7 +29,7 @@ async def test_run_passes_live_discovery_shortlist_only_to_stage1(monkeypatch):
     scanner._discovery = SimpleNamespace(
         acquire=AsyncMock(return_value=SimpleNamespace(shortlist=("NEW2", "NEW1")))
     )
-    scanner.check_spy_volatility = AsyncMock(return_value=SpyVolatilityState.SAFE)
+    scanner._assess_market_risk = AsyncMock(return_value=(MarketRiskState.NORMAL, 0.85, []))
     stage1 = AsyncMock(return_value=[])
     monkeypatch.setattr(scanner, "_stage1_prefilter_parallel", stage1)
     outcome, symbols = await scanner.run()
@@ -41,7 +42,7 @@ async def test_run_passes_live_discovery_shortlist_only_to_stage1(monkeypatch):
 async def test_run_passes_full_static_pool_to_stage1_for_historical_as_of(monkeypatch):
     provider = SimpleNamespace(name="alpaca", supports_asset_discovery=True)
     scanner = MarketScanner(SimpleNamespace(provider=provider), [])
-    scanner.check_spy_volatility = AsyncMock(return_value=SpyVolatilityState.SAFE)
+    scanner._assess_market_risk = AsyncMock(return_value=(MarketRiskState.NORMAL, 0.85, []))
     stage1 = AsyncMock(return_value=[])
     monkeypatch.setattr(scanner, "_stage1_prefilter_parallel", stage1)
     outcome, symbols = await scanner.run(HISTORICAL_T)
