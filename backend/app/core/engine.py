@@ -1007,6 +1007,8 @@ class TradingEngine:
                     rejection_stage = "ml_gate"
                 elif "Trade Score" in rejection_reason:
                     rejection_stage = "trade_score_gate"
+                elif "Meta-label" in rejection_reason:
+                    rejection_stage = "meta_label_gate"
                 elif "lost conflict" in rejection_reason:
                     rejection_stage = "conflict_resolution"
                 else:
