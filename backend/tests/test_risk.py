@@ -22,6 +22,7 @@ def ctx(equity=100_000.0, positions=None, day_pnl=0.0, start_eq=100_000.0, peak=
         session_start_equity=start_eq,
         peak_equity=peak,
         day_trades_today=day_trades,
+        rolling_day_trades=day_trades,
         is_paper=is_paper,
     )
 

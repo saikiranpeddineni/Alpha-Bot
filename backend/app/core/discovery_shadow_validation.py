@@ -27,10 +27,15 @@ class ShadowSessionEvidence:
     dynamic_stale: int = 0
 
     def __post_init__(self) -> None:
+        import math
         if not self.session.strip():
             raise ValueError("session is required")
         if min(self.fixed_requests, self.dynamic_requests, self.dynamic_missing, self.dynamic_stale) < 0:
             raise ValueError("counts must be non-negative")
+        if isinstance(self.fixed_latency_ms, bool) or isinstance(self.dynamic_latency_ms, bool):
+            raise TypeError("latency must be float or int, not bool")
+        if not math.isfinite(self.fixed_latency_ms) or not math.isfinite(self.dynamic_latency_ms):
+            raise ValueError("latency must be a finite real number")
         if self.fixed_latency_ms < 0 or self.dynamic_latency_ms < 0:
             raise ValueError("latency must be non-negative")
         if not self.fixed_qualified <= self.fixed_candidates:

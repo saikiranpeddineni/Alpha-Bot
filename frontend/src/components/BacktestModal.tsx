@@ -37,6 +37,7 @@ export function BacktestModal(props: { onClose: () => void }) {
   const [endDate, setEndDate] = useState(() => new Date().toISOString().split("T")[0]);
   const [mlGate, setMlGate] = useState(true);
   const [dynamicScanner, setDynamicScanner] = useState(false);
+  const [ignoreTemporalLeakage, setIgnoreTemporalLeakage] = useState(false);
   const [cash, setCash] = useState(100000);
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<BacktestResult | null>(null);
@@ -59,6 +60,7 @@ export function BacktestModal(props: { onClose: () => void }) {
         starting_cash: cash,
         use_ml_gate: mlGate,
         use_dynamic_scanner: dynamicScanner,
+        ignore_temporal_leakage: ignoreTemporalLeakage,
         start_date: rangeMode === "dates" ? startDate : null,
         end_date: rangeMode === "dates" ? endDate : null,
       });
@@ -165,6 +167,16 @@ export function BacktestModal(props: { onClose: () => void }) {
               <button className={`switch ${dynamicScanner ? "on" : ""}`} onClick={() => setDynamicScanner(!dynamicScanner)} />
               <span className="muted">{dynamicScanner ? "Active pre-market rotation" : "Static watchlist"}</span>
             </div>
+          </div>
+          <div className="field" style={{ gridColumn: "1 / -1" }}>
+            <label>Ignore Temporal Leakage</label>
+            <div className="row" style={{ alignItems: "center" }}>
+              <button className={`switch ${ignoreTemporalLeakage ? "on" : ""}`} onClick={() => setIgnoreTemporalLeakage(!ignoreTemporalLeakage)} />
+              <span className="muted">{ignoreTemporalLeakage ? "Bypassed (Models will run)" : "Enforced (Look-ahead protection)"}</span>
+            </div>
+            <span className="hint">
+              Enables backtesting past dates using models trained in the future. <b>Warning:</b> May introduce look-ahead bias if the model has trained on your backtest data.
+            </span>
           </div>
         </div>
 

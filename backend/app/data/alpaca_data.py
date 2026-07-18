@@ -32,10 +32,15 @@ class AlpacaDataProvider(DataProvider):
         try:
             from alpaca.data.historical import StockHistoricalDataClient
             from alpaca.trading.client import TradingClient
+            from alpaca.data import ScreenerClient
         except ImportError as exc:  # pragma: no cover
             raise RuntimeError("alpaca-py is not installed; run the install script") from exc
         self._client = StockHistoricalDataClient(api_key, api_secret)
         self._trading_client = TradingClient(api_key, api_secret, paper=True)
+        try:
+            self._screener_client = ScreenerClient(api_key, api_secret)
+        except Exception:
+            self._screener_client = None
         try:
             from requests.adapters import HTTPAdapter
             adapter = HTTPAdapter(pool_connections=64, pool_maxsize=64)
@@ -101,7 +106,57 @@ class AlpacaDataProvider(DataProvider):
         return empty_bars()
 
     async def discover_assets(self) -> tuple[DiscoverableAsset, ...]:
-        """Fetch Alpaca's active US-equity asset metadata for bounded discovery."""
+        """Fetch Alpaca's active US-equity asset metadata for bounded discovery.
+
+        First attempts to fetch top actives and movers via ScreenerClient.
+        Falls back to standard get_all_assets.
+        """
+        screener = getattr(self, "_screener_client", None)
+        if screener is not None:
+            try:
+                def fetch_screener() -> list[str]:
+                    from alpaca.data import MostActivesRequest, MarketMoversRequest, MarketType
+                    symbols = set()
+
+                    # 1. Fetch top 50 most active stocks by volume
+                    try:
+                        actives = screener.get_most_actives(MostActivesRequest(top=50))
+                        if hasattr(actives, "most_actives") and actives.most_actives:
+                            for item in actives.most_actives:
+                                if getattr(item, "symbol", None):
+                                    symbols.add(item.symbol.upper())
+                    except Exception as e:
+                        applog.warning("data.alpaca", f"Screener get_most_actives failed: {e}")
+
+                    # 2. Fetch top 50 market movers (gainers)
+                    try:
+                        movers = screener.get_market_movers(
+                            MarketMoversRequest(top=50, market_type=MarketType.STOCKS)
+                        )
+                        if hasattr(movers, "gainers") and movers.gainers:
+                            for item in movers.gainers:
+                                if getattr(item, "symbol", None):
+                                    symbols.add(item.symbol.upper())
+                    except Exception as e:
+                        applog.warning("data.alpaca", f"Screener get_market_movers failed: {e}")
+
+                    return list(symbols)
+
+                screener_symbols = await asyncio.to_thread(fetch_screener)
+                if screener_symbols:
+                    applog.info("data.alpaca", f"Screener discovered {len(screener_symbols)} dynamic assets.")
+                    return tuple(
+                        DiscoverableAsset(
+                            symbol=sym,
+                            active=True,
+                            tradable=True,
+                            asset_class="us_equity",
+                        )
+                        for sym in sorted(screener_symbols)
+                    )
+            except Exception as exc:
+                applog.warning("data.alpaca", f"Screener discovery failed: {exc}. Falling back to standard asset list.")
+
         def fetch() -> tuple[DiscoverableAsset, ...]:
             from alpaca.trading.enums import AssetClass, AssetStatus
             from alpaca.trading.requests import GetAssetsRequest

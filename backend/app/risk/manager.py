@@ -66,8 +66,8 @@ class AccountContext:
     day_trades_today: int
     # Rolling 5-calendar-day day-trade count for PDT guard (does not reset on
     # session roll — supplied by PortfolioTracker.rolling_day_trade_count()).
-    rolling_day_trades: int
-    is_paper: bool
+    rolling_day_trades: int = 0
+    is_paper: bool = False
     pending_entry_symbols: list[str] = field(default_factory=list)
 
 

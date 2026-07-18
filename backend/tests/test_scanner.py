@@ -21,9 +21,9 @@ def mock_data_manager():
 async def test_spy_volatility_checks(mock_data_manager):
     scanner = MarketScanner(mock_data_manager, ["SPY", "QQQ"])
     
-    # Mock SPY history returning low volatility (hourly bars)
+    # Mock VIX history returning low volatility (hourly bars)
     idx = pd.date_range(end=datetime.now(UTC), periods=300, freq="1h", tz="UTC")
-    closes = np.ones(300) * 100.0
+    closes = np.ones(300) * 15.0
     df = pd.DataFrame({
         "open": closes, "high": closes + 0.01, "low": closes - 0.01, "close": closes, "volume": 1000.0
     }, index=idx)
