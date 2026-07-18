@@ -241,7 +241,7 @@ def test_attribution_recomputation_at_replay(temp_db: Database):
     payload = {
         "candidate_id": "REPLAY_TEST_123",
         "symbol": "AAPL",
-        "strategy": "orb",
+        "strategy": "vwap_reversion",
         "direction": "long",
         "outcomes": {},  # empty at first
         "gate_evidence_json": gate_evidence,
@@ -252,7 +252,7 @@ def test_attribution_recomputation_at_replay(temp_db: Database):
         candidate_id="REPLAY_TEST_123",
         ts=ts,
         symbol="AAPL",
-        strategy="orb",
+        strategy="vwap_reversion",
         direction="long",
         mode="backtest",
         payload=payload,
@@ -270,7 +270,7 @@ def test_attribution_recomputation_at_replay(temp_db: Database):
         candidate_id="REPLAY_TEST_123",
         ts=ts,
         symbol="AAPL",
-        strategy="orb",
+        strategy="vwap_reversion",
         direction="long",
         mode="backtest",
         payload=payload,
