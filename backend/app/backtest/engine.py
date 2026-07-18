@@ -931,6 +931,43 @@ async def run_backtest(
                     if not signals:
                         continue
                     feature_row = window.iloc[-1]
+                    slot_engine = slot_volume_engines.get(symbol)
+                    slot_rvol_val = slot_engine.get_slot_rvol(now) if slot_engine else None
+
+                    # Estimate SPY 30-bar rolling volatility
+                    spy_vol: float | None = None
+                    if spy_df is not None:
+                        spy_i = positions_index["SPY"].get(ts)
+                        if spy_i is not None:
+                            spy_window = spy_df.iloc[max(0, spy_i - SLICE_WINDOW + 1) : spy_i + 1]
+                            try:
+                                spy_vol = float(spy_window["close"].pct_change().rolling(30).std().iloc[-1] * 100)
+                            except Exception:
+                                spy_vol = None
+
+                    # Fetch Level 1 Context expectancy for each strategy and log
+                    from app.strategies import get_contextual_expectancy
+                    from app.core.phase import classify_clock_phase
+                    clock_phase = classify_clock_phase(now)
+                    for sig in signals:
+                        if sig.action != SignalAction.EXIT:
+                            try:
+                                exp_info = get_contextual_expectancy(
+                                    db=None,  # No DB in backtest engine
+                                    strategy=sig.strategy,
+                                    direction="long" if sig.action == SignalAction.ENTER_LONG else "short",
+                                    regime=regime.name if hasattr(regime, "name") else str(regime),
+                                    clock_phase=clock_phase.value if hasattr(clock_phase, "value") else str(clock_phase),
+                                    rvol=slot_rvol_val,
+                                    spy_vol=spy_vol,
+                                )
+                                applog.debug(
+                                    "backtest.memory",
+                                    f"Context memory lookup for {sig.symbol} {sig.strategy} {sig.action}: "
+                                    f"expectancy={exp_info['expectancy']}, shrunk_expectancy={exp_info['shrunk_expectancy']}"
+                                )
+                            except Exception as exc:
+                                applog.error("backtest.memory", f"Failed memory expectancy lookup: {exc}")
                     # Assign a unique candidate ID to all candidate entry signals first (shared UUID)
                     import uuid
                     for sig in signals:
@@ -1009,8 +1046,6 @@ async def run_backtest(
                                 f"(strategy: {sig.strategy}) -- Stage: {rejection_stage}, Reason: {rejection_reason}"
                             )
 
-                        slot_engine = slot_volume_engines.get(symbol)
-                        slot_rvol_val = slot_engine.get_slot_rvol(now) if slot_engine else None
                         vwap_tel = compute_vwap_telemetry(window, now, slot_rvol_val)
 
                         payload = ShadowLedger.record_candidate(
@@ -1037,6 +1072,7 @@ async def run_backtest(
                             parent_policy_id=None,
                             policy_version="1.0.0",
                             gate_evidence_json=parallel_evidences.get(sig.candidate_id),
+                            spy_vol=spy_vol,
                         )
                         shadow_signals_log.append(payload)
 

@@ -480,6 +480,12 @@ class TradingEngine:
             if self.last_error.startswith("CRITICAL EOD liquidation unresolved"):
                 self.last_error = ""
             applog.info("engine", "End-of-day liquidation authoritatively complete")
+            # Refresh contextual aggregate memory at EOD
+            try:
+                from app.strategies import refresh_contextual_memory
+                refresh_contextual_memory(self.db)
+            except Exception as exc:
+                applog.error("engine", f"Failed contextual aggregates refresh: {exc}")
             self.publish("status", self.status())
             return True
         except BaseException as exc:
@@ -873,6 +879,39 @@ class TradingEngine:
                     prefix = f"{symbol}_{sig.strategy}_{now.strftime('%Y%m%d_%H%M%S')}"
                     sig.candidate_id = f"{prefix}_{uuid.uuid4().hex[:6]}".upper()
 
+        # Estimate SPY 30-bar rolling volatility (standard deviation of returns)
+        spy_vol: float | None = None
+        if spy_df is not None and not spy_df.empty:
+            try:
+                spy_vol = float(spy_df["close"].pct_change().rolling(30).std().iloc[-1] * 100)
+            except Exception:
+                spy_vol = None
+
+        # Fetch Level 1 Context expectancy for each strategy and log
+        from app.strategies import get_contextual_expectancy
+        from app.core.phase import classify_clock_phase
+        clock_phase = classify_clock_phase(now)
+        for sig in signals:
+            if sig.action != SignalAction.EXIT:
+                try:
+                    exp_info = get_contextual_expectancy(
+                        db=self.db,
+                        strategy=sig.strategy,
+                        direction="long" if sig.action == SignalAction.ENTER_LONG else "short",
+                        regime=regime.name if hasattr(regime, "name") else str(regime),
+                        clock_phase=clock_phase.value if hasattr(clock_phase, "value") else str(clock_phase),
+                        rvol=slot_rvol_val,
+                        spy_vol=spy_vol,
+                    )
+                    applog.info(
+                        "engine.memory",
+                        f"Context memory lookup for {sig.symbol} {sig.strategy} {sig.action}: "
+                        f"trades_count={exp_info['trades_count']}, expectancy={exp_info['expectancy']}, "
+                        f"shrunk_expectancy={exp_info['shrunk_expectancy']} (source: {exp_info['source']})"
+                    )
+                except Exception as exc:
+                    applog.error("engine.memory", f"Failed memory expectancy lookup: {exc}")
+
         # Run ParallelEvidenceEvaluator out-of-band to capture the parallel evidence (CR-146)
         parallel_evidences = {}
         for sig in signals:
@@ -954,6 +993,7 @@ class TradingEngine:
                 parent_policy_id=None,
                 policy_version="1.0.0",
                 gate_evidence_json=parallel_evidences.get(sig.candidate_id),
+                spy_vol=spy_vol,
             )
 
         for sig, reason in rejected:
