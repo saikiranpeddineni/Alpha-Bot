@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from app.ai.features import FEATURE_COLUMNS, build_training_set, compute_features, latest_feature_row
 from app.ai.model import SignalModel
@@ -119,3 +120,38 @@ def test_adaptive_model_tuning(tmp_path):
     row = latest_feature_row(compute_features(frames["SPY"]))
     p = model.p_up(row)
     assert 0.0 <= p <= 1.0
+
+
+def test_gate_report_with_none_realized_r():
+    from app.ai.gate_report import build_gate_value_report
+    shadow_signals = [
+        {
+            "final_decision": "accepted",
+            "replayed": True,
+            "outcomes": {
+                "15m": {
+                    "fwd_return": None,
+                    "realized_r": None,
+                    "stop_is_synthetic": True,
+                }
+            }
+        },
+        {
+            "final_decision": "rejected",
+            "rejection_stage": "ml_gate",
+            "replayed": True,
+            "outcomes": {
+                "15m": {
+                    "fwd_return": 0.05,
+                    "realized_r": 1.2,
+                    "stop_is_synthetic": False,
+                }
+            }
+        }
+    ]
+    report = build_gate_value_report(shadow_signals, horizon="15m")
+    assert report["horizon"] == "15m"
+    assert report["all_candidates"]["candidates"] == 2
+    # The first candidate had None outcomes -> mapped to 0.0
+    assert report["all_candidates"]["expectancy_r"] == pytest.approx(0.6)  # (0.0 + 1.2) / 2 = 0.6
+

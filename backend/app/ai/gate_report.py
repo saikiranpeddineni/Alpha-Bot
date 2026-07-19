@@ -9,8 +9,8 @@ from typing import Any
 def _summary(rows: list[dict[str, Any]], horizon: str) -> dict[str, Any]:
     outcomes = [r.get("outcomes", {}).get(horizon) for r in rows]
     outcomes = [o for o in outcomes if isinstance(o, dict)]
-    returns = [float(o.get("fwd_return", 0.0)) for o in outcomes]
-    rs = [float(o.get("realized_r", 0.0)) for o in outcomes]
+    returns = [float(val) if (val := o.get("fwd_return")) is not None else 0.0 for o in outcomes]
+    rs = [float(val) if (val := o.get("realized_r")) is not None else 0.0 for o in outcomes]
     wins = [x for x in rs if x > 0]
     losses = [x for x in rs if x < 0]
     gross_loss = abs(sum(losses))
