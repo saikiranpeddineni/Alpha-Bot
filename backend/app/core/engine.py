@@ -1684,6 +1684,7 @@ class TradingEngine:
                     "tp_hit": replay_res["tp_hit"],
                     "sl_hit": replay_res["sl_hit"],
                     "bars_held": replay_res["bars_held"],
+                    "exit_timestamp": replay_res.get("exit_timestamp"),
                     "mfe_r": replay_res.get("mfe_r", 0.0),
                     "mae_r": replay_res.get("mae_r", 0.0),
                 }
@@ -1724,6 +1725,7 @@ class TradingEngine:
                             "tp_hit": alt_res["tp_hit"],
                             "sl_hit": alt_res["sl_hit"],
                             "bars_held": alt_res["bars_held"],
+                            "exit_timestamp": alt_res.get("exit_timestamp"),
                             "mfe_r": alt_res.get("mfe_r", 0.0),
                             "mae_r": alt_res.get("mae_r", 0.0),
                         }

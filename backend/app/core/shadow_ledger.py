@@ -702,6 +702,13 @@ class ShadowLedger:
             except Exception:
                 time_to_target_mins = None
 
+        exit_ts_str = None
+        if exit_ts is not None:
+            try:
+                exit_ts_str = exit_ts.isoformat() if hasattr(exit_ts, "isoformat") else str(exit_ts)
+            except Exception:
+                exit_ts_str = str(exit_ts)
+
         # Fix A1 (#194/#197): Null R-metrics when stop is synthetic.
         if not stop_is_synthetic:
             initial_risk = abs(entry_price - initial_stop)
@@ -720,6 +727,7 @@ class ShadowLedger:
                 "exit_price": round(exit_price, 4),
                 "exit_reason": exit_reason,
                 "bars_held": bars_held,
+                "exit_timestamp": exit_ts_str,
                 "mfe_pct": round(mfe_pct, 4),
                 "mae_pct": round(mae_pct, 4),
                 "mfe_r": round(mfe_r, 4),
@@ -747,6 +755,7 @@ class ShadowLedger:
                 "exit_price": round(exit_price, 4),
                 "exit_reason": exit_reason,
                 "bars_held": bars_held,
+                "exit_timestamp": exit_ts_str,
                 "mfe_pct": round(mfe_pct, 4),
                 "mae_pct": round(mae_pct, 4),
                 "mfe_r": None,

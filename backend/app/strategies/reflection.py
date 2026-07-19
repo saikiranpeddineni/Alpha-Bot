@@ -301,6 +301,66 @@ def generate_eod_reflection_report(db: Database, now: datetime | None = None, en
                 f"> **Recommendation:** Keep current Champion policy active. Continue monitoring walk-forward testing."
             )
 
+    # 3. Portfolio-level Virtual Simulation Comparison
+    try:
+        from app.portfolio.simulator import VirtualPortfolioSimulator, SimulationConfig
+        from app.config import get_settings
+        
+        settings = get_settings()
+        risk_cfg = settings.risk_config()
+        sim_cfg = SimulationConfig(
+            starting_capital=settings.paper_starting_cash or 100000.0,
+            risk_per_trade_pct=risk_cfg.risk_per_trade_pct,
+            max_position_pct=risk_cfg.max_position_pct,
+            max_open_positions=risk_cfg.max_open_positions,
+            max_positions_per_sector=risk_cfg.max_positions_per_sector,
+            max_correlation=getattr(risk_cfg, "max_correlation_penalty", 0.75),
+            slippage_bps=getattr(settings, "paper_slippage_bps", 3.0),
+            commission_per_share=getattr(settings, "paper_commission_per_share", 0.005),
+        )
+        
+        sim = VirtualPortfolioSimulator(sim_cfg)
+        
+        report.append("\n## Portfolio-Level Virtual Simulation Comparison")
+        report.append(
+            f"Simulated under identical risk and capital constraints: "
+            f"Starting Capital: ${sim_cfg.starting_capital:,.2f} | "
+            f"Max Open Positions: {sim_cfg.max_open_positions} | "
+            f"Risk/Trade: {sim_cfg.risk_per_trade_pct}% | "
+            f"Slippage: {sim_cfg.slippage_bps} bps\n"
+        )
+        report.append(
+            "| Policy ID | Return | Max Drawdown | Win Rate | Profit Factor | Sharpe | Sortino | CVaR 95% | Turnover | Trades |"
+        )
+        report.append(
+            "| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |"
+        )
+        
+        for policy_id in sorted(list(policies) + ["champion"]):
+            policy_sigs = [
+                r for r in records 
+                if (r.get("policy_id") or "champion") == policy_id 
+                and r.get("final_decision") == "pipeline_approved"
+            ]
+            
+            sim_res = sim.run(policy_sigs)
+            m = sim_res.metrics
+            
+            ret_str = f"{m['total_return_pct']:+.2f}%"
+            dd_str = f"{m['max_drawdown_pct']:.2f}%"
+            wr_str = f"{m['win_rate_pct']:.1f}%"
+            pf_str = f"{m['profit_factor']:.2f}" if m['profit_factor'] is not None else "N/A"
+            sh_str = f"{m['sharpe']:.2f}" if m['sharpe'] is not None else "N/A"
+            so_str = f"{m['sortino']:.2f}" if m['sortino'] is not None else "N/A"
+            cvar_str = f"{m['cvar_95']:.4f}" if m['cvar_95'] is not None else "N/A"
+            to_str = f"{m['turnover']:.2f}"
+            
+            report.append(
+                f"| **{policy_id}** | {ret_str} | {dd_str} | {wr_str} | {pf_str} | {sh_str} | {so_str} | {cvar_str} | {to_str} | {m['total_trades']} |"
+            )
+    except Exception as e:
+        applog.error("reflection", f"Failed to run portfolio simulation comparison for reflection: {e}")
+
     report_text = "\n".join(report)
 
     # Save to file

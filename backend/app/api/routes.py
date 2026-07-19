@@ -957,6 +957,60 @@ async def get_shadow_performance(
     return res
 
 
+@router.get("/strategies/portfolio-comparison")
+async def get_portfolio_comparison(
+    request: Request,
+    limit: int = 5000,
+) -> list[dict]:
+    engine = _engine(request)
+    db = _db(request)
+    signals = db.get_shadow_signals(mode=engine.mode, limit=limit)
+    
+    # Group signals by policy_id. Simulate approved entries only
+    by_policy: dict[str, list[dict]] = {}
+    for sig in signals:
+        policy_id = sig.get("policy_id", "champion")
+        if policy_id not in by_policy:
+            by_policy[policy_id] = []
+        if sig.get("final_decision") in ACCEPTED_DECISIONS:
+            by_policy[policy_id].append(sig)
+            
+    from app.portfolio.simulator import VirtualPortfolioSimulator, SimulationConfig
+    from app.config import get_settings
+    
+    settings = get_settings()
+    risk_cfg = settings.risk_config()
+    sim_cfg = SimulationConfig(
+        starting_capital=settings.paper_starting_cash or 100000.0,
+        risk_per_trade_pct=risk_cfg.risk_per_trade_pct,
+        max_position_pct=risk_cfg.max_position_pct,
+        max_open_positions=risk_cfg.max_open_positions,
+        max_positions_per_sector=risk_cfg.max_positions_per_sector,
+        max_correlation=getattr(risk_cfg, "max_correlation_penalty", 0.75),
+        slippage_bps=getattr(settings, "paper_slippage_bps", 3.0),
+        commission_per_share=getattr(settings, "paper_commission_per_share", 0.005),
+    )
+    
+    sim = VirtualPortfolioSimulator(sim_cfg)
+    
+    res = []
+    for policy_id, policy_sigs in by_policy.items():
+        sim_res = sim.run(policy_sigs)
+        m = sim_res.metrics
+        
+        eq_curve = [
+            {"time": ts.isoformat() if hasattr(ts, "isoformat") else str(ts), "equity": float(eq)}
+            for ts, eq in sim_res.equity_curve
+        ]
+        
+        res.append({
+            "policy_id": policy_id,
+            "metrics": m,
+            "equity_curve": eq_curve,
+        })
+    return res
+
+
 @router.get("/strategies/nominees")
 async def get_policy_nominees(request: Request) -> list[dict]:
     """Returns all pending Challenger promotion nominations.
