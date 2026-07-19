@@ -215,3 +215,4 @@ class EngineState(StrEnum):
     STOPPED = "stopped"
     RUNNING = "running"
     HALTED = "halted"  # kill switch tripped; manual reset required
+    SAFE_MODE = "safe_mode"

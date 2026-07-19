@@ -35,6 +35,16 @@ async def get_status(request: Request) -> dict:
     return _engine(request).status()
 
 
+@router.get("/system/heartbeat")
+async def get_system_heartbeat(request: Request) -> dict:
+    engine = _engine(request)
+    return {
+        "system_health": getattr(engine, "system_health", "NORMAL"),
+        "allow_new_entries": getattr(engine, "allow_new_entries", True),
+        "heartbeat_diagnostics": getattr(engine, "heartbeat_diagnostics", {})
+    }
+
+
 class StartBody(BaseModel):
     mode: str = "demo"
     confirm: str = ""
