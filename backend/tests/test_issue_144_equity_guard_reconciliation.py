@@ -293,3 +293,46 @@ async def test_entries_unblocked_after_recovery(engine_with_failed_reconciliatio
 
     assert engine.reconciliation_failed is False
     assert len(broker.submitted_orders) == 1
+
+
+@pytest.mark.asyncio
+async def test_unbound_local_regression_when_reconciliation_failed_and_approved_entries(engine_with_failed_reconciliation):
+    engine, broker, strat = engine_with_failed_reconciliation
+
+    # Set reconciliation_failed to True
+    engine.reconciliation_failed = True
+
+    # Setup approved entries in the decision outcome
+    from app.portfolio.allocator import PortfolioDecision
+    
+    entry_sig = Signal(
+        symbol="AAPL",
+        action=SignalAction.ENTER_LONG,
+        confidence=1.0,
+        strategy="test_strat",
+        reason="test_entry",
+        price=100.0,
+        stop_loss=90.0,
+        take_profit=120.0,
+        ml_probability=0.9,
+        candidate_id="test_candidate_123",
+    )
+    
+    outcome = PortfolioDecision(
+        approved_entries=[(entry_sig, 1.0)],
+        gated_entries=[]
+    )
+    
+    # Mock evaluate to return this outcome
+    from unittest.mock import MagicMock
+    engine.portfolio_gate.evaluate = MagicMock(return_value=outcome)
+    
+    # Run _tick and verify no crash/UnboundLocalError occurs
+    broker.should_fail_positions = False
+    broker.mock_positions = []
+    
+    await engine._tick()
+    
+    # No broker submissions should occur
+    assert len(broker.submitted_orders) == 0
+

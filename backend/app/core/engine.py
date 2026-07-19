@@ -745,70 +745,70 @@ class TradingEngine:
                             effective_pending_entries.add(info["symbol"].upper())
                         reservations = SameCycleEntryReservations.from_snapshot(account.cash, positions)
 
-                    for sig, kelly_val in decision_outcome.approved_entries:
-                        df = df_by_symbol[sig.symbol]
-                        ctx = AccountContext(
-                            equity=account.equity,
-                            cash=reservations.cash,
-                            positions=reservations.positions,
-                            day_pnl=self.portfolio.day_pnl(account.equity),
-                            session_start_equity=self.portfolio.session_start_equity or account.equity,
-                            peak_equity=self.portfolio.peak_equity,
-                            day_trades_today=self.portfolio.day_trades_today,
-                            rolling_day_trades=self.portfolio.day_trades_in_window(now),
-                            is_paper=self.broker.is_paper,
-                            pending_entry_symbols=list(effective_pending_entries),
-                        )
-                        decision = self.risk.evaluate_entry(sig, ctx, df, now=now, kelly_override=kelly_val)
-                        if not decision.approved:
-                            applog.info("engine", f"{sig.symbol.upper()}: entry rejected by RiskManager — {decision.reason}")
-                            self.publish("insight", self.insights.on_signal(sig, gated=True, gate_reason=decision.reason).model_dump(mode="json"))
-                            if getattr(sig, "candidate_id", None) is not None:
-                                self._update_shadow_decision(sig.candidate_id, "rejected", decision.reason, "risk_gate")
-                            continue
-
-                        client_order_id = decision.order.client_order_id
-                        self.pending_reconciliation_orders[client_order_id] = {
-                            "symbol": decision.order.symbol.upper(),
-                            "client_order_id": client_order_id,
-                            "side": str(decision.order.side),
-                            "qty": decision.order.qty,
-                            "order_type": str(decision.order.order_type),
-                            "limit_price": decision.order.limit_price,
-                            "submitted_at": utcnow().isoformat(),
-                        }
-                        self.db.set_setting("pending_reconciliation_orders", self.pending_reconciliation_orders)
-
-                        try:
-                            order = await self.broker.submit(decision.order)
-                            self.pending_reconciliation_orders.pop(client_order_id, None)
-                            self.db.set_setting("pending_reconciliation_orders", self.pending_reconciliation_orders)
-                            self.recent_orders.appendleft(order)
-                            self.db.save_order(order, self.mode)
-                            self.publish("insight", self.insights.on_signal(sig, gated=False).model_dump(mode="json"))
-                            self.publish("orders", self.orders_payload())
-                            if getattr(sig, "candidate_id", None) is not None:
-                                self._update_shadow_decision(sig.candidate_id, "accepted", "", "none")
-                        except Exception as exc:
-                            applog.error("engine", f"Ambiguous submission exception for {decision.order.symbol} ({client_order_id}): {exc}")
-                            order = Order(
-                                id=client_order_id,
-                                client_order_id=client_order_id,
-                                symbol=decision.order.symbol,
-                                side=decision.order.side,
-                                qty=decision.order.qty,
-                                order_type=decision.order.order_type,
-                                limit_price=decision.order.limit_price,
-                                status=OrderStatus.PENDING,
-                                reason=f"Ambiguous submit: {exc}"
+                        for sig, kelly_val in decision_outcome.approved_entries:
+                            df = df_by_symbol[sig.symbol]
+                            ctx = AccountContext(
+                                equity=account.equity,
+                                cash=reservations.cash,
+                                positions=reservations.positions,
+                                day_pnl=self.portfolio.day_pnl(account.equity),
+                                session_start_equity=self.portfolio.session_start_equity or account.equity,
+                                peak_equity=self.portfolio.peak_equity,
+                                day_trades_today=self.portfolio.day_trades_today,
+                                rolling_day_trades=self.portfolio.day_trades_in_window(now),
+                                is_paper=self.broker.is_paper,
+                                pending_entry_symbols=list(effective_pending_entries),
                             )
-                            self.db.save_order(order, self.mode)
+                            decision = self.risk.evaluate_entry(sig, ctx, df, now=now, kelly_override=kelly_val)
+                            if not decision.approved:
+                                applog.info("engine", f"{sig.symbol.upper()}: entry rejected by RiskManager — {decision.reason}")
+                                self.publish("insight", self.insights.on_signal(sig, gated=True, gate_reason=decision.reason).model_dump(mode="json"))
+                                if getattr(sig, "candidate_id", None) is not None:
+                                    self._update_shadow_decision(sig.candidate_id, "rejected", decision.reason, "risk_gate")
+                                continue
 
-                        # Reserve active same-cycle submissions before evaluating the next candidate.
-                        # This overlays the stale broker snapshot for cash, position-count, and sector checks.
-                        reference_price = sig.price or float(df["close"].iloc[-1])
-                        if reservations.reserve(order, reference_price):
-                            effective_pending_entries.add(sig.symbol.upper())
+                            client_order_id = decision.order.client_order_id
+                            self.pending_reconciliation_orders[client_order_id] = {
+                                "symbol": decision.order.symbol.upper(),
+                                "client_order_id": client_order_id,
+                                "side": str(decision.order.side),
+                                "qty": decision.order.qty,
+                                "order_type": str(decision.order.order_type),
+                                "limit_price": decision.order.limit_price,
+                                "submitted_at": utcnow().isoformat(),
+                            }
+                            self.db.set_setting("pending_reconciliation_orders", self.pending_reconciliation_orders)
+
+                            try:
+                                order = await self.broker.submit(decision.order)
+                                self.pending_reconciliation_orders.pop(client_order_id, None)
+                                self.db.set_setting("pending_reconciliation_orders", self.pending_reconciliation_orders)
+                                self.recent_orders.appendleft(order)
+                                self.db.save_order(order, self.mode)
+                                self.publish("insight", self.insights.on_signal(sig, gated=False).model_dump(mode="json"))
+                                self.publish("orders", self.orders_payload())
+                                if getattr(sig, "candidate_id", None) is not None:
+                                    self._update_shadow_decision(sig.candidate_id, "accepted", "", "none")
+                            except Exception as exc:
+                                applog.error("engine", f"Ambiguous submission exception for {decision.order.symbol} ({client_order_id}): {exc}")
+                                order = Order(
+                                    id=client_order_id,
+                                    client_order_id=client_order_id,
+                                    symbol=decision.order.symbol,
+                                    side=decision.order.side,
+                                    qty=decision.order.qty,
+                                    order_type=decision.order.order_type,
+                                    limit_price=decision.order.limit_price,
+                                    status=OrderStatus.PENDING,
+                                    reason=f"Ambiguous submit: {exc}"
+                                )
+                                self.db.save_order(order, self.mode)
+
+                            # Reserve active same-cycle submissions before evaluating the next candidate.
+                            # This overlays the stale broker snapshot for cash, position-count, and sector checks.
+                            reference_price = sig.price or float(df["close"].iloc[-1])
+                            if reservations.reserve(order, reference_price):
+                                effective_pending_entries.add(sig.symbol.upper())
 
             await self._drain_fills(now)
 
