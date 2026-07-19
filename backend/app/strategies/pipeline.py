@@ -167,9 +167,9 @@ class SignalPipeline:
                     use_detailed = True
 
             if use_detailed:
-                score_res = self.model.score_action_detailed(features, sig.action, symbol=symbol)
+                score_res = self.model.score_action_detailed(features, sig.action, symbol=symbol, regime_key=regime_key)
             else:
-                prob = self.model.score_action(features, sig.action, symbol=symbol)
+                prob = self.model.score_action(features, sig.action, symbol=symbol, regime_key=regime_key)
                 from app.ai.model import ScoreActionResult
                 score_res = ScoreActionResult(
                     probability=prob,
@@ -180,6 +180,13 @@ class SignalPipeline:
                     fallback_reason=None if prob is not None else "score_action returned None"
                 )
             ml = score_res.probability
+            if ml is not None:
+                from app.ai.model_legacy import _validate_signal_probability
+                _, reason = _validate_signal_probability(ml)
+                if reason is not None:
+                    ml = None
+                    from dataclasses import replace
+                    score_res = replace(score_res, probability=None, specialist_status="INVALID_SCORE", fallback_reason=reason)
             applog.info(
                 "pipeline",
                 f"{symbol}: model_source={score_res.model_source} | "

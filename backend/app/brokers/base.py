@@ -1,4 +1,4 @@
-"""Broker interface and shared types."""
+"""Broker interface, shared types, and broker factory."""
 
 from __future__ import annotations
 
@@ -7,12 +7,15 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from app.config import Settings
     from app.core.domain import (
         AccountSnapshot,
         Order,
         OrderRequest,
         Position,
     )
+
+from app.core.domain import OrderSide
 
 
 class BrokerTimeoutError(RuntimeError):
@@ -25,14 +28,21 @@ class BrokerTimeoutError(RuntimeError):
 
 @dataclass
 class Fill:
+    order_id: str
     symbol: str
-    side: str  # 'BUY' | 'SELL'
+    side: OrderSide | str  # 'BUY' | 'SELL' or OrderSide enum
     qty: float
     price: float
-    strategy: str = ""
+    commission: float = 0.0
+    strategy: str = "manual"
     reason: str = ""
-    order_id: str = ""
     ts: datetime = field(default_factory=lambda: datetime.now(UTC))
+    signal_timestamp_utc: datetime | None = None
+    decision_bar_timestamp_utc: datetime | None = None
+    broker_fill_key: str | None = None
+    cumulative_qty: float | None = None
+    broker_mode: str | None = None
+    broker_account_id: str | None = None
 
 
 class Broker:
@@ -55,6 +65,9 @@ class Broker:
     async def submit(self, req: OrderRequest) -> Order:  # pragma: no cover
         ...
 
+    async def get_order_by_client_id(self, client_order_id: str) -> Order | None:  # pragma: no cover
+        return None
+
     async def poll_fills(self) -> None:  # pragma: no cover
         ...
 
@@ -64,8 +77,44 @@ class Broker:
     async def cancel(self, order_id: str) -> bool:  # pragma: no cover
         return False
 
+    async def cancel_all(self) -> None:  # pragma: no cover
+        pass
+
     async def close_position(self, symbol: str, reason: str = "manual") -> Order | None:  # pragma: no cover
         return None
 
     async def flatten_all(self, reason: str = "flatten") -> list[Order]:  # pragma: no cover
         return []
+
+
+def make_broker(broker_name: str, settings: Settings) -> Broker:
+    """Factory — instantiate the correct Broker implementation by name.
+
+    Supported names:
+        ``"alpaca"``      — Live/paper Alpaca broker.
+        ``"paper_sim"``   — Local in-process paper simulator (no Alpaca keys required).
+
+    Raises
+    ------
+    ValueError
+        When *broker_name* is not recognised.
+    """
+    name = broker_name.lower().strip()
+    if name == "alpaca":
+        from app.brokers.alpaca import AlpacaBroker
+        return AlpacaBroker(
+            api_key=settings.alpaca_api_key,
+            api_secret=settings.alpaca_api_secret,
+            paper=settings.alpaca_paper,
+        )
+    if name in ("paper_sim", "paper", "demo"):
+        from app.brokers.paper import PaperBroker
+        return PaperBroker(
+            starting_cash=settings.paper_starting_cash,
+            slippage_bps=settings.paper_slippage_bps,
+            commission_per_share=settings.paper_commission_per_share,
+        )
+    raise ValueError(
+        f"Unknown broker {broker_name!r}. "
+        "Valid choices are: 'alpaca', 'paper_sim'."
+    )

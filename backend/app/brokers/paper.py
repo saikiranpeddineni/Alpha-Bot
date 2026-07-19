@@ -88,6 +88,12 @@ class PaperBroker(Broker):
         fills, self._fills = self._fills, []
         return fills
 
+    async def get_order_by_client_id(self, client_order_id: str) -> Order | None:
+        for order in self._orders.values():
+            if order.client_order_id == client_order_id:
+                return order
+        return None
+
     async def connect(self) -> None:
         applog.info("broker.paper", f"Paper simulator ready (cash ${self.cash:,.0f})")
 

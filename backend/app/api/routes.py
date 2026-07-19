@@ -316,6 +316,7 @@ class BacktestBody(BaseModel):
     starting_cash: float = Field(default=100_000.0, gt=0)
     use_ml_gate: bool = True
     use_dynamic_scanner: bool = False
+    ignore_temporal_leakage: bool = False
     debug_mode: bool = False
     strategies: dict[str, dict] | None = None
     start_date: str | None = None
@@ -345,7 +346,7 @@ async def post_backtest(body: BacktestBody, request: Request) -> dict:
     # Atomically attempt to acquire the lock without queuing.
     # timeout=0 means: succeed immediately if free, raise TimeoutError if not.
     try:
-        await asyncio.wait_for(lock.acquire(), timeout=0)
+        await asyncio.wait_for(lock.acquire(), timeout=1e-6)
     except asyncio.TimeoutError:
         raise HTTPException(status_code=409, detail="A backtest is already running")
 
@@ -388,6 +389,7 @@ async def post_backtest(body: BacktestBody, request: Request) -> dict:
             starting_cash=body.starting_cash,
             use_ml_gate=body.use_ml_gate,
             use_dynamic_scanner=body.use_dynamic_scanner,
+            ignore_temporal_leakage=body.ignore_temporal_leakage,
             debug_mode=body.debug_mode,
             strategies=merged_strategies,
             risk=engine.risk_config,
@@ -401,6 +403,19 @@ async def post_backtest(body: BacktestBody, request: Request) -> dict:
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        finally:
+            # --- FIX #69: Belt-and-suspenders assertion. run_backtest() deep-copies
+            # engine.model and never writes to the live singleton, but we assert
+            # and forcibly reset here to guarantee the invariant holds even if a
+            # future refactor accidentally passes the singleton without copying.
+            if getattr(engine.model, "backtest_start_time", None) is not None:
+                applog.warning(
+                    "backtest",
+                    "BUG #69: engine.model.backtest_start_time was non-None after "
+                    "run_backtest() returned — forcibly resetting to None to protect "
+                    "live ML temporal gate.",
+                )
+                engine.model.backtest_start_time = None
         payload = result.model_dump(mode="json")
         summary = {
             "symbols": params.symbols,
@@ -437,3 +452,276 @@ async def run_scanner(request: Request) -> dict:
         return {"status": "success", "watchlist": new_watchlist}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/shadow-ledger")
+async def get_shadow_ledger(request: Request, limit: int = 200) -> list[dict]:
+    engine = _engine(request)
+    return _db(request).get_shadow_signals(mode=engine.mode, limit=limit)
+
+
+@router.get("/shadow-ledger/analytics")
+async def get_shadow_ledger_analytics(request: Request) -> dict:
+    engine = _engine(request)
+    signals = _db(request).get_shadow_signals(mode=engine.mode, limit=5000)
+    
+    total_signals = len(signals)
+    rejected_signals = [s for s in signals if s.get("final_decision") == "rejected"]
+    accepted_signals = [s for s in signals if s.get("final_decision") == "accepted"]
+    replayed_signals = [s for s in signals if s.get("replayed")]
+    
+    winning_replayed = [s for s in replayed_signals if (s.get("simulated_pnl") or 0.0) > 0.0]
+    
+    total_replayed = len(replayed_signals)
+    win_rate = (len(winning_replayed) / total_replayed * 100.0) if total_replayed > 0 else 0.0
+    
+    avg_pnl = (sum((s.get("simulated_pnl") or 0.0) for s in replayed_signals) / total_replayed) if total_replayed > 0 else 0.0
+    avg_mfe = (sum((s.get("mfe_pct") or 0.0) for s in replayed_signals) / total_replayed) if total_replayed > 0 else 0.0
+    avg_mae = (sum((s.get("mae_pct") or 0.0) for s in replayed_signals) / total_replayed) if total_replayed > 0 else 0.0
+    
+    by_strategy = {}
+    for s in signals:
+        strat = s.get("strategy", "unknown")
+        if strat not in by_strategy:
+            by_strategy[strat] = {
+                "total": 0,
+                "rejected": 0,
+                "accepted": 0,
+                "replayed": 0,
+                "wins": 0,
+                "losses": 0,
+                "total_pnl": 0.0,
+                "total_mfe": 0.0,
+                "total_mae": 0.0,
+            }
+        
+        stat = by_strategy[strat]
+        stat["total"] += 1
+        dec = s.get("final_decision")
+        if dec == "rejected":
+            stat["rejected"] += 1
+        elif dec == "accepted":
+            stat["accepted"] += 1
+            
+        if s.get("replayed"):
+            stat["replayed"] += 1
+            pnl = s.get("simulated_pnl") or 0.0
+            stat["total_pnl"] += pnl
+            stat["total_mfe"] += s.get("mfe_pct") or 0.0
+            stat["total_mae"] += s.get("mae_pct") or 0.0
+            if pnl > 0:
+                stat["wins"] += 1
+            else:
+                stat["losses"] += 1
+
+    strategy_breakdown = {}
+    for strat, data in by_strategy.items():
+        rep = data["replayed"]
+        strategy_breakdown[strat] = {
+            "total_signals": data["total"],
+            "rejected_signals": data["rejected"],
+            "accepted_signals": data["accepted"],
+            "replayed_signals": rep,
+            "win_rate": round(data["wins"] / rep * 100.0, 2) if rep > 0 else 0.0,
+            "avg_simulated_return": round(data["total_pnl"] / rep, 4) if rep > 0 else 0.0,
+            "avg_mfe": round(data["total_mfe"] / rep, 4) if rep > 0 else 0.0,
+            "avg_mae": round(data["total_mae"] / rep, 4) if rep > 0 else 0.0,
+        }
+
+    by_rejection = {}
+    for s in signals:
+        if s.get("final_decision") != "rejected":
+            continue
+        stage = s.get("rejection_stage") or "unknown"
+        if stage not in by_rejection:
+            by_rejection[stage] = {
+                "count": 0,
+                "replayed": 0,
+                "wins": 0,
+                "losses": 0,
+                "total_pnl": 0.0,
+                "total_mfe": 0.0,
+                "total_mae": 0.0,
+            }
+        
+        stat = by_rejection[stage]
+        stat["count"] += 1
+        if s.get("replayed"):
+            stat["replayed"] += 1
+            pnl = s.get("simulated_pnl") or 0.0
+            stat["total_pnl"] += pnl
+            stat["total_mfe"] += s.get("mfe_pct") or 0.0
+            stat["total_mae"] += s.get("mae_pct") or 0.0
+            if pnl > 0:
+                stat["wins"] += 1
+            else:
+                stat["losses"] += 1
+
+    rejection_breakdown = {}
+    for stage, data in by_rejection.items():
+        rep = data["replayed"]
+        rejection_breakdown[stage] = {
+            "count": data["count"],
+            "replayed_count": rep,
+            "win_rate": round(data["wins"] / rep * 100.0, 2) if rep > 0 else 0.0,
+            "avg_simulated_return_if_traded": round(data["total_pnl"] / rep, 4) if rep > 0 else 0.0,
+            "avg_mfe": round(data["total_mfe"] / rep, 4) if rep > 0 else 0.0,
+            "avg_mae": round(data["total_mae"] / rep, 4) if rep > 0 else 0.0,
+        }
+
+    return {
+        "summary": {
+            "total_signals": total_signals,
+            "rejected_signals": len(rejected_signals),
+            "accepted_signals": len(accepted_signals),
+            "replayed_signals": total_replayed,
+            "win_rate_pct": round(win_rate, 2),
+            "avg_simulated_return_pct": round(avg_pnl, 4),
+            "avg_mfe_pct": round(avg_mfe, 4),
+            "avg_mae_pct": round(avg_mae, 4),
+        },
+        "by_strategy": strategy_breakdown,
+        "by_rejection_stage": rejection_breakdown,
+    }
+
+
+class PromoteRequest(BaseModel):
+    policy_id: str
+
+
+@router.get("/strategies/challengers")
+async def get_challengers(request: Request) -> list[dict]:
+    from app.strategies.challenger import get_active_challengers
+    res = []
+    for c in get_active_challengers():
+        res.append({
+            "policy_id": c.policy_id,
+            "ml_threshold": c.ml_threshold,
+            "risk_multiplier": getattr(c, "risk_multiplier", 1.0),
+            "description": f"Challenger policy with threshold={c.ml_threshold}"
+        })
+    return res
+
+
+@router.get("/strategies/shadow-performance")
+async def get_shadow_performance(request: Request) -> list[dict]:
+    db = _db(request)
+    signals = db.get_shadow_signals(limit=5000)
+    
+    by_policy = {}
+    for sig in signals:
+        policy_id = sig.get("policy_id", "champion")
+        if policy_id not in by_policy:
+            by_policy[policy_id] = []
+        by_policy[policy_id].append(sig)
+        
+    res = []
+    for policy_id, sigs in by_policy.items():
+        total_signals = len(sigs)
+        accepted = [s for s in sigs if s.get("final_decision") == "pipeline_approved"]
+        rejected = [s for s in sigs if s.get("final_decision") == "rejected"]
+        
+        trades = [s for s in sigs if s.get("replayed")]
+        wins = [s for s in trades if (s.get("simulated_pnl") or 0.0) > 0.0]
+        total_realized = sum((s.get("simulated_pnl") or 0.0) for s in trades)
+        
+        win_rate = (len(wins) / len(trades) * 100.0) if trades else 0.0
+        avg_expectancy = (total_realized / len(trades)) if trades else 0.0
+        
+        res.append({
+            "policy_id": policy_id,
+            "total_signals": total_signals,
+            "accepted_count": len(accepted),
+            "rejected_count": len(rejected),
+            "total_trades": len(trades),
+            "win_rate": round(win_rate, 2),
+            "total_realized_r": round(total_realized, 4),
+            "average_expectancy": round(avg_expectancy, 4),
+        })
+    return res
+
+
+@router.get("/strategies/nominees")
+async def get_policy_nominees(request: Request) -> list[dict]:
+    """Returns all pending Challenger promotion nominations.
+    Nominations are generated by EOD reflection analysis when a Challenger satisfies
+    statistical criteria. No production config is changed until POST /strategies/promote is called.
+    """
+    db = _db(request)
+    return db.get_pending_nominees()
+
+
+@router.post("/strategies/promote")
+async def promote_policy(request: Request, body: PromoteRequest) -> dict:
+    engine = _engine(request)
+    db = _db(request)
+    policy_id = body.policy_id
+    
+    if policy_id == "champion":
+        raise HTTPException(status_code=400, detail="Champion is already production.")
+        
+    from app.strategies.challenger import get_active_challengers
+    challengers = get_active_challengers()
+    target_challenger = next((c for c in challengers if c.policy_id == policy_id), None)
+    if not target_challenger:
+        raise HTTPException(status_code=404, detail=f"Challenger policy {policy_id!r} not found.")
+        
+    try:
+        snapshot = target_challenger.to_snapshot()
+        db.set_setting("active_policy_snapshot", snapshot)
+        applog.info(
+            "engine.promotion",
+            f"Policy snapshot persisted before promotion: {snapshot}"
+        )
+
+        # Apply settings from the snapshot (not individual field references) for atomicity
+        db.set_setting("ml_threshold", snapshot["ml_threshold"])
+        
+        # Reset engine risk config back to base settings from the DB first (without prior offsets)
+        stored_risk = db.get_setting("risk_config") or {}
+        default_risk = engine.settings.risk_config().model_dump()
+        merged_risk = {**default_risk, **stored_risk}
+        
+        # Apply the new offset to the merged base risk config in-memory
+        from app.config import RiskConfig
+        engine.risk_config = RiskConfig(**merged_risk)
+        
+        offset = float(snapshot.get("score_threshold_offset", 0.0))
+        if offset != 0.0:
+            engine.risk_config.score_threshold_event = max(0.0, engine.risk_config.score_threshold_event + offset)
+            engine.risk_config.score_threshold_trend = max(0.0, engine.risk_config.score_threshold_trend + offset)
+            engine.risk_config.score_threshold_range = max(0.0, engine.risk_config.score_threshold_range + offset)
+            engine.risk_config.score_threshold_volatile = max(0.0, engine.risk_config.score_threshold_volatile + offset)
+            
+        # Synchronize risk manager and pipeline engines
+        if engine.risk:
+            engine.risk.config = engine.risk_config
+            
+        # Update running engine properties in-place from the snapshot
+        pipeline = getattr(engine, "pipeline", None)
+        if pipeline:
+            pipeline.ml_threshold = snapshot["ml_threshold"]
+            if hasattr(pipeline, "trade_score_engine") and pipeline.trade_score_engine is not None:
+                pipeline.trade_score_engine.risk_config = engine.risk_config
+            
+        evaluator = getattr(engine, "evidence_evaluator", None)
+        if evaluator:
+            evaluator.ml_threshold = snapshot["ml_threshold"]
+            
+        applog.info(
+            "engine.promotion",
+            f"SUCCESS: Promoted policy {policy_id!r} to Champion production state in-place. "
+            f"Snapshot: {snapshot}"
+        )
+        
+        return {
+            "status": "success",
+            "message": f"Promoted policy {policy_id!r} successfully.",
+            "config": {
+                "ml_threshold": snapshot["ml_threshold"],
+                "score_threshold_offset": offset,
+            },
+            "snapshot": snapshot,
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to promote policy: {exc}") from exc

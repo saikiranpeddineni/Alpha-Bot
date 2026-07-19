@@ -110,7 +110,7 @@ class TestPipelineInvalidScoreFailClosed:
 
     def _make_pipeline(self, model):
         from app.strategies.pipeline import SignalPipeline
-        with patch("app.strategies.pipeline.MetaLabelEngine"):
+        with patch("app.ai.prediction.MetaLabelEngine"):
             pl = SignalPipeline(model=model, ml_threshold=0.55)
         return pl
 
