@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { api } from "../api";
 import { fmtDateTime, fmtMoney, fmtPct, fmtQty, fmtSigned, fmtTime, pnlClass } from "../format";
 import { useStore } from "../store";
+import { ShadowAnalyticsResponse, GateAlphaResponse, GateAlphaStats, AltExitStats } from "../types";
 
 type Tab = "positions" | "orders" | "trades" | "logs" | "shadow";
 
@@ -326,7 +327,7 @@ export function ShadowAnalyticsTab() {
             </tr>
           </thead>
           <tbody>
-            {Object.entries(gateAlpha).map(([gateName, info]) => {
+            {(Object.entries(gateAlpha) as [string, GateAlphaStats][]).map(([gateName, info]) => {
               const friendlyName = gateName === "ml_gate" ? "ML Alpha Gate" : gateName === "meta_label_gate" ? "Meta-Label Gate" : "Trade Score Gate";
               return (
                 <tr key={gateName}>
@@ -404,7 +405,7 @@ export function ShadowAnalyticsTab() {
             </tr>
           </thead>
           <tbody>
-            {analytics.alternative_exits_comparison?.map((p) => {
+            {analytics.alternative_exits_comparison?.map((p: AltExitStats) => {
               const isProduction = p.policy_id === "exit_production";
               const friendlyName = p.policy_id === "exit_production"
                 ? "Champion Production Exit"

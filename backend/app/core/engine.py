@@ -288,6 +288,7 @@ class TradingEngine:
         ml_thresh = self.risk_config.ml_confidence_threshold
         if active_snapshot and "ml_threshold" in active_snapshot:
             ml_thresh = float(active_snapshot["ml_threshold"])
+            self.risk_config.ml_confidence_threshold = ml_thresh
             applog.info("engine", f"Restored active promoted policy snapshot on startup: {active_snapshot}")
             offset = float(active_snapshot.get("score_threshold_offset", 0.0))
             if offset != 0.0:
@@ -298,6 +299,7 @@ class TradingEngine:
                 applog.info("engine", f"Applied score threshold offset of {offset:+.1f} points to RiskConfig thresholds.")
         elif self.db.get_setting("ml_threshold") is not None:
             ml_thresh = float(self.db.get_setting("ml_threshold"))
+            self.risk_config.ml_confidence_threshold = ml_thresh
             applog.info("engine", f"Restored active promoted ML threshold setting on startup: {ml_thresh}")
 
         self.pipeline = SignalPipeline(self.model, ml_thresh)
@@ -460,6 +462,44 @@ class TradingEngine:
             return True
         except BaseException as exc:
             self.last_error = f"HARD HALTED — liquidation unresolved: {type(exc).__name__}: {exc}"
+            applog.error("engine", self.last_error)
+            self.publish("status", self.status())
+            if isinstance(exc, (KeyboardInterrupt, SystemExit, asyncio.CancelledError)):
+                raise
+            return False
+
+    async def _reconcile_daily_halt_liquidation(self, now: datetime) -> bool:
+        """Keep daily halt liquidation active until broker state proves flat."""
+        assert self.broker is not None
+        import asyncio
+        try:
+            open_orders = await self.broker.open_orders()
+            if open_orders:
+                applog.warning("engine", f"Daily halt liquidation: cancelling {len(open_orders)} open orders")
+                await self.broker.cancel_all()
+            positions = await self.broker.positions()
+            if positions:
+                applog.warning("engine", f"Daily halt liquidation unresolved: flattening {len(positions)} authoritative positions")
+                await self.broker.flatten_all(reason="daily loss halt")
+                await self._drain_fills(now)
+            residual_positions = await self.broker.positions()
+            residual_orders = await self.broker.open_orders()
+            if residual_positions or residual_orders:
+                symbols = sorted({position.symbol for position in residual_positions})
+                self.last_error = (
+                    "DAILY LOSS HALTED — liquidation unresolved: "
+                    f"residual_positions={symbols}, open_orders={len(residual_orders)}"
+                )
+                applog.error("engine", self.last_error)
+                self.publish("status", self.status())
+                return False
+            if self.last_error.startswith("DAILY LOSS HALTED — liquidation unresolved"):
+                self.last_error = ""
+            applog.info("engine", "Daily halt liquidation authoritatively complete: flat")
+            self.publish("status", self.status())
+            return True
+        except BaseException as exc:
+            self.last_error = f"DAILY LOSS HALTED — liquidation unresolved: {type(exc).__name__}: {exc}"
             applog.error("engine", self.last_error)
             self.publish("status", self.status())
             if isinstance(exc, (KeyboardInterrupt, SystemExit, asyncio.CancelledError)):
@@ -657,14 +697,14 @@ class TradingEngine:
             self.publish("status", self.status())
         elif self.state == EngineState.HALTED and self.risk.hard_halted:
             await self._reconcile_hard_halt_liquidation(now)
-        elif halt == "daily":
-            await self.broker.flatten_all(reason="daily loss halt")
-            await self._drain_fills(now)
-            self.insights.on_risk_event(
-                "Daily loss limit hit",
-                f"Trading paused until the next session (day P&L {ctx.day_pnl:+,.2f}).",
-                severity="danger",
-            )
+        elif halt == "daily" or (self.risk.daily_halted and not self.risk.hard_halted):
+            await self._reconcile_daily_halt_liquidation(now)
+            if halt == "daily":
+                self.insights.on_risk_event(
+                    "Daily loss limit hit",
+                    f"Trading paused until the next session (day P&L {ctx.day_pnl:+,.2f}).",
+                    severity="danger",
+                )
 
         # 4. end-of-day flatten. Completion is latched only after an
         # authoritative broker post-condition proves no positions or open orders.

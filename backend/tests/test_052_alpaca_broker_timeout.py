@@ -167,20 +167,19 @@ async def test_close_position_timeout_returns_none(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# flatten_all timeout: does not raise (safety-critical path stays non-blocking)
+# flatten_all timeout: raises exception so callers can escalate and retry
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_flatten_all_timeout_does_not_raise(monkeypatch):
+async def test_flatten_all_timeout_does_raise(monkeypatch):
     broker = _make_broker(monkeypatch)
 
     async def _timed_out_call(fn, *args, **kwargs):
         raise BrokerTimeoutError("simulated timeout")
 
     with patch("app.brokers.alpaca._call", side_effect=_timed_out_call):
-        result = await broker.flatten_all(reason="eod")
-
-    assert result == []
+        with pytest.raises(BrokerTimeoutError):
+            await broker.flatten_all(reason="eod")
 
 
 # ---------------------------------------------------------------------------

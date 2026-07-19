@@ -437,10 +437,19 @@ class AlpacaBroker(Broker):
 
     async def flatten_all(self, reason: str = "flatten") -> list[Order]:
         try:
-            await _call(self._client.close_all_positions, cancel_orders=True, label="close_all_positions")
+            res = await _call(self._client.close_all_positions, cancel_orders=True, label="close_all_positions")
             applog.trade("broker.alpaca", f"Flattened all positions ({reason})")
-        except BrokerTimeoutError:
-            applog.error("broker.alpaca", "flatten_all timed out; manual intervention may be required")
-        except Exception as exc:  # noqa: BLE001
+            orders = []
+            if isinstance(res, list):
+                for raw in res:
+                    try:
+                        orders.append(self._to_order(raw))
+                    except Exception:
+                        pass
+            return orders
+        except BrokerTimeoutError as exc:
+            applog.error("broker.alpaca", f"flatten_all timed out: {exc}")
+            raise
+        except Exception as exc:
             applog.error("broker.alpaca", f"flatten failed: {exc}")
-        return []
+            raise
