@@ -891,7 +891,6 @@ async def get_challengers(request: Request) -> list[dict]:
         })
     return res
 
-
 @router.get("/strategies/shadow-performance")
 async def get_shadow_performance(
     request: Request,
@@ -903,6 +902,23 @@ async def get_shadow_performance(
     signals = db.get_shadow_signals(mode=engine.mode, limit=limit)
     total_available = len(signals)
     truncated = total_available >= limit
+
+    from app.portfolio.simulator import VirtualPortfolioSimulator, SimulationConfig
+    from app.config import get_settings
+    
+    settings = get_settings()
+    risk_cfg = settings.risk_config()
+    sim_cfg = SimulationConfig(
+        starting_capital=settings.paper_starting_cash or 100000.0,
+        risk_per_trade_pct=risk_cfg.risk_per_trade_pct,
+        max_position_pct=risk_cfg.max_position_pct,
+        max_open_positions=risk_cfg.max_open_positions,
+        max_positions_per_sector=risk_cfg.max_positions_per_sector,
+        max_correlation=getattr(risk_cfg, "max_correlation_penalty", 0.75),
+        slippage_bps=getattr(settings, "paper_slippage_bps", 3.0),
+        commission_per_share=getattr(settings, "paper_commission_per_share", 0.005),
+    )
+    sim = VirtualPortfolioSimulator(sim_cfg)
 
     by_policy: dict[str, list[dict]] = {}
     for sig in signals:
@@ -923,6 +939,7 @@ async def get_shadow_performance(
         # not simulated_pnl which is a percentage and not an R-multiple.
         wins = [s for s in trades if (s.get("simulated_pnl") or 0.0) > 0.0]
         breakevens_count = sum(1 for s in trades if (s.get("simulated_pnl") or 0.0) == 0.0)
+
         # Sum actual R-multiples from the replay outcomes canonical horizon.
         from app.strategies.memory import _canonical_realized_r
         total_realized_r = sum(
@@ -933,6 +950,10 @@ async def get_shadow_performance(
 
         win_rate = (len(wins) / len(trades) * 100.0) if trades else 0.0
         avg_realized_r = (total_realized_r / len(trades)) if trades else 0.0
+
+        # Run virtual portfolio simulation to obtain portfolio-level metrics
+        sim_res = sim.run(accepted)
+        portfolio_m = sim_res.metrics
 
         res.append({
             "policy_id": policy_id,
@@ -947,6 +968,7 @@ async def get_shadow_performance(
             # Percentage return is exposed separately with a clearly named field.
             "total_simulated_return_pct": round(total_simulated_return_pct, 4),
             "breakevens": breakevens_count,
+            "portfolio_metrics": portfolio_m,
             # Fix C8: expose truncation metadata at policy level
             "population_meta": {
                 "limit": limit,

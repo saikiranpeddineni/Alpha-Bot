@@ -51,6 +51,8 @@ class SimulatedPosition:
     initial_risk_per_share: float
     exit_timestamp_inferred: bool = False
     margin_held: float = 0.0
+    entry_slippage: float = 0.0
+    entry_commission: float = 0.0
 
 
 @dataclass
@@ -231,13 +233,13 @@ class VirtualPortfolioSimulator:
                 
                 if pos.direction == "long":
                     gross_exit_val = pos.qty * pos.exit_price
-                    realized_pnl = gross_exit_val - (pos.qty * pos.entry_price) - slippage_cost_exit - commission_exit
+                    realized_pnl = (gross_exit_val - slippage_cost_exit - commission_exit) - (pos.qty * pos.entry_price + pos.entry_slippage + pos.entry_commission)
                     cash += gross_exit_val - slippage_cost_exit - commission_exit
                 else:  # short
                     # Close value = cost to buy back
                     buyback_cost = pos.qty * pos.exit_price
                     borrow_fee = self._calculate_borrow_fee(pos.qty * pos.entry_price, pos.entry_timestamp, pos.exit_timestamp)
-                    realized_pnl = (pos.qty * pos.entry_price) - buyback_cost - slippage_cost_exit - commission_exit - borrow_fee
+                    realized_pnl = (pos.qty * pos.entry_price - pos.entry_slippage - pos.entry_commission) - buyback_cost - slippage_cost_exit - commission_exit - borrow_fee
                     
                     # Cash release: returned margin + net realized PnL
                     cash += pos.margin_held + realized_pnl
@@ -376,7 +378,9 @@ class VirtualPortfolioSimulator:
                         strategy=strategy,
                         initial_risk_per_share=risk_distance,
                         exit_timestamp_inferred=t["exit_timestamp_inferred"],
-                        margin_held=margin_held
+                        margin_held=margin_held,
+                        entry_slippage=slippage_cost,
+                        entry_commission=comm
                     )
 
             # Record equity watermark
@@ -394,12 +398,12 @@ class VirtualPortfolioSimulator:
                 
                 if pos.direction == "long":
                     gross_exit_val = pos.qty * pos.exit_price
-                    realized_pnl = gross_exit_val - (pos.qty * pos.entry_price) - slippage_cost_exit - commission_exit
+                    realized_pnl = (gross_exit_val - slippage_cost_exit - commission_exit) - (pos.qty * pos.entry_price + pos.entry_slippage + pos.entry_commission)
                     cash += gross_exit_val - slippage_cost_exit - commission_exit
                 else:  # short
                     buyback_cost = pos.qty * pos.exit_price
                     borrow_fee = self._calculate_borrow_fee(pos.qty * pos.entry_price, pos.entry_timestamp, pos.exit_timestamp)
-                    realized_pnl = (pos.qty * pos.entry_price) - buyback_cost - slippage_cost_exit - commission_exit - borrow_fee
+                    realized_pnl = (pos.qty * pos.entry_price - pos.entry_slippage - pos.entry_commission) - buyback_cost - slippage_cost_exit - commission_exit - borrow_fee
                     cash += pos.margin_held + realized_pnl
                 
                 completed_trades.append({
