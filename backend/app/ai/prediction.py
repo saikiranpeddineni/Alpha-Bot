@@ -19,7 +19,7 @@ from __future__ import annotations
 import math
 import warnings
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -389,7 +389,7 @@ class WalkForwardValidator:
         if n_windows < self.min_windows:
             applog.warning(
                 "wfv",
-                f"Only {n_windows} windows (need ≥{self.min_windows}). "
+                f"Only {n_windows} windows (need \u2265{self.min_windows}). "
                 "Using full-dataset training.",
             )
             clf = _make_classifier("lgbm")
@@ -488,7 +488,7 @@ class WalkForwardResult:
 # 4. Trade Score Engine
 # ---------------------------------------------------------------------------
 
-# Maps Regime → relative difficulty multiplier used to pick the right gate.
+# Maps Regime -> relative difficulty multiplier used to pick the right gate.
 _REGIME_SCORE: dict[str, float] = {
     Regime.TREND_UP:   1.0,
     Regime.TREND_DOWN: 1.0,
@@ -498,15 +498,15 @@ _REGIME_SCORE: dict[str, float] = {
 
 
 class TradeScoreEngine:
-    """Computes a 0–100 composite Trade Score for a proposed entry.
+    """Computes a 0-100 composite Trade Score for a proposed entry.
 
     Components (weights configurable via Settings):
-      w1 × ML probability of success
-      w2 × Expected return score
-      w3 × Reward / Risk ratio score
-      w4 × Market regime score
-      w5 × Liquidity score
-      w6 × Sector strength score
+      w1 x ML probability of success
+      w2 x Expected return score
+      w3 x Reward / Risk ratio score
+      w4 x Market regime score
+      w5 x Liquidity score
+      w6 x Sector strength score
 
     The result is compared against the regime-specific gating threshold
     from RiskConfig to approve or reject the proposed trade.
@@ -542,7 +542,7 @@ class TradeScoreEngine:
         """Return the composite Trade Score in [0, 100]."""
         w1, w2, w3, w4, w5, w6 = self.w
 
-        # Probability component (already 0-1 → scale to 0-100)
+        # Probability component (already 0-1 -> scale to 0-100)
         s_prob = (ml_prob * 100.0) if ml_prob is not None else 50.0
 
         # Expected return component: normalize around a 0.25% intraday target for 1m bars
@@ -551,14 +551,14 @@ class TradeScoreEngine:
         # Reward/Risk component: 2:1 is 100, 1:1 is 50, <1:1 is 0
         rr = (expected_return_pct / expected_drawdown_pct
               if expected_drawdown_pct > 0 else 1.0)
-        s_rr = min(100.0, max(0.0, rr / 2.0 * 100.0))  # 2:1 → 100
+        s_rr = min(100.0, max(0.0, rr / 2.0 * 100.0))  # 2:1 -> 100
 
         # Regime component
         s_regime = _REGIME_SCORE.get(regime, 1.0) * 100.0
 
         # Liquidity component: proxy via avg 1-minute dollar volume
         if avg_daily_volume is not None:
-            # 500k dollar volume/minute → 100
+            # 500k dollar volume/minute -> 100
             s_liq = min(100.0, avg_daily_volume / 500_000.0 * 100.0)
         else:
             s_liq = 50.0  # neutral when unknown
@@ -605,7 +605,7 @@ class TradeScoreEngine:
     ) -> tuple[bool, float]:
         """Return (approved, threshold).
 
-        ``threshold_boost`` raises the bar without fully blocking — exceptional
+        ``threshold_boost`` raises the bar without fully blocking -- exceptional
         setups (very high score) can still trade during low-edge periods.
         """
         threshold = self.gate_threshold(regime, is_event_day, threshold_boost)
@@ -769,6 +769,11 @@ class MetaLabelEngine:
         self._classifiers: dict[str, object | None] = {}  # strategy_side -> fitted clf
         self._sample_counts: dict[str, int] = {}
         self._provenance: dict[str, dict] = {}  # strategy_side -> artifact provenance dict
+        # FIX: Explicitly declare backtest_start_time so the temporal-leakage
+        # gate is always reachable without relying on external attribute
+        # injection.  Live instances keep this as None; the backtest engine
+        # sets it on the deep-copied instance before running the replay.
+        self.backtest_start_time: datetime | None = None
 
     # ------------------------------------------------------------------
     def _load(self, strategy: str, side: str = "long") -> object | None:
@@ -803,7 +808,7 @@ class MetaLabelEngine:
                         f"feature_version={artifact.get('feature_version', 'unknown')}",
                     )
                 else:
-                    # Legacy: bare estimator — no provenance available
+                    # Legacy: bare estimator -- no provenance available
                     clf = artifact
                     self._sample_counts[cache_key] = 0
                     applog.info("meta", f"[meta_load] {strategy} ({side}) | source=LEGACY_ARTIFACT (no provenance)")
@@ -823,14 +828,16 @@ class MetaLabelEngine:
         BYPASS = model not configured / not yet trained for optional strategy.
         """
         import hashlib
-        from datetime import datetime, UTC
         clf = self._load(strategy, side)
         
-        # Check for temporal leakage relative to backtest start time
+        # Check for temporal leakage relative to backtest start time.
+        # FIX: Use `self.backtest_start_time is not None` instead of the
+        # previous `hasattr(self, "backtest_start_time")` guard now that the
+        # field is always declared in __init__.
         if clf is not None:
             cache_key = f"{strategy}_{side}"
             prov = self._provenance.get(cache_key)
-            if prov and hasattr(self, "backtest_start_time") and self.backtest_start_time is not None:
+            if prov and self.backtest_start_time is not None:
                 trained_at_str = prov.get("trained_at")
                 if trained_at_str:
                     trained_at = datetime.fromisoformat(trained_at_str.replace("Z", "+00:00"))
@@ -847,7 +854,7 @@ class MetaLabelEngine:
                             f"[meta_label] Bypass {strategy} ({side}) due to temporal leakage: "
                             f"model trained_at {trained_at_str} is after backtest start {self.backtest_start_time}"
                         )
-                        clf = None  # Force bypass/NO_MODEL behavior!
+                        clf = None  # Force bypass/NO_MODEL behavior
         threshold = self.DEFAULT_THRESHOLDS.get(strategy, self.FALLBACK_THRESHOLD)
         cache_key = f"{strategy}_{side}"
         n_samples = self._sample_counts.get(cache_key, 0)
@@ -856,7 +863,7 @@ class MetaLabelEngine:
         if clf is None:
             artifact_path = self.models_dir / f"meta_{strategy}_{side}.joblib"
             if is_mandatory:
-                # Fail-closed: mandatory model missing → REJECT
+                # Fail-closed: mandatory model missing -> REJECT
                 applog.warning(
                     "meta",
                     f"[meta_label] {strategy} ({side}) REJECT | source=NO_MODEL | mandatory=True | "
@@ -990,7 +997,6 @@ class MetaLabelEngine:
           8. Return provenance dict with PROMOTED or REJECTED_LOW_AUC status.
         """
         import hashlib
-        from datetime import UTC, datetime
         from sklearn.metrics import roc_auc_score
 
         xs, ys = [], []
@@ -1010,7 +1016,7 @@ class MetaLabelEngine:
                 strategy_candidate_count += len(common_idx)
 
         if not xs:
-            applog.warning("meta", f"[meta_train] {strategy} ({side}) SKIPPED — no strategy candidate events found")
+            applog.warning("meta", f"[meta_train] {strategy} ({side}) SKIPPED -- no strategy candidate events found")
             return {"status": "skipped", "strategy": strategy, "side": side, "reason": "no_data"}
 
         X_all = pd.concat(xs).sort_index()
@@ -1045,17 +1051,17 @@ class MetaLabelEngine:
         )
 
         if y_all.nunique() < 2:
-            applog.warning("meta", f"[meta_train] {strategy} ({side}) SKIPPED — single class (n_pos={n_pos} n_neg={n_neg})")
+            applog.warning("meta", f"[meta_train] {strategy} ({side}) SKIPPED -- single class (n_pos={n_pos} n_neg={n_neg})")
             return {"status": "skipped", "strategy": strategy, "side": side, "reason": "single_class",
                     "n_samples": n_total, "n_positive": n_pos, "n_negative": n_neg}
 
-        # Temporal split — never shuffle meta-label data
+        # Temporal split -- never shuffle meta-label data
         split = int(n_total * 0.75)
         n_train = split
         n_val = n_total - split
 
         if n_val < 20:
-            applog.warning("meta", f"[meta_train] {strategy} ({side}) SKIPPED — insufficient validation samples ({n_val} < 20)")
+            applog.warning("meta", f"[meta_train] {strategy} ({side}) SKIPPED -- insufficient validation samples ({n_val} < 20)")
             return {"status": "skipped", "strategy": strategy, "side": side, "reason": "insufficient_validation_samples",
                     "n_samples": n_total, "n_train": n_train, "n_val": n_val}
 
@@ -1196,7 +1202,7 @@ class MetaLabelEngine:
 
 
 # ---------------------------------------------------------------------------
-# 6. Excursion Regressors — MAE / MFE (Phase 2)
+# 6. Excursion Regressors -- MAE / MFE (Phase 2)
 # ---------------------------------------------------------------------------
 
 
@@ -1232,8 +1238,8 @@ class ExcursionRegressors:
     ``horizon_bars`` bars.
 
     The predictions are used to:
-      - Set dynamic stop-loss: entry_price × (1 - mae_predicted × safety_mult)
-      - Set dynamic take-profit: entry_price × (1 + mfe_predicted × capture_ratio)
+      - Set dynamic stop-loss: entry_price x (1 - mae_predicted x safety_mult)
+      - Set dynamic take-profit: entry_price x (1 + mfe_predicted x capture_ratio)
       - Feed expected_return_pct and expected_drawdown_pct into the Trade Score
         engine with real model estimates instead of static defaults.
 
@@ -1359,7 +1365,7 @@ class ExcursionRegressors:
 
         applog.info(
             "excursion",
-            f"Excursion regressors trained — {len(X_all)} samples, "
+            f"Excursion regressors trained -- {len(X_all)} samples, "
             f"MAE prediction error: {mae_err:.4f}%",
         )
         return {
