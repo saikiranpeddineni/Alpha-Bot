@@ -70,10 +70,7 @@ async def _call(fn, *args, timeout: float = _API_TIMEOUT, label: str = "", **kwa
 class AlpacaBroker(Broker):
     name = "alpaca"
 
-    def __init__(self, settings: Settings) -> None:  # fix(#42): accept Settings object
-        api_key = settings.alpaca_api_key
-        api_secret = settings.alpaca_api_secret
-        paper = settings.alpaca_paper
+    def __init__(self, api_key: str, api_secret: str, paper: bool = True) -> None:
         if not (api_key and api_secret):
             raise RuntimeError("Alpaca broker requires ALPACA_API_KEY and ALPACA_API_SECRET")
         try:
