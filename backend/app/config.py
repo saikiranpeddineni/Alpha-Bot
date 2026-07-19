@@ -50,6 +50,13 @@ class RiskConfig(BaseModel):
     midday_start_et: int = Field(690, ge=570, le=960)
     midday_end_et: int = Field(795, ge=570, le=960)
     scanner_watchlist_ttl: int = Field(3, ge=1, le=30)
+    alternative_exits: list[dict] = Field(
+        default=[
+            {"policy_id": "exit_bracket_tight", "take_profit_pct": 1.0, "stop_loss_pct": 0.5},
+            {"policy_id": "exit_bracket_wide", "take_profit_pct": 3.0, "stop_loss_pct": 1.5},
+            {"policy_id": "exit_atr_trailing", "trailing_stop_atr_mult": 2.0},
+        ]
+    )
 
 
 class Settings(BaseSettings):

@@ -15,6 +15,8 @@ import type {
   StrategyInfo,
   TradeRow,
   TrainerStatus,
+  ShadowAnalyticsResponse,
+  GateAlphaResponse,
 } from "./types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -105,4 +107,6 @@ export const api = {
       method: "POST",
       body: body ? JSON.stringify(body) : undefined,
     }),
+  shadowLedgerAnalytics: () => request<ShadowAnalyticsResponse>("/api/shadow-ledger/analytics"),
+  shadowLedgerGateAlpha: () => request<GateAlphaResponse>("/api/shadow-ledger/gate-alpha"),
 };
