@@ -22,6 +22,7 @@ def ctx(equity=100_000.0, positions=None, day_pnl=0.0, start_eq=100_000.0, peak=
         session_start_equity=start_eq,
         peak_equity=peak,
         day_trades_today=day_trades,
+        rolling_day_trades=day_trades,
         is_paper=is_paper,
     )
 
@@ -152,3 +153,27 @@ def test_rejects_illiquid_and_penny(rm: RiskManager, risk_config, bars):
     risk_config.min_price = 500.0
     decision = rm.evaluate_entry(long_signal(), ctx(), bars, now=MID_SESSION)
     assert not decision.approved and "below minimum" in decision.reason
+
+
+def test_strategy_specific_cooldown_isolation(rm: RiskManager, bars):
+    now = MID_SESSION
+    losing_a = TradeRecord(
+        symbol="AAPL", side="long", qty=10, entry_price=100, exit_price=99,
+        entry_at=now, exit_at=now, pnl=-10.0, pnl_pct=-1.0, strategy="strategy_a",
+    )
+    # Strategy A loses 2 times (consecutive loss limit is 2)
+    rm.on_trade_closed(losing_a, now=now)
+    rm.on_trade_closed(losing_a, now=now)
+    
+    assert rm.is_strategy_in_cooldown("strategy_a", now)
+    assert not rm.is_strategy_in_cooldown("strategy_b", now)
+    
+    # Strategy A entry should be blocked
+    signal_a = Signal(symbol="AAPL", action=SignalAction.ENTER_LONG, strategy="strategy_a", reason="test", confidence=0.7)
+    decision_a = rm.evaluate_entry(signal_a, ctx(), bars, now=now)
+    assert not decision_a.approved and "cooldown" in decision_a.reason
+    
+    # Strategy B entry should be approved
+    signal_b = Signal(symbol="MSFT", action=SignalAction.ENTER_LONG, strategy="strategy_b", reason="test", confidence=0.7)
+    decision_b = rm.evaluate_entry(signal_b, ctx(), bars, now=now)
+    assert decision_b.approved, decision_b.reason

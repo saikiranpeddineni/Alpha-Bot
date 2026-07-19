@@ -22,13 +22,34 @@ if sys.platform == "win32":
             except ConnectionResetError:
                 pass
             except OSError as e:
-                if getattr(e, "winerror", None) == 10054:
+                # 10054 = WSAECONNRESET, 64 = ERROR_NETNAME_DELETED
+                # Both are harmless client-disconnect races on Windows.
+                if getattr(e, "winerror", None) in (64, 10054):
                     pass
                 else:
                     raise
         _ProactorBasePipeTransport._call_connection_lost = patched_call
     except ImportError:
         pass
+
+    # Suppress WinError 64 / ERROR_NETNAME_DELETED that the IOCP proactor
+    # raises from its accept() coroutine when a client drops the connection
+    # during the TLS accept phase. This is a benign Windows-specific race.
+    try:
+        import asyncio.windows_events as _wev
+        _orig_loop = _wev.IocpProactor.loop
+        async def _patched_loop(self, future=None):
+            try:
+                await _orig_loop(self, future)
+            except OSError as e:
+                if getattr(e, "winerror", None) == 64:
+                    pass
+                else:
+                    raise
+        _wev.IocpProactor.loop = _patched_loop
+    except (ImportError, AttributeError):
+        pass
+
 
 import uvicorn
 

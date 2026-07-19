@@ -34,10 +34,32 @@ META_FILE = "signal_model.meta.json"
 class ScoreActionResult:
     probability: float | None
     model_source: str              # "SPECIALIST" or "BASE"
-    specialist_status: str         # "SPECIALIST_USED", "REJECTED_LOW_AUC", "NO_ARTIFACT", "NO_SYMBOL", "SPECIALIST_INFERENCE_FAILED"
+    specialist_status: str         # "SPECIALIST_USED", "REJECTED_LOW_AUC", "NO_ARTIFACT", "NO_SYMBOL", "SPECIALIST_INFERENCE_FAILED", "INVALID_SCORE"
     specialist_auc: float | None
     specialist_min_auc: float
     fallback_reason: str | None
+
+
+def _validate_signal_probability(prob: object) -> tuple[float | None, str | None]:
+    """Validate that *prob* is a finite real number in [0.0, 1.0].
+
+    Returns ``(prob, None)`` when valid and ``(None, reason)`` when invalid.
+    Booleans are explicitly rejected to prevent Python numeric coercion.
+    NaN and ±infinity are rejected regardless of their comparison behaviour.
+    """
+    if isinstance(prob, bool):
+        return None, f"probability is bool ({prob!r}), not a real number"
+    if not isinstance(prob, (int, float)):
+        return None, f"probability has unexpected type {type(prob).__name__}"
+    p = float(prob)
+    if math.isnan(p):
+        return None, "probability is NaN"
+    if math.isinf(p):
+        return None, f"probability is {'positive' if p > 0 else 'negative'} infinity"
+    if p < 0.0 or p > 1.0:
+        return None, f"probability {p!r} is outside [0.0, 1.0]"
+    return p, None
+
 
 def predict_proba_safe(clf, x: pd.DataFrame):
     """Predict proba safely matching the feature names contract of the fitted classifier."""
@@ -150,6 +172,32 @@ class SignalModel:
                     applog.debug("ai.model", f"Could not load specialist {pkl.name}: {exc}")
         self._auc_warned_symbols = set()
 
+    def reload_specialists(self) -> None:
+        """Reload specialist models from disk into the in-memory cache.
+
+        Called before a backtest deepcopy so the backtest always sees the
+        most recently trained specialist artifacts, even if they were trained
+        after this server process started.
+        """
+        import joblib
+        specialists_dir = self.models_dir / "specialists"
+        self._specialists.clear()
+        if specialists_dir.exists():
+            for pkl in specialists_dir.glob("*.pkl"):
+                try:
+                    artifact = joblib.load(pkl)
+                    if isinstance(artifact, dict):
+                        if "auc" in artifact:
+                            if "auc_long" not in artifact:
+                                artifact["auc_long"] = artifact["auc"]
+                            if "auc_short" not in artifact:
+                                artifact["auc_short"] = artifact["auc"]
+                    self._specialists[pkl.stem.upper()] = artifact
+                except Exception as exc:
+                    applog.debug("ai.model", f"Could not reload specialist {pkl.name}: {exc}")
+        self._auc_warned_symbols = set()
+        applog.info("ai.model", f"reload_specialists: loaded {len(self._specialists)} specialist(s) from disk")
+
     @property
     def is_trained(self) -> bool:
         return self._model_long is not None
@@ -213,7 +261,47 @@ class SignalModel:
         )
         return _sigmoid(z)
 
-    def _get_base_result(self, features: pd.Series, action: SignalAction, specialist_status: str, auc: float | None, min_auc: float, fallback_reason: str | None) -> ScoreActionResult:
+    def _make_validated_result(
+        self,
+        raw_prob: object,
+        model_source: str,
+        specialist_status: str,
+        auc: float | None,
+        min_auc: float,
+        fallback_reason: str | None,
+        symbol: str | None = None,
+    ) -> ScoreActionResult:
+        """Validate *raw_prob* and return a ScoreActionResult with a safe probability.
+
+        If *raw_prob* is invalid (NaN, ±inf, bool, out-of-range) the result carries
+        ``probability=None`` and ``specialist_status='INVALID_SCORE'`` so that the
+        pipeline treats it as fail-closed rather than performing an unvalidated comparison.
+        """
+        validated, reason = _validate_signal_probability(raw_prob)
+        if reason is not None:
+            applog.warning(
+                "ai.model",
+                f"[{model_source}] INVALID_SCORE: {reason} | "
+                f"raw={raw_prob!r} | symbol={symbol} | source={model_source}",
+            )
+            return ScoreActionResult(
+                probability=None,
+                model_source=model_source,
+                specialist_status="INVALID_SCORE",
+                specialist_auc=auc,
+                specialist_min_auc=min_auc,
+                fallback_reason=reason,
+            )
+        return ScoreActionResult(
+            probability=validated,
+            model_source=model_source,
+            specialist_status=specialist_status,
+            specialist_auc=auc,
+            specialist_min_auc=min_auc,
+            fallback_reason=fallback_reason,
+        )
+
+    def _get_base_result(self, features: pd.Series, action: SignalAction, specialist_status: str, auc: float | None, min_auc: float, fallback_reason: str | None, symbol: str | None = None, regime_key: str | None = None) -> ScoreActionResult:
         bt_start = self.backtest_start_time
         base_trained_at_str = self.meta.get("trained_at")
         base_trained_at = None
@@ -241,11 +329,13 @@ class SignalModel:
                     fallback_reason="BASE model temporal leakage"
                 )
                 
-        base_prob = self.p_down(features) if action == SignalAction.ENTER_SHORT else self.p_up(features)
-        return ScoreActionResult(base_prob, "BASE", specialist_status, auc, min_auc, fallback_reason)
+        raw_prob = self.p_down(features, regime_key=regime_key) if action == SignalAction.ENTER_SHORT else self.p_up(features, regime_key=regime_key)
+        return self._make_validated_result(
+            raw_prob, "BASE", specialist_status, auc, min_auc, fallback_reason, symbol=symbol
+        )
 
     def score_action_detailed(
-        self, features: pd.Series | None, action: SignalAction, symbol: str | None = None
+        self, features: pd.Series | None, action: SignalAction, symbol: str | None = None, regime_key: str | None = None
     ) -> ScoreActionResult:
         """Probability the move is favorable for the proposed action, with detailed routing metadata."""
         from app.config import get_settings
@@ -326,7 +416,9 @@ class SignalModel:
                         )
                     return self._get_base_result(
                         features, action, "REJECTED_LOW_AUC", auc, min_auc,
-                        f"Specialist AUC {auc:.4f} below minimum threshold {min_auc:.2f}"
+                        f"Specialist AUC {auc:.4f} below minimum threshold {min_auc:.2f}",
+                        symbol=symbol,
+                        regime_key=regime_key,
                     )
 
                 # Use the specialist model for inference
@@ -335,18 +427,22 @@ class SignalModel:
                     if action == SignalAction.ENTER_SHORT:
                         clf = spec.get("short")
                         if clf is not None:
-                            prob = float(predict_proba_safe(clf, x)[0, 1])
-                            return ScoreActionResult(prob, "SPECIALIST", "SPECIALIST_USED", auc, min_auc, None)
+                            raw_prob = float(predict_proba_safe(clf, x)[0, 1])
+                            return self._make_validated_result(
+                                raw_prob, "SPECIALIST", "SPECIALIST_USED", auc, min_auc, None, symbol=symbol
+                            )
                         applog.debug("ai.model", f"[specialist] {sym_upper} has no 'short' sub-model — falling back to global")
                     else:
                         clf = spec.get("long")
                         if clf is not None:
-                            prob = float(predict_proba_safe(clf, x)[0, 1])
-                            return ScoreActionResult(prob, "SPECIALIST", "SPECIALIST_USED", auc, min_auc, None)
+                            raw_prob = float(predict_proba_safe(clf, x)[0, 1])
+                            return self._make_validated_result(
+                                raw_prob, "SPECIALIST", "SPECIALIST_USED", auc, min_auc, None, symbol=symbol
+                            )
                         applog.debug("ai.model", f"[specialist] {sym_upper} has no 'long' sub-model — falling back to global")
                 except Exception as exc:
                     applog.debug("ai.model", f"Specialist inference failed for {symbol}: {exc}")
-                    return self._get_base_result(features, action, "SPECIALIST_INFERENCE_FAILED", auc, min_auc, str(exc))
+                    return self._get_base_result(features, action, "SPECIALIST_INFERENCE_FAILED", auc, min_auc, str(exc), symbol=symbol)
             else:
                 # No specialist artifact at all for this symbol
                 applog.debug(
@@ -354,15 +450,15 @@ class SignalModel:
                     f"[specialist] {sym_upper} no specialist artifact found in "
                     f"{self.models_dir / 'specialists'} — using global model",
                 )
-                return self._get_base_result(features, action, "NO_ARTIFACT", None, min_auc, None)
+                return self._get_base_result(features, action, "NO_ARTIFACT", None, min_auc, None, symbol=symbol, regime_key=regime_key)
 
-        return self._get_base_result(features, action, "NO_SYMBOL", None, min_auc, None)
+        return self._get_base_result(features, action, "NO_SYMBOL", None, min_auc, None, symbol=symbol, regime_key=regime_key)
 
     def score_action(
-        self, features: pd.Series | None, action: SignalAction, symbol: str | None = None
+        self, features: pd.Series | None, action: SignalAction, symbol: str | None = None, regime_key: str | None = None
     ) -> float | None:
         """Probability the move is favorable for the proposed action."""
-        return self.score_action_detailed(features, action, symbol).probability
+        return self.score_action_detailed(features, action, symbol, regime_key=regime_key).probability
 
 
     def train_adaptive(
