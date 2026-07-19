@@ -45,6 +45,7 @@ async def test_resurrection_queue_lifecycle(temp_db: Database):
     pipeline_mock = MagicMock()
     engine.pipeline = pipeline_mock
     engine.broker = MagicMock()
+    engine.broker.is_paper = True  # enable resurrection queue (paper/demo mode only)
     engine.risk = MagicMock()
 
     now = datetime(2026, 1, 6, 15, 30, tzinfo=UTC)
@@ -55,6 +56,9 @@ async def test_resurrection_queue_lifecycle(temp_db: Database):
 
     # Mock strategy
     strat_mock = MagicMock()
+    strat_mock.name = "orb"
+    strat_mock.enabled = True
+    strat_mock.params = {}
     strat_mock.on_bar.return_value = sig
     engine.strategies = [strat_mock]
 
@@ -67,7 +71,7 @@ async def test_resurrection_queue_lifecycle(temp_db: Database):
     assert len(engine.resurrection_queue) == 1
     assert engine.resurrection_queue[0]["symbol"] == "AAPL"
     assert engine.resurrection_queue[0]["retry_count"] == 0
-    assert engine.resurrection_queue[0]["original_signal"] == sig
+    assert "original_signal" not in engine.resurrection_queue[0]
 
     # 2. TTL Expiry Test
     # Manually modify ts_rejected to be 31 minutes ago
@@ -83,6 +87,8 @@ async def test_resurrection_queue_lifecycle(temp_db: Database):
     sig_new = Signal(symbol="AAPL", action=SignalAction.ENTER_LONG, strategy="orb", price=100.0, confidence=0.6, reason="")
     sig_new.candidate_id = "TEST_CAND_RES_SUCCESS"
     
+    strat_mock.on_bar.return_value = sig_new
+
     # Write initial candidate record to database
     from app.core.shadow_ledger import ShadowLedger
     ShadowLedger.record_candidate(
@@ -108,8 +114,10 @@ async def test_resurrection_queue_lifecycle(temp_db: Database):
 
     engine.resurrection_queue.append({
         "symbol": "AAPL",
+        "strategy": "orb",
+        "direction": "long",
         "ts_rejected": now,
-        "original_signal": sig_new,
+        "candidate_id": "TEST_CAND_RES_SUCCESS",
         "retry_count": 0,
     })
 
@@ -119,7 +127,8 @@ async def test_resurrection_queue_lifecycle(temp_db: Database):
     # Process queue -> should resurrect it
     resurrected = await engine._process_resurrection_queue(10000.0, now)
     assert len(resurrected) == 1
-    assert resurrected[0][0] == sig_new
+    assert resurrected[0][0].symbol == "AAPL"
+    assert resurrected[0][0].strategy == "orb"
     assert len(engine.resurrection_queue) == 0
 
     # Assert that final decision was updated in DB
@@ -172,10 +181,20 @@ async def test_resurrection_queue_timezone_safety(temp_db: Database):
     naive_ts = datetime(2026, 1, 6, 15, 0)
     sig = Signal(symbol="AAPL", action=SignalAction.ENTER_LONG, strategy="orb", price=100.0, confidence=0.6, reason="")
     sig.candidate_id = "TEST_NAIVE_TZ"
+    
+    strat_mock = MagicMock()
+    strat_mock.name = "orb"
+    strat_mock.enabled = True
+    strat_mock.params = {}
+    strat_mock.on_bar.return_value = sig
+    engine.strategies = [strat_mock]
+
     engine.resurrection_queue.append({
         "symbol": "AAPL",
+        "strategy": "orb",
+        "direction": "long",
         "ts_rejected": naive_ts,
-        "original_signal": sig,
+        "candidate_id": "TEST_NAIVE_TZ",
         "retry_count": 0,
     })
 
@@ -184,4 +203,156 @@ async def test_resurrection_queue_timezone_safety(temp_db: Database):
     resurrected = await engine._process_resurrection_queue(10000.0, aware_now)
     # Should not raise TypeError, but instead process safely (expired or evaluated)
     assert isinstance(resurrected, list)
+
+
+@pytest.mark.asyncio
+async def test_resurrection_queue_live_mode_gating(temp_db: Database):
+    settings = MagicMock()
+    settings.mode = "demo"
+    settings.watchlist_symbols.return_value = ["AAPL"]
+    settings.risk_config().model_dump.return_value = {}
+    settings.risk_config().ml_confidence_threshold = 0.55
+
+    engine = TradingEngine(settings, temp_db)
+    engine.state = EngineState.RUNNING
+    engine.data = MagicMock()
+    engine.data.frame.return_value = make_bars(n=100)
+    engine.portfolio = MagicMock()
+    engine.portfolio.positions = []
+    engine.risk = MagicMock()
+    engine.evidence_evaluator = MagicMock()
+    
+    # 1. Live mode -> is_paper is False
+    engine.broker = MagicMock()
+    engine.broker.is_paper = False
+
+    sig = Signal(symbol="AAPL", action=SignalAction.ENTER_LONG, strategy="orb", price=100.0, confidence=0.6, reason="")
+    
+    # Mock strategy
+    strat_mock = MagicMock()
+    strat_mock.name = "orb"
+    strat_mock.enabled = True
+    strat_mock.params = {}
+    strat_mock.on_bar.return_value = sig
+    engine.strategies = [strat_mock]
+
+    # Mock pipeline returning rejection
+    engine.pipeline = MagicMock()
+    engine.pipeline.process.return_value = ([], [(sig, "ML confidence low")])
+
+    # Evaluate symbol -> should NOT enqueue in live mode!
+    now = datetime(2026, 1, 6, 15, 30, tzinfo=UTC)
+    await engine._evaluate_symbol("AAPL", None, 10000.0, now)
+    assert len(engine.resurrection_queue) == 0
+
+
+@pytest.mark.asyncio
+async def test_resurrection_queue_clears_in_live_mode(temp_db: Database):
+    settings = MagicMock()
+    settings.mode = "demo"
+    settings.watchlist_symbols.return_value = ["AAPL"]
+    settings.risk_config().model_dump.return_value = {}
+    settings.risk_config().ml_confidence_threshold = 0.55
+
+    engine = TradingEngine(settings, temp_db)
+    engine.state = EngineState.RUNNING
+    engine.risk = MagicMock()
+    engine.risk.should_flatten.return_value = False
+    engine.risk.check_halts.return_value = None
+    engine.risk.daily_halted = False
+    engine.risk.hard_halted = False
+    engine.portfolio = MagicMock()
+    engine.pipeline = MagicMock()
+    engine.evidence_evaluator = MagicMock()
+    
+    # Pre-populate queue
+    engine.resurrection_queue.append({
+        "symbol": "AAPL",
+        "strategy": "orb",
+        "direction": "long",
+        "ts_rejected": datetime(2026, 1, 6, 15, 0, tzinfo=UTC),
+        "candidate_id": "TEST_STALE_LIVE",
+        "retry_count": 0,
+    })
+
+    # Live mode -> is_paper is False
+    engine.broker = MagicMock()
+    engine.broker.is_paper = False
+    del engine.broker.poll_fills
+    
+    # Trigger tick roll / processing
+    engine.data = MagicMock()
+    async def mock_poll(*args, **kwargs):
+        return {"AAPL": make_bars(n=5)}
+    engine.data.poll = mock_poll
+    async def mock_account():
+        return MagicMock(equity=10000.0, cash=10000.0)
+    engine.broker.account = mock_account
+
+    async def mock_positions():
+        return []
+    engine.broker.positions = mock_positions
+
+    async def mock_open_orders():
+        return []
+    engine.broker.open_orders = mock_open_orders
+    engine.clock = MagicMock()
+    engine.clock.session_date.return_value = datetime(2026, 1, 6).date()
+    
+    await engine._tick()
+    
+    # Should have cleared the queue!
+    assert len(engine.resurrection_queue) == 0
+
+
+@pytest.mark.asyncio
+async def test_resurrection_queue_bound(temp_db: Database):
+    settings = MagicMock()
+    settings.mode = "demo"
+    settings.watchlist_symbols.return_value = ["AAPL"]
+    settings.risk_config().model_dump.return_value = {}
+    settings.risk_config().ml_confidence_threshold = 0.55
+
+    engine = TradingEngine(settings, temp_db)
+    engine.state = EngineState.RUNNING
+    engine.risk = MagicMock()
+    engine.evidence_evaluator = MagicMock()
+    engine.broker = MagicMock()
+    engine.broker.is_paper = True
+
+    # Pre-populate 50 items
+    for i in range(50):
+        engine.resurrection_queue.append({
+            "symbol": f"AAPL_{i}",
+            "strategy": "orb",
+            "direction": "long",
+            "ts_rejected": datetime(2026, 1, 6, 15, 0, tzinfo=UTC),
+            "candidate_id": f"TEST_CAND_{i}",
+            "retry_count": 0,
+        })
+
+    sig = Signal(symbol="AAPL_NEW", action=SignalAction.ENTER_LONG, strategy="orb", price=100.0, confidence=0.6, reason="")
+    
+    # Mock strategy
+    strat_mock = MagicMock()
+    strat_mock.name = "orb"
+    strat_mock.enabled = True
+    strat_mock.params = {}
+    strat_mock.on_bar.return_value = sig
+    engine.strategies = [strat_mock]
+
+    engine.pipeline = MagicMock()
+    engine.pipeline.process.return_value = ([], [(sig, "rejected")])
+    engine.data = MagicMock()
+    engine.data.frame.return_value = make_bars(n=100)
+    engine.portfolio = MagicMock()
+    engine.portfolio.positions = []
+
+    now = datetime(2026, 1, 6, 15, 30, tzinfo=UTC)
+    await engine._evaluate_symbol("AAPL_NEW", None, 10000.0, now)
+
+    # Queue size must still be 50, and the oldest item AAPL_0 should be discarded!
+    assert len(engine.resurrection_queue) == 50
+    assert engine.resurrection_queue[0]["symbol"] == "AAPL_1"
+    assert engine.resurrection_queue[-1]["symbol"] == "AAPL_NEW"
 
