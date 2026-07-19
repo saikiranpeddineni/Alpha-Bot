@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import os
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 
 from app.brokers.base import Broker, BrokerTimeoutError, Fill
 from app.core.domain import (
@@ -28,6 +29,9 @@ from app.core.domain import (
     Position,
 )
 from app.core.logging import applog
+
+if TYPE_CHECKING:
+    from app.config import Settings
 
 # Wall-clock budget for every Alpaca HTTP call. Tune via env var if needed.
 _API_TIMEOUT: float = float(os.environ.get("ALPACA_API_TIMEOUT_SECONDS", "10"))
@@ -44,7 +48,7 @@ _STATUS_MAP = {
 }
 
 
-async def _call(fn, *args, timeout: float = _API_TIMEOUT, label: str = ""):
+async def _call(fn, *args, timeout: float = _API_TIMEOUT, label: str = "", **kwargs):
     """Run a synchronous Alpaca SDK call in a thread with a bounded timeout.
 
     Raises BrokerTimeoutError (not asyncio.TimeoutError) so callers can
@@ -52,7 +56,7 @@ async def _call(fn, *args, timeout: float = _API_TIMEOUT, label: str = ""):
     """
     try:
         return await asyncio.wait_for(
-            asyncio.to_thread(fn, *args),
+            asyncio.to_thread(fn, *args, **kwargs),
             timeout=timeout,
         )
     except asyncio.TimeoutError as exc:
@@ -80,32 +84,73 @@ class AlpacaBroker(Broker):
         self._processed_fill_qty: dict[str, float] = {}
         self._meta: dict[str, tuple[str, str]] = {}  # order id -> (strategy, reason)
         self._symbol_strategies: dict[str, str] = {}
+        self.account_id: str | None = None
+
+    @property
+    def _broker_mode(self) -> str:
+        return "paper" if self.is_paper else "live"
 
     async def connect(self) -> None:
         acct = await _call(self._client.get_account, label="get_account")
+        self.account_id = str(acct.account_number)
         applog.info(
             "broker.alpaca",
-            f"Connected to Alpaca ({'paper' if self.is_paper else 'LIVE'}) -- equity ${float(acct.equity):,.2f}",
+            f"Connected to Alpaca ({'paper' if self.is_paper else 'LIVE'}) account {self.account_id} -- equity ${float(acct.equity):,.2f}",
         )
+        await self._bootstrap_durable_fill_baseline()
+
+    async def _bootstrap_durable_fill_baseline(self) -> None:
+        """One-time migration baseline; existing installations must not replay old history."""
+        from app.db.database import Database
+        db = Database.active()
+        if db is None or db.has_portfolio_checkpoint(self._broker_mode):
+            return
         try:
             from alpaca.trading.requests import GetOrdersRequest
+            raw_positions = await _call(self._client.get_all_positions, label="get_all_positions")
             after = datetime.now(UTC) - timedelta(hours=24)
-            raw = await _call(
+            orders = await _call(
                 self._client.get_orders,
-                GetOrdersRequest(status="closed", after=after, limit=200),
-                label="get_orders/connect",
+                GetOrdersRequest(status="all", after=after, limit=500),
+                label="get_orders/bootstrap",
             )
-            for o in raw:
-                oid = str(o.id)
-                filled_qty = float(o.filled_qty or 0)
-                if filled_qty > 0:
-                    self._processed_fill_qty[oid] = filled_qty
-                if str(o.status).split(".")[-1].lower() == "filled":
-                    self._emitted_fill_ids.add(oid)
+            lots = {}
+            for p in raw_positions:
+                qty = float(p.qty)
+                if str(p.side) == "PositionSide.SHORT" or qty < 0:
+                    qty = -abs(qty)
+                lots[p.symbol.upper()] = {
+                    "qty": qty,
+                    "avg_price": float(p.avg_entry_price),
+                    "stop_loss": None,
+                    "initial_risk_per_share": None,
+                }
+            checkpoint = {
+                "realized_pnl": 0.0,
+                "day_realized_pnl": 0.0,
+                "session_date": None,
+                "session_start_equity": None,
+                "peak_equity": float(acct.equity) if (acct := await _call(self._client.get_account, label="get_account")) else 0.0,
+                "day_trades_today": 0,
+                "trades": [],
+                "equity_curve": [],
+                "lots": lots,
+            }
+            watermarks = {
+                str(o.id): float(o.filled_qty or 0)
+                for o in orders if float(o.filled_qty or 0) > 0
+            }
+            db.bootstrap_broker_checkpoint(mode=self._broker_mode, account_id=self.account_id, checkpoint=checkpoint, fill_watermarks=watermarks)
+            applog.info("broker.alpaca", "Initialized durable Alpaca fill baseline from authoritative broker state")
         except BrokerTimeoutError:
+            applog.error(
+                "broker.alpaca",
+                "Bootstrap FAILED: Alpaca API timed out during durable fill baseline initialization. "
+                "Engine start aborted to avoid operating without authoritative baseline.",
+            )
             raise
         except Exception as exc:
-            applog.warning("broker.alpaca", f"failed to pre-populate emitted fill IDs: {exc}")
+            applog.warning("broker.alpaca", f"failed to initialize durable fill baseline: {exc}")
 
     async def account(self) -> AccountSnapshot:
         acct = await _call(self._client.get_account, label="get_account")
@@ -116,6 +161,14 @@ class AlpacaBroker(Broker):
         )
 
     async def positions(self) -> list[Position]:
+        """Return authoritative broker positions.
+
+        fix(#42): Positions are ALWAYS derived from the live Alpaca API
+        (get_all_positions). DB checkpoints are strictly internal accounting
+        state and must never override broker-authoritative qty, side, or
+        symbol membership. This prevents ghost lots, hidden real exposure,
+        stale qty, and direction inversions after restarts.
+        """
         raw = await _call(self._client.get_all_positions, label="get_all_positions")
         out = []
         for p in raw:
@@ -199,33 +252,88 @@ class AlpacaBroker(Broker):
             # Propagate: caller must treat as ambiguous order state, not rejected.
             raise
         except Exception as exc:  # noqa: BLE001
-            applog.error("broker.alpaca", f"Order rejected {req.symbol} {req.side} {qty}: {exc}")
-            return Order(
-                client_order_id=req.client_order_id,
-                symbol=req.symbol.upper(),
-                side=req.side,
-                qty=qty,
-                order_type=req.order_type,
-                limit_price=req.limit_price,
-                status=OrderStatus.REJECTED,
-                strategy=req.strategy,
-                reason=f"{req.reason} | rejected: {exc}",
-            )
+            if self._is_definitive_rejection(exc):
+                applog.error("broker.alpaca", f"Order rejected {req.symbol} {req.side} {qty}: {exc}")
+                return Order(
+                    client_order_id=req.client_order_id,
+                    symbol=req.symbol.upper(),
+                    side=req.side,
+                    qty=qty,
+                    order_type=req.order_type,
+                    limit_price=req.limit_price,
+                    status=OrderStatus.REJECTED,
+                    strategy=req.strategy,
+                    reason=f"{req.reason} | rejected: {exc}",
+                )
+            else:
+                msg = f"Ambiguous submission result for {req.symbol} ({req.client_order_id}): {exc}"
+                applog.error("broker.alpaca", msg)
+                raise BrokerTimeoutError(msg) from exc
         self._meta[str(raw.id)] = (req.strategy, req.reason)
         self._symbol_strategies[req.symbol.upper()] = req.strategy
         order = self._to_order(raw)
+        order.stop_loss = req.stop_loss
+        order.take_profit = req.take_profit
         applog.trade("broker.alpaca", f"Submitted {req.side.upper()} {qty} {req.symbol} ({req.strategy})")
         return order
 
+    def _is_definitive_rejection(self, exc: Exception) -> bool:
+        import asyncio
+        try:
+            import requests
+            if isinstance(exc, (requests.exceptions.RequestException, ConnectionError, TimeoutError, asyncio.TimeoutError)):
+                return False
+        except ImportError:
+            if isinstance(exc, (ConnectionError, TimeoutError, asyncio.TimeoutError)):
+                return False
+
+        try:
+            from alpaca.common.exceptions import APIError
+            if isinstance(exc, APIError):
+                status_code = getattr(exc, "status_code", None)
+                if status_code is not None:
+                    # 4xx are client/business rejections, 5xx are server/transport issues
+                    return 400 <= status_code < 500
+                return True
+        except ImportError:
+            pass
+
+        # If it's a timeout/connection description, treat as transport failure
+        err_str = str(exc).lower()
+        if "timeout" in err_str or "connect" in err_str or "connection" in err_str:
+            return False
+
+        return True
+
+    async def get_order_by_client_id(self, client_order_id: str) -> Order | None:
+        try:
+            raw = await _call(
+                self._client.get_order_by_client_id,
+                client_order_id,
+                label=f"get_order_by_client_id/{client_order_id}"
+            )
+            return self._to_order(raw)
+        except BrokerTimeoutError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            from alpaca.common.exceptions import APIError
+            if isinstance(exc, APIError) and getattr(exc, "status_code", None) == 404:
+                return None
+            err_str = str(exc).lower()
+            if "not found" in err_str or "404" in err_str:
+                return None
+            raise BrokerTimeoutError(f"Ambiguous query result for client ID {client_order_id}: {exc}") from exc
+
     async def poll_fills(self) -> None:
-        """Emit each newly executed cumulative quantity delta exactly once."""
+        """Surface every cumulative execution watermark not durably processed yet."""
         from alpaca.trading.requests import GetOrdersRequest
+        from app.db.database import Database
 
         after = datetime.now(UTC) - timedelta(hours=24)
         try:
             raw = await _call(
                 self._client.get_orders,
-                GetOrdersRequest(status="all", after=after, limit=200),
+                GetOrdersRequest(status="all", after=after, limit=500),
                 label="get_orders/poll_fills",
             )
         except BrokerTimeoutError:
@@ -234,18 +342,37 @@ class AlpacaBroker(Broker):
         except Exception as exc:  # noqa: BLE001
             applog.warning("broker.alpaca", f"fill poll failed: {exc}")
             return
+
+        db = Database.active()
+        candidates = []
         for o in raw:
-            oid = str(o.id)
-            cumulative_qty = float(o.filled_qty or 0)
-            processed_qty = self._processed_fill_qty.get(oid, 0.0)
-            delta_qty = cumulative_qty - processed_qty
-            if delta_qty <= 1e-9:
+            cumulative = float(o.filled_qty or 0)
+            if cumulative <= 0 or not o.filled_avg_price:
                 continue
-            if not o.filled_avg_price:
-                applog.warning(
-                    "broker.alpaca",
-                    f"order {oid} reports {cumulative_qty:g} filled shares without an average fill price; retaining watermark at {processed_qty:g}",
-                )
+            oid = str(o.id)
+            processed = self._processed_fill_qty.get(oid, 0.0)
+            if db:
+                processed = max(processed, db.processed_fill_qty(mode=self._broker_mode, account_id=self.account_id, fill_key=oid))
+            if cumulative <= processed + 1e-9:
+                continue
+            candidates.append(o)
+
+        candidates.sort(key=lambda o: (o.filled_at or o.updated_at or o.submitted_at or datetime.now(UTC), str(o.id)))
+        queued = {(f.broker_fill_key, f.cumulative_qty) for f in self._fills}
+        local_watermarks = {}
+        for o in candidates:
+            oid = str(o.id)
+            cumulative = float(o.filled_qty or 0)
+            if (oid, cumulative) in queued:
+                continue
+            if oid in local_watermarks:
+                processed = local_watermarks[oid]
+            else:
+                processed = self._processed_fill_qty.get(oid, 0.0)
+                if db:
+                    processed = max(processed, db.processed_fill_qty(mode=self._broker_mode, account_id=self.account_id, fill_key=oid))
+            delta = cumulative - processed
+            if delta <= 1e-9:
                 continue
             strategy, reason = self._meta.get(oid, ("alpaca", ""))
             self._fills.append(
@@ -253,16 +380,19 @@ class AlpacaBroker(Broker):
                     order_id=oid,
                     symbol=o.symbol,
                     side=OrderSide.BUY if "buy" in str(o.side).lower() else OrderSide.SELL,
-                    qty=delta_qty,
+                    qty=delta,
                     price=float(o.filled_avg_price),
                     strategy=strategy,
                     reason=reason,
-                    ts=o.filled_at or datetime.now(UTC),
+                    ts=o.filled_at or o.updated_at or datetime.now(UTC),
+                    broker_fill_key=oid,
+                    cumulative_qty=cumulative,
+                    broker_mode=self._broker_mode,
+                    broker_account_id=self.account_id,
                 )
             )
-            self._processed_fill_qty[oid] = cumulative_qty
-            if str(o.status).split(".")[-1].lower() == "filled":
-                self._emitted_fill_ids.add(oid)
+            self._processed_fill_qty[oid] = cumulative
+            local_watermarks[oid] = cumulative
 
     def drain_fills(self) -> list[Fill]:
         fills, self._fills = self._fills, []
@@ -278,6 +408,19 @@ class AlpacaBroker(Broker):
         except Exception as exc:  # noqa: BLE001
             applog.warning("broker.alpaca", f"cancel {order_id} failed: {exc}")
             return False
+
+    async def cancel_all(self) -> None:
+        """Cancel all open orders. Used by emergency flatten and EOD liquidation."""
+        try:
+            await _call(
+                self._client.cancel_orders,
+                label="cancel_all_orders",
+            )
+            applog.info("broker.alpaca", "cancel_all: all open orders cancelled")
+        except BrokerTimeoutError:
+            applog.error("broker.alpaca", "cancel_all timed out; state is ambiguous")
+        except Exception as exc:  # noqa: BLE001
+            applog.warning("broker.alpaca", f"cancel_all failed: {exc}")
 
     async def close_position(self, symbol: str, reason: str = "manual") -> Order | None:
         try:

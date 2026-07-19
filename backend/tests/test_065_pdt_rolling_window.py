@@ -15,7 +15,7 @@ from unittest.mock import MagicMock
 import pandas as pd
 import pytest
 
-from app.portfolio.tracker import PortfolioTracker, _PDT_ROLLING_CALENDAR_DAYS
+from app.portfolio.tracker import PortfolioTracker, _business_days_ago, _PDT_WINDOW_BUSINESS_DAYS
 from app.risk.manager import AccountContext, PDT_EQUITY_MIN, PDT_MAX_DAY_TRADES, RiskManager
 
 # ---------------------------------------------------------------------------
@@ -97,12 +97,12 @@ def _signal(price: float = 100.0) -> MagicMock:
 class TestRollingDayTradeCount:
     def test_empty_log_returns_zero(self):
         p = _make_tracker()
-        assert p.rolling_day_trade_count(TUESDAY) == 0
+        assert p.day_trades_in_window(TUESDAY) == 0
 
     def test_single_trade_on_same_day_counts(self):
         p = _make_tracker()
         p._day_trade_dates.append(MONDAY)
-        assert p.rolling_day_trade_count(MONDAY) == 1
+        assert p.day_trades_in_window(MONDAY) == 1
 
     def test_three_trades_on_monday_still_count_on_tuesday(self):
         """Core regression: Monday's 3 day trades must remain visible on Tuesday."""
@@ -110,7 +110,7 @@ class TestRollingDayTradeCount:
         for _ in range(3):
             p._day_trade_dates.append(MONDAY)
         # Tuesday is within the 5-calendar-day window from Monday.
-        assert p.rolling_day_trade_count(TUESDAY) == 3
+        assert p.day_trades_in_window(TUESDAY) == 3
 
     def test_trades_expire_after_rolling_window(self):
         """Trades older than the rolling window drop out."""
@@ -118,14 +118,14 @@ class TestRollingDayTradeCount:
         for _ in range(3):
             p._day_trade_dates.append(MONDAY)
         # NEXT_MONDAY is 7 calendar days later; window is 5 days so Monday is out.
-        assert p.rolling_day_trade_count(NEXT_MONDAY) == 0
+        assert p.day_trades_in_window(NEXT_MONDAY) == 0
 
     def test_trades_on_boundary_day_still_count(self):
         """Trade exactly at the edge of the 5-day window is still included."""
         p = _make_tracker()
         p._day_trade_dates.append(MONDAY)
         # cutoff = ref - 4 days; ref = FRIDAY (4 days later); cutoff == MONDAY
-        assert p.rolling_day_trade_count(FRIDAY) == 1
+        assert p.day_trades_in_window(FRIDAY) == 1
 
     def test_session_roll_does_not_clear_rolling_log(self):
         """roll_session must not erase _day_trade_dates from earlier in the window."""
@@ -136,15 +136,15 @@ class TestRollingDayTradeCount:
         # day_trades_today is reset (per-session display)
         assert p.day_trades_today == 0
         # but rolling log still has Monday's trades
-        assert p.rolling_day_trade_count(TUESDAY) == 3
+        assert p.day_trades_in_window(TUESDAY) == 3
 
     def test_roll_prunes_stale_entries(self):
         """roll_session prunes entries older than the window to bound memory."""
         p = _make_tracker()
-        old_date = MONDAY - timedelta(days=_PDT_ROLLING_CALENDAR_DAYS + 1)
+        old_date = _business_days_ago(TUESDAY, _PDT_WINDOW_BUSINESS_DAYS)
         p._day_trade_dates.append(old_date)
         p.roll_session(TUESDAY, 20_000.0)
-        assert p.rolling_day_trade_count(TUESDAY) == 0
+        assert p.day_trades_in_window(TUESDAY) == 0
         assert len(p._day_trade_dates) == 0
 
     def test_overnight_trade_not_miscounted(self):
@@ -153,7 +153,7 @@ class TestRollingDayTradeCount:
         # Simulate: entry_at.date() = MONDAY, exit_at.date() = TUESDAY -> NOT day trade
         # The tracker only increments when entry_at.date() == exit_at.date().
         # Verify no automatic logging happened.
-        assert p.rolling_day_trade_count(TUESDAY) == 0
+        assert p.day_trades_in_window(TUESDAY) == 0
 
     def test_rolling_count_accumulates_across_sessions(self):
         p = _make_tracker()
@@ -162,7 +162,7 @@ class TestRollingDayTradeCount:
         p.roll_session(TUESDAY, 20_000.0)
         # 1 day trade Tuesday
         p._day_trade_dates.append(TUESDAY)
-        assert p.rolling_day_trade_count(TUESDAY) == 2
+        assert p.day_trades_in_window(TUESDAY) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -212,7 +212,7 @@ class TestPDTGateRolling:
             p._day_trade_dates.append(MONDAY)
         p.roll_session(TUESDAY, 20_000.0)
 
-        rolling = p.rolling_day_trade_count(TUESDAY)
+        rolling = p.day_trades_in_window(TUESDAY)
         rm = _make_risk()
         ctx = _ctx(rolling=rolling)
         d = rm.evaluate_entry(_signal(), ctx, _bars())
@@ -224,7 +224,7 @@ class TestPDTGateRolling:
         p = _make_tracker()
         for _ in range(3):
             p._day_trade_dates.append(MONDAY)
-        rolling = p.rolling_day_trade_count(NEXT_MONDAY)
+        rolling = p.day_trades_in_window(NEXT_MONDAY)
         assert rolling == 0
         rm = _make_risk()
         ctx = _ctx(rolling=rolling)
