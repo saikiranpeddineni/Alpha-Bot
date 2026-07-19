@@ -448,11 +448,11 @@ class ShadowLedger:
                 if take_profit is not None and low_val <= take_profit:
                     tp_hit = True
 
-            # Resolve triggers (stop-loss wins ties)
+            # Resolve triggers (stop-loss wins ties, but mark as ambiguous)
             if sl_hit and tp_hit:
                 sl_triggered = True
                 exit_price = initial_stop
-                exit_reason = "sl"
+                exit_reason = "ambiguous"
                 if direction == "long":
                     mae_price = min(mae_price, initial_stop)
                 else:

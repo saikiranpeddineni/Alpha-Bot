@@ -25,114 +25,217 @@ def generate_eod_reflection_report(db: Database, now: datetime | None = None, en
         applog.error("reflection", f"Failed to retrieve shadow signals for EOD reflection: {exc}")
         return "# EOD Reflection Report\n\nFailed to retrieve shadow signals from database."
 
-    # Group statistics by policy_id
-    policy_stats = collections.defaultdict(lambda: {
-        "total": 0,
-        "approved": 0,
-        "rejected": 0,
-        "wins": 0,
-        "total_r": 0.0,
-    })
-
+    # Group records by candidate_id to build matched cohorts
+    candidate_map = collections.defaultdict(dict)
     for r in records:
-        policy_id = r.get("policy_id") or "unknown"
-        final_decision = r.get("final_decision")
-        outcomes = r.get("outcomes")
-        strategy = r.get("strategy")
+        cand_id = r.get("candidate_id")
+        pol_id = r.get("policy_id") or "champion"
+        if cand_id:
+            candidate_map[cand_id][pol_id] = r
 
-        stats = policy_stats[policy_id]
-        stats["total"] += 1
-        
-        if final_decision == "pipeline_approved":
-            stats["approved"] += 1
-            if outcomes:
-                # Use strategy-specific horizon for canonical realized R (Fix 8)
-                realized_r = _canonical_realized_r(strategy, outcomes)
-                stats["total_r"] += realized_r
-                if realized_r > 0.0:
-                    stats["wins"] += 1
-        else:
-            stats["rejected"] += 1
+    # Determine unique policies present in the records
+    policies = set()
+    for r in records:
+        if r.get("policy_id"):
+            policies.add(r["policy_id"])
+    policies.discard("champion")
 
-    if not policy_stats:
-        return "# EOD Reflection Report\n\nNo active policies or candidate records found."
+    # Helper function to get config fingerprint
+    import hashlib
+    import json
+    def get_config_fingerprint(snapshot: dict) -> str:
+        cleaned = {k: v for k, v in snapshot.items() if k not in ("snapshot_at", "snapshot_version")}
+        serialized = json.dumps(cleaned, sort_keys=True, default=str)
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:16]
 
-    # Build markdown comparison table
+    # Get active champion config fingerprint
+    def get_champion_config_fingerprint(db_inst) -> str:
+        snapshot = db_inst.get_setting("active_policy_snapshot")
+        if not snapshot:
+            from app.config import get_settings
+            settings = get_settings()
+            snapshot = {
+                "policy_id": "champion",
+                "ml_threshold": settings.ml_confidence_threshold,
+                "score_threshold_offset": 0.0,
+                "risk_config": settings.risk_config().model_dump()
+            }
+        return get_config_fingerprint(snapshot)
+
+    champion_config_fp = get_champion_config_fingerprint(db)
+
+    # 1. Global Champion Stats (for the baseline report view)
+    champ_global_total = 0
+    champ_global_approved = 0
+    champ_global_rejected = 0
+    champ_global_wins = 0
+    champ_global_total_r = 0.0
+
+    for cand_id, pmap in candidate_map.items():
+        if "champion" in pmap:
+            r = pmap["champion"]
+            champ_global_total += 1
+            if r.get("final_decision") == "pipeline_approved":
+                champ_global_approved += 1
+                strategy = r.get("strategy")
+                outcomes = r.get("outcomes")
+                if outcomes:
+                    realized_r = _canonical_realized_r(strategy, outcomes)
+                    champ_global_total_r += realized_r
+                    if realized_r > 0.0:
+                        champ_global_wins += 1
+            else:
+                champ_global_rejected += 1
+
+    champ_global_win_rate = (champ_global_wins / champ_global_approved * 100.0) if champ_global_approved > 0 else 0.0
+    champ_global_expectancy = (champ_global_total_r / champ_global_approved) if champ_global_approved > 0 else 0.0
+
+    # Build markdown report header
     report = []
     report.append("# EOD Policy Performance Reflection Report")
     report.append(f"Generated at: {now.strftime('%Y-%m-%d %H:%M:%S')} UTC\n")
-    report.append("| Policy ID | Role | Candidates | Approved | Vetoed | Win Rate | Expectancy (R) | Total Realized (R) |")
-    report.append("| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |")
+    report.append("| Policy ID | Role | Candidates | Approved | Vetoed | Win Rate | Expectancy (R) | Total Realized (R) | Matched Champ Expectancy | Edge Over Champ |")
+    report.append("| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |")
 
-    champ_stats = policy_stats.get("champion")
-    champ_expectancy = 0.0
-    if champ_stats and champ_stats["approved"] > 0:
-        champ_expectancy = champ_stats["total_r"] / champ_stats["approved"]
+    # Add Champion global baseline row
+    report.append(
+        f"| **champion** | Champion | {champ_global_total} | {champ_global_approved} | {champ_global_rejected} | "
+        f"{champ_global_win_rate:.2f}% | {champ_global_expectancy:+.4f}R | {champ_global_total_r:+.2f}R | {champ_global_expectancy:+.4f}R | +0.0000R |"
+    )
 
+    # 2. Challenger Matched Cohort Analysis
     best_policy = None
     best_expectancy = -999.0
+    best_edge = -999.0
+    best_nominee_stats = None
 
-    for policy_id, stats in sorted(policy_stats.items()):
-        total = stats["total"]
-        approved = stats["approved"]
-        rejected = stats["rejected"]
-        wins = stats["wins"]
-        total_r = stats["total_r"]
+    # Load active challenger configs to calculate config fingerprints
+    from app.strategies.challenger import get_active_challengers
+    challengers = {c.policy_id: c for c in get_active_challengers()}
+
+    for policy_id in sorted(policies):
+        # Find matched candidates (opportunites evaluated by both Challenger and Champion)
+        matched_cands = [
+            cand_id for cand_id, pmap in candidate_map.items()
+            if policy_id in pmap and "champion" in pmap
+        ]
         
-        win_rate = (wins / approved * 100.0) if approved > 0 else 0.0
-        expectancy = (total_r / approved) if approved > 0 else 0.0
-        
-        role = "Champion" if policy_id == "champion" else "Challenger"
+        if not matched_cands:
+            continue
+
+        # Challenger matched stats
+        chall_total = 0
+        chall_approved = 0
+        chall_rejected = 0
+        chall_wins = 0
+        chall_total_r = 0.0
+
+        for cand_id in matched_cands:
+            r = candidate_map[cand_id][policy_id]
+            chall_total += 1
+            if r.get("final_decision") == "pipeline_approved":
+                chall_approved += 1
+                strategy = r.get("strategy")
+                outcomes = r.get("outcomes")
+                if outcomes:
+                    realized_r = _canonical_realized_r(strategy, outcomes)
+                    chall_total_r += realized_r
+                    if realized_r > 0.0:
+                        chall_wins += 1
+            else:
+                chall_rejected += 1
+
+        chall_win_rate = (chall_wins / chall_approved * 100.0) if chall_approved > 0 else 0.0
+        chall_expectancy = (chall_total_r / chall_approved) if chall_approved > 0 else 0.0
+
+        # Champion matched stats specifically on the same matched cohort
+        champ_matched_approved = 0
+        champ_matched_total_r = 0.0
+
+        for cand_id in matched_cands:
+            r = candidate_map[cand_id]["champion"]
+            if r.get("final_decision") == "pipeline_approved":
+                champ_matched_approved += 1
+                strategy = r.get("strategy")
+                outcomes = r.get("outcomes")
+                if outcomes:
+                    champ_matched_total_r += _canonical_realized_r(strategy, outcomes)
+
+        champ_matched_expectancy = (champ_matched_total_r / champ_matched_approved) if champ_matched_approved > 0 else 0.0
+        edge = chall_expectancy - champ_matched_expectancy
 
         report.append(
-            f"| **{policy_id}** | {role} | {total} | {approved} | {rejected} | {win_rate:.2f}% | {expectancy:+.4f}R | {total_r:+.2f}R |"
+            f"| **{policy_id}** | Challenger | {chall_total} | {chall_approved} | {chall_rejected} | "
+            f"{chall_win_rate:.2f}% | {chall_expectancy:+.4f}R | {chall_total_r:+.2f}R | {champ_matched_expectancy:+.4f}R | {edge:+.4f}R |"
         )
 
-        # Statistical promotion candidate check:
-        # Require at least 15 trades (approved candidates) and expectancy >= Champion expectancy + 0.15R
-        if policy_id != "champion" and approved >= 15:
-            if expectancy >= champ_expectancy + 0.15:
-                if expectancy > best_expectancy:
-                    best_expectancy = expectancy
-                    best_policy = policy_id
+        # Statistical nomination criteria check (matched approved count >= 15 and edge >= +0.15R)
+        if chall_approved >= 15 and edge >= 0.15:
+            if chall_expectancy > best_expectancy:
+                best_expectancy = chall_expectancy
+                best_edge = edge
+                best_policy = policy_id
+                
+                # Fingerprints calculations
+                sorted_cands = sorted(list(matched_cands))
+                cohort_str = ",".join(sorted_cands)
+                cohort_fp = hashlib.sha256(cohort_str.encode("utf-8")).hexdigest()[:16]
+                
+                c_obj = challengers.get(policy_id)
+                config_fp = get_config_fingerprint(c_obj.to_snapshot()) if c_obj else "unknown_config"
+                
+                best_nominee_stats = {
+                    "approved_count": chall_approved,
+                    "expectancy": chall_expectancy,
+                    "edge_over_champion": edge,
+                    "champion_expectancy": champ_matched_expectancy,
+                    "cohort_fingerprint": cohort_fp,
+                    "config_fingerprint": config_fp,
+                    "champion_config_fingerprint": champion_config_fp,
+                }
 
     report.append("")
     report.append("## Promotion Analysis & Nominations")
 
-    if best_policy:
-        stats = policy_stats[best_policy]
-        edge = best_expectancy - champ_expectancy
+    if best_policy and best_nominee_stats:
+        stats = best_nominee_stats
+        edge = stats["edge_over_champion"]
+        champ_matched_exp = stats["champion_expectancy"]
         report.append(
             f"> [!IMPORTANT]\n"
             f"> **PROMOTION CANDIDATE NOMINATED — Human Approval Required**\n"
             f"> Policy `{best_policy}` has satisfied the statistical nomination criteria:\n"
-            f"> - Simulated Trades: {stats['approved']} (Required: >= 15)\n"
-            f"> - Expectancy: {best_expectancy:+.4f}R (Champion: {champ_expectancy:+.4f}R, Edge: {edge:+.4f}R, Required: >= +0.15R)\n"
+            f"> - Simulated Trades: {stats['approved_count']} (Required: >= 15)\n"
+            f"> - Expectancy: {stats['expectancy']:+.4f}R (Matched Champion: {champ_matched_exp:+.4f}R, Edge: {edge:+.4f}R, Required: >= +0.15R)\n"
+            f"> - Cohort Fingerprint: `{stats['cohort_fingerprint']}`\n"
+            f"> - Config Fingerprint: `{stats['config_fingerprint']}`\n"
             f"> \n"
             f"> **No production configuration has been changed.**\n"
             f"> Review the shadow performance dashboard and use `POST /strategies/promote` to approve."
         )
 
-        # Persist the nomination to DB for the dashboard to surface (no production config touched)
         try:
             db.save_policy_nominee({
                 "policy_id": best_policy,
                 "nominated_at": now.isoformat(),
-                "approved_count": stats["approved"],
-                "expectancy": round(best_expectancy, 4),
+                "approved_count": stats["approved_count"],
+                "expectancy": round(stats["expectancy"], 4),
                 "edge_over_champion": round(edge, 4),
-                "champion_expectancy": round(champ_expectancy, 4),
+                "champion_expectancy": round(champ_matched_exp, 4),
                 "status": "pending",
+                "cohort_fingerprint": stats["cohort_fingerprint"],
+                "config_fingerprint": stats["config_fingerprint"],
+                "champion_config_fingerprint": stats["champion_config_fingerprint"],
             })
             applog.info(
                 "reflection",
                 f"Nomination recorded: policy {best_policy!r} nominated for promotion review. "
-                f"Expectancy: {best_expectancy:+.4f}R (edge: {edge:+.4f}R over Champion)."
+                f"Expectancy: {stats['expectancy']:+.4f}R (edge: {edge:+.4f}R over Matched Champion)."
             )
         except Exception as exc:
             applog.error("reflection", f"Failed to save policy nomination for {best_policy}: {exc}")
 
-        # Fire a warning-severity UI insight for operator review (no config mutation)
+        # Fire a warning-severity UI insight
         try:
             publish = getattr(engine, "publish", None) if engine is not None else None
             if publish:
@@ -142,9 +245,9 @@ def generate_eod_reflection_report(db: Database, now: datetime | None = None, en
                     "severity": "warning",
                     "title": f"Promotion Candidate Nominated: {best_policy}",
                     "detail": (
-                        f"Policy '{best_policy}' has qualified for promotion review. "
-                        f"Expectancy: {best_expectancy:+.4f}R vs Champion {champ_expectancy:+.4f}R "
-                        f"(edge: {edge:+.4f}R) over {stats['approved']} simulated trades. "
+                        f"Policy '{best_policy}' qualified for promotion review on matched cohort. "
+                        f"Expectancy: {stats['expectancy']:+.4f}R vs Matched Champ {champ_matched_exp:+.4f}R "
+                        f"(edge: {edge:+.4f}R) over {stats['approved_count']} trades. "
                         f"No production config changed. Use POST /strategies/promote to approve."
                     ),
                 })
@@ -154,26 +257,47 @@ def generate_eod_reflection_report(db: Database, now: datetime | None = None, en
         # Fallback recommendations logic for manual review if rules aren't met
         manual_best = None
         manual_expectancy = -999.0
-        for policy_id, stats in policy_stats.items():
-            if policy_id == "champion" or stats["approved"] < 2:
+        manual_champ_exp = 0.0
+        for policy_id in sorted(policies):
+            matched_cands = [
+                cand_id for cand_id, pmap in candidate_map.items()
+                if policy_id in pmap and "champion" in pmap
+            ]
+            if not matched_cands:
                 continue
-            expectancy = stats["total_r"] / stats["approved"]
+            chall_approved = [
+                candidate_map[cand_id][policy_id] for cand_id in matched_cands
+                if candidate_map[cand_id][policy_id].get("final_decision") == "pipeline_approved"
+            ]
+            if len(chall_approved) < 2:
+                continue
+            chall_total_r = sum(_canonical_realized_r(r.get("strategy"), r.get("outcomes")) for r in chall_approved if r.get("outcomes"))
+            expectancy = chall_total_r / len(chall_approved)
+
+            champ_approved = [
+                candidate_map[cand_id]["champion"] for cand_id in matched_cands
+                if candidate_map[cand_id]["champion"].get("final_decision") == "pipeline_approved"
+            ]
+            champ_total_r = sum(_canonical_realized_r(r.get("strategy"), r.get("outcomes")) for r in champ_approved if r.get("outcomes"))
+            champ_exp = champ_total_r / len(champ_approved) if len(champ_approved) > 0 else 0.0
+
             if expectancy > manual_expectancy:
                 manual_expectancy = expectancy
                 manual_best = policy_id
+                manual_champ_exp = champ_exp
 
-        if manual_best and manual_expectancy > champ_expectancy:
+        if manual_best and manual_expectancy > manual_champ_exp:
             report.append(
                 f"> [!NOTE]\n"
                 f"> **Challenger Outperformance (Manual Review Required):**\n"
-                f"> Policy `{manual_best}` achieved higher expectancy ({manual_expectancy:+.4f}R) than Champion `{champ_expectancy:+.4f}R` over {policy_stats[manual_best]['approved']} trades.\n"
+                f"> Policy `{manual_best}` achieved higher expectancy ({manual_expectancy:+.4f}R) than Matched Champion `{manual_champ_exp:+.4f}R` over matched trades.\n"
                 f"> **Recommendation:** Consider promoting `{manual_best}` to production manually after verification."
             )
         else:
             report.append(
                 f"> [!NOTE]\n"
                 f"> **Champion Remains Undefeated:**\n"
-                f"> Champion expectancy ({champ_expectancy:+.4f}R) is superior to or equal to all qualified challenger policies.\n"
+                f"> Champion expectancy ({champ_global_expectancy:+.4f}R) is superior to or equal to all qualified challenger policies.\n"
                 f"> **Recommendation:** Keep current Champion policy active. Continue monitoring walk-forward testing."
             )
 
