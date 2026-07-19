@@ -89,6 +89,7 @@ class TradingEngine:
 
         self.user_watchlist: list[str] = db.get_setting("watchlist") or settings.watchlist_symbols()
         self.scanned_watchlist: list[str] = []
+        self.scanned_watchlist_ttl: dict[str, int] = {}
         self.watchlist: list[str] = sorted(list(set(self.user_watchlist + self.scanned_watchlist)))
         self.core_watchlist: list[str] = list(self.user_watchlist)
         stored_risk = db.get_setting("risk_config") or {}
@@ -531,6 +532,22 @@ class TradingEngine:
         self._tick_count += 1
         now = utcnow()
 
+        # Synchronize ML gate threshold with assessed market risk regime with default fallback validation
+        is_stress = getattr(self.risk_config, "current_regime", "normal") in ("stress", "panic")
+        raw_threshold = (
+            getattr(self.risk_config, "stress_ml_confidence_threshold", 0.55)
+            if is_stress
+            else getattr(self.risk_config, "ml_confidence_threshold", 0.55)
+        )
+        try:
+            import math
+            val = float(raw_threshold)
+            if math.isnan(val) or math.isinf(val) or not (0.0 <= val <= 1.0):
+                val = 0.55
+        except (ValueError, TypeError):
+            val = 0.55
+        self.pipeline.ml_threshold = val
+
         try:
             await self._reconcile_pending_submissions()
         except Exception as exc:
@@ -674,7 +691,7 @@ class TradingEngine:
             # Process resurrected signals from queue (CR-146 Phase 4)
             # SAFETY: Resurrection uses stale signal price/SL/TP from the original rejection tick.
             # Enabled only for paper/shadow sessions. Live sessions skip entirely to avoid stale orders.
-            _resurrection_enabled = getattr(self.broker, "is_paper", False)
+            _resurrection_enabled = getattr(self.broker, "is_paper", False) is True
             resurrected = []
             if _resurrection_enabled:
                 resurrected = await self._process_resurrection_queue(account.equity, now)
@@ -682,8 +699,9 @@ class TradingEngine:
                 applog.debug(
                     "engine.resurrection",
                     f"Resurrection queue skipped for live session ({len(self.resurrection_queue)} items pending). "
-                    "Enable paper mode or validate signal freshness before re-enabling for live."
+                    "Clearing stale intents."
                 )
+                self.resurrection_queue.clear()
             candidates.extend(resurrected)
 
             for symbol in new_closed:
@@ -935,6 +953,14 @@ class TradingEngine:
                     prefix = f"{symbol}_{sig.strategy}_{now.strftime('%Y%m%d_%H%M%S')}"
                     sig.candidate_id = f"{prefix}_{uuid.uuid4().hex[:6]}".upper()
 
+        # Compute slot_rvol_val for the current symbol
+        slot_rvol_val: float | None = None
+        try:
+            slot_engine = SlotVolumeEngine(df, lookback_sessions=20, min_observations=5)
+            slot_rvol_val = slot_engine.get_slot_rvol(now)
+        except Exception:
+            slot_rvol_val = None
+
         # Estimate SPY 30-bar rolling volatility (standard deviation of returns)
         spy_vol: float | None = None
         if spy_df is not None and not spy_df.empty:
@@ -1130,14 +1156,20 @@ class TradingEngine:
                 except Exception as exc:
                     applog.error("engine.challenger", f"Challenger {challenger.policy_id} failed for {symbol}: {exc}")
 
+        _resurrection_enabled = getattr(self.broker, "is_paper", False) is True
         for sig, reason in rejected:
             applog.debug("pipeline", f"{symbol} {sig.strategy} {sig.action}: rejected -- {reason}")
-            if sig.action != SignalAction.EXIT:
+            if sig.action != SignalAction.EXIT and _resurrection_enabled:
                 in_queue = any(
                     q["symbol"] == sig.symbol and q["strategy"] == sig.strategy
                     for q in self.resurrection_queue
                 )
                 if not in_queue:
+                    # Enforce defensive queue bound (e.g. max 50 items)
+                    if len(self.resurrection_queue) >= 50:
+                        applog.warning("engine.resurrection", "Resurrection queue is full (max 50). Discarding oldest intent.")
+                        self.resurrection_queue.pop(0)
+
                     # Store resurrection INTENT only — not the full sig object.
                     # Stale price/SL/TP are intentionally excluded to prevent stale-data orders.
                     # When retried, the live pipeline will gate fresh market data through all gates.
@@ -1148,7 +1180,6 @@ class TradingEngine:
                         "candidate_id": sig.candidate_id,
                         "original_rejection_reason": reason,
                         "ts_rejected": now,
-                        "original_signal": sig,   # kept for paper-mode pipeline re-evaluation only
                         "retry_count": 0,
                     })
                     applog.info(
@@ -1782,25 +1813,35 @@ class TradingEngine:
             applog.error("engine", "Market scanner failed; preserving the existing watchlist")
             return []
         if outcome == ScannerOutcome.SUCCESS_EMPTY:
-            applog.info("engine", "Market scanner returned no eligible symbols; preserving the existing watchlist")
-            return []
-        if new_watchlist:
-            # Feature 1: Hysteresis — protect symbols with open positions from removal
+            new_watchlist = []
+
+        if outcome in (ScannerOutcome.SUCCESS_NONEMPTY, ScannerOutcome.SUCCESS_EMPTY):
+            # Feature 1: Hysteresis — protect symbols with open positions & pending orders from removal
             open_symbols: set[str] = set()
+            pending_symbols: set[str] = set()
             try:
                 if self.broker:
                     positions = await self.broker.positions()
-                    open_symbols = {p.symbol for p in positions}
-            except Exception:
-                pass
+                    open_symbols = {p.symbol.upper() for p in positions}
+                    open_orders = await self.broker.open_orders()
+                    pending_symbols = {o.symbol.upper() for o in open_orders}
+                active_trade_symbols = open_symbols | pending_symbols
+            except Exception as exc:
+                applog.error(
+                    "engine",
+                    f"Failed to retrieve broker positions/orders during scan: {exc}. "
+                    "Fail-safe: preserving the pre-update scanned watchlist without changes.",
+                )
+                return self.watchlist
 
             if is_intraday:
                 # Intraday: only add new symbols; retain all existing except those
-                # that dropped off scanner AND have no open position
+                # that dropped off scanner AND have no active exposure and not retained by TTL
+                retained_dynamic = {sym for sym, ttl in self.scanned_watchlist_ttl.items() if ttl > 0}
                 existing = set(self.scanned_watchlist)
                 new_set = set(new_watchlist)
-                # Symbols to remove: in existing but not in new scan, no open position
-                to_remove = (existing - new_set) - open_symbols
+                # Symbols to remove: in existing but not in new scan, no active exposure AND not retained by TTL
+                to_remove = (existing - new_set) - (active_trade_symbols | retained_dynamic)
                 # Symbols to add: in new scan but not yet in existing
                 to_add = new_set - existing
                 updated = (existing - to_remove) | to_add
@@ -1809,16 +1850,29 @@ class TradingEngine:
                     applog.info(
                         "engine",
                         f"Intraday watchlist refresh: +{sorted(to_add)} −{sorted(to_remove)} "
-                        f"(protected open positions: {sorted(open_symbols & existing)})",
+                        f"(protected exposure: {sorted((active_trade_symbols | retained_dynamic) & existing)})",
                     )
                 else:
                     applog.info("engine", "Intraday watchlist refresh: no changes")
             else:
-                # Morning scan: full replacement (open positions still protected)
-                protected = open_symbols & set(self.scanned_watchlist)
-                final = set(new_watchlist) | protected
+                # Morning scan: full replacement (active exposures and TTL-retained symbols protected)
+                scanned_set = set(new_watchlist)
+                # Reset TTL for today's scanned symbols
+                for sym in scanned_set:
+                    self.scanned_watchlist_ttl[sym] = self.risk_config.scanner_watchlist_ttl
+                # Decrement TTL for previously scanned symbols that were not scanned today
+                for sym in list(self.scanned_watchlist_ttl.keys()):
+                    if sym not in scanned_set:
+                        self.scanned_watchlist_ttl[sym] = self.scanned_watchlist_ttl.get(sym, 1) - 1
+                
+                retained_dynamic = {sym for sym, ttl in self.scanned_watchlist_ttl.items() if ttl > 0}
+                final = scanned_set | retained_dynamic | active_trade_symbols
                 self.scanned_watchlist = sorted(final)
-                applog.info("engine", f"Watchlist dynamically updated by pre-market scanner: {new_watchlist}")
+                applog.info(
+                    "engine",
+                    f"Watchlist dynamically updated by pre-market scanner: {new_watchlist} "
+                    f"(retained: {sorted(retained_dynamic)}, active protection: {sorted(active_trade_symbols)})",
+                )
 
             self.watchlist = sorted(list(set(self.user_watchlist + self.scanned_watchlist)))
 
@@ -1980,7 +2034,18 @@ class TradingEngine:
                 continue
 
             symbol = item["symbol"]
-            sig = item["original_signal"]
+            strategy_name = item["strategy"]
+
+            # Find the originating strategy
+            strat = None
+            for s in self.strategies:
+                if s.name == strategy_name:
+                    strat = s
+                    break
+
+            if strat is None or not strat.enabled:
+                applog.warning("engine.resurrection", f"Strategy {strategy_name} not found or disabled for resurrection.")
+                continue
 
             try:
                 # Fetch recent window
@@ -1989,32 +2054,61 @@ class TradingEngine:
                     active_queue.append(item)
                     continue
 
-                # Run pipeline re-evaluation
+                # Run strategy on fresh bar
                 pos_by_symbol = {p.symbol: p for p in self.portfolio.positions} if self.portfolio else {}
                 spy_df = enrich(self.data.frame("SPY", "1Min", limit=600))
                 rs_score = compute_relative_strength(df, spy_df)
                 regime, _ = detect_regime(df)
 
-                # Re-run pipeline process
-                accepted, rejected = self.pipeline.process(symbol, df, [sig], regime, sector_strength=rs_score)
+                from app.strategies.base import StrategyContext
+                sctx = StrategyContext(position=pos_by_symbol.get(symbol), equity=account_equity, regime=regime, now=now)
+                fresh_sig = strat.on_bar(sctx, symbol, df)
+                if fresh_sig is None:
+                    applog.debug("engine.resurrection", f"{symbol} {strategy_name}: Strategy no longer produces a signal on current bar.")
+                    continue
 
-                if sig in accepted:
+                # Verify direction matches original intent
+                expected_action = SignalAction.ENTER_LONG if item["direction"] == "long" else SignalAction.ENTER_SHORT
+                if fresh_sig.action != expected_action:
+                    applog.debug("engine.resurrection", f"{symbol} {strategy_name}: Fresh signal action {fresh_sig.action} does not match original direction.")
+                    continue
+
+                # Assign fresh candidate ID and link to the parent candidate ID
+                import uuid
+                prefix = f"{symbol}_{fresh_sig.strategy}_{now.strftime('%Y%m%d_%H%M%S')}"
+                fresh_sig.candidate_id = f"{prefix}_{uuid.uuid4().hex[:6]}".upper()
+                fresh_sig.parent_candidate_id = item["candidate_id"]
+                fresh_sig.strategy_params = getattr(strat, "params", {})
+
+                # Re-run pipeline process on fresh signal
+                accepted, rejected = self.pipeline.process(symbol, df, [fresh_sig], regime, sector_strength=rs_score)
+
+                if fresh_sig in accepted:
                     item["retry_count"] += 1
                     applog.info(
                         "engine.resurrection",
-                        f"SUCCESS: Resurrected candidate {symbol} {sig.strategy} {sig.action} passed all gates! "
+                        f"SUCCESS: Resurrected candidate {symbol} {fresh_sig.strategy} {fresh_sig.action} passed all gates! "
                         f"Submitting for allocation (retry {item['retry_count']}/{MAX_RETRIES})."
                     )
-                    
+
                     self._update_shadow_decision(
-                        candidate_id=sig.candidate_id,
+                        candidate_id=fresh_sig.candidate_id,
                         final_decision="pipeline_approved",
                         rejection_reason="",
                         rejection_stage="none",
                     )
-                    
-                    resurrected.append((sig, df))
+                    # Also update the parent candidate record to mark it as resurrected/approved
+                    if "candidate_id" in item:
+                        self._update_shadow_decision(
+                            candidate_id=item["candidate_id"],
+                            final_decision="pipeline_approved",
+                            rejection_reason="",
+                            rejection_stage="none",
+                        )
+
+                    resurrected.append((fresh_sig, df))
                 else:
+                    item["retry_count"] += 1
                     active_queue.append(item)
             except Exception as exc:
                 applog.error("engine.resurrection", f"Failed re-evaluation of {symbol}: {exc}")
