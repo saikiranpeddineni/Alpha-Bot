@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import os
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 
 from app.brokers.base import Broker, BrokerTimeoutError, Fill
 from app.core.domain import (
@@ -28,6 +29,9 @@ from app.core.domain import (
     Position,
 )
 from app.core.logging import applog
+
+if TYPE_CHECKING:
+    from app.config import Settings
 
 # Wall-clock budget for every Alpaca HTTP call. Tune via env var if needed.
 _API_TIMEOUT: float = float(os.environ.get("ALPACA_API_TIMEOUT_SECONDS", "10"))
@@ -157,6 +161,14 @@ class AlpacaBroker(Broker):
         )
 
     async def positions(self) -> list[Position]:
+        """Return authoritative broker positions.
+
+        fix(#42): Positions are ALWAYS derived from the live Alpaca API
+        (get_all_positions). DB checkpoints are strictly internal accounting
+        state and must never override broker-authoritative qty, side, or
+        symbol membership. This prevents ghost lots, hidden real exposure,
+        stale qty, and direction inversions after restarts.
+        """
         raw = await _call(self._client.get_all_positions, label="get_all_positions")
         out = []
         for p in raw:
@@ -396,6 +408,19 @@ class AlpacaBroker(Broker):
         except Exception as exc:  # noqa: BLE001
             applog.warning("broker.alpaca", f"cancel {order_id} failed: {exc}")
             return False
+
+    async def cancel_all(self) -> None:
+        """Cancel all open orders. Used by emergency flatten and EOD liquidation."""
+        try:
+            await _call(
+                self._client.cancel_orders,
+                label="cancel_all_orders",
+            )
+            applog.info("broker.alpaca", "cancel_all: all open orders cancelled")
+        except BrokerTimeoutError:
+            applog.error("broker.alpaca", "cancel_all timed out; state is ambiguous")
+        except Exception as exc:  # noqa: BLE001
+            applog.warning("broker.alpaca", f"cancel_all failed: {exc}")
 
     async def close_position(self, symbol: str, reason: str = "manual") -> Order | None:
         try:
