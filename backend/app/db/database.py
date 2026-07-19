@@ -145,6 +145,35 @@ class PortfolioCheckpointRow(Base):
     payload: Mapped[str] = mapped_column(Text)
 
 
+class PolicyEvidenceRow(Base):
+    __tablename__ = "policy_evidence"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    policy_id: Mapped[str] = mapped_column(String(64))
+    timestamp: Mapped[datetime]
+    payload: Mapped[str] = mapped_column(Text)
+
+
+class PolicyPromotionRow(Base):
+    __tablename__ = "policy_promotions"
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    policy_id: Mapped[str] = mapped_column(String(64))
+    champion_policy_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    champion_policy_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    challenger_policy_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    challenger_policy_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    promoter_id: Mapped[str] = mapped_column(String(64))
+    timestamp: Mapped[datetime]
+    reason: Mapped[str] = mapped_column(Text)
+    previous_snapshot: Mapped[str] = mapped_column(Text)
+    new_snapshot: Mapped[str] = mapped_column(Text)
+    evidence_package_id: Mapped[str] = mapped_column(String(64))
+    evidence_package: Mapped[str] = mapped_column(Text)
+    mode: Mapped[str] = mapped_column(String(10))
+    evidence_generation_timestamp: Mapped[datetime]
+    code_commit_sha: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    dataset_window_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
 class Database:
     def __init__(self, path: Path) -> None:
         global _ACTIVE_DATABASE
@@ -652,6 +681,83 @@ class Database:
             if row:
                 row.status = "approved"
             s.commit()
+
+    def save_policy_evidence(self, evidence_id: str, policy_id: str, ts: datetime, payload: dict) -> None:
+        """Saves a frozen point-in-time policy evidence package."""
+        with self._session() as s:
+            row = PolicyEvidenceRow(
+                id=evidence_id,
+                policy_id=policy_id,
+                timestamp=ts,
+                payload=json.dumps(payload)
+            )
+            s.add(row)
+            s.commit()
+
+    def get_policy_evidence(self, evidence_id: str) -> dict | None:
+        """Retrieves a frozen point-in-time policy evidence package."""
+        from sqlalchemy import select as sa_select
+        with self._session() as s:
+            row = s.execute(
+                sa_select(PolicyEvidenceRow).where(PolicyEvidenceRow.id == evidence_id)
+            ).scalars().first()
+            if row is None:
+                return None
+            return json.loads(row.payload)
+
+    def save_policy_promotion(self, promotion: dict) -> None:
+        """Appends a new promotion record to the promotions audit log."""
+        with self._session() as s:
+            row = PolicyPromotionRow(
+                policy_id=promotion["policy_id"],
+                champion_policy_id=promotion.get("champion_policy_id"),
+                champion_policy_version=promotion.get("champion_policy_version"),
+                challenger_policy_id=promotion.get("challenger_policy_id"),
+                challenger_policy_version=promotion.get("challenger_policy_version"),
+                promoter_id=promotion["promoter_id"],
+                timestamp=promotion["timestamp"],
+                reason=promotion["reason"],
+                previous_snapshot=json.dumps(promotion["previous_snapshot"]),
+                new_snapshot=json.dumps(promotion["new_snapshot"]),
+                evidence_package_id=promotion["evidence_package_id"],
+                evidence_package=json.dumps(promotion["evidence_package"]),
+                mode=promotion["mode"],
+                evidence_generation_timestamp=promotion["evidence_generation_timestamp"],
+                code_commit_sha=promotion.get("code_commit_sha"),
+                dataset_window_id=promotion.get("dataset_window_id")
+            )
+            s.add(row)
+            s.commit()
+
+    def get_policy_promotions(self) -> list[dict]:
+        """Returns all policy promotions logs ordered by timestamp descending."""
+        from sqlalchemy import select as sa_select
+        with self._session() as s:
+            rows = s.execute(
+                sa_select(PolicyPromotionRow).order_by(PolicyPromotionRow.timestamp.desc())
+            ).scalars().all()
+            return [
+                {
+                    "id": r.id,
+                    "policy_id": r.policy_id,
+                    "champion_policy_id": r.champion_policy_id,
+                    "champion_policy_version": r.champion_policy_version,
+                    "challenger_policy_id": r.challenger_policy_id,
+                    "challenger_policy_version": r.challenger_policy_version,
+                    "promoter_id": r.promoter_id,
+                    "timestamp": r.timestamp.isoformat() if hasattr(r.timestamp, "isoformat") else str(r.timestamp),
+                    "reason": r.reason,
+                    "previous_snapshot": json.loads(r.previous_snapshot),
+                    "new_snapshot": json.loads(r.new_snapshot),
+                    "evidence_package_id": r.evidence_package_id,
+                    "evidence_package": json.loads(r.evidence_package),
+                    "mode": r.mode,
+                    "evidence_generation_timestamp": r.evidence_generation_timestamp.isoformat() if hasattr(r.evidence_generation_timestamp, "isoformat") else str(r.evidence_generation_timestamp),
+                    "code_commit_sha": r.code_commit_sha,
+                    "dataset_window_id": r.dataset_window_id
+                }
+                for r in rows
+            ]
 
     def close(self) -> None:
         global _ACTIVE_DATABASE
