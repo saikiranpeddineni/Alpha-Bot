@@ -45,6 +45,49 @@ async def get_system_heartbeat(request: Request) -> dict:
     }
 
 
+class AllowNewEntriesBody(BaseModel):
+    allow: bool
+
+
+@router.post("/system/allow-new-entries")
+async def post_allow_new_entries(body: AllowNewEntriesBody, request: Request) -> dict:
+    engine = _engine(request)
+    engine._force_gated = not body.allow
+    if not body.allow:
+        engine.allow_new_entries = False
+        if engine.system_health not in ("SAFE_MODE", "HALTED"):
+            engine.system_health = "DEGRADED"
+    else:
+        # Trigger immediate heartbeat run to recheck if it can recover
+        await engine._check_system_heartbeat(utcnow())
+        
+    return {
+        "status": "success",
+        "allow_new_entries": engine.allow_new_entries,
+        "system_health": engine.system_health
+    }
+
+
+@router.post("/system/reset-health")
+async def post_reset_health(request: Request) -> dict:
+    engine = _engine(request)
+    
+    # Reset reconciliation failure states
+    engine.reconciliation_failed = False
+    engine.reconciliation_mismatch = False
+    engine.system_health = "NORMAL"
+    engine.allow_new_entries = True
+    
+    # Trigger immediate heartbeat run to recheck health status
+    await engine._check_system_heartbeat(utcnow())
+    
+    return {
+        "status": "success",
+        "system_health": engine.system_health,
+        "allow_new_entries": engine.allow_new_entries
+    }
+
+
 class StartBody(BaseModel):
     mode: str = "demo"
     confirm: str = ""

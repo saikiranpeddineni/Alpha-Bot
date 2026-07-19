@@ -140,12 +140,14 @@ class TradingEngine:
         self.portfolio_allocator = None
         self.pending_reconciliation_orders: dict[str, dict] = db.get_setting("pending_reconciliation_orders") or {}
         self.reconciliation_failed = False
+        self.reconciliation_mismatch = False
 
         # Heartbeat System Diagnostics (CR-146 Phase F)
         self.system_health = "NORMAL"
         self.allow_new_entries = True
         self.vix_unavailable = False
         self.heartbeat_diagnostics = {}
+        self._force_gated = False
 
     # ------------------------------------------------------------------
     # kill-switch persistence helpers
@@ -2264,6 +2266,16 @@ class TradingEngine:
         self.allow_new_entries = True
         self.vix_unavailable = False
         
+        # Enforce manual gating override latch
+        if getattr(self, "_force_gated", False):
+            self.allow_new_entries = False
+            self.system_health = "DEGRADED"
+
+        # Enforce reconciliation failure latch (SAFE_MODE)
+        if getattr(self, "reconciliation_mismatch", False):
+            self.system_health = "SAFE_MODE"
+            self.allow_new_entries = False
+            
         diagnostics = {
             "broker_connected": True,
             "market_data_fresh": True,
@@ -2272,8 +2284,8 @@ class TradingEngine:
             "model_ready": True,
             "scanner_ok": True,
             "buying_power_ok": True,
-            "positions_reconciled": True,
-            "orders_reconciled": True,
+            "positions_reconciled": not getattr(self, "reconciliation_mismatch", False),
+            "orders_reconciled": not getattr(self, "reconciliation_mismatch", False),
             "vix_fresh": True,
         }
         
@@ -2366,7 +2378,7 @@ class TradingEngine:
                 self.allow_new_entries = False
 
         # Monitor 8: Position reconciliation
-        if diagnostics["broker_connected"]:
+        if diagnostics["broker_connected"] and not getattr(self, "reconciliation_mismatch", False):
             try:
                 broker_positions = await self.broker.positions()
                 broker_syms = {p.symbol: float(p.qty) for p in broker_positions}
@@ -2385,18 +2397,20 @@ class TradingEngine:
                             
                 if not reconciled:
                     diagnostics["positions_reconciled"] = False
-                    self.reconciliation_failed = True
+                    self.reconciliation_mismatch = True
+                    self.allow_new_entries = False
                     if self.system_health not in ("HALTED",):
                         self.system_health = "SAFE_MODE"
                     applog.warning("engine.heartbeat", f"Position reconciliation failure. Broker: {broker_syms}, DB lots: {db_syms}")
             except Exception:
                 diagnostics["positions_reconciled"] = False
-                self.reconciliation_failed = True
+                self.reconciliation_mismatch = True
+                self.allow_new_entries = False
                 if self.system_health not in ("HALTED",):
                     self.system_health = "SAFE_MODE"
 
         # Monitor 9: Order reconciliation
-        if diagnostics["broker_connected"]:
+        if diagnostics["broker_connected"] and not getattr(self, "reconciliation_mismatch", False):
             try:
                 discrepancy = False
                 for cid in list(self.pending_reconciliation_orders.keys()):
@@ -2411,11 +2425,15 @@ class TradingEngine:
                         
                 if discrepancy:
                     diagnostics["orders_reconciled"] = False
+                    self.reconciliation_mismatch = True
+                    self.allow_new_entries = False
                     if self.system_health not in ("HALTED",):
                         self.system_health = "SAFE_MODE"
                     applog.warning("engine.heartbeat", "Order reconciliation mismatch found.")
             except Exception:
                 diagnostics["orders_reconciled"] = False
+                self.reconciliation_mismatch = True
+                self.allow_new_entries = False
                 if self.system_health not in ("HALTED",):
                     self.system_health = "SAFE_MODE"
 
