@@ -183,7 +183,7 @@ class TestMetaLabelEngine:
         # Monkeypatch get_strategy_candidates to return all timestamps of df except the first 60
         monkeypatch.setattr(
             "app.ai.prediction.get_strategy_candidates",
-            lambda strategy, df, symbol, side: list(df.index[60:])
+            lambda strategy, df, symbol, side, strategy_overrides: list(df.index[60:])
         )
         # Use min_validation_auc=0.0 to avoid rejected status on low random OOS AUC
         result = engine.train("orb", {"SYM": df}, horizon_bars=10, threshold_pct=0.05, side="long", min_validation_auc=0.0)
@@ -321,7 +321,7 @@ class TestStrategyCandidatesRegression:
         # Monkeypatch get_strategy_candidates to return all timestamps of df except the first 60
         monkeypatch.setattr(
             "app.ai.prediction.get_strategy_candidates",
-            lambda strategy, df, symbol, side: list(df.index[60:])
+            lambda strategy, df, symbol, side, strategy_overrides: list(df.index[60:])
         )
         engine.train("orb", {"SYM": df}, horizon_bars=10, threshold_pct=0.05, side="long", min_validation_auc=0.0)
 
@@ -365,8 +365,8 @@ class TestSpecialistFallback:
         model = SignalModel(models_dir)
 
         # 2. Mock base model p_up and p_down to return fixed values
-        monkeypatch.setattr(model, "p_up", lambda feats: 0.65)
-        monkeypatch.setattr(model, "p_down", lambda feats: 0.35)
+        monkeypatch.setattr(model, "p_up", lambda feats, regime_key=None: 0.65)
+        monkeypatch.setattr(model, "p_down", lambda feats, regime_key=None: 0.35)
 
         # 3. Create dummy features Series
         from app.ai.features import FEATURE_COLUMNS

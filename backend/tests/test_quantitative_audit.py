@@ -67,8 +67,8 @@ def test_kelly_is_disabled_due_to_incompatibility():
     )
     
     assert len(decision.approved_entries) == 1
-    # Verify that the Kelly override value is the computed fractional Kelly value (0.1475)
-    assert decision.approved_entries[0][1] == pytest.approx(0.1475)
+    # Verify that the Kelly override value is None (disabled)
+    assert decision.approved_entries[0][1] is None
 
 
 # ---------------------------------------------------------------------------
@@ -325,10 +325,10 @@ def test_backtest_uses_shared_allocation_path():
         portfolio_allocator=mock_allocator
     )
     
-    # Assertions
+    # Assertions: Kelly overrides must be None since Kelly position sizing is disabled
     assert len(decision.approved_entries) == 2
-    assert decision.approved_entries[0] == (signal_a, 0.10)
-    assert decision.approved_entries[1] == (signal_b, 0.12)
+    assert decision.approved_entries[0] == (signal_a, None)
+    assert decision.approved_entries[1] == (signal_b, None)
     assert len(decision.gated_entries) == 0
 
 

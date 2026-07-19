@@ -114,43 +114,50 @@ class InsightEngine:
             return None
 
         if self.gemini_api_key:
-            try:
-                async with httpx.AsyncClient(timeout=20.0) as client:
-                    resp = await client.post(
-                        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={self.gemini_api_key}",
-                        headers={"content-type": "application/json"},
-                        json={
-                            "contents": [
-                                {
-                                    "parts": [
-                                        {
-                                            "text": (
-                                                "You are the analyst narrator inside a day-trading dashboard. "
-                                                "Write a tight 3-4 sentence market note based on this engine "
-                                                "state. No advice disclaimers, no hedging boilerplate.\n\n"
-                                                + context
-                                            )
-                                        }
-                                    ]
-                                }
-                            ]
-                        },
-                    )
-                    resp.raise_for_status()
-                    data = resp.json()
-                    candidates = data.get("candidates", [])
-                    if candidates:
-                        text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-                        if text:
-                            self._add(
-                                InsightItem(kind="narrative", title="Analyst note", detail=text.strip(), severity="info")
-                            )
-                            return text.strip()
-            except Exception as exc:  # noqa: BLE001
-                applog.warning("ai.insights", f"Gemini narrative failed: {exc}")
-                # If Gemini fails, we can fall back to Anthropic if available
-                if not self.anthropic_api_key:
-                    return None
+            gemini_models = ["gemini-3.1-flash-lite", "gemini-3-flash-preview", "gemini-2.5-flash", "gemini-2.0-flash"]
+            last_exception = None
+            for model in gemini_models:
+                try:
+                    async with httpx.AsyncClient(timeout=20.0) as client:
+                        resp = await client.post(
+                            f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={self.gemini_api_key}",
+                            headers={"content-type": "application/json"},
+                            json={
+                                "contents": [
+                                    {
+                                        "parts": [
+                                            {
+                                                "text": (
+                                                    "You are the analyst narrator inside a day-trading dashboard. "
+                                                    "Write a tight 3-4 sentence market note based on this engine "
+                                                    "state. No advice disclaimers, no hedging boilerplate.\n\n"
+                                                    + context
+                                                )
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                        )
+                        resp.raise_for_status()
+                        data = resp.json()
+                        candidates = data.get("candidates", [])
+                        if candidates:
+                            text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+                            if text:
+                                self._add(
+                                    InsightItem(kind="narrative", title="Analyst note", detail=text.strip(), severity="info")
+                                )
+                                return text.strip()
+                except Exception as exc:  # noqa: BLE001
+                    last_exception = exc
+                    applog.warning("ai.insights", f"Gemini model {model} failed: {exc}")
+                    continue
+
+            # If Gemini fails, we can fall back to Anthropic if available
+            if last_exception and not self.anthropic_api_key:
+                applog.warning("ai.insights", f"All Gemini models failed. Last error: {last_exception}")
+                return None
 
         if self.anthropic_api_key:
             try:

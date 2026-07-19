@@ -6,7 +6,12 @@ Pipeline:
   Stage 3  ML AUC validate  (asyncio.gather, semaphore=8)   top 25 -> final 10-15
 
 Safety gates:
-  - Global SPY panic halt (>= 85th volatility percentile)
+  - Multi-signal MarketRiskState (CR-047): NORMAL/CAUTION/STRESS/PANIC/UNKNOWN
+    aggregated from 5 independent signal families (SPY, QQQ, breadth,
+    universe_stress, data_health)
+  - UNKNOWN fails closed: blocks new scanner-driven entries, preserves
+    existing-position management
+  - SPY alone unavailable does NOT produce UNKNOWN if other families healthy
   - Sector diversity cap (max 3 symbols per sector)
   - Tiered AUC selection (Tier-1 >= 0.55, Tier-2 > 0.50 best-of)
   - Fallback to core watchlist if nothing beats random chance
@@ -22,13 +27,35 @@ import numpy as np
 import pandas as pd
 
 from app.core.logging import applog
+from app.core.scanner_discovery_input import resolve_stage1_symbols
+from app.core.universe_discovery import DiscoveryCoordinator
 from app.ai.features import FEATURE_COLUMNS, build_training_set
 from app.data.manager import DataManager
+from app.risk.market_regime import (
+    MarketRiskAggregator,
+    MarketRiskState,
+    SignalHealth,  # re-exported for convenience
+)
+
 
 class ScannerOutcome(Enum):
     SUCCESS_NONEMPTY = "SUCCESS_NONEMPTY"
     SUCCESS_EMPTY = "SUCCESS_EMPTY"
     FAILED = "FAILED"
+
+
+# ---------------------------------------------------------------------------
+# Backward-compatible tri-state alias (satisfies #87 / 046 regressions)
+# ---------------------------------------------------------------------------
+
+class SpyVolatilityState(Enum):
+    """Backward-compatible alias; new code should use MarketRiskState directly.
+
+    Kept so existing tests that mock ``check_spy_volatility`` continue to work.
+    """
+    SAFE    = "SAFE"
+    PANIC   = "PANIC"
+    UNKNOWN = "UNKNOWN"
 
 
 # ---------------------------------------------------------------------------
@@ -87,82 +114,95 @@ DEFENSIVE_WATCHLIST: list[str] = ["SPY", "QQQ", "DIA", "IWM", "GLD"]
 LARGE_CAP_ANCHORS: list[str] = ["NVDA", "TSLA", "AMD", "META", "AMZN", "AAPL", "MSFT", "PLTR", "SMCI", "COIN"]
 
 # Concurrency limits
-_PREFILTER_CONCURRENCY = 20   # Stage 1: API calls (I/O-bound)
-_ML_CONCURRENCY = 8           # Stage 3: sklearn training (CPU-bound)
+_PREFILTER_CONCURRENCY = 20
+_ML_CONCURRENCY = 8
 
 # Selection parameters
-_TECH_SCORE_TOP_N = 25        # Stage 2 → Stage 3 handoff
-_MAX_PER_SECTOR = 3           # Sector diversity cap
-_TARGET_SYMBOLS = 12          # Ideal final watchlist size
-_AUC_TIER1 = 0.55             # Strong edge threshold
-_AUC_TIER2 = 0.50             # Beats random (minimum acceptable)
+_TECH_SCORE_TOP_N = 25
+_MAX_PER_SECTOR = 3
+_TARGET_SYMBOLS = 12
+_AUC_TIER1 = 0.55
+_AUC_TIER2 = 0.50
 
 
 class MarketScanner:
     _last_scans = []
 
-    def __init__(self, data_manager: DataManager, core_watchlist: list[str]) -> None:
+    def __init__(self, data_manager: DataManager, core_watchlist: list[str], risk_config=None) -> None:
         self.data = data_manager
         self.core_watchlist = core_watchlist
+        self.risk_config = risk_config
+        self._discovery: DiscoveryCoordinator | None = None
+        self._regime = MarketRiskAggregator(
+            data_manager=data_manager,
+            universe_symbols=list(CANDIDATE_POOL),
+        )
 
-    # ------------------------------------------------------------------
-    # Global safety gate
-    # ------------------------------------------------------------------
-
-    async def check_spy_volatility(self, as_of: datetime | None = None) -> bool:
-        """True = safe to trade. False = panic state, deploy defensives."""
-        try:
-            end = as_of or datetime.now(UTC)
-            start = end - timedelta(days=20)
-            df = await self.data.history("SPY", "1Min", start, end, prefer_cache=True)
-            if df.empty or len(df) < 200:
-                return True
-
-            df_h = df.resample("1h").agg({
-                "open": "first", "high": "max", "low": "min",
-                "close": "last", "volume": "sum",
-            }).dropna()
-            if len(df_h) < 20:
-                return True
-
-            prev = df_h["close"].shift(1)
-            tr = pd.concat([
-                df_h["high"] - df_h["low"],
-                (df_h["high"] - prev).abs(),
-                (df_h["low"] - prev).abs(),
-            ], axis=1).max(axis=1)
-            atr_pct = tr.ewm(alpha=1.0 / 14, adjust=False).mean() / df_h["close"] * 100.0
-
-            if atr_pct.std() < 1e-6:
-                vol_pct = 0.0
-            else:
-                vol_pct = float((atr_pct.tail(200) <= atr_pct.iloc[-1]).mean())
-
-            if vol_pct >= 0.85:
-                applog.warning(
-                    "scanner",
-                    f"Market panic: SPY volatility at {vol_pct*100:.1f}th percentile. "
-                    "Deploying defensive ETFs.",
+    async def _stage1_symbols(self, as_of: datetime | None = None) -> list[str]:
+        """Resolve bounded Stage-1 input without current-data replay leakage."""
+        provider = self.data.provider
+        discovery_supported = bool(getattr(provider, "supports_asset_discovery", False))
+        acquire_discovery = None
+        if as_of is None and discovery_supported:
+            discovery = getattr(self, "_discovery", None)
+            if discovery is None:
+                discovery = getattr(self.data, "_discovery", None)
+            if discovery is None:
+                discovery = DiscoveryCoordinator(
+                    provider, feed="iex", asset_cache_ttl=timedelta(hours=6),
+                    batch_size=200, request_budget=10, shortlist_limit=50,
                 )
-                return False
+                self._discovery = discovery
+                self.data._discovery = discovery
+            acquire_discovery = discovery.acquire
+        symbols = await resolve_stage1_symbols(
+            as_of=as_of, static_symbols=CANDIDATE_POOL, fallback_limit=50,
+            discovery_supported=discovery_supported, acquire_discovery=acquire_discovery,
+        )
+        return list(symbols)
 
-            applog.info("scanner", f"Market volatility normal (SPY Volatility Percentile: {vol_pct*100:.1f}%)")
-            return True
-        except Exception as exc:
-            applog.warning("scanner", f"SPY volatility check failed: {exc}. Assuming safe.")
-            return True
+    # ------------------------------------------------------------------
+    # Global safety gate — multi-signal, fail-closed on UNKNOWN
+    # ------------------------------------------------------------------
+
+    async def check_spy_volatility(self, as_of: datetime | None = None) -> SpyVolatilityState:
+        """Backward-compatible SPY gate wrapper.
+
+        Delegates to MarketRiskAggregator.  STRESS/PANIC → PANIC;
+        UNKNOWN → UNKNOWN; NORMAL/CAUTION → SAFE.
+        Kept for tests that mock this method directly.
+        """
+        state, _conf, _cov, _reasons, _healths = await self._regime.assess(as_of=as_of)
+        if state in (MarketRiskState.PANIC, MarketRiskState.STRESS):
+            return SpyVolatilityState.PANIC
+        if state is MarketRiskState.UNKNOWN:
+            return SpyVolatilityState.UNKNOWN
+        return SpyVolatilityState.SAFE
+
+    async def _assess_market_risk(
+        self, as_of: datetime | None = None
+    ) -> tuple[MarketRiskState, float, list[str]]:
+        """Run the full regime aggregator and return (state, confidence, reason_codes)."""
+        state, conf, cov, reasons, healths = await self._regime.assess(as_of=as_of)
+        applog.info(
+            "scanner",
+            f"[MarketRisk] state={state.value} confidence={conf:.2f} coverage={cov:.2f} "
+            f"reasons={reasons} "
+            f"unavailable={[f for f, h in healths.items() if not h.healthy]}",
+        )
+        return state, conf, reasons
 
     # ------------------------------------------------------------------
     # Stage 1 — Parallel pre-filter
     # ------------------------------------------------------------------
 
     async def _stage1_prefilter_parallel(
-        self, as_of: datetime | None = None
+        self, as_of: datetime | None = None, symbols: list[str] | None = None
     ) -> list[dict]:
         """Fetch daily stats for all ~200 symbols concurrently. Returns candidates."""
         end = as_of or datetime.now(UTC)
         start = end - timedelta(days=25)
-        all_symbols = CANDIDATE_POOL
+        all_symbols = list(symbols) if symbols is not None else CANDIDATE_POOL
         semaphore = asyncio.Semaphore(_PREFILTER_CONCURRENCY)
 
         applog.info("scanner", f"[Stage 1] Pre-filtering {len(all_symbols)} symbols (parallel)... end={end.isoformat()} tzinfo={end.tzinfo}")
@@ -170,7 +210,7 @@ class MarketScanner:
         diag_records = {}
 
         history_fn = getattr(self.data, "original_history", self.data.history)
-        
+
         async def _check(symbol: str) -> dict | None:
             symbol = symbol.upper()
             record = {
@@ -196,14 +236,8 @@ class MarketScanner:
 
             async with semaphore:
                 try:
-                    df_raw = pd.DataFrame()
-                    try:
-                        df_raw = await self.data.provider.get_bars(symbol, "1Day", start, end)
-                    except Exception:
-                        pass
-                    
                     df = await history_fn(symbol, "1Day", start, end, prefer_cache=True)
-                    record["bars_raw"] = len(df_raw)
+                    record["bars_raw"] = len(df)
                     record["bars_asof"] = len(df)
 
                     record["filter_history"] = {
@@ -214,10 +248,10 @@ class MarketScanner:
                     if df.empty:
                         record["FINAL_REJECTION_REASON"] = "MISSING_DATA"
                         return None
-                    
+
                     record["first_bar"] = df.index[0].isoformat()
                     record["latest_bar"] = df.index[-1].isoformat()
-                    
+
                     if len(df) < 8:
                         record["FINAL_REJECTION_REASON"] = "INSUFFICIENT_HISTORY"
                         return None
@@ -228,14 +262,13 @@ class MarketScanner:
                     now_tz = end_pd.tz_convert(latest_bar_ts.tz) if latest_bar_ts.tz else end_pd
                     now_et = now_tz.astimezone(ZoneInfo("America/New_York"))
                     et_mins = now_et.hour * 60 + now_et.minute
-                    
-                    # Allow up to 100 hours before 9:30 AM to account for weekends and holidays
+
                     allowed_lag = timedelta(hours=100) if et_mins < 9 * 60 + 30 else timedelta(hours=1)
-                    
+
                     raw_lag = now_tz - latest_bar_ts
                     time_since_midnight = now_et - now_et.replace(hour=0, minute=0, second=0, microsecond=0)
                     lag = max(timedelta(0), raw_lag - time_since_midnight)
-                    
+
                     record["filter_staleness"] = {
                         "actual": str(lag),
                         "max_lag": str(allowed_lag),
@@ -253,10 +286,10 @@ class MarketScanner:
                     except Exception:
                         pass
                     record["price"] = price
-                    
+
                     from app.config import get_settings
-                    cfg = get_settings().risk_config()
-                    
+                    cfg = self.risk_config or get_settings().risk_config()
+
                     record["filter_price"] = {
                         "actual": price,
                         "min": cfg.min_price,
@@ -269,7 +302,7 @@ class MarketScanner:
                     avg_vol = float(df["volume"].mean())
                     avg_daily_dollar_vol = avg_vol * price
                     target_daily_dollar_vol = cfg.min_avg_dollar_volume * 390
-                    
+
                     record["avg_dollar_volume"] = avg_daily_dollar_vol
                     record["filter_liquidity"] = {
                         "actual": avg_daily_dollar_vol,
@@ -311,62 +344,6 @@ class MarketScanner:
             "scanner",
             f"[Stage 1] {len(candidates)}/{len(all_symbols)} symbols passed pre-filter.",
         )
-
-        is_diag_target_ts = end.isoformat().startswith("2026-07-06T14:00")
-        applog.info("scanner", f"DEBUG is_diag_target_ts={is_diag_target_ts} for end={end.isoformat()}")
-
-        if is_diag_target_ts:
-            target_symbols = ["TSLA", "NVDA", "SPY", "MU", "AMD"]
-            for sym in target_symbols:
-                rec = diag_records.get(sym)
-                if rec:
-                    applog.info("scanner", "[SCANNER_DIAG]")
-                    applog.info("scanner", f"symbol={rec['symbol']}")
-                    applog.info("scanner", f"T={rec['T']}")
-                    applog.info("scanner", f"adapter={rec['adapter']}")
-                    applog.info("scanner", f"timeframe={rec['timeframe']}")
-                    applog.info("scanner", f"required_bars={rec['required_bars']}")
-                    applog.info("scanner", f"bars_raw={rec['bars_raw']}")
-                    applog.info("scanner", f"bars_asof={rec['bars_asof']}")
-                    applog.info("scanner", f"first_bar={rec['first_bar']}")
-                    applog.info("scanner", f"latest_bar={rec['latest_bar']}")
-                    applog.info("scanner", f"price={rec['price']}")
-                    applog.info("scanner", f"avg_dollar_volume={rec['avg_dollar_volume']}")
-                    
-                    fl = rec['filter_liquidity']
-                    applog.info("scanner", f"filter_liquidity actual={fl['actual']} threshold={fl['threshold']} result={fl['result']}")
-                    fp = rec['filter_price']
-                    applog.info("scanner", f"filter_price actual={fp['actual']} min={fp['min']} result={fp['result']}")
-                    fh = rec['filter_history']
-                    applog.info("scanner", f"filter_history actual={fh['actual']} required={fh['required']} result={fh['result']}")
-                    fs = rec.get('filter_staleness', {"actual": "N/A", "max_lag": "N/A", "result": "FAIL"})
-                    applog.info("scanner", f"filter_staleness actual={fs['actual']} max_lag={fs['max_lag']} result={fs['result']}")
-                    
-                    applog.info("scanner", f"FINAL_PASS={rec['FINAL_PASS']}")
-                    applog.info("scanner", f"FINAL_REJECTION_REASON={rec['FINAL_REJECTION_REASON']}")
-
-            passed_cnt = sum(1 for r in diag_records.values() if r["FINAL_PASS"])
-            insufficient_history_cnt = sum(1 for r in diag_records.values() if r["FINAL_REJECTION_REASON"] == "INSUFFICIENT_HISTORY")
-            missing_data_cnt = sum(1 for r in diag_records.values() if r["FINAL_REJECTION_REASON"] == "MISSING_DATA")
-            stale_data_cnt = sum(1 for r in diag_records.values() if r["FINAL_REJECTION_REASON"] == "STALE_DATA")
-            price_filter_cnt = sum(1 for r in diag_records.values() if r["FINAL_REJECTION_REASON"] == "PRICE_FILTER")
-            liquidity_filter_cnt = sum(1 for r in diag_records.values() if r["FINAL_REJECTION_REASON"] == "LIQUIDITY_FILTER")
-            volatility_filter_cnt = 0
-            calc_error_cnt = sum(1 for r in diag_records.values() if r["FINAL_REJECTION_REASON"] == "CALCULATION_ERROR")
-            other_cnt = sum(1 for r in diag_records.values() if r["FINAL_REJECTION_REASON"] not in ["NONE", "INSUFFICIENT_HISTORY", "MISSING_DATA", "STALE_DATA", "PRICE_FILTER", "LIQUIDITY_FILTER", "CALCULATION_ERROR"])
-
-            applog.info("scanner", "SCANNER_STAGE1_SUMMARY")
-            applog.info("scanner", f"total={len(diag_records)}")
-            applog.info("scanner", f"passed={passed_cnt}")
-            applog.info("scanner", f"INSUFFICIENT_HISTORY={insufficient_history_cnt}")
-            applog.info("scanner", f"MISSING_DATA={missing_data_cnt}")
-            applog.info("scanner", f"STALE_DATA={stale_data_cnt}")
-            applog.info("scanner", f"PRICE_FILTER={price_filter_cnt}")
-            applog.info("scanner", f"LIQUIDITY_FILTER={liquidity_filter_cnt}")
-            applog.info("scanner", f"VOLATILITY_FILTER={volatility_filter_cnt}")
-            applog.info("scanner", f"CALCULATION_ERROR={calc_error_cnt}")
-            applog.info("scanner", f"OTHER={other_cnt}")
-
         return candidates
 
     # ------------------------------------------------------------------
@@ -375,7 +352,6 @@ class MarketScanner:
 
     @staticmethod
     def _stage2_technical_score(candidates: list[dict], as_of: datetime | None = None) -> list[dict]:
-        """Rank candidates by composite technical score. Returns sorted list."""
         if not candidates:
             return []
 
@@ -401,106 +377,196 @@ class MarketScanner:
         scores = 0.30 * rvol_rank + 0.20 * gap_rank + 0.20 * atr_rank + 0.30 * mom_rank
         for i, c in enumerate(candidates):
             c["tech_score"] = float(scores[i])
-            # Log component scores
             applog.info(
                 "scanner",
                 f"SCAN_SCORE: symbol={c['symbol']}, T={T.isoformat()}, "
                 f"rel_volume={c['rvol']:.4f}, ATR_pct={c['atr_pct']:.4f}, "
                 f"momentum={c['mom3']:.4f}, VWAP_distance=N/A, "
-                f"gap_pct={c['gap_pct']:.4f}, liquidity={c['avg_vol']*c['price']:.2f}, "
-                f"composite_score={c['tech_score']:.4f}, latest_bar_timestamp={c['latest_bar_timestamp'].isoformat()}"
+                f"composite_score={c['tech_score']:.4f}, stage=TECH_SCORE"
             )
 
-        candidates.sort(key=lambda x: x["tech_score"], reverse=True)
-        top = candidates[:_TECH_SCORE_TOP_N]
-        applog.info("scanner", "[Stage 2] Ranked candidates:")
-        for rank, c in enumerate(top):
-            # Temporarily compute if it would be selected based on cap/momentum logic
-            # This is slightly duplicated from the selection logic below to provide accurate logging
-            # but is necessary for the audit trail.
-            # Wait, the actual selection logic runs in run(), not here. We can just return the candidates and log them in run() instead.
-            # But the user asked for this log in Stage 2. Let's just log rank and score here, and we'll log selection in run().
-            pass # We will move the logging to run() where final_anchors and final_momentum are decided.
-
-        return top
+        ranked = sorted(candidates, key=lambda c: c["tech_score"], reverse=True)
+        return ranked[:_TECH_SCORE_TOP_N]
 
     # ------------------------------------------------------------------
-    # Public entry point
+    # Stage 3 — ML AUC validation
     # ------------------------------------------------------------------
 
-    async def run(self, as_of: datetime | None = None) -> tuple[ScannerOutcome, list[str]]:
-        """Run a scan and return its outcome together with the selected symbols."""
-        try:
-            # Global safety gate
-            if not await self.check_spy_volatility(as_of):
-                return (ScannerOutcome.SUCCESS_NONEMPTY, DEFENSIVE_WATCHLIST)
+    async def _stage3_ml_validate(
+        self, candidates: list[dict], as_of: datetime | None = None
+    ) -> list[dict]:
+        from sklearn.ensemble import RandomForestClassifier
+        from sklearn.metrics import roc_auc_score
+        from sklearn.model_selection import TimeSeriesSplit
 
-            # Stage 1: parallel pre-filter
-            candidates = await self._stage1_prefilter_parallel(as_of)
-            if not candidates:
-                applog.info("scanner", "SCANNER_RUN_EMPTY: All candidates failed pre-filter.")
-                return (ScannerOutcome.SUCCESS_EMPTY, [])
+        end = as_of or datetime.now(UTC)
+        start = end - timedelta(days=60)
+        semaphore = asyncio.Semaphore(_ML_CONCURRENCY)
 
-            # Stage 2: technical scoring
-            top_candidates = self._stage2_technical_score(candidates, as_of)
-            if not top_candidates:
-                applog.info("scanner", "SCANNER_RUN_EMPTY: No candidates survived technical scoring.")
-                return (ScannerOutcome.SUCCESS_EMPTY, [])
+        async def _validate(candidate: dict) -> dict:
+            async with semaphore:
+                symbol = candidate["symbol"]
+                try:
+                    df = await self.data.history(symbol, "1Min", start, end, prefer_cache=True)
+                    if len(df) < 500:
+                        candidate["auc"] = 0.0
+                        return candidate
 
-            # Check for stale scans invariant using source timestamps
-            latest_timestamp = max(c["latest_bar_timestamp"] for c in top_candidates[:8])
-            MarketScanner._last_scans.append((as_of or datetime.now(UTC), latest_timestamp))
-            MarketScanner._last_scans = MarketScanner._last_scans[-10:]
-            age_seconds = (MarketScanner._last_scans[-1][0] - latest_timestamp).total_seconds()
+                    X, y = build_training_set(df)
+                    if len(X) < 100 or y.nunique() < 2:
+                        candidate["auc"] = 0.0
+                        return candidate
 
+                    tscv = TimeSeriesSplit(n_splits=3)
+                    aucs: list[float] = []
+                    for train_idx, val_idx in tscv.split(X):
+                        y_train = y.iloc[train_idx]
+                        if y_train.nunique() < 2:
+                            continue
+                        model = RandomForestClassifier(
+                            n_estimators=50, max_depth=5, min_samples_leaf=10,
+                            random_state=42, n_jobs=1,
+                        )
+                        model.fit(X.iloc[train_idx][FEATURE_COLUMNS], y_train)
+                        probs = model.predict_proba(X.iloc[val_idx][FEATURE_COLUMNS])[:, 1]
+                        try:
+                            aucs.append(roc_auc_score(y.iloc[val_idx], probs))
+                        except ValueError:
+                            continue
 
-            # Separate into Large-cap Anchors and Momentum Leaders
-            anchors = [c for c in top_candidates if c["symbol"] in LARGE_CAP_ANCHORS]
-            momentum = [c for c in top_candidates if c["symbol"] not in LARGE_CAP_ANCHORS]
+                    candidate["auc"] = float(np.mean(aucs)) if aucs else 0.0
+                except Exception as exc:
+                    applog.error("scanner", f"ML validation failed for {symbol}: {exc}")
+                    candidate["auc"] = 0.0
+                return candidate
 
-            # Select top 4 anchors (already sorted by tech_score descending in Stage 2)
-            final_anchors = [c["symbol"] for c in anchors[:4]]
+        results = await asyncio.gather(*[_validate(c) for c in candidates])
+        return list(results)
 
-            final_momentum = []
-            sector_counts = {}
-            for c in momentum:
-                if len(final_momentum) >= 8:
+    # ------------------------------------------------------------------
+    # Final selection — tiered AUC + sector diversity
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _select_final(candidates: list[dict]) -> list[str]:
+        if not candidates:
+            return []
+
+        ranked = sorted(candidates, key=lambda c: c.get("auc", 0.0), reverse=True)
+        selected: list[str] = []
+        sector_counts: dict[str, int] = {}
+
+        def _try_add(c: dict) -> bool:
+            sym = c["symbol"]
+            sector = c.get("sector")
+            if not isinstance(sector, str) or not sector.strip():
+                sector = f"unknown:{sym}"
+            if sector_counts.get(sector, 0) >= _MAX_PER_SECTOR:
+                return False
+            selected.append(sym)
+            sector_counts[sector] = sector_counts.get(sector, 0) + 1
+            return True
+
+        for c in ranked:
+            if c.get("auc", 0.0) >= _AUC_TIER1:
+                _try_add(c)
+            if len(selected) >= _TARGET_SYMBOLS:
+                break
+
+        if len(selected) < _TARGET_SYMBOLS:
+            for c in ranked:
+                if c["symbol"] in selected:
+                    continue
+                if c.get("auc", 0.0) > _AUC_TIER2:
+                    _try_add(c)
+                if len(selected) >= _TARGET_SYMBOLS:
                     break
-                s = c["sector"]
-                if sector_counts.get(s, 0) < _MAX_PER_SECTOR:
-                    final_momentum.append(c["symbol"])
-                    sector_counts[s] = sector_counts.get(s, 0) + 1
 
-            # Log Stage 2 results explicitly
-            applog.info("scanner", "[Stage 2] Ranked candidates:")
-            for rank, c in enumerate(top_candidates):
-                selected = c["symbol"] in final_anchors or c["symbol"] in final_momentum
-                if selected:
-                    reason = "NONE"
-                elif len(final_momentum) >= 8 and c["symbol"] not in LARGE_CAP_ANCHORS:
-                    reason = "TOP_N_LIMIT"
-                elif c["symbol"] not in LARGE_CAP_ANCHORS and sector_counts.get(c["sector"], 0) >= _MAX_PER_SECTOR:
-                    reason = "SECTOR_CAP"
-                else:
-                    reason = "NOT_SELECTED"
-                applog.info("scanner", f"Stage2 rank={rank+1} symbol={c['symbol']} composite_score={c['tech_score']:.4f} selected={str(selected).lower()} exclusion_reason={reason}")
-
-            scanned = sorted(list(set(final_anchors + final_momentum)))
-            if not scanned:
-                applog.info("scanner", "SCANNER_RUN_EMPTY: Scanner produced no final candidates.")
-                return (ScannerOutcome.SUCCESS_EMPTY, [])
-
-            applog.info("scanner", f"scan_as_of={(as_of or datetime.now(UTC)).isoformat()} source_latest_timestamp={latest_timestamp.isoformat()} source_age_seconds={age_seconds} outcome={ScannerOutcome.SUCCESS_NONEMPTY.name}")
-            return (ScannerOutcome.SUCCESS_NONEMPTY, scanned)
-
-        except Exception as exc:
-            applog.error("scanner", f"SCANNER_RUN_FAILED: {exc}")
-            return (ScannerOutcome.FAILED, [])
+        return selected
 
     # ------------------------------------------------------------------
-    # Legacy screen_pool (kept for tests)
+    # Public API
     # ------------------------------------------------------------------
 
     async def screen_pool(self, as_of: datetime | None = None) -> list[dict]:
-        """Legacy sequential screener kept for unit-test compatibility."""
-        return await self._stage1_prefilter_parallel(as_of)
+        symbols = await self._stage1_symbols(as_of=as_of)
+        return await self._stage1_prefilter_parallel(as_of=as_of, symbols=symbols)
+
+    async def run(self, as_of: datetime | None = None) -> tuple[ScannerOutcome, list[str]]:
+        """Execute the full 3-stage scan. Returns (outcome, watchlist).
+
+        MarketRiskState gate behaviour:
+          NORMAL / CAUTION  -- proceed with normal candidate pipeline.
+          STRESS / PANIC    -- return DEFENSIVE_WATCHLIST immediately.
+          UNKNOWN           -- fail closed: SUCCESS_EMPTY so the engine preserves
+                              existing-position management without authorising
+                              new scanner-driven entries.
+        """
+        try:
+            market_state, confidence, reason_codes = await self._assess_market_risk(as_of=as_of)
+
+            if market_state in (MarketRiskState.PANIC, MarketRiskState.STRESS):
+                applog.warning(
+                    "scanner",
+                    f"Market regime={market_state.value} (confidence={confidence:.2f}). "
+                    f"Deploying defensive watchlist. reasons={reason_codes}",
+                )
+                return ScannerOutcome.SUCCESS_NONEMPTY, DEFENSIVE_WATCHLIST.copy()
+
+            if market_state is MarketRiskState.UNKNOWN:
+                applog.warning(
+                    "scanner",
+                    f"Market regime=UNKNOWN (confidence={confidence:.2f}). "
+                    "Failing closed: blocking new scanner-driven entries. "
+                    "Existing-position management continues unaffected. "
+                    f"reasons={reason_codes}",
+                )
+                return ScannerOutcome.SUCCESS_EMPTY, []
+
+            # NORMAL or CAUTION — proceed with normal pipeline
+            if market_state is MarketRiskState.CAUTION:
+                applog.warning(
+                    "scanner",
+                    f"Market regime=CAUTION (confidence={confidence:.2f}). "
+                    "Proceeding with pipeline at reduced confidence. "
+                    f"reasons={reason_codes}",
+                )
+
+            stage1_symbols = await self._stage1_symbols(as_of=as_of)
+            stage1 = await self._stage1_prefilter_parallel(as_of=as_of, symbols=stage1_symbols)
+            if not stage1:
+                applog.warning("scanner", "Stage 1 returned no candidates.")
+                return ScannerOutcome.SUCCESS_EMPTY, []
+
+            stage2 = self._stage2_technical_score(stage1, as_of=as_of)
+            stage3 = await self._stage3_ml_validate(stage2, as_of=as_of)
+            final = self._select_final(stage3)
+
+            if not final:
+                applog.warning("scanner", "No candidates beat AUC > 0.50.")
+                return ScannerOutcome.SUCCESS_EMPTY, []
+
+            applog.info(
+                "scanner",
+                f"Scan complete: {len(final)} symbols selected from {len(CANDIDATE_POOL)} candidates. "
+                f"Selected: {final}",
+            )
+            self._last_scans = [
+                {
+                    "symbol": c["symbol"],
+                    "score": round(c.get("tech_score", 0.0), 4),
+                    "auc": round(c.get("auc", 0.0), 4),
+                    "sector": c.get("sector", "unknown"),
+                    "rvol": round(c.get("rvol", 0.0), 2),
+                    "atr_pct": round(c.get("atr_pct", 0.0), 2),
+                }
+                for c in stage3
+            ]
+            return ScannerOutcome.SUCCESS_NONEMPTY, final
+        except Exception as exc:
+            applog.error("scanner", f"Scanner pipeline failed: {exc}")
+            return ScannerOutcome.FAILED, []
+
+    @classmethod
+    def get_last_scans(cls) -> list[dict]:
+        return cls._last_scans

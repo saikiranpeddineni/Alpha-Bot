@@ -4,7 +4,7 @@ import numpy as np
 from datetime import datetime, UTC
 from unittest.mock import AsyncMock, MagicMock
 
-from app.core.scanner import MarketScanner, DEFENSIVE_WATCHLIST, ScannerOutcome
+from app.core.scanner import MarketScanner, DEFENSIVE_WATCHLIST, ScannerOutcome, SpyVolatilityState
 from app.indicators.ta import enrich
 
 
@@ -12,6 +12,8 @@ from app.indicators.ta import enrich
 def mock_data_manager():
     dm = MagicMock()
     dm.history = AsyncMock()
+    dm.original_history = dm.history
+    dm.provider.get_bars = AsyncMock(return_value=pd.DataFrame())
     return dm
 
 
@@ -19,27 +21,30 @@ def mock_data_manager():
 async def test_spy_volatility_checks(mock_data_manager):
     scanner = MarketScanner(mock_data_manager, ["SPY", "QQQ"])
     
-    # Mock SPY history returning low volatility
+    # Mock VIX history returning low volatility (hourly bars)
     idx = pd.date_range(end=datetime.now(UTC), periods=300, freq="1h", tz="UTC")
-    closes = np.ones(300) * 100.0
+    closes = np.ones(300) * 15.0
     df = pd.DataFrame({
         "open": closes, "high": closes + 0.01, "low": closes - 0.01, "close": closes, "volume": 1000.0
     }, index=idx)
     mock_data_manager.history.return_value = df
     
     res = await scanner.check_spy_volatility()
-    assert res is True  # normal volatility
+    assert res is SpyVolatilityState.SAFE  # normal volatility
 
 
 @pytest.mark.anyio
 async def test_pool_screener_filtering(mock_data_manager):
-    scanner = MarketScanner(mock_data_manager, ["SPY", "QQQ"])
+    from app.config import RiskConfig
+    test_risk = RiskConfig(
+        min_price=10.0,
+        min_avg_dollar_volume=1_000_000.0,
+    )
+    scanner = MarketScanner(mock_data_manager, ["SPY", "QQQ"], risk_config=test_risk)
     
-    # Custom history for different symbols to test filters
     async def mock_history(symbol, timeframe, start, end, prefer_cache=True):
         idx = pd.date_range(end=datetime.now(UTC), periods=15, freq="D", tz="UTC")
         if symbol == "AAPL":
-            # Passes: Price 150, Vol 5M
             closes = np.ones(15) * 150.0
             vols = np.ones(15) * 5_000_000.0
         elif symbol == "MSFT":
@@ -47,7 +52,7 @@ async def test_pool_screener_filtering(mock_data_manager):
             closes = np.ones(15) * 8.0
             vols = np.ones(15) * 5_000_000.0
         else:
-            # Fails: Vol 500k (volume limit)
+            # Fails: Vol 500k
             closes = np.ones(15) * 100.0
             vols = np.ones(15) * 500_000.0
             
@@ -57,7 +62,6 @@ async def test_pool_screener_filtering(mock_data_manager):
         
     mock_data_manager.history.side_effect = mock_history
     
-    # Overwrite CANDIDATE_POOL temporarily to speed up testing
     from app.core import scanner as scanner_module
     orig_pool = scanner_module.CANDIDATE_POOL
     scanner_module.CANDIDATE_POOL = ["AAPL", "MSFT", "TSLA"]
@@ -94,7 +98,7 @@ async def test_scanner_panic_fallback(mock_data_manager):
     mock_data_manager.history.return_value = df
     
     res = await scanner.check_spy_volatility()
-    assert res is False  # panic volatility triggered
+    assert res is SpyVolatilityState.PANIC  # panic volatility triggered
     
     outcome, watchlist = await scanner.run()
     assert outcome == ScannerOutcome.SUCCESS_NONEMPTY

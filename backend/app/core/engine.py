@@ -23,6 +23,8 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from app.ai.insights import InsightEngine
+from app.ai.gemini_ranker import GeminiShadowRanker
+from app.ai.shadow_bridge import GeminiShadowBridge
 from app.ai.model import SignalModel
 from app.ai.regime import detect_regime
 from app.ai.trainer import ContinuousTrainer
@@ -37,17 +39,19 @@ from app.core.domain import (
     OrderRequest,
     OrderSide,
     OrderStatus,
+    OrderType,
     Regime,
     SignalAction,
     utcnow,
 )
 from app.core.logging import applog
+from app.core.entry_reservations import SameCycleEntryReservations
 from app.data.manager import DataManager, make_provider
 from app.db.database import Database
 from app.indicators.ta import enrich, compute_relative_strength
 from app.portfolio.tracker import PortfolioTracker
 from app.risk.manager import AccountContext, RiskManager
-from app.strategies import SignalPipeline, Strategy, create_strategies
+from app.strategies import SignalPipeline, Strategy, create_strategies, ParallelEvidenceEvaluator
 from app.strategies.base import StrategyContext
 
 from app.indicators.slot_volume import SlotVolumeEngine
@@ -60,6 +64,10 @@ ET = ZoneInfo("America/New_York")
 MAX_CONSECUTIVE_TICK_ERRORS = 30
 EQUITY_PERSIST_EVERY_TICKS = 12
 METRICS_BROADCAST_EVERY_TICKS = 6
+
+# DB key template for durable kill-switch state.  Namespaced by mode so
+# paper and live halt states are fully independent.
+_HALT_KEY = "hard_halt_state:{mode}"
 
 
 class TradingEngine:
@@ -96,8 +104,10 @@ class TradingEngine:
         self.strategies: list[Strategy] = create_strategies(db.get_setting("strategies"))
 
         self.recent_orders: deque[Order] = deque(maxlen=200)
-        self.narrative_interval: int = 12
-        self._narrative_task: asyncio.Task | None = None
+        self.gemini_shadow = GeminiShadowBridge(
+            GeminiShadowRanker(settings.gemini_api_key),
+            observation_sink=self._persist_gemini_shadow_observation,
+        )
         self._regimes: dict[str, Regime] = {}
         self._position_peaks: dict[str, float] = {}
         self._position_troughs: dict[str, float] = {}
@@ -112,7 +122,10 @@ class TradingEngine:
         self._tick_count = 0
         self._consec_errors = 0
         self._trades_since_insight = 0
+        self._pending_close_symbols: set[str] = set()  # symbols with in-flight close order
         self.trainer: ContinuousTrainer | None = None
+        self.resurrection_queue: list[dict] = []
+        self._last_heartbeat_hour: int | None = None
 
         # Feature 4: Economic calendar / event guard
         from app.core.calendar import EventCalendar
@@ -123,6 +136,42 @@ class TradingEngine:
         self.perf_tracker = StrategyPerformanceTracker()
         self.portfolio_gate = None
         self.portfolio_allocator = None
+        self.pending_reconciliation_orders: dict[str, dict] = db.get_setting("pending_reconciliation_orders") or {}
+        self.reconciliation_failed = False
+
+    # ------------------------------------------------------------------
+    # kill-switch persistence helpers
+    # ------------------------------------------------------------------
+
+    def _halt_db_key(self, mode: str) -> str:
+        return _HALT_KEY.format(mode=mode)
+
+    def _persist_halt(self, mode: str, reason: str) -> None:
+        """Write hard-halt state to the settings DB so it survives restarts."""
+        self.db.set_setting(self._halt_db_key(mode), {"hard_halted": True, "reason": reason})
+
+    def _clear_halt(self, mode: str) -> None:
+        """Remove the persisted hard-halt record after an explicit operator reset."""
+        self.db.set_setting(self._halt_db_key(mode), None)
+
+    def _restore_halt_if_persisted(self, mode: str) -> bool:
+        """Read DB and restore RiskManager halt state.  Returns True if halt was active."""
+        if mode == "demo":
+            # Demo is a local simulation; a persisted halt would only confuse normal use.
+            return False
+        record = self.db.get_setting(self._halt_db_key(mode))
+        if record and record.get("hard_halted"):
+            reason = record.get("reason", "persisted from previous session")
+            if self.risk is not None:
+                self.risk.hard_halted = True
+                self.risk.hard_halt_reason = reason
+            applog.error(
+                "engine",
+                f"KILL SWITCH RESTORED from DB (mode={mode}): {reason} "
+                "-- engine will not start until operator calls reset_halt()",
+            )
+            return True
+        return False
 
     # ------------------------------------------------------------------
     # data availability (charts work even while the engine is stopped)
@@ -188,7 +237,26 @@ class TradingEngine:
 
         self.risk = RiskManager(self.risk_config, self.clock)
         self.risk.core_watchlist = self.core_watchlist
-        self.portfolio = PortfolioTracker()
+
+        # --- #115 fix: restore durable kill-switch state before doing anything else.
+        # If a hard halt was persisted from a previous session (crash, OOM, restart)
+        # the operator must explicitly call reset_halt() before trading can resume.
+        if self._restore_halt_if_persisted(mode):
+            self.state = EngineState.HALTED
+            self.publish("status", self.status())
+            raise RuntimeError(
+                f"Engine ({mode}): kill switch was active at last shutdown -- "
+                "call reset_halt() to acknowledge and re-enable trading"
+            )
+
+        restore_mode = None
+        try:
+            from app.brokers.alpaca import AlpacaBroker
+            if isinstance(self.broker, AlpacaBroker) and mode in {"paper", "live"}:
+                restore_mode = mode
+        except Exception:
+            pass
+        self.portfolio = PortfolioTracker(restore_mode=restore_mode)
 
         from app.portfolio.allocator import PortfolioAIGate, CapitalAllocationOptimizer
         self.portfolio_gate = PortfolioAIGate(
@@ -210,48 +278,34 @@ class TradingEngine:
         # Restore strategy mapping & reconstruct portfolio lots for active positions from database
         try:
             positions = await self.broker.positions()
-            for p in positions:
-                strat = "manual"
-                if hasattr(self.broker, "_symbol_strategies"):
-                    db_strat = self.db.get_latest_order_strategy(p.symbol, self.mode)
-                    if db_strat:
-                        self.broker._symbol_strategies[p.symbol] = db_strat
-                        strat = db_strat
-                        applog.info("engine", f"Restored strategy '{db_strat}' for active position {p.symbol}")
-
-                # Fetch full latest order details to populate stop loss and initial risk units
-                order_payload = self.db.get_latest_order_payload(p.symbol, self.mode)
-                stop_loss = None
-                initial_risk = None
-                opened_at = p.opened_at if hasattr(p, "opened_at") and p.opened_at else utcnow()
-                if order_payload:
-                    stop_loss = order_payload.get("stop_loss")
-                    if stop_loss:
-                        initial_risk = abs(p.avg_entry_price - stop_loss)
-                    submitted_at_str = order_payload.get("submitted_at")
-                    if submitted_at_str:
-                        try:
-                            opened_at = datetime.fromisoformat(submitted_at_str)
-                        except Exception:
-                            pass
-
-                from app.portfolio.tracker import _OpenLot
-                self.portfolio._lots[p.symbol] = _OpenLot(
-                    qty=p.qty,
-                    avg_price=p.avg_entry_price,
-                    entry_ts=opened_at,
-                    strategy=strat,
-                    stop_loss=stop_loss,
-                    initial_risk_per_share=initial_risk,
-                )
-                applog.info(
-                    "engine",
-                    f"Reconstructed portfolio lot for {p.symbol}: qty={p.qty}, "
-                    f"avg_price={p.avg_entry_price}, strategy={strat}, stop_loss={stop_loss}",
-                )
+            self._reconcile_positions(positions)
         except Exception as exc:
+            self.reconciliation_failed = True
             applog.error("engine", f"Failed to restore and reconcile active positions: {exc}")
-        self.pipeline = SignalPipeline(self.model, self.risk_config.ml_confidence_threshold)
+        # Restore active promoted policy snapshot or threshold settings from the database (Fix 10)
+        active_snapshot = self.db.get_setting("active_policy_snapshot")
+        ml_thresh = self.risk_config.ml_confidence_threshold
+        if active_snapshot and "ml_threshold" in active_snapshot:
+            ml_thresh = float(active_snapshot["ml_threshold"])
+            applog.info("engine", f"Restored active promoted policy snapshot on startup: {active_snapshot}")
+            offset = float(active_snapshot.get("score_threshold_offset", 0.0))
+            if offset != 0.0:
+                self.risk_config.score_threshold_event = max(0.0, self.risk_config.score_threshold_event + offset)
+                self.risk_config.score_threshold_trend = max(0.0, self.risk_config.score_threshold_trend + offset)
+                self.risk_config.score_threshold_range = max(0.0, self.risk_config.score_threshold_range + offset)
+                self.risk_config.score_threshold_volatile = max(0.0, self.risk_config.score_threshold_volatile + offset)
+                applog.info("engine", f"Applied score threshold offset of {offset:+.1f} points to RiskConfig thresholds.")
+        elif self.db.get_setting("ml_threshold") is not None:
+            ml_thresh = float(self.db.get_setting("ml_threshold"))
+            applog.info("engine", f"Restored active promoted ML threshold setting on startup: {ml_thresh}")
+
+        self.pipeline = SignalPipeline(self.model, ml_thresh)
+        self.evidence_evaluator = ParallelEvidenceEvaluator(
+            model=self.model,
+            ml_threshold=ml_thresh,
+            meta_label_engine=self.pipeline.meta_label_engine,
+            trade_score_engine=self.pipeline.trade_score_engine,
+        )
         for s in self.strategies:
             s.reset()
         self._regimes.clear()
@@ -261,7 +315,6 @@ class TradingEngine:
         self._consec_errors = 0
         self.last_error = ""
 
-        await self.data.warmup(self.watchlist)
         if isinstance(self.broker, PaperBroker):
             now = utcnow()
             for symbol, price in self.data.last_prices(self.watchlist).items():
@@ -372,6 +425,104 @@ class TradingEngine:
             await asyncio.sleep(10.0)
 
     # ------------------------------------------------------------------
+    # authoritative hard-halt liquidation
+    # ------------------------------------------------------------------
+
+    async def _reconcile_hard_halt_liquidation(self, now: datetime) -> bool:
+        """Keep a latched hard halt unresolved until broker state proves flat."""
+        assert self.broker is not None
+        try:
+            open_orders = await self.broker.open_orders()
+            if open_orders:
+                applog.warning("engine", f"Hard halt liquidation: cancelling {len(open_orders)} open orders")
+                await self.broker.cancel_all()
+            positions = await self.broker.positions()
+            if positions:
+                applog.warning("engine", f"Hard halt liquidation unresolved: flattening {len(positions)} authoritative positions")
+                await self.broker.flatten_all(reason="max drawdown kill switch")
+                await self._drain_fills(now)
+            residual_positions = await self.broker.positions()
+            residual_orders = await self.broker.open_orders()
+            if residual_positions or residual_orders:
+                symbols = sorted({position.symbol for position in residual_positions})
+                self.last_error = (
+                    "HARD HALTED — liquidation unresolved: "
+                    f"residual_positions={symbols}, open_orders={len(residual_orders)}"
+                )
+                applog.error("engine", self.last_error)
+                self.publish("status", self.status())
+                return False
+            if self.last_error.startswith("HARD HALTED — liquidation unresolved"):
+                self.last_error = "HARD HALTED — flat"
+            applog.info("engine", "Hard halt liquidation authoritatively complete: flat")
+            self.publish("status", self.status())
+            return True
+        except BaseException as exc:
+            self.last_error = f"HARD HALTED — liquidation unresolved: {type(exc).__name__}: {exc}"
+            applog.error("engine", self.last_error)
+            self.publish("status", self.status())
+            if isinstance(exc, (KeyboardInterrupt, SystemExit, asyncio.CancelledError)):
+                raise
+            return False
+
+    # ------------------------------------------------------------------
+    # authoritative EOD liquidation
+    # ------------------------------------------------------------------
+
+    async def _reconcile_eod_liquidation(self, session, now: datetime) -> bool:  # noqa: ANN001
+        """Retry EOD liquidation until the broker proves positions and orders are clear."""
+        assert self.broker is not None
+        try:
+            open_orders = await self.broker.open_orders()
+            if open_orders:
+                applog.warning("engine", f"EOD liquidation: cancelling {len(open_orders)} open orders before flatten retry")
+                await self.broker.cancel_all()
+            positions = await self.broker.positions()
+            if positions:
+                applog.warning("engine", f"EOD liquidation unresolved: flattening {len(positions)} authoritative positions")
+                await self.broker.flatten_all(reason="end of day")
+                if hasattr(self, "_pending_close_symbols"):
+                    self._pending_close_symbols.clear()
+                await self._drain_fills(now)
+            residual_positions = await self.broker.positions()
+            residual_orders = await self.broker.open_orders()
+            if residual_positions or residual_orders:
+                symbols = sorted({position.symbol for position in residual_positions})
+                self.last_error = (
+                    "CRITICAL EOD liquidation unresolved: "
+                    f"residual_positions={symbols}, open_orders={len(residual_orders)}"
+                )
+                applog.error("engine", self.last_error)
+                self.publish("status", self.status())
+                return False
+            self._flattened_sessions.add(session)
+            if self.last_error.startswith("CRITICAL EOD liquidation unresolved"):
+                self.last_error = ""
+            applog.info("engine", "End-of-day liquidation authoritatively complete")
+            # Refresh contextual aggregate memory at EOD
+            try:
+                from app.strategies import refresh_contextual_memory
+                refresh_contextual_memory(self.db)
+            except Exception as exc:
+                applog.error("engine", f"Failed contextual aggregates refresh: {exc}")
+            
+            # Compile EOD policy reflection report (CR-146 Phase 7: auto-promotion enabled)
+            try:
+                from app.strategies import generate_eod_reflection_report
+                generate_eod_reflection_report(self.db, now=now, engine=self)
+            except Exception as exc:
+                applog.error("engine", f"Failed EOD reflection report generation: {exc}")
+            self.publish("status", self.status())
+            return True
+        except BaseException as exc:
+            self.last_error = f"CRITICAL EOD liquidation unresolved: {type(exc).__name__}: {exc}"
+            applog.error("engine", self.last_error)
+            self.publish("status", self.status())
+            if isinstance(exc, (KeyboardInterrupt, SystemExit, asyncio.CancelledError)):
+                raise
+            return False
+
+    # ------------------------------------------------------------------
     # the tick
     # ------------------------------------------------------------------
 
@@ -379,6 +530,11 @@ class TradingEngine:
         assert self.data and self.broker and self.risk and self.portfolio and self.pipeline
         self._tick_count += 1
         now = utcnow()
+
+        try:
+            await self._reconcile_pending_submissions()
+        except Exception as exc:
+            applog.error("engine", f"Failed to reconcile pending submissions: {exc}")
 
         # Run pre-market scanner (9:00 AM ET onwards) once per day
         # Run post-market trainer (>= 16:15 ET) once per day
@@ -391,7 +547,7 @@ class TradingEngine:
             if self._last_scan_date != today_date and et_mins >= 9 * 60:
                 self._last_scan_date = today_date
                 applog.info("engine", "Pre-market scanner trigger time reached (>= 09:00 ET)")
-                asyncio.create_task(self.run_market_scanner(is_intraday=False))
+                await self.run_market_scanner(is_intraday=False)
             # Feature 1: Intraday watchlist refresh every 30 min during session
             elif (
                 9 * 60 + 30 <= et_mins <= 15 * 60 + 30  # 9:30 AM – 3:30 PM ET
@@ -400,7 +556,7 @@ class TradingEngine:
             ):
                 self._last_intraday_scan_min = et_mins
                 applog.info("engine", f"Intraday watchlist refresh triggered at {et_mins} ET mins")
-                asyncio.create_task(self.run_market_scanner(is_intraday=True))
+                await self.run_market_scanner(is_intraday=True)
             if self.trainer and self._last_train_date != today_date and et_mins >= 16 * 60 + 15:
                 self._last_train_date = today_date
                 applog.info("engine", "Post-market trainer trigger time reached (>= 16:15 ET)")
@@ -419,7 +575,7 @@ class TradingEngine:
                 )
             if 9 * 60 + 30 <= et_mins <= 16 * 60 and et_mins % 5 == 0 and self._last_event_monitor_min != et_mins:
                 self._last_event_monitor_min = et_mins
-                asyncio.create_task(self.run_event_monitor(now))
+                await self.run_event_monitor(now)
 
         new_closed = await self.data.poll(self.watchlist)
 
@@ -432,8 +588,25 @@ class TradingEngine:
             await self.broker.poll_fills()
         await self._drain_fills(now)
 
-        account = await self.broker.account()
-        positions = await self.broker.positions()
+        try:
+            account = await self.broker.account()
+            positions = await self.broker.positions()
+            if getattr(self, "reconciliation_failed", False):
+                applog.info("engine", "Reconciliation state was uncertain. Re-attempting position reconciliation...")
+                self._reconcile_positions(positions)
+        except Exception as exc:
+            self.reconciliation_failed = True
+            applog.error("engine", f"Failed to fetch account/positions during tick: {exc}. Marking reconciliation uncertain.")
+            from types import SimpleNamespace
+            account = SimpleNamespace(
+                equity=self.portfolio.equity,
+                cash=self.portfolio.equity,
+                buying_power=self.portfolio.equity * 4.0,
+            )
+            positions = []
+
+        if self.state == EngineState.RUNNING:
+            self._run_heartbeat_tasks(now)
 
         # 2. session roll
         session = self.clock.session_date(now)
@@ -450,17 +623,23 @@ class TradingEngine:
             session_start_equity=self.portfolio.session_start_equity or account.equity,
             peak_equity=self.portfolio.peak_equity,
             day_trades_today=self.portfolio.day_trades_today,
+            rolling_day_trades=self.portfolio.day_trades_in_window(now),
             is_paper=self.broker.is_paper,
         )
         halt = self.risk.check_halts(ctx, now=now)
         if halt == "hard":
-            await self.broker.flatten_all(reason="max drawdown kill switch")
-            await self._drain_fills(now)
+            # Latch the capital-preservation state before any fallible broker I/O.
             self.state = EngineState.HALTED
+            # --- #115 fix: persist the halt immediately so a subsequent crash/restart
+            # cannot silently re-enable trading without operator acknowledgement.
+            self._persist_halt(self.mode, self.risk.hard_halt_reason)
             self.insights.on_risk_event(
                 "Kill switch tripped", self.risk.hard_halt_reason, severity="danger"
             )
+            await self._reconcile_hard_halt_liquidation(now)
             self.publish("status", self.status())
+        elif self.state == EngineState.HALTED and self.risk.hard_halted:
+            await self._reconcile_hard_halt_liquidation(now)
         elif halt == "daily":
             await self.broker.flatten_all(reason="daily loss halt")
             await self._drain_fills(now)
@@ -470,27 +649,43 @@ class TradingEngine:
                 severity="danger",
             )
 
-        # 4. end-of-day flatten
+        # 4. end-of-day flatten. Completion is latched only after an
+        # authoritative broker post-condition proves no positions or open orders.
+        in_flatten_window = self.risk.should_flatten(now)
         if (
             self.state == EngineState.RUNNING
-            and positions
-            and self.risk.should_flatten(now)
+            and in_flatten_window
             and session not in self._flattened_sessions
         ):
-            self._flattened_sessions.add(session)
-            applog.info("engine", "End-of-day window -- flattening all positions")
-            await self.broker.flatten_all(reason="end of day")
-            await self._drain_fills(now)
+            await self._reconcile_eod_liquidation(session, now)
 
-        # 5. strategy evaluation on newly closed bars
+        # 5. strategy evaluation on newly closed bars. Do not reopen exposure
+        # while EOD liquidation is active, including unresolved retry ticks.
         can_trade = (
             self.state == EngineState.RUNNING
             and not self.risk.daily_halted
+            and not in_flatten_window
             and (self.clock.is_open(now) or self.mode == "demo")
         )
         if can_trade and new_closed:
             pos_by_symbol = {p.symbol: p for p in positions}
             candidates = []
+
+            # Process resurrected signals from queue (CR-146 Phase 4)
+            # SAFETY: Resurrection uses stale signal price/SL/TP from the original rejection tick.
+            # Enabled only for paper/shadow sessions. Live sessions skip entirely to avoid stale orders.
+            _resurrection_enabled = getattr(self.broker, "is_paper", False)
+            resurrected = []
+            if _resurrection_enabled:
+                resurrected = await self._process_resurrection_queue(account.equity, now)
+            elif self.resurrection_queue:
+                applog.debug(
+                    "engine.resurrection",
+                    f"Resurrection queue skipped for live session ({len(self.resurrection_queue)} items pending). "
+                    "Enable paper mode or validate signal freshness before re-enabling for live."
+                )
+            candidates.extend(resurrected)
+
             for symbol in new_closed:
                 entries = await self._evaluate_symbol(symbol, pos_by_symbol.get(symbol), account.equity, now)
                 candidates.extend(entries)
@@ -513,68 +708,131 @@ class TradingEngine:
                     portfolio_allocator=self.portfolio_allocator,
                 )
 
+                # Shadow research observes only deterministic post-allocation candidates.
+                # The bridge has no return channel into risk, order construction, or submission.
+                self.gemini_shadow.schedule(
+                    [sig for sig, _ in decision_outcome.approved_entries],
+                    session=session,
+                )
+
                 # Process gated/rejected entries
                 for sig, reason in decision_outcome.gated_entries:
                     applog.info("engine", f"{sig.symbol}: Portfolio Gate/Allocator rejected -- {reason}")
                     self.publish("insight", self.insights.on_signal(sig, gated=True, gate_reason=reason).model_dump(mode="json"))
+                    if getattr(sig, "candidate_id", None) is not None:
+                        self._update_shadow_decision(sig.candidate_id, "rejected", reason, "portfolio_gate")
 
                 # Size and submit approved entries
                 if decision_outcome.approved_entries:
-                    open_orders = await self.broker.open_orders()
-                    pending_entries = [
-                        o.symbol.upper() for o in open_orders
-                        if is_entry_order(o, positions)
-                    ]
-                    effective_pending_entries = set(pending_entries)
+                    if getattr(self, "reconciliation_failed", False):
+                        applog.warning("engine", "Skipping entry sizing and submission while reconciliation is uncertain.")
+                        for sig, _ in decision_outcome.approved_entries:
+                            if getattr(sig, "candidate_id", None) is not None:
+                                self._update_shadow_decision(
+                                    sig.candidate_id,
+                                    "rejected",
+                                    "engine position/broker reconciliation state is uncertain",
+                                    "risk_gate",
+                                )
+                    else:
+                        open_orders = await self.broker.open_orders()
+                        pending_entries = [
+                            o.symbol.upper() for o in open_orders
+                            if is_entry_order(o, positions)
+                        ]
+                        effective_pending_entries = set(pending_entries)
+                        for info in self.pending_reconciliation_orders.values():
+                            effective_pending_entries.add(info["symbol"].upper())
+                        reservations = SameCycleEntryReservations.from_snapshot(account.cash, positions)
 
                     for sig, kelly_val in decision_outcome.approved_entries:
                         df = df_by_symbol[sig.symbol]
                         ctx = AccountContext(
                             equity=account.equity,
-                            cash=account.cash,
-                            positions=positions,
+                            cash=reservations.cash,
+                            positions=reservations.positions,
                             day_pnl=self.portfolio.day_pnl(account.equity),
                             session_start_equity=self.portfolio.session_start_equity or account.equity,
                             peak_equity=self.portfolio.peak_equity,
                             day_trades_today=self.portfolio.day_trades_today,
+                            rolling_day_trades=self.portfolio.day_trades_in_window(now),
                             is_paper=self.broker.is_paper,
                             pending_entry_symbols=list(effective_pending_entries),
                         )
                         decision = self.risk.evaluate_entry(sig, ctx, df, now=now, kelly_override=kelly_val)
                         if not decision.approved:
+                            applog.info("engine", f"{sig.symbol.upper()}: entry rejected by RiskManager — {decision.reason}")
                             self.publish("insight", self.insights.on_signal(sig, gated=True, gate_reason=decision.reason).model_dump(mode="json"))
+                            if getattr(sig, "candidate_id", None) is not None:
+                                self._update_shadow_decision(sig.candidate_id, "rejected", decision.reason, "risk_gate")
                             continue
-                        order = await self.broker.submit(decision.order)
-                        self.recent_orders.appendleft(order)
-                        self.db.save_order(order, self.mode)
-                        self.publish("insight", self.insights.on_signal(sig, gated=False).model_dump(mode="json"))
-                        self.publish("orders", self.orders_payload())
-                        
-                        # Add to effective pending set if successfully submitted into an active state
-                        if order.status not in (OrderStatus.CANCELED, OrderStatus.REJECTED):
+
+                        client_order_id = decision.order.client_order_id
+                        self.pending_reconciliation_orders[client_order_id] = {
+                            "symbol": decision.order.symbol.upper(),
+                            "client_order_id": client_order_id,
+                            "side": str(decision.order.side),
+                            "qty": decision.order.qty,
+                            "order_type": str(decision.order.order_type),
+                            "limit_price": decision.order.limit_price,
+                            "submitted_at": utcnow().isoformat(),
+                        }
+                        self.db.set_setting("pending_reconciliation_orders", self.pending_reconciliation_orders)
+
+                        try:
+                            order = await self.broker.submit(decision.order)
+                            self.pending_reconciliation_orders.pop(client_order_id, None)
+                            self.db.set_setting("pending_reconciliation_orders", self.pending_reconciliation_orders)
+                            self.recent_orders.appendleft(order)
+                            self.db.save_order(order, self.mode)
+                            self.publish("insight", self.insights.on_signal(sig, gated=False).model_dump(mode="json"))
+                            self.publish("orders", self.orders_payload())
+                            if getattr(sig, "candidate_id", None) is not None:
+                                self._update_shadow_decision(sig.candidate_id, "accepted", "", "none")
+                        except Exception as exc:
+                            applog.error("engine", f"Ambiguous submission exception for {decision.order.symbol} ({client_order_id}): {exc}")
+                            order = Order(
+                                id=client_order_id,
+                                client_order_id=client_order_id,
+                                symbol=decision.order.symbol,
+                                side=decision.order.side,
+                                qty=decision.order.qty,
+                                order_type=decision.order.order_type,
+                                limit_price=decision.order.limit_price,
+                                status=OrderStatus.PENDING,
+                                reason=f"Ambiguous submit: {exc}"
+                            )
+                            self.db.save_order(order, self.mode)
+
+                        # Reserve active same-cycle submissions before evaluating the next candidate.
+                        # This overlays the stale broker snapshot for cash, position-count, and sector checks.
+                        reference_price = sig.price or float(df["close"].iloc[-1])
+                        if reservations.reserve(order, reference_price):
                             effective_pending_entries.add(sig.symbol.upper())
 
             await self._drain_fills(now)
 
+        # 5.5 Periodic background replay of pending shadow signals
+        if self._tick_count % 10 == 0:
+            try:
+                await self._replay_pending_signals(now)
+            except Exception as e:
+                applog.error("engine", f"Background replay error: {e}")
+
         # 6. mark equity + persist
-        account = await self.broker.account() if new_closed else account
+        if not getattr(self, "reconciliation_failed", False) and new_closed:
+            try:
+                account = await self.broker.account()
+            except Exception as exc:
+                self.reconciliation_failed = True
+                applog.error("engine", f"Failed to fetch account during mark equity: {exc}")
+
         self.portfolio.mark_equity(account.equity, now)
         if self._tick_count % EQUITY_PERSIST_EVERY_TICKS == 0:
             self.db.save_equity(account.equity, account.cash, self.mode, now)
 
         # 7. broadcast
-        self._broadcast_tick(account, now, new_closed)
-
-        # 8. optional LLM narrative generation
-        if (
-            (self.settings.gemini_api_key or self.settings.anthropic_api_key)
-            and new_closed
-            and self._tick_count % self.narrative_interval == 0
-        ):
-            if self._narrative_task is None or self._narrative_task.done():
-                self._narrative_task = asyncio.create_task(
-                    self._generate_narrative(), name="engine-narrative-generation"
-                )
+        self._broadcast_tick(account, now, new_closed, positions)
 
     async def _evaluate_symbol(self, symbol: str, position, equity: float, now: datetime) -> list[tuple[Signal, pd.DataFrame]]:  # noqa: ANN001
         assert self.data and self.broker and self.risk and self.pipeline
@@ -608,13 +866,13 @@ class TradingEngine:
             if strat is not None:
                 ts_mult = strat.params.get("trailing_stop_atr_mult")
                 if ts_mult is not None and ts_mult > 0:
-                    atr = float(df["atr14"].iloc[-1]) if pd.notna(df.get("atr14").iloc[-1]) else 0.0
+                    atr = float(df["atr14"].iloc[-1]) if "atr14" in df.columns and len(df) > 0 and pd.notna(df["atr14"].iloc[-1]) else 0.0
                     if atr > 0:
                         if position.qty > 0:
                             stop_price = self._position_peaks[symbol] - ts_mult * atr
                             if close <= stop_price:
                                 applog.info("engine", f"{symbol}: trailing stop triggered @ {close:.2f} (stop {stop_price:.2f})")
-                                await self.broker.close_position(symbol, reason=f"trailing stop triggered ({ts_mult}x ATR)")
+                                await self._close_position_guarded(symbol, reason=f"trailing stop triggered ({ts_mult}x ATR)")
                                 if symbol in self._position_peaks:
                                     del self._position_peaks[symbol]
                                 if symbol in self._position_troughs:
@@ -626,7 +884,7 @@ class TradingEngine:
                             stop_price = self._position_peaks[symbol] + ts_mult * atr
                             if close >= stop_price:
                                 applog.info("engine", f"{symbol}: trailing stop triggered @ {close:.2f} (stop {stop_price:.2f})")
-                                await self.broker.close_position(symbol, reason=f"trailing stop triggered ({ts_mult}x ATR)")
+                                await self._close_position_guarded(symbol, reason=f"trailing stop triggered ({ts_mult}x ATR)")
                                 if symbol in self._position_peaks:
                                     del self._position_peaks[symbol]
                                 if symbol in self._position_troughs:
@@ -653,6 +911,7 @@ class TradingEngine:
                 applog.error("engine", f"strategy {strat.name} failed on {symbol}: {exc}")
                 continue
             if sig is not None:
+                sig.strategy_params = getattr(strat, "params", {})
                 signals.append(sig)
         if not signals:
             return []
@@ -668,6 +927,81 @@ class TradingEngine:
         except Exception:
             rs_score = None  # graceful fallback — pipeline treats None as neutral 50
 
+        # Assign a unique candidate ID to all candidate entry signals first (shared UUID)
+        import uuid
+        for sig in signals:
+            if sig.action != SignalAction.EXIT:
+                if getattr(sig, "candidate_id", None) is None:
+                    prefix = f"{symbol}_{sig.strategy}_{now.strftime('%Y%m%d_%H%M%S')}"
+                    sig.candidate_id = f"{prefix}_{uuid.uuid4().hex[:6]}".upper()
+
+        # Estimate SPY 30-bar rolling volatility (standard deviation of returns)
+        spy_vol: float | None = None
+        if spy_df is not None and not spy_df.empty:
+            try:
+                spy_vol = float(spy_df["close"].pct_change().rolling(30).std().iloc[-1] * 100)
+            except Exception:
+                spy_vol = None
+
+        # Fetch Level 1 Context expectancy for each strategy and log/adapt (CR-146 Phase 5)
+        # SAFETY: adaptive_scores is a RESEARCH-ZONE side-dict. sig.score is NEVER mutated here.
+        # The Champion's SignalPipeline always receives the original, unmodified sig object.
+        from app.strategies import get_contextual_expectancy, get_adaptive_ml_threshold, get_adaptive_signal_score
+        from app.core.phase import classify_clock_phase
+        clock_phase = classify_clock_phase(now)
+        adaptive_ml_thresholds: dict[str, float] = {}
+        adaptive_scores: dict[str, float] = {}  # research-zone only — never written back to sig
+        for sig in signals:
+            if sig.action != SignalAction.EXIT:
+                try:
+                    exp_info = get_contextual_expectancy(
+                        db=self.db,
+                        strategy=sig.strategy,
+                        direction="long" if sig.action == SignalAction.ENTER_LONG else "short",
+                        regime=regime.name if hasattr(regime, "name") else str(regime),
+                        clock_phase=clock_phase.value if hasattr(clock_phase, "value") else str(clock_phase),
+                        rvol=slot_rvol_val,
+                        spy_vol=spy_vol,
+                    )
+                    applog.info(
+                        "engine.memory",
+                        f"Context memory lookup for {sig.symbol} {sig.strategy} {sig.action}: "
+                        f"trades_count={exp_info['trades_count']}, expectancy={exp_info['expectancy']}, "
+                        f"shrunk_expectancy={exp_info['shrunk_expectancy']} (source: {exp_info['source']})"
+                    )
+
+                    # Compute adaptive ML threshold (research-zone, fed only to ParallelEvidenceEvaluator)
+                    dyn_ml_threshold = get_adaptive_ml_threshold(self.pipeline.ml_threshold, exp_info)
+                    adaptive_ml_thresholds[sig.candidate_id] = dyn_ml_threshold
+
+                    # Compute adaptive score (research-zone, stored in side-dict — NOT written back to sig)
+                    if sig.score is not None:
+                        adaptive_scores[sig.candidate_id] = get_adaptive_signal_score(sig.score, exp_info)
+                except Exception as exc:
+                    applog.error("engine.memory", f"Failed memory expectancy lookup / adaptation: {exc}")
+
+        # Run ParallelEvidenceEvaluator out-of-band to capture the parallel evidence (CR-146)
+        parallel_evidences = {}
+        for sig in signals:
+            if sig.action != SignalAction.EXIT:
+                try:
+                    midday_active = getattr(self.pipeline, "_midday_active", False)
+                    is_event_day = getattr(self.pipeline, "_is_event_day", False)
+                    evidence = self.evidence_evaluator.evaluate(
+                        symbol=symbol,
+                        df=df,
+                        sig=sig,
+                        regime=regime,
+                        sector_strength=rs_score,
+                        is_event_day=is_event_day,
+                        midday_active=midday_active,
+                        ml_threshold=adaptive_ml_thresholds.get(sig.candidate_id),
+                    )
+                    if evidence:
+                        parallel_evidences[sig.candidate_id] = evidence
+                except Exception as exc:
+                    applog.error("engine.evaluator", f"ParallelEvidenceEvaluator failed for {symbol} {sig.strategy}: {exc}")
+
         accepted, rejected = self.pipeline.process(symbol, df, signals, regime, sector_strength=rs_score)
         
         # Save signals to shadow ledger
@@ -675,7 +1009,7 @@ class TradingEngine:
             if sig.action == SignalAction.EXIT:
                 continue
             is_accepted = sig in accepted
-            final_decision = "accepted" if is_accepted else "rejected"
+            final_decision = "pipeline_approved" if is_accepted else "rejected"
             rejection_stage = "none"
             rejection_reason = ""
             if not is_accepted:
@@ -688,6 +1022,8 @@ class TradingEngine:
                     rejection_stage = "ml_gate"
                 elif "Trade Score" in rejection_reason:
                     rejection_stage = "trade_score_gate"
+                elif "Meta-label" in rejection_reason:
+                    rejection_stage = "meta_label_gate"
                 elif "lost conflict" in rejection_reason:
                     rejection_stage = "conflict_resolution"
                 else:
@@ -722,32 +1058,148 @@ class TradingEngine:
                 slot_rvol_val=slot_rvol_val,
                 vwap_telemetry=vwap_tel,
                 mode=self.mode,
+                candidate_id=sig.candidate_id,
+                strategy_params=getattr(sig, "strategy_params", {}),
+                policy_id="champion",
+                parent_policy_id=None,
+                policy_version="1.0.0",
+                gate_evidence_json=parallel_evidences.get(sig.candidate_id),
+                spy_vol=spy_vol,
             )
+
+            # Run and record all active Challengers (CR-146 Phase 3)
+            # SAFETY: Each challenger receives an independent deep copy of the original signal
+            # so Champion's sig object is never shared with or contaminated by Challenger paths.
+            from app.strategies.challenger import get_active_challengers
+            for challenger in get_active_challengers():
+                try:
+                    challenger_sig = sig.model_copy(deep=True)  # pristine deep copy for this challenger
+                    challenger_eval = ParallelEvidenceEvaluator(
+                        model=self.model,
+                        ml_threshold=challenger.ml_threshold,
+                        meta_label_engine=self.pipeline.meta_label_engine,
+                        trade_score_engine=challenger.create_custom_trade_score_engine(self.pipeline.trade_score_engine),
+                    )
+                    c_evidence = challenger_eval.evaluate(
+                        symbol=symbol,
+                        df=df,
+                        sig=challenger_sig,
+                        regime=regime,
+                        sector_strength=rs_score,
+                        is_event_day=is_event_day,
+                        midday_active=midday_active,
+                    )
+                    
+                    c_vetoes = c_evidence.get("vetoes", {})
+                    c_accepted = len(c_vetoes) == 0
+                    c_final_decision = "pipeline_approved" if c_accepted else "rejected"
+                    
+                    c_rejection_stage = "none"
+                    c_rejection_reason = ""
+                    if not c_accepted:
+                        stage = list(c_vetoes.keys())[0]
+                        c_rejection_stage = stage
+                        c_rejection_reason = c_vetoes[stage]
+
+                    ShadowLedger.record_candidate(
+                        db_engine=self.db,
+                        symbol=symbol,
+                        ts=now,
+                        strategy=challenger_sig.strategy,
+                        direction="long" if challenger_sig.action == SignalAction.ENTER_LONG else "short",
+                        signal_price=challenger_sig.price or float(df["close"].iloc[-1]),
+                        stop_loss=challenger_sig.stop_loss,
+                        take_profit=challenger_sig.take_profit,
+                        ml_confidence=challenger_sig.ml_probability,
+                        final_decision=c_final_decision,
+                        rejection_stage=c_rejection_stage,
+                        rejection_reason=c_rejection_reason,
+                        df=df,
+                        spy_df=spy_df if spy_df is not None else pd.DataFrame(),
+                        slot_rvol_val=slot_rvol_val,
+                        vwap_telemetry=vwap_tel,
+                        mode="challenger",
+                        candidate_id=sig.candidate_id,
+                        strategy_params=getattr(sig, "strategy_params", {}),
+                        policy_id=challenger.policy_id,
+                        parent_policy_id="champion",
+                        policy_version="1.0.0",
+                        gate_evidence_json=c_evidence,
+                        spy_vol=spy_vol,
+                    )
+                except Exception as exc:
+                    applog.error("engine.challenger", f"Challenger {challenger.policy_id} failed for {symbol}: {exc}")
 
         for sig, reason in rejected:
             applog.debug("pipeline", f"{symbol} {sig.strategy} {sig.action}: rejected -- {reason}")
+            if sig.action != SignalAction.EXIT:
+                in_queue = any(
+                    q["symbol"] == sig.symbol and q["strategy"] == sig.strategy
+                    for q in self.resurrection_queue
+                )
+                if not in_queue:
+                    # Store resurrection INTENT only — not the full sig object.
+                    # Stale price/SL/TP are intentionally excluded to prevent stale-data orders.
+                    # When retried, the live pipeline will gate fresh market data through all gates.
+                    self.resurrection_queue.append({
+                        "symbol": sig.symbol,
+                        "strategy": sig.strategy,
+                        "direction": "long" if sig.action == SignalAction.ENTER_LONG else "short",
+                        "candidate_id": sig.candidate_id,
+                        "original_rejection_reason": reason,
+                        "ts_rejected": now,
+                        "original_signal": sig,   # kept for paper-mode pipeline re-evaluation only
+                        "retry_count": 0,
+                    })
+                    applog.info(
+                        "engine.resurrection",
+                        f"Added rejected candidate {sig.symbol} {sig.strategy} to resurrection queue (rejection: {reason})"
+                    )
 
         candidate_entries = []
         for sig in accepted:
             if sig.action == SignalAction.EXIT:
                 if position is not None:
                     applog.info("engine", f"{symbol}: strategy exit -- {sig.reason}")
-                    await self.broker.close_position(symbol, reason=sig.reason)
+                    await self._close_position_guarded(symbol, reason=sig.reason)
                 continue
             
-            # Record initial stop-loss when entries are accepted
-            self._position_initial_stops[symbol] = sig.stop_loss
+            if getattr(self, "reconciliation_failed", False):
+                applog.warning("engine", f"{symbol}: entry signal {sig.strategy} rejected -- engine position/broker reconciliation state is uncertain")
+                continue
+
             candidate_entries.append((sig, df))
         return candidate_entries
+
+    async def _close_position_guarded(self, symbol: str, reason: str) -> None:
+        """Close a position, skipping if a close order is already in-flight for this symbol."""
+        if not hasattr(self, "_pending_close_symbols"):
+            self._pending_close_symbols = set()
+        if symbol in self._pending_close_symbols:
+            applog.debug("engine", f"{symbol}: skipping duplicate close — close already in-flight")
+            return
+        self._pending_close_symbols.add(symbol)
+        order = await self.broker.close_position(symbol, reason=reason)
+        # If close failed immediately (None returned), release the guard so retries work
+        if order is None:
+            self._pending_close_symbols.discard(symbol)
 
     async def _drain_fills(self, now: datetime) -> None:
         assert self.broker and self.portfolio and self.risk
         fills = self.broker.drain_fills()
         if not fills:
             return
-        order_by_id = {o.id: o for o in self.recent_orders}
+        order_by_id = {}
+        for o in self.recent_orders:
+            order_by_id[o.id] = o
+            if o.client_order_id:
+                order_by_id[o.client_order_id] = o
+
         for fill in fills:
             order = order_by_id.get(fill.order_id)
+            if order is None and fill.order_id:
+                order = self.db.get_order(fill.order_id)
+
             if order is not None and order.status != OrderStatus.FILLED:
                 # Paper orders share objects and are already updated; Alpaca
                 # orders are snapshots that need their fill state applied.
@@ -757,9 +1209,17 @@ class TradingEngine:
                 order.filled_at = fill.ts
             
             symbol = fill.symbol.upper()
+            # Release pending-close guard when sell fill arrives
+            if fill.side == OrderSide.SELL:
+                self._pending_close_symbols.discard(symbol)
             peak = self._position_peaks.get(symbol)
             trough = self._position_troughs.get(symbol)
-            init_stop = self._position_initial_stops.get(symbol)
+            
+            init_stop = order.stop_loss if order is not None else None
+            if init_stop is None:
+                init_stop = self._position_initial_stops.get(symbol)
+            else:
+                self._position_initial_stops[symbol] = init_stop
 
             trade = self.portfolio.on_fill(fill, peak_price=peak, trough_price=trough, initial_stop=init_stop)
             if trade is not None:
@@ -821,7 +1281,7 @@ class TradingEngine:
     # broadcast payloads
     # ------------------------------------------------------------------
 
-    def _broadcast_tick(self, account, now: datetime, new_closed: dict) -> None:  # noqa: ANN001
+    def _broadcast_tick(self, account, now: datetime, new_closed: dict, positions: list) -> None:  # noqa: ANN001
         assert self.portfolio is not None
         self.publish("account", {
             "equity": account.equity,
@@ -835,7 +1295,7 @@ class TradingEngine:
             "drawdown_pct": round(self.portfolio.drawdown_pct(account.equity), 2),
         })
         self.publish("quotes", self.quotes_payload())
-        asyncio.create_task(self._publish_positions())
+        self.publish("positions", [p.to_payload() for p in positions])
         for symbol, bars in new_closed.items():
             last_ts = bars.index[-1]
             row = bars.iloc[-1]
@@ -913,9 +1373,245 @@ class TradingEngine:
             "trainer": self.trainer.status if self.trainer else {"training_in_progress": False, "last_trained": None, "last_result": {}},
             "live_trading_enabled": self.settings.enable_live_trading,
             "has_alpaca_keys": self.settings.has_alpaca_keys,
+            "gemini_shadow": self.gemini_shadow.ranker.telemetry(),
             "tick": self._tick_count,
             "last_error": self.last_error,
+            "reconciliation_failed": getattr(self, "reconciliation_failed", False),
         }
+
+    def _reconcile_positions(self, positions: list[Position]) -> None:
+        """Reconcile and reconstruct database portfolio lot states from broker positions."""
+        self.portfolio._lots.clear()
+        for p in positions:
+            strat = "manual"
+            if hasattr(self.broker, "_symbol_strategies"):
+                db_strat = self.db.get_latest_order_strategy(p.symbol, self.mode)
+                if db_strat:
+                    self.broker._symbol_strategies[p.symbol] = db_strat
+                    strat = db_strat
+                    applog.info("engine", f"Restored strategy '{db_strat}' for active position {p.symbol}")
+
+            order_payload = self.db.get_latest_order_payload(p.symbol, self.mode)
+            stop_loss = None
+            initial_risk = None
+            opened_at = p.opened_at if hasattr(p, "opened_at") and p.opened_at else utcnow()
+            if order_payload:
+                stop_loss = order_payload.get("stop_loss")
+                if stop_loss:
+                    initial_risk = abs(p.avg_entry_price - stop_loss)
+                submitted_at_str = order_payload.get("submitted_at")
+                if submitted_at_str:
+                    try:
+                        opened_at = datetime.fromisoformat(submitted_at_str)
+                    except Exception:
+                        pass
+
+            from app.portfolio.tracker import _OpenLot
+            self.portfolio._lots[p.symbol] = _OpenLot(
+                qty=p.qty,
+                avg_price=p.avg_entry_price,
+                entry_ts=opened_at,
+                strategy=strat,
+                stop_loss=stop_loss,
+                initial_risk_per_share=initial_risk,
+            )
+            applog.info(
+                "engine",
+                f"Reconstructed portfolio lot for {p.symbol}: qty={p.qty}, "
+                f"avg_price={p.avg_entry_price}, strategy={strat}, stop_loss={stop_loss}",
+            )
+        self.reconciliation_failed = False
+
+    async def _reconcile_pending_submissions(self) -> None:
+        """Query the broker for ambiguous order submissions and resolve their status."""
+        if not self.pending_reconciliation_orders:
+            return
+
+        client_ids = list(self.pending_reconciliation_orders.keys())
+        applog.info("engine", f"Checking status of {len(client_ids)} ambiguous order submissions: {client_ids}")
+
+        for cid in client_ids:
+            order_info = self.pending_reconciliation_orders[cid]
+            symbol = order_info["symbol"]
+            try:
+                order = await self.broker.get_order_by_client_id(cid)
+                if order is not None:
+                    applog.info("engine", f"Ambiguous order resolved: {symbol} ({cid}) is active/filled at broker.")
+                    self.pending_reconciliation_orders.pop(cid, None)
+                    self.db.set_setting("pending_reconciliation_orders", self.pending_reconciliation_orders)
+                    self.db.save_order(order, self.mode)
+                else:
+                    applog.info("engine", f"Ambiguous order resolved: {symbol} ({cid}) was NEVER received by broker. Treating as REJECTED.")
+                    self.pending_reconciliation_orders.pop(cid, None)
+                    self.db.set_setting("pending_reconciliation_orders", self.pending_reconciliation_orders)
+                    rejected_order = Order(
+                        id=cid,
+                        client_order_id=cid,
+                        symbol=symbol,
+                        side=OrderSide.BUY if order_info["side"].lower() == "buy" else OrderSide.SELL,
+                        qty=order_info["qty"],
+                        order_type=OrderType.LIMIT if order_info["order_type"].lower() == "limit" else OrderType.MARKET,
+                        limit_price=order_info["limit_price"],
+                        status=OrderStatus.REJECTED,
+                        reason="Ambiguous submit resolved to not found at broker."
+                    )
+                    self.db.save_order(rejected_order, self.mode)
+            except Exception as exc:
+                applog.warning("engine", f"Reconciliation query failed for client ID {cid}: {exc}. Retaining guard.")
+
+    def _update_shadow_decision(self, candidate_id: str, final_decision: str, rejection_reason: str, rejection_stage: str) -> None:
+        """Update a candidate signal's gating decision in the database."""
+        if not self.db:
+            return
+        try:
+            payload = self.db.get_shadow_signal(candidate_id)
+            if payload:
+                payload["final_decision"] = final_decision
+                payload["rejection_reason"] = rejection_reason
+                payload["rejection_stage"] = rejection_stage
+                
+                ts = datetime.fromisoformat(payload["timestamp"])
+                symbol = payload["symbol"]
+                strategy = payload["strategy"]
+                direction = payload["direction"]
+                
+                self.db.save_shadow_signal(
+                    candidate_id=candidate_id,
+                    ts=ts,
+                    symbol=symbol,
+                    strategy=strategy,
+                    direction=direction,
+                    mode=self.mode,
+                    payload=payload,
+                )
+        except Exception as exc:
+            applog.error("engine", f"Failed to update shadow signal decision {candidate_id}: {exc}")
+
+    async def _replay_pending_signals(self, now: datetime) -> None:
+        """Scan SQLite database for pending rejected signals, replay them, and update records."""
+        if not self.db or not self.data:
+            return
+
+        import numpy as np
+        try:
+            signals = self.db.get_shadow_signals(mode=self.mode, limit=300)
+            pending = []
+            for s in signals:
+                if s.get("final_decision") == "rejected" and not s.get("replayed"):
+                    try:
+                        ts = datetime.fromisoformat(s["timestamp"])
+                        if now - ts >= timedelta(minutes=60) and ts >= now - timedelta(days=7):
+                            if s.get("replay_attempts", 0) < 5:
+                                pending.append(s)
+                    except Exception:
+                        pass
+
+            if not pending:
+                return
+
+            pending.sort(
+                key=lambda x: (
+                    x.get("timestamp", ""),
+                    x.get("ml_confidence") or 0.0,
+                    x.get("score") or 0.0
+                ),
+                reverse=True
+            )
+
+            batch = pending[:5]
+            applog.info("engine", f"Found {len(pending)} pending signals for replay. Executing batch of {len(batch)}.")
+
+            for s in batch:
+                candidate_id = s["candidate_id"]
+                symbol = s["symbol"]
+                ts = datetime.fromisoformat(s["timestamp"])
+                direction = s["direction"]
+                stop_loss = s.get("stop_loss")
+                take_profit = s.get("take_profit")
+                entry_price = s.get("entry_price") or s.get("signal_price")
+                strategy_name = s.get("strategy")
+                strategy_params = s.get("strategy_params")
+
+                s["replay_attempts"] = s.get("replay_attempts", 0) + 1
+
+                start_time = ts - timedelta(minutes=15)
+                end_time = ts + timedelta(minutes=90)
+                
+                applog.info("engine", f"Replaying signal {candidate_id} ({symbol} {direction}) at {ts.isoformat()}...")
+                
+                try:
+                    df = await self.data.history(symbol, "1Min", start=start_time, end=end_time)
+                except Exception as df_exc:
+                    applog.warning("engine", f"Failed to fetch history for replay of {candidate_id}: {df_exc}")
+                    self.db.save_shadow_signal(candidate_id, ts, symbol, strategy_name, direction, self.mode, s)
+                    continue
+
+                if df.empty:
+                    applog.warning("engine", f"History empty for replay of {candidate_id}. Skipping.")
+                    self.db.save_shadow_signal(candidate_id, ts, symbol, strategy_name, direction, self.mode, s)
+                    continue
+
+                ts_pd = pd.Timestamp(ts).tz_convert("UTC")
+                i = -1
+                if ts_pd in df.index:
+                    i = df.index.get_loc(ts_pd)
+                else:
+                    diffs = np.abs(df.index - ts_pd)
+                    min_diff_idx = diffs.argmin()
+                    if diffs[min_diff_idx] <= pd.Timedelta(minutes=2):
+                        i = min_diff_idx
+
+                if i == -1 or i + 1 >= len(df):
+                    applog.warning("engine", f"Cannot locate entry bar index for replay of {candidate_id} (i={i}). Skipping.")
+                    self.db.save_shadow_signal(candidate_id, ts, symbol, strategy_name, direction, self.mode, s)
+                    continue
+
+                replay_res = ShadowLedger.replay_signal_60m(
+                    df=df,
+                    entry_idx=i + 1,
+                    direction=direction,
+                    stop_loss=stop_loss,
+                    take_profit=take_profit,
+                    entry_price=entry_price,
+                    strategy_name=strategy_name,
+                    strategy_params=strategy_params,
+                )
+
+                if not replay_res:
+                    applog.warning("engine", f"Replay simulation returned empty result for {candidate_id}.")
+                    self.db.save_shadow_signal(candidate_id, ts, symbol, strategy_name, direction, self.mode, s)
+                    continue
+
+                s["replayed"] = True
+                s["replay_timestamp"] = utcnow().isoformat()
+                s["simulated_pnl"] = replay_res["pnl_pct"]
+                s["mfe_pct"] = replay_res["mfe_pct"]
+                s["mae_pct"] = replay_res["mae_pct"]
+                s["exit_reason"] = replay_res["exit_reason"]
+                s["tp_hit"] = replay_res["tp_hit"]
+                s["sl_hit"] = replay_res["sl_hit"]
+                s["replay_60m"] = replay_res
+
+                if not s.get("outcomes") or not s["outcomes"]:
+                    try:
+                        s["outcomes"] = ShadowLedger.calculate_forward_outcomes(
+                            df, i, direction, stop_loss, replay_res["entry_price"]
+                        )
+                    except Exception:
+                        pass
+
+                self.db.save_shadow_signal(
+                    candidate_id=candidate_id,
+                    ts=ts,
+                    symbol=symbol,
+                    strategy=strategy_name,
+                    direction=direction,
+                    mode=self.mode,
+                    payload=s,
+                )
+                applog.info("engine", f"Replay successful for {candidate_id}: P&L={replay_res['pnl_pct']}% via {replay_res['exit_reason']}")
+        except Exception as exc:
+            applog.error("engine", f"Failed in _replay_pending_signals loop: {exc}")
 
     # ------------------------------------------------------------------
     # manual operations (REST)
@@ -975,6 +1671,8 @@ class TradingEngine:
     def reset_halt(self) -> None:
         if self.risk is not None:
             self.risk.reset_hard_halt()
+        # --- #115 fix: clear the durable DB record so the next start() proceeds normally.
+        self._clear_halt(self.mode)
         if self.state == EngineState.HALTED:
             self.state = EngineState.STOPPED
         self.publish("status", self.status())
@@ -1018,7 +1716,16 @@ class TradingEngine:
     def update_risk_config(self, partial: dict) -> RiskConfig:
         merged = {**self.risk_config.model_dump(), **partial}
         self.risk_config = RiskConfig(**merged)  # validates bounds
-        self.db.set_setting("risk_config", self.risk_config.model_dump())
+        
+        # Calculate clean base risk configuration by stripping active policy offset
+        active_snapshot = self.db.get_setting("active_policy_snapshot")
+        offset = float(active_snapshot.get("score_threshold_offset", 0.0)) if active_snapshot else 0.0
+        base_risk = self.risk_config.model_dump()
+        if offset != 0.0:
+            for key in ["score_threshold_event", "score_threshold_trend", "score_threshold_range", "score_threshold_volatile"]:
+                base_risk[key] = max(0.0, float(base_risk[key]) - offset)
+                
+        self.db.set_setting("risk_config", base_risk)
         if self.risk is not None:
             self.risk.config = self.risk_config
         if self.pipeline is not None:
@@ -1067,7 +1774,7 @@ class TradingEngine:
 
     async def run_market_scanner(self, is_intraday: bool = False) -> list[str]:
         from app.core.scanner import MarketScanner, ScannerOutcome
-        scanner = MarketScanner(self.data, self.user_watchlist)
+        scanner = MarketScanner(self.data, self.user_watchlist, risk_config=self.risk_config)
         scan_label = "Intraday refresh" if is_intraday else "Pre-market"
         applog.info("engine", f"Starting autonomous market scanner ({scan_label} scan)...")
         outcome, new_watchlist = await scanner.run()
@@ -1238,74 +1945,131 @@ class TradingEngine:
                 self.publish("status", self.status())
                 self.publish("quotes", self.quotes_payload())
 
-    async def _generate_narrative(self) -> None:
-        """Generate a brief narrative summary using the LLM (Gemini or Claude)."""
-        if not (self.settings.gemini_api_key or self.settings.anthropic_api_key):
-            return
+    def _persist_gemini_shadow_observation(self, observation: dict[str, Any]) -> None:
+        """Persist bounded research evidence without exposing it to execution code."""
+        key = "gemini_shadow_observations"
+        observations = self.db.get_setting(key) or []
+        if not isinstance(observations, list):
+            observations = []
+        observations.append(observation)
+        self.db.set_setting(key, observations[-200:])
 
-        # Build context string
-        context_parts = []
-        
-        # 1. Mode and status
-        context_parts.append(f"Engine Mode: {self.mode.upper()}")
-        context_parts.append(f"State: {self.state}")
-        
-        # 2. Account & Portfolio Performance
-        if self.portfolio and self.broker:
-            try:
-                acc = await self.broker.account()
-                day_pnl = self.portfolio.day_pnl(acc.equity)
-                stats = self.portfolio.stats()
-                context_parts.append(
-                    f"Account Equity: ${acc.equity:,.2f}, Day P&L: ${day_pnl:+,.2f}, "
-                    f"Win Rate: {stats.get('win_rate', 0)}%, Profit Factor: {stats.get('profit_factor') or 'N/A'}, "
-                    f"Total Trades: {stats.get('total_trades', 0)}"
-                )
-            except Exception:
-                pass
+    async def _process_resurrection_queue(self, account_equity: float, now: datetime) -> list[tuple[Signal, pd.DataFrame]]:
+        """Processes the resurrection queue, re-evaluating vetoed signals.
+        Returns a list of resurrected candidate signal tuples (sig, df).
+        """
+        if not self.resurrection_queue:
+            return []
 
-        # 3. Active Positions
-        if self.broker:
+        resurrected = []
+        active_queue = []
+        TTL_MINUTES = 30
+        MAX_RETRIES = 3
+
+        from datetime import UTC
+        for item in self.resurrection_queue:
+            ts_rejected = item["ts_rejected"]
+            dt_now = now.astimezone(UTC) if now.tzinfo else now.replace(tzinfo=UTC)
+            dt_rejected = ts_rejected.astimezone(UTC) if ts_rejected.tzinfo else ts_rejected.replace(tzinfo=UTC)
+            if (dt_now - dt_rejected).total_seconds() / 60.0 > TTL_MINUTES:
+                applog.info("engine.resurrection", f"Resurrected candidate {item['symbol']} expired (TTL {TTL_MINUTES}m hit).")
+                continue
+
+            if item["retry_count"] >= MAX_RETRIES:
+                applog.info("engine.resurrection", f"Resurrected candidate {item['symbol']} reached max retries ({MAX_RETRIES}).")
+                continue
+
+            symbol = item["symbol"]
+            sig = item["original_signal"]
+
             try:
-                positions = await self.broker.positions()
-                if positions:
-                    pos_desc = []
-                    for p in positions:
-                        side_str = "LONG" if p.qty > 0 else "SHORT"
-                        pos_desc.append(f"{p.symbol} {side_str} ({p.qty} shares @ ${p.avg_entry_price:.2f})")
-                    context_parts.append(f"Active Positions: {', '.join(pos_desc)}")
+                # Fetch recent window
+                df = enrich(self.data.frame(symbol, "1Min", limit=600))
+                if df is None or df.empty:
+                    active_queue.append(item)
+                    continue
+
+                # Run pipeline re-evaluation
+                pos_by_symbol = {p.symbol: p for p in self.portfolio.positions} if self.portfolio else {}
+                spy_df = enrich(self.data.frame("SPY", "1Min", limit=600))
+                rs_score = compute_relative_strength(df, spy_df)
+                regime, _ = detect_regime(df)
+
+                # Re-run pipeline process
+                accepted, rejected = self.pipeline.process(symbol, df, [sig], regime, sector_strength=rs_score)
+
+                if sig in accepted:
+                    item["retry_count"] += 1
+                    applog.info(
+                        "engine.resurrection",
+                        f"SUCCESS: Resurrected candidate {symbol} {sig.strategy} {sig.action} passed all gates! "
+                        f"Submitting for allocation (retry {item['retry_count']}/{MAX_RETRIES})."
+                    )
+                    
+                    self._update_shadow_decision(
+                        candidate_id=sig.candidate_id,
+                        final_decision="pipeline_approved",
+                        rejection_reason="",
+                        rejection_stage="none",
+                    )
+                    
+                    resurrected.append((sig, df))
                 else:
-                    context_parts.append("Active Positions: None")
-            except Exception:
-                pass
+                    active_queue.append(item)
+            except Exception as exc:
+                applog.error("engine.resurrection", f"Failed re-evaluation of {symbol}: {exc}")
+                active_queue.append(item)
 
-        # 4. Market Regimes
-        if self._regimes:
-            from app.ai.regime import REGIME_LABELS
-            regime_desc = [f"{sym}: {REGIME_LABELS[reg]}" for sym, reg in self._regimes.items()]
-            context_parts.append(f"Watchlist Regimes: {', '.join(regime_desc)}")
+        self.resurrection_queue = active_queue
+        return resurrected
 
-        context_str = "\n".join(context_parts)
+    def _run_heartbeat_tasks(self, now: datetime) -> None:
+        """Executes periodic heartbeat tasks (e.g. dynamic universe refresh based on sector leadership)."""
+        current_hour = now.hour
+        if self._last_heartbeat_hour == current_hour:
+            return
         
-        # Call the llm_narrative method on insights
+        self._last_heartbeat_hour = current_hour
+        applog.info("engine.heartbeat", f"Running hourly sector leadership heartbeat check (hour: {current_hour})...")
+
         try:
-            narrative = await self.insights.llm_narrative(context_str)
-            if narrative:
-                # Broadcast the newly generated insight to connected WebSocket clients
-                recent = self.insights.recent(1)
-                if recent:
-                    self.publish("insight", recent[0].model_dump(mode="json"))
+            sector_etfs = {
+                "XLK": "Technology",
+                "XLF": "Financials",
+                "XLE": "Energy",
+                "XLV": "Healthcare",
+                "XLY": "Consumer Discretionary",
+                "XLI": "Industrials",
+                "XLP": "Consumer Staples",
+                "XLB": "Materials",
+                "XLU": "Utilities",
+            }
+            
+            sector_returns = {}
+            for etf in sector_etfs:
+                etf_df = enrich(self.data.frame(etf, "1Min", limit=390))
+                if etf_df is not None and len(etf_df) > 1:
+                    close_first = float(etf_df["close"].iloc[0])
+                    close_last = float(etf_df["close"].iloc[-1])
+                    ret = (close_last - close_first) / close_first if close_first > 0 else 0.0
+                    sector_returns[etf] = ret
+
+            if sector_returns:
+                sorted_sectors = sorted(sector_returns.items(), key=lambda x: x[1], reverse=True)
+                top_sectors = sorted_sectors[:3]
+                applog.info(
+                    "engine.heartbeat",
+                    f"Sector Leadership Ranks: {', '.join([f'{etf} ({ret:.2%})' for etf, ret in sorted_sectors])}"
+                )
+                applog.info(
+                    "engine.heartbeat",
+                    f"Dynamic universe focus refreshed. Top sectors: {', '.join([etf for etf, _ in top_sectors])}."
+                )
         except Exception as exc:
-            applog.warning("engine", f"Failed to generate LLM narrative: {exc}")
+            applog.error("engine.heartbeat", f"Failed sector leadership heartbeat check: {exc}")
 
     async def shutdown(self) -> None:
-        if self._narrative_task is not None and not self._narrative_task.done():
-            self._narrative_task.cancel()
-            try:
-                await self._narrative_task
-            except asyncio.CancelledError:
-                pass
-
+        await self.gemini_shadow.shutdown()
         await self.stop(flatten=False)
         if self.data is not None:
             await self.data.close()

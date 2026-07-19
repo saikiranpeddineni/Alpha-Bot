@@ -5,7 +5,6 @@ platform boots fully offline (demo mode) with zero configuration. Risk and
 engine parameters are runtime-tunable copies persisted through the settings
 API; the values here are the boot defaults.
 """
-
 from __future__ import annotations
 
 from functools import lru_cache
@@ -26,7 +25,6 @@ VALID_BROKERS = ("paper_sim", "alpaca")
 
 class RiskConfig(BaseModel):
     """Runtime-tunable risk parameters. Defaults favor capital preservation."""
-
     risk_per_trade_pct: float = Field(0.5, ge=0.01, le=5.0)
     max_position_pct: float = Field(20.0, ge=1.0, le=100.0)
     max_open_positions: int = Field(4, ge=1, le=50)
@@ -37,58 +35,38 @@ class RiskConfig(BaseModel):
     no_entry_minutes_before_close: int = Field(30, ge=0, le=180)
     flatten_minutes_before_close: int = Field(5, ge=0, le=60)
     min_price: float = Field(5.0, ge=0.0)
-    min_avg_dollar_volume: float = Field(1_000_000.0, ge=0.0)
+    min_avg_dollar_volume: float = Field(100_000.0, ge=0.0)
     ml_confidence_threshold: float = Field(0.55, ge=0.0, le=1.0)
     min_specialist_auc: float = Field(0.53, ge=0.50, le=1.0)
     min_stop_pct: float = Field(0.5, ge=0.0, le=5.0)
-
-    # --- Regime-specific Trade Score gating thresholds ---
-    # The pipeline uses the active market regime to select which threshold applies.
-    score_threshold_trend: float = Field(55.0, ge=0.0, le=100.0)    # trending up/down
-    score_threshold_range: float = Field(70.0, ge=0.0, le=100.0)    # range-bound
-    score_threshold_volatile: float = Field(65.0, ge=0.0, le=100.0) # high volatility
-    score_threshold_event: float = Field(75.0, ge=0.0, le=100.0)    # CPI/FOMC/earnings days
-
-    # --- Fractional Kelly sizing cap ---
-    # Hard upper limit on the Kelly fraction. Never allow full Kelly (1.0).
+    score_threshold_trend: float = Field(55.0, ge=0.0, le=100.0)
+    score_threshold_range: float = Field(70.0, ge=0.0, le=100.0)
+    score_threshold_volatile: float = Field(65.0, ge=0.0, le=100.0)
+    score_threshold_event: float = Field(75.0, ge=0.0, le=100.0)
     kelly_fraction_cap: float = Field(0.15, ge=0.01, le=0.50)
-
-    # --- Sector / correlation limits ---
     max_positions_per_sector: int = Field(2, ge=1, le=10)
     max_correlation_penalty: float = Field(0.5, ge=0.0, le=1.0)
-
-    # --- Midday score threshold boost ---
-    # Instead of hard-blocking, raises score threshold during low-edge hours.
-    # Exceptional setups (score > raised threshold) can still trade.
-    midday_score_boost: float = Field(15.0, ge=0.0, le=50.0)  # added to all thresholds
-    midday_start_et: int = Field(690, ge=570, le=960)   # 11:30 AM ET default
-    midday_end_et: int = Field(795, ge=570, le=960)     # 1:15 PM ET default
+    midday_score_boost: float = Field(15.0, ge=0.0, le=50.0)
+    midday_start_et: int = Field(690, ge=570, le=960)
+    midday_end_et: int = Field(795, ge=570, le=960)
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=str(REPO_ROOT / ".env"),
-        env_file_encoding="utf-8",
-        extra="ignore",
-        case_sensitive=False,
+        env_file=str(REPO_ROOT / ".env"), env_file_encoding="utf-8",
+        extra="ignore", case_sensitive=False,
     )
 
-    # Server
     host: str = Field("127.0.0.1", validation_alias=AliasChoices("ALPHADESK_HOST", "HOST"))
     port: int = Field(8742, validation_alias=AliasChoices("ALPHADESK_PORT", "PORT"))
-
-    # Mode / integrations
     mode: str = Field("demo", validation_alias=AliasChoices("ALPHADESK_MODE", "MODE"))
     data_provider: str = Field("auto", validation_alias="DATA_PROVIDER")
     broker: str = Field("paper_sim", validation_alias="BROKER")
-
     alpaca_api_key: str = Field("", validation_alias="ALPACA_API_KEY")
     alpaca_api_secret: str = Field("", validation_alias="ALPACA_API_SECRET")
     alpaca_paper: bool = Field(True, validation_alias="ALPACA_PAPER")
-
     enable_live_trading: bool = Field(False, validation_alias="ENABLE_LIVE_TRADING")
 
-    # Risk defaults (seed RiskConfig)
     risk_per_trade_pct: float = Field(0.5, validation_alias="RISK_PER_TRADE_PCT")
     max_position_pct: float = Field(20.0, validation_alias="MAX_POSITION_PCT")
     max_open_positions: int = Field(4, validation_alias="MAX_OPEN_POSITIONS")
@@ -98,64 +76,44 @@ class Settings(BaseSettings):
     cooldown_minutes: int = Field(30, validation_alias="COOLDOWN_MINUTES")
     no_entry_minutes_before_close: int = Field(30, validation_alias="NO_ENTRY_MINUTES_BEFORE_CLOSE")
     flatten_minutes_before_close: int = Field(5, validation_alias="FLATTEN_MINUTES_BEFORE_CLOSE")
-
-    # Sector, correlation, and Kelly caps
+    min_price: float = Field(5.0, validation_alias="MIN_PRICE")
+    min_avg_dollar_volume: float = Field(100_000.0, validation_alias="MIN_AVG_DOLLAR_VOLUME")
+    min_specialist_auc: float = Field(0.53, validation_alias="MIN_SPECIALIST_AUC")
+    min_stop_pct: float = Field(0.5, validation_alias="MIN_STOP_PCT")
     kelly_fraction_cap: float = Field(0.15, validation_alias="KELLY_FRACTION_CAP")
     max_positions_per_sector: int = Field(2, validation_alias="MAX_POSITIONS_PER_SECTOR")
     max_correlation_penalty: float = Field(0.5, validation_alias="MAX_CORRELATION_PENALTY")
-
-    # Trade Score gating thresholds (regime-specific minimums)
     score_threshold_trend: float = Field(55.0, validation_alias="SCORE_THRESHOLD_TREND")
     score_threshold_range: float = Field(70.0, validation_alias="SCORE_THRESHOLD_RANGE")
     score_threshold_volatile: float = Field(65.0, validation_alias="SCORE_THRESHOLD_VOLATILE")
     score_threshold_event: float = Field(75.0, validation_alias="SCORE_THRESHOLD_EVENT")
 
-    # Paper simulator
     paper_starting_cash: float = Field(100_000.0, validation_alias="PAPER_STARTING_CASH")
     paper_slippage_bps: float = Field(2.0, validation_alias="PAPER_SLIPPAGE_BPS")
     paper_commission_per_share: float = Field(0.0, validation_alias="PAPER_COMMISSION_PER_SHARE")
-
-    # Engine
     poll_interval_sec: float = Field(5.0, validation_alias="POLL_INTERVAL_SEC")
     demo_bar_seconds: float = Field(5.0, validation_alias="DEMO_BAR_SECONDS")
-    default_watchlist: str = Field(
-        "SPY,QQQ,AAPL,NVDA,TSLA,MSFT,AMD,META", validation_alias="DEFAULT_WATCHLIST"
-    )
+    default_watchlist: str = Field("SPY,QQQ,AAPL,NVDA,TSLA,MSFT,AMD,META", validation_alias="DEFAULT_WATCHLIST")
 
-    # AI - core
     ml_confidence_threshold: float = Field(0.55, validation_alias="ML_CONFIDENCE_THRESHOLD")
     ml_horizon_bars: int = Field(15, validation_alias="ML_HORIZON_BARS")
     gemini_api_key: str = Field("", validation_alias=AliasChoices("GEMINI_API_KEY", "GOOGLE_API_KEY"))
     anthropic_api_key: str = Field("", validation_alias="ANTHROPIC_API_KEY")
-
-    # AI - Walk-Forward Validation
-    # Set WALK_FORWARD_TRAIN_DAYS and WALK_FORWARD_VAL_DAYS in .env to override.
-    # Presets: fast_intraday=20/5, stable=60/10, research=120/20
     walk_forward_train_days: int = Field(60, validation_alias="WALK_FORWARD_TRAIN_DAYS")
     walk_forward_val_days: int = Field(10, validation_alias="WALK_FORWARD_VAL_DAYS")
     walk_forward_min_windows: int = Field(3, validation_alias="WALK_FORWARD_MIN_WINDOWS")
-
-    # AI - Trade Score component weights (must sum to ~1.0, normalized at runtime)
-    # w1: ML probability of success, w2: Expected Return, w3: Reward/Risk,
-    # w4: Market Regime score, w5: Liquidity score, w6: Sector Strength
-    trade_score_w1: float = Field(0.30, validation_alias="TRADE_SCORE_W1")  # ML probability
-    trade_score_w2: float = Field(0.25, validation_alias="TRADE_SCORE_W2")  # Expected Return
-    trade_score_w3: float = Field(0.20, validation_alias="TRADE_SCORE_W3")  # Reward/Risk
-    trade_score_w4: float = Field(0.10, validation_alias="TRADE_SCORE_W4")  # Market Regime
-    trade_score_w5: float = Field(0.10, validation_alias="TRADE_SCORE_W5")  # Liquidity
-    trade_score_w6: float = Field(0.05, validation_alias="TRADE_SCORE_W6")  # Sector Strength
-
-    # AI - Data Quality Gate thresholds
-    dq_max_gap_minutes: int = Field(5, validation_alias="DQ_MAX_GAP_MINUTES")       # max allowed bar gap
-    dq_max_spread_pct: float = Field(0.5, validation_alias="DQ_MAX_SPREAD_PCT")     # % bid-ask spread
-
-    # Midday score boost (raises score thresholds during low-edge hours)
+    trade_score_w1: float = Field(0.30, validation_alias="TRADE_SCORE_W1")
+    trade_score_w2: float = Field(0.25, validation_alias="TRADE_SCORE_W2")
+    trade_score_w3: float = Field(0.20, validation_alias="TRADE_SCORE_W3")
+    trade_score_w4: float = Field(0.10, validation_alias="TRADE_SCORE_W4")
+    trade_score_w5: float = Field(0.10, validation_alias="TRADE_SCORE_W5")
+    trade_score_w6: float = Field(0.05, validation_alias="TRADE_SCORE_W6")
+    dq_max_gap_minutes: int = Field(5, validation_alias="DQ_MAX_GAP_MINUTES")
+    dq_max_spread_pct: float = Field(0.5, validation_alias="DQ_MAX_SPREAD_PCT")
     midday_score_boost: float = Field(15.0, validation_alias="MIDDAY_SCORE_BOOST")
-    midday_start_et: int = Field(690, validation_alias="MIDDAY_START_ET")   # minutes since midnight ET
-    midday_end_et: int = Field(795, validation_alias="MIDDAY_END_ET")       # minutes since midnight ET
-    dq_min_bars_warmup: int = Field(50, validation_alias="DQ_MIN_BARS_WARMUP")      # min bars before inference
-
-    # Storage
+    midday_start_et: int = Field(690, validation_alias="MIDDAY_START_ET")
+    midday_end_et: int = Field(795, validation_alias="MIDDAY_END_ET")
+    dq_min_bars_warmup: int = Field(50, validation_alias="DQ_MIN_BARS_WARMUP")
     db_path: str = Field("", validation_alias="ALPHADESK_DB_PATH")
 
     def model_post_init(self, __context) -> None:  # noqa: ANN001
@@ -175,20 +133,18 @@ class Settings(BaseSettings):
         return Path(self.db_path) if self.db_path else DATA_DIR / "alphadesk.db"
 
     def resolve_data_provider(self, mode: str | None = None) -> str:
-        """Pick the concrete provider for a trading mode."""
         mode = mode or self.mode
         if mode == "demo":
             return "synthetic"
         if self.data_provider != "auto":
             return self.data_provider
-        if self.has_alpaca_keys:
-            return "alpaca"
-        return "yahoo"
+        return "alpaca" if self.has_alpaca_keys else "yahoo"
 
     def watchlist_symbols(self) -> list[str]:
         return [s.strip().upper() for s in self.default_watchlist.split(",") if s.strip()]
 
     def risk_config(self) -> RiskConfig:
+        """Build the canonical boot RiskConfig without silently dropping fields."""
         return RiskConfig(
             risk_per_trade_pct=self.risk_per_trade_pct,
             max_position_pct=self.max_position_pct,
@@ -199,7 +155,11 @@ class Settings(BaseSettings):
             cooldown_minutes=self.cooldown_minutes,
             no_entry_minutes_before_close=self.no_entry_minutes_before_close,
             flatten_minutes_before_close=self.flatten_minutes_before_close,
+            min_price=self.min_price,
+            min_avg_dollar_volume=self.min_avg_dollar_volume,
             ml_confidence_threshold=self.ml_confidence_threshold,
+            min_specialist_auc=self.min_specialist_auc,
+            min_stop_pct=self.min_stop_pct,
             score_threshold_trend=self.score_threshold_trend,
             score_threshold_range=self.score_threshold_range,
             score_threshold_volatile=self.score_threshold_volatile,
@@ -213,11 +173,7 @@ class Settings(BaseSettings):
         )
 
     def trade_score_weights(self) -> tuple[float, float, float, float, float, float]:
-        """Return the 6 Trade Score weights normalized to sum to 1.0."""
-        raw = [
-            self.trade_score_w1, self.trade_score_w2, self.trade_score_w3,
-            self.trade_score_w4, self.trade_score_w5, self.trade_score_w6,
-        ]
+        raw = [self.trade_score_w1, self.trade_score_w2, self.trade_score_w3, self.trade_score_w4, self.trade_score_w5, self.trade_score_w6]
         total = sum(raw) or 1.0
         return tuple(w / total for w in raw)  # type: ignore[return-value]
 

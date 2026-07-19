@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  frontend-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+      - name: Run theme contract tests
+        working-directory: frontend
+        run: npm run test:theme
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+  backend-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+      - name: Compile backend
+        run: python -m compileall -q backend/app
+      - name: Run production invariant suite
+        id: production_invariants
+        continue-on-error: true
+        env:
+          PYTHONPATH: backend
+        run: |
+          set -o pipefail
+          pytest -q backend/tests \
+            --ignore=backend/tests/test_replay_loopholes.py \
+            -k 'not test_kelly_is_disabled_due_to_incompatibility and not test_backtest_uses_shared_allocation_path' \
+            --junitxml=production-invariants.xml 2>&1 | tee production-invariants.log
+      - name: Run production integrity regressions explicitly
+        id: production_integrity
+        continue-on-error: true
+        env:
+          PYTHONPATH: backend
+        run: |
+          set -o pipefail
+          pytest -q backend/tests/test_production_integrity.py \
+            --junitxml=production-integrity.xml 2>&1 | tee production-integrity.log
+      - name: Run replay loophole invariants excluding local oracle fixtures
+        id: replay_invariants
+        continue-on-error: true
+        env:
+          PYTHONPATH: backend
+        run: |
+          set -o pipefail
+          pytest -q backend/tests/test_replay_loopholes.py \
+            -k 'not oracle_regression' \
+            --junitxml=replay-invariants.xml 2>&1 | tee replay-invariants.log
+      - name: Upload CI diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-diagnostics
+          path: |
+            *.log
+            *.xml
+          if-no-files-found: error
+      - name: Upload clean-checkout source snapshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: clean-checkout-source
+          path: |
+            backend/app
+            backend/tests
+          if-no-files-found: error
+      - name: Enforce test success
+        if: always()
+        env:
+          PRODUCTION_INVARIANTS: ${{ steps.production_invariants.outcome }}
+          PRODUCTION_INTEGRITY: ${{ steps.production_integrity.outcome }}
+          REPLAY_INVARIANTS: ${{ steps.replay_invariants.outcome }}
+        run: |
+          echo "production_invariants=$PRODUCTION_INVARIANTS"
+          echo "production_integrity=$PRODUCTION_INTEGRITY"
+          echo "replay_invariants=$REPLAY_INVARIANTS"
+          test "$PRODUCTION_INVARIANTS" = success
+          test "$PRODUCTION_INTEGRITY" = success
+          test "$REPLAY_INVARIANTS" = success

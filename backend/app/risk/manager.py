@@ -33,7 +33,7 @@ from app.core.domain import (
 from app.core.logging import applog
 
 PDT_EQUITY_MIN = 25_000.0
-PDT_MAX_DAY_TRADES = 3  # in 5 business days; we conservatively apply per-day count
+PDT_MAX_DAY_TRADES = 3  # allowed day trades in any rolling 5-business-day window
 
 
 def is_entry_order(order: Order, positions: list[Position]) -> bool:
@@ -64,7 +64,10 @@ class AccountContext:
     session_start_equity: float
     peak_equity: float
     day_trades_today: int
-    is_paper: bool
+    # Rolling 5-calendar-day day-trade count for PDT guard (does not reset on
+    # session roll — supplied by PortfolioTracker.rolling_day_trade_count()).
+    rolling_day_trades: int = 0
+    is_paper: bool = False
     pending_entry_symbols: list[str] = field(default_factory=list)
 
 
@@ -86,6 +89,8 @@ class RiskManager:
         self.daily_halt_date = None
         self.consecutive_losses: int = 0
         self.cooldown_until: datetime | None = None
+        self.strategy_consecutive_losses: dict[str, int] = {}
+        self.strategy_cooldowns: dict[str, datetime] = {}
         self.symbol_cooldowns: dict[str, datetime] = {}
         self._pdt_warned = False
         self.core_watchlist: list[str] | None = None
@@ -93,24 +98,41 @@ class RiskManager:
     # ---- lifecycle hooks ----
 
     def on_trade_closed(self, trade: TradeRecord, now: datetime | None = None) -> None:
+        strategy = trade.strategy or "manual"
+        now_dt = now or datetime.now(UTC)
         if trade.pnl <= 0:
-            self.consecutive_losses += 1
             symbol = trade.symbol.upper()
-            now_dt = now or datetime.now(UTC)
             self.symbol_cooldowns[symbol] = now_dt + timedelta(minutes=self.config.cooldown_minutes)
             applog.warning(
                 "risk",
                 f"Loss on {symbol} -- cooling down this ticker for {self.config.cooldown_minutes} minutes"
             )
-            if self.consecutive_losses >= self.config.consecutive_loss_limit:
-                self.cooldown_until = now_dt + timedelta(minutes=self.config.cooldown_minutes)
+            
+            # Track strategy-specific consecutive losses
+            current_losses = self.strategy_consecutive_losses.get(strategy, 0) + 1
+            self.strategy_consecutive_losses[strategy] = current_losses
+            
+            if current_losses >= self.config.consecutive_loss_limit:
+                cooldown_time = now_dt + timedelta(minutes=self.config.cooldown_minutes)
+                self.strategy_cooldowns[strategy] = cooldown_time
                 applog.warning(
                     "risk",
-                    f"{self.consecutive_losses} consecutive losses -- pausing new entries "
-                    f"for {self.config.cooldown_minutes} minutes",
+                    f"Strategy '{strategy}' has {current_losses} consecutive losses -- pausing new entries "
+                    f"for this strategy for {self.config.cooldown_minutes} minutes",
                 )
+            
+            # Keep legacy fields updated for UI/backward compatibility
+            self.consecutive_losses = max(self.strategy_consecutive_losses.values(), default=0)
+            active_cooldowns = [t for t in self.strategy_cooldowns.values() if t > now_dt]
+            self.cooldown_until = max(active_cooldowns) if active_cooldowns else None
         else:
-            self.consecutive_losses = 0
+            self.strategy_consecutive_losses[strategy] = 0
+            # Keep legacy fields updated
+            self.consecutive_losses = max(self.strategy_consecutive_losses.values(), default=0)
+            # Clean expired cooldowns from dict
+            self.strategy_cooldowns = {k: v for k, v in self.strategy_cooldowns.items() if v > now_dt}
+            active_cooldowns = list(self.strategy_cooldowns.values())
+            self.cooldown_until = max(active_cooldowns) if active_cooldowns else None
 
     def roll_session(self, session_date) -> None:  # noqa: ANN001
         if self.daily_halted and self.daily_halt_date != session_date:
@@ -118,6 +140,8 @@ class RiskManager:
             applog.info("risk", "New session -- daily loss halt cleared")
         self.cooldown_until = None
         self.consecutive_losses = 0
+        self.strategy_consecutive_losses.clear()
+        self.strategy_cooldowns.clear()
         self.symbol_cooldowns.clear()
 
     def reset_hard_halt(self) -> None:
@@ -155,6 +179,11 @@ class RiskManager:
         now = now or datetime.now(UTC)
         return self.cooldown_until is not None and now < self.cooldown_until
 
+    def is_strategy_in_cooldown(self, strategy: str, now: datetime | None = None) -> bool:
+        now = now or datetime.now(UTC)
+        cooldown_until = self.strategy_cooldowns.get(strategy)
+        return cooldown_until is not None and now < cooldown_until
+
     def should_flatten(self, now: datetime | None = None) -> bool:
         return self.clock.in_flatten_window(self.config.flatten_minutes_before_close, now)
 
@@ -180,12 +209,13 @@ class RiskManager:
         """
         cfg = self.config
         symbol = signal.symbol.upper()
+        strategy = signal.strategy or "manual"
 
         if self.hard_halted:
             return RiskDecision(False, f"hard halt active: {self.hard_halt_reason}")
         if self.daily_halted:
             return RiskDecision(False, "daily loss halt active")
-        if self.in_cooldown(now):
+        if self.is_strategy_in_cooldown(strategy, now):
             return RiskDecision(False, "loss-streak cooldown active")
         cooldown_until = self.symbol_cooldowns.get(symbol)
         if cooldown_until is not None and (now or datetime.now(UTC)) < cooldown_until:
@@ -219,10 +249,12 @@ class RiskManager:
         if avg_dollar_vol < cfg.min_avg_dollar_volume:
             return RiskDecision(False, f"illiquid: avg ${avg_dollar_vol:,.0f}/min below minimum")
 
-        # PDT protection: block only for small LIVE accounts; warn on paper
-        if ctx.day_trades_today >= PDT_MAX_DAY_TRADES and ctx.equity < PDT_EQUITY_MIN:
+        # PDT protection: block only for small LIVE accounts; warn on paper.
+        # Use the rolling 5-calendar-day count so session rollover does not
+        # restore consumed PDT capacity.
+        if ctx.rolling_day_trades >= PDT_MAX_DAY_TRADES and ctx.equity < PDT_EQUITY_MIN:
             if not ctx.is_paper:
-                return RiskDecision(False, "PDT guard: 3 day trades used and equity < $25k (live)")
+                return RiskDecision(False, "PDT guard: 3 day trades used in rolling window and equity < $25k (live)")
             if not self._pdt_warned:
                 self._pdt_warned = True
                 applog.warning(
@@ -240,6 +272,11 @@ class RiskManager:
             if atr is None or atr <= 0:
                 return RiskDecision(False, "no stop provided and ATR unavailable")
             stop_loss = price - 1.5 * atr if signal.action == SignalAction.ENTER_LONG else price + 1.5 * atr
+
+        if signal.action == SignalAction.ENTER_LONG and stop_loss >= price:
+            return RiskDecision(False, f"long stop must be below entry ({stop_loss:.4f} >= {price:.4f})")
+        if signal.action == SignalAction.ENTER_SHORT and stop_loss <= price:
+            return RiskDecision(False, f"short stop must be above entry ({stop_loss:.4f} <= {price:.4f})")
 
         stop_distance = abs(price - stop_loss)
         min_distance = max(price * 0.0005, 0.01)
@@ -297,6 +334,10 @@ class RiskManager:
         take_profit = signal.take_profit
         if take_profit is None:
             take_profit = price + 2.0 * stop_distance if side == OrderSide.BUY else price - 2.0 * stop_distance
+        elif side == OrderSide.BUY and take_profit <= price:
+            return RiskDecision(False, f"long target must be above entry ({take_profit:.4f} <= {price:.4f})")
+        elif side == OrderSide.SELL and take_profit >= price:
+            return RiskDecision(False, f"short target must be below entry ({take_profit:.4f} >= {price:.4f})")
 
         order = OrderRequest(
             symbol=symbol,

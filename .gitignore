@@ -40,7 +40,7 @@ temp/
 *.sqlite3
 
 # Trading/runtime artifacts
-data/
+/data/
 cache/
 backtest_results/
 reports/
@@ -62,6 +62,7 @@ rejections_output*.txt
 frontend/node_modules/
 frontend/dist/
 frontend/build/
+frontend/.theme-test-dist/
 
 # Coverage
 .coverage
@@ -71,3 +72,6 @@ coverage.xml
 # Additional local runtime files
 *.bak
 *.tmp
+
+# Local utility scripts
+update_bot.cmd

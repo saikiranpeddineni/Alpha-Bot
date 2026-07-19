@@ -47,7 +47,7 @@ async def test_llm_narrative_gemini_success():
         # Verify post arguments
         mock_post.assert_called_once()
         args, kwargs = mock_post.call_args
-        assert "gemini-2.5-flash:generateContent" in args[0]
+        assert "gemini-3.1-flash-lite:generateContent" in args[0]
         assert "key=test-gemini-key" in args[0]
         assert kwargs["json"]["contents"][0]["parts"][0]["text"].endswith("Test context")
 
@@ -73,14 +73,21 @@ async def test_llm_narrative_anthropic_fallback_on_gemini_fail():
             ]
         }
         
-        mock_post.side_effect = [Exception("Gemini network error"), mock_anthropic_response]
+        def mock_post_side_effect(url, **kwargs):
+            if "generativelanguage.googleapis.com" in url:
+                raise Exception("Gemini network error")
+            elif "api.anthropic.com" in url:
+                return mock_anthropic_response
+            raise ValueError(f"Unexpected URL: {url}")
+        
+        mock_post.side_effect = mock_post_side_effect
         
         result = await engine.llm_narrative("Test context")
         
         assert result == "Market is flat. Strategy weights rebalanced."
         assert len(engine.items) == 1
         assert engine.items[0].detail == result
-        assert mock_post.call_count == 2
+        assert mock_post.call_count == 5
 
 
 @pytest.mark.asyncio
