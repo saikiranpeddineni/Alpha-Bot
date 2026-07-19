@@ -4,7 +4,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.core.scanner import CANDIDATE_POOL, MarketScanner, ScannerOutcome, SpyVolatilityState
+from app.core.scanner import CANDIDATE_POOL, MarketScanner, ScannerOutcome
+from app.risk.market_regime import MarketRiskState
 
 
 @pytest.mark.asyncio
@@ -14,7 +15,7 @@ async def test_live_stage1_prefilter_receives_keyword_discovery_contract(monkeyp
     scanner._discovery = SimpleNamespace(
         acquire=AsyncMock(return_value=SimpleNamespace(shortlist=("NEW2", "NEW1")))
     )
-    scanner.check_spy_volatility = AsyncMock(return_value=SpyVolatilityState.SAFE)
+    scanner._assess_market_risk = AsyncMock(return_value=(MarketRiskState.NORMAL, 0.85, []))
     stage1 = AsyncMock(return_value=[])
     monkeypatch.setattr(scanner, "_stage1_prefilter_parallel", stage1)
 
@@ -30,7 +31,7 @@ async def test_replay_stage1_prefilter_receives_keyword_static_contract(monkeypa
     historical_t = datetime(2026, 7, 14, 14, 0, tzinfo=UTC)
     provider = SimpleNamespace(name="alpaca", supports_asset_discovery=True)
     scanner = MarketScanner(SimpleNamespace(provider=provider), [])
-    scanner.check_spy_volatility = AsyncMock(return_value=SpyVolatilityState.SAFE)
+    scanner._assess_market_risk = AsyncMock(return_value=(MarketRiskState.NORMAL, 0.85, []))
     stage1 = AsyncMock(return_value=[])
     monkeypatch.setattr(scanner, "_stage1_prefilter_parallel", stage1)
 

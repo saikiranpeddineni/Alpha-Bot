@@ -402,7 +402,20 @@ class ContinuousTrainer:
         if artifact_path.exists():
             try:
                 incumbent = joblib.load(artifact_path)
-                incumbent_auc = float(incumbent.get("auc", 0.0)) if isinstance(incumbent, dict) else 0.0
+                if isinstance(incumbent, dict):
+                    incumbent_auc = float(incumbent.get("auc", 0.0))
+                    # Check feature version compatibility: if incompatible, treat incumbent_auc as 0.0
+                    # to force promotion of the new, compatible candidate.
+                    if incumbent.get("feature_version") != feature_hash:
+                        applog.warning(
+                            "trainer",
+                            f"  Specialist [{symbol}] incumbent schema is incompatible: "
+                            f"artifact version {incumbent.get('feature_version')} != current version {feature_hash} "
+                            f"— ignoring incumbent AUC to force promotion of the new candidate.",
+                        )
+                        incumbent_auc = 0.0
+                else:
+                    incumbent_auc = 0.0
             except Exception:
                 incumbent_auc = 0.0
 
