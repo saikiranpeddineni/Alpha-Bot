@@ -22,11 +22,17 @@ _DEFAULT_HORIZON = ["15m", "close"]  # fallback for unknown strategies
 
 
 def _canonical_realized_r(strategy: str | None, outcomes: dict) -> float:
-    """Returns the canonical realized R for a candidate using strategy-specific horizon priority."""
+    """Returns the canonical realized R for a candidate using strategy-specific horizon priority.
+
+    Returns 0.0 when realized_r is None (synthetic-stop records where R cannot be computed).
+    """
     horizons = STRATEGY_HORIZON.get(strategy or "", _DEFAULT_HORIZON)
     for h in horizons:
         if h in outcomes:
-            return float(outcomes[h].get("realized_r", 0.0))
+            # Fix: realized_r may be None for synthetic-stop records (Issue #194);
+            # treat None as 0.0 rather than crashing float().
+            val = outcomes[h].get("realized_r")
+            return float(val) if val is not None else 0.0
     return 0.0
 
 

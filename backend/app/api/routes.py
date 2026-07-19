@@ -501,6 +501,11 @@ async def run_scanner(request: Request) -> dict:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+# Fix C3 (Issue #192): Canonical accepted-decision values used consistently across all endpoints.
+# Both "accepted" and "pipeline_approved" are treated as accepted states to handle legacy records.
+ACCEPTED_DECISIONS: frozenset[str] = frozenset({"accepted", "pipeline_approved"})
+
+
 @router.get("/shadow-ledger")
 async def get_shadow_ledger(request: Request, limit: int = 200) -> list[dict]:
     engine = _engine(request)
@@ -508,13 +513,20 @@ async def get_shadow_ledger(request: Request, limit: int = 200) -> list[dict]:
 
 
 @router.get("/shadow-ledger/analytics")
-async def get_shadow_ledger_analytics(request: Request) -> dict:
+async def get_shadow_ledger_analytics(
+    request: Request,
+    limit: int = 5000,
+    since: str | None = None,
+) -> dict:
     engine = _engine(request)
-    signals = _db(request).get_shadow_signals(mode=engine.mode, limit=5000)
+    signals = _db(request).get_shadow_signals(mode=engine.mode, limit=limit)
+    total_available = len(signals)  # best-effort; equals limit when truncated
+    truncated = total_available >= limit
     
     total_signals = len(signals)
     rejected_signals = [s for s in signals if s.get("final_decision") == "rejected"]
-    accepted_signals = [s for s in signals if s.get("final_decision") == "accepted"]
+    # Fix C3 (Issue #192): Use canonical ACCEPTED_DECISIONS set for consistency.
+    accepted_signals = [s for s in signals if s.get("final_decision") in ACCEPTED_DECISIONS]
     replayed_signals = [s for s in signals if s.get("replayed")]
     
     winning_replayed = [s for s in replayed_signals if (s.get("simulated_pnl") or 0.0) > 0.0]
@@ -538,7 +550,16 @@ async def get_shadow_ledger_analytics(request: Request) -> dict:
     
     for s in replayed_signals:
         outcomes = s.get("outcomes") or {}
-        outcome_std = outcomes.get("15m") or outcomes.get("close")
+        # Fix C6 (Issue #173): Use strategy-canonical horizon instead of hardcoded 15m.
+        from app.strategies.memory import _canonical_realized_r
+        strategy_name = s.get("strategy")
+        outcome_std = None
+        # Find the canonical horizon dict for give-back/capture metrics
+        horizons_prio = ["15m", "30m", "60m", "close"]
+        for _h in horizons_prio:
+            if _h in outcomes:
+                outcome_std = outcomes[_h]
+                break
         
         # Determine realized R return
         realized_r = 0.0
@@ -599,7 +620,8 @@ async def get_shadow_ledger_analytics(request: Request) -> dict:
             "bars_held": 0,
         }
         
-    for s in signals:
+    # Fix C7 (Issue #198): Alt-exit comparison uses same replayed_signals population.
+    for s in replayed_signals:
         alt_data = s.get("alternative_exits") or {}
         for pid in policy_ids:
             if pid in alt_data:
@@ -608,14 +630,18 @@ async def get_shadow_ledger_analytics(request: Request) -> dict:
                 stat["count"] += 1
                 pnl = res.get("pnl_pct", 0.0)
                 stat["total_pnl"] += pnl
-                stat["total_r"] += res.get("realized_r", 0.0)
-                stat["total_mfe_r"] += res.get("mfe_r", 0.0)
-                stat["total_mae_r"] += res.get("mae_r", 0.0)
+                stat["total_r"] += (res.get("realized_r") or 0.0)
+                stat["total_mfe_r"] += (res.get("mfe_r") or 0.0)
+                stat["total_mae_r"] += (res.get("mae_r") or 0.0)
                 stat["bars_held"] += res.get("bars_held", 0)
+                # Fix C1 (Issues #178/#193): Breakeven outcomes get their own bucket.
                 if pnl > 0:
                     stat["wins"] += 1
-                else:
+                elif pnl < 0:
                     stat["losses"] += 1
+                else:
+                    stat.setdefault("breakevens", 0)
+                    stat["breakevens"] += 1
 
     alt_exits_comparison = []
     for pid, data in alt_exits_totals.items():
@@ -635,6 +661,7 @@ async def get_shadow_ledger_analytics(request: Request) -> dict:
             "avg_mfe_r": round(avg_mfe_val, 4),
             "avg_mae_r": round(avg_mae_val, 4),
             "avg_bars_held": round(avg_held_val, 1),
+            "breakevens": data.get("breakevens", 0),
         })
 
     by_strategy = {}
@@ -658,7 +685,8 @@ async def get_shadow_ledger_analytics(request: Request) -> dict:
         dec = s.get("final_decision")
         if dec == "rejected":
             stat["rejected"] += 1
-        elif dec == "accepted":
+        # Fix C3 (Issue #192): Use canonical ACCEPTED_DECISIONS for strategy breakdown.
+        elif dec in ACCEPTED_DECISIONS:
             stat["accepted"] += 1
             
         if s.get("replayed"):
@@ -669,8 +697,9 @@ async def get_shadow_ledger_analytics(request: Request) -> dict:
             stat["total_mae"] += s.get("mae_pct") or 0.0
             if pnl > 0:
                 stat["wins"] += 1
-            else:
+            elif pnl < 0:
                 stat["losses"] += 1
+            # breakeven counts not tracked per-strategy to keep breakdown lean
 
     strategy_breakdown = {}
     for strat, data in by_strategy.items():
@@ -712,7 +741,7 @@ async def get_shadow_ledger_analytics(request: Request) -> dict:
             stat["total_mae"] += s.get("mae_pct") or 0.0
             if pnl > 0:
                 stat["wins"] += 1
-            else:
+            elif pnl < 0:
                 stat["losses"] += 1
 
     rejection_breakdown = {}
@@ -726,6 +755,9 @@ async def get_shadow_ledger_analytics(request: Request) -> dict:
             "avg_mfe": round(data["total_mfe"] / rep, 4) if rep > 0 else 0.0,
             "avg_mae": round(data["total_mae"] / rep, 4) if rep > 0 else 0.0,
         }
+
+    # Fix A9 (Issue #191): Expose persistence-failure count in analytics response.
+    from app.core.shadow_ledger import get_persistence_failure_count
 
     return {
         "summary": {
@@ -744,17 +776,29 @@ async def get_shadow_ledger_analytics(request: Request) -> dict:
             "avoided_loss_r": round(avoided_loss_r, 4),
             "missed_profit_count": missed_profit_count,
             "missed_profit_r": round(missed_profit_r, 4),
+            "persistence_failures": get_persistence_failure_count(),
         },
         "by_strategy": strategy_breakdown,
         "by_rejection_stage": rejection_breakdown,
         "alternative_exits_comparison": alt_exits_comparison,
+        # Fix C8 (Issue #199): Expose truncation metadata.
+        "population_meta": {
+            "limit": limit,
+            "total_returned": total_signals,
+            "truncated": truncated,
+        },
     }
 
 
 @router.get("/shadow-ledger/gate-alpha")
-async def get_shadow_ledger_gate_alpha(request: Request) -> dict:
+async def get_shadow_ledger_gate_alpha(
+    request: Request,
+    limit: int = 5000,
+) -> dict:
     engine = _engine(request)
-    signals = _db(request).get_shadow_signals(mode=engine.mode, limit=5000)
+    signals = _db(request).get_shadow_signals(mode=engine.mode, limit=limit)
+    total_available = len(signals)
+    truncated = total_available >= limit
     
     gates = ["ml_gate", "meta_label_gate", "trade_score_gate"]
     stats = {
@@ -785,40 +829,49 @@ async def get_shadow_ledger_gate_alpha(request: Request) -> dict:
         shared_veto = s.get("shared_veto_alpha") or {}
         marginal = s.get("marginal_alpha") or {}
         
-        replayed = s.get("replayed", False)
-        realized_r = 0.0
+        # Fix C6 (Issue #173): Use strategy-canonical horizon for realized R.
+        from app.strategies.memory import _canonical_realized_r
         outcomes = s.get("outcomes") or {}
-        if outcomes:
-            if "15m" in outcomes:
-                realized_r = outcomes["15m"].get("realized_r", 0.0)
-            elif "close" in outcomes:
-                realized_r = outcomes["close"].get("realized_r", 0.0)
-        else:
+        strategy_name_s = s.get("strategy")
+        realized_r = _canonical_realized_r(strategy_name_s, outcomes) if outcomes else 0.0
+        if not outcomes:
             sim_pnl = s.get("simulated_pnl")
             if sim_pnl is not None:
                 realized_r = sim_pnl / 100.0
                 
         for g in gates:
-            if g in unique_veto and unique_veto[g] != 0.0:
+            # Fix C5 (Issue #195): Count unique veto by membership, not non-zero magnitude.
+            if g in unique_veto:
                 stats[g]["unique_vetoes"] += 1
-                stats[g]["unique_veto_alpha"] += unique_veto[g]
-                if replayed:
+                stats[g]["unique_veto_alpha"] += unique_veto.get(g, 0.0)
+                # Fix C5 (Issue #196): Use forward outcome eligibility, not the replayed flag.
+                # Any signal with a resolved counterfactual outcome qualifies.
+                has_outcome = bool(outcomes) or s.get("simulated_pnl") is not None
+                if has_outcome:
                     if realized_r < 0:
                         stats[g]["avoided_losses"] += 1
                     elif realized_r > 0:
                         stats[g]["missed_profits"] += 1
                         
             if g in shared_veto:
-                stats[g]["shared_veto_alpha"] += shared_veto[g]
+                stats[g]["shared_veto_alpha"] += shared_veto.get(g, 0.0)
             if g in marginal:
-                stats[g]["marginal_alpha"] += marginal[g]
+                stats[g]["marginal_alpha"] += marginal.get(g, 0.0)
                 
     for g in gates:
         stats[g]["unique_veto_alpha"] = round(stats[g]["unique_veto_alpha"], 4)
         stats[g]["shared_veto_alpha"] = round(stats[g]["shared_veto_alpha"], 4)
         stats[g]["marginal_alpha"] = round(stats[g]["marginal_alpha"], 4)
-        
-    return stats
+
+    # Fix C8 (Issue #199): Expose truncation metadata.
+    return {
+        "gates": stats,
+        "population_meta": {
+            "limit": limit,
+            "total_returned": total_available,
+            "truncated": truncated,
+        },
+    }
 
 
 class PromoteRequest(BaseModel):
@@ -840,30 +893,47 @@ async def get_challengers(request: Request) -> list[dict]:
 
 
 @router.get("/strategies/shadow-performance")
-async def get_shadow_performance(request: Request) -> list[dict]:
+async def get_shadow_performance(
+    request: Request,
+    limit: int = 5000,
+) -> list[dict]:
+    engine = _engine(request)
     db = _db(request)
-    signals = db.get_shadow_signals(limit=5000)
-    
-    by_policy = {}
+    # Fix C4 (Issue #190): Scope to engine mode to prevent cross-mode contamination.
+    signals = db.get_shadow_signals(mode=engine.mode, limit=limit)
+    total_available = len(signals)
+    truncated = total_available >= limit
+
+    by_policy: dict[str, list[dict]] = {}
     for sig in signals:
         policy_id = sig.get("policy_id", "champion")
         if policy_id not in by_policy:
             by_policy[policy_id] = []
         by_policy[policy_id].append(sig)
-        
+
     res = []
     for policy_id, sigs in by_policy.items():
         total_signals = len(sigs)
-        accepted = [s for s in sigs if s.get("final_decision") == "pipeline_approved"]
+        # Fix C3 (Issue #192): Use canonical ACCEPTED_DECISIONS set.
+        accepted = [s for s in sigs if s.get("final_decision") in ACCEPTED_DECISIONS]
         rejected = [s for s in sigs if s.get("final_decision") == "rejected"]
-        
+
         trades = [s for s in sigs if s.get("replayed")]
+        # Fix C2 (Issue #188): Source total_realized_r from actual replay realized_r,
+        # not simulated_pnl which is a percentage and not an R-multiple.
         wins = [s for s in trades if (s.get("simulated_pnl") or 0.0) > 0.0]
-        total_realized = sum((s.get("simulated_pnl") or 0.0) for s in trades)
-        
+        breakevens_count = sum(1 for s in trades if (s.get("simulated_pnl") or 0.0) == 0.0)
+        # Sum actual R-multiples from the replay outcomes canonical horizon.
+        from app.strategies.memory import _canonical_realized_r
+        total_realized_r = sum(
+            _canonical_realized_r(s.get("strategy"), s.get("outcomes") or {})
+            for s in trades
+        )
+        total_simulated_return_pct = sum((s.get("simulated_pnl") or 0.0) for s in trades)
+
         win_rate = (len(wins) / len(trades) * 100.0) if trades else 0.0
-        avg_expectancy = (total_realized / len(trades)) if trades else 0.0
-        
+        avg_realized_r = (total_realized_r / len(trades)) if trades else 0.0
+
         res.append({
             "policy_id": policy_id,
             "total_signals": total_signals,
@@ -871,8 +941,18 @@ async def get_shadow_performance(request: Request) -> list[dict]:
             "rejected_count": len(rejected),
             "total_trades": len(trades),
             "win_rate": round(win_rate, 2),
-            "total_realized_r": round(total_realized, 4),
-            "average_expectancy": round(avg_expectancy, 4),
+            # Fix C2 (Issue #188): Correctly named and sourced R-multiple total.
+            "total_realized_r": round(total_realized_r, 4),
+            "avg_realized_r": round(avg_realized_r, 4),
+            # Percentage return is exposed separately with a clearly named field.
+            "total_simulated_return_pct": round(total_simulated_return_pct, 4),
+            "breakevens": breakevens_count,
+            # Fix C8: expose truncation metadata at policy level
+            "population_meta": {
+                "limit": limit,
+                "total_returned": total_available,
+                "truncated": truncated,
+            },
         })
     return res
 

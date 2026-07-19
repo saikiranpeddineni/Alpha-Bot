@@ -110,6 +110,10 @@ async def test_shadow_ledger_replay(tmp_path):
     assert updated["tp_hit"] is True
     assert updated["sl_hit"] is False
     assert updated["simulated_pnl"] == 4.0  # (104.0 - 100.0) / 100.0 * 100.0 = 4.0%
-    assert updated["replay_60m"]["time_to_target_mins"] == 40  # Price climbs 0.1/min. Reaches 104.0 after 40 minutes (m=55)
+    import pytest
+    # Fix A7 (Issue #189): time_to_target_mins is now timestamp-derived (not bars_held).
+    # Entry bar = index 16 (m=16), TP-hit bar = index 55 (m=55).
+    # Elapsed time = 55 - 16 = 39 minutes. The old code returned bars_held=40 (wrong).
+    assert updated["replay_60m"]["time_to_target_mins"] == pytest.approx(39.0)
     assert updated["mfe_pct"] >= 4.0
     assert updated["mae_pct"] <= 0.05  # Initial bar dip is open - 0.05

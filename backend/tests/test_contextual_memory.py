@@ -85,7 +85,7 @@ def test_contextual_memory_compilation_and_retrieval(temp_db: Database):
         strategy="orb",
         direction="long",
         signal_price=100.0,
-        stop_loss=99.0,
+        stop_loss=98.0,
         take_profit=103.0, # 3R take profit
         ml_confidence=0.6,
         final_decision="pipeline_approved",
@@ -108,7 +108,7 @@ def test_contextual_memory_compilation_and_retrieval(temp_db: Database):
         strategy="orb",
         direction="long",
         signal_price=100.0,
-        stop_loss=99.0,
+        stop_loss=98.0,
         take_profit=103.0,
         ml_confidence=0.6,
         final_decision="pipeline_approved",
@@ -140,10 +140,10 @@ def test_contextual_memory_compilation_and_retrieval(temp_db: Database):
     assert agg["trades_count"] == 2
     assert agg["wins_count"] == 0
     
-    # Global expectancy: 2 trades, total R = -0.6814 (avg = -0.3407)
-    # Local expectancy: 2 trades, total R = -0.6814
-    # Shrunk expectancy: (-0.6814 + 10.0 * -0.3407) / (2 + 10) = -4.0884 / 12 = -0.3407
-    assert agg["shrunk_expectancy"] == -0.3407
+    # Global expectancy: 2 trades, total R = -1.3082 (avg = -0.6541)
+    # Local expectancy: 2 trades, total R = -1.3082
+    # Shrunk expectancy: (-1.3082 + 10.0 * -0.6541) / (2 + 10) = -0.6541
+    assert agg["shrunk_expectancy"] == -0.6541
 
     # Test get_contextual_expectancy query
     lookup = get_contextual_expectancy(
@@ -157,8 +157,8 @@ def test_contextual_memory_compilation_and_retrieval(temp_db: Database):
     )
     assert lookup["source"] == "contextual_memory"
     assert lookup["trades_count"] == 2
-    assert lookup["expectancy"] == -0.3407
-    assert lookup["shrunk_expectancy"] == -0.3407
+    assert lookup["expectancy"] == -0.6541
+    assert lookup["shrunk_expectancy"] == -0.6541
 
     # Test fallback query for unseen context
     lookup_fallback = get_contextual_expectancy(

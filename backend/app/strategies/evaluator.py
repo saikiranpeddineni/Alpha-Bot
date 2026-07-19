@@ -192,6 +192,10 @@ class ParallelEvidenceEvaluator:
                 if vetoed_gate in shared_veto_alpha:
                     val = -realized_r / veto_count
                     shared_veto_alpha[vetoed_gate] = round(val, 4)
+                    # Fix B1 (Issue #177): Marginal alpha for shared vetoes is the
+                    # equal-weight Shapley approximation: -realized_r / veto_count.
+                    # Previously this was always left at 0.0, making it useless.
+                    marginal_alpha[vetoed_gate] = round(val, 4)
 
         return {
             "unique_veto_alpha": unique_veto_alpha,

@@ -1139,6 +1139,8 @@ class TradingEngine:
                 policy_version="1.0.0",
                 gate_evidence_json=parallel_evidences.get(sig.candidate_id),
                 spy_vol=spy_vol,
+                # Fix A5 (Issue #176): Pass runtime-tuned alternative exits from the engine.
+                alternative_exits=getattr(self.risk_config, "alternative_exits", None),
             )
 
             # Run and record all active Challengers (CR-146 Phase 3)
@@ -1200,6 +1202,8 @@ class TradingEngine:
                         policy_version="1.0.0",
                         gate_evidence_json=c_evidence,
                         spy_vol=spy_vol,
+                        # Fix A5 (Issue #176): Runtime-tuned alternative exits for challenger replays.
+                        alternative_exits=getattr(self.risk_config, "alternative_exits", None),
                     )
                 except Exception as exc:
                     applog.error("engine.challenger", f"Challenger {challenger.policy_id} failed for {symbol}: {exc}")

@@ -28,7 +28,10 @@ def test_veto_attribution_math():
     assert res["unique_veto_alpha"]["ml_gate"] == 0.0
     assert res["shared_veto_alpha"]["ml_gate"] == -1.0
     assert res["shared_veto_alpha"]["meta_label_gate"] == -1.0
-    assert res["marginal_alpha"]["ml_gate"] == 0.0
+    # Fix B1 (Issue #177): marginal_alpha for shared vetoes is now -realized_r / veto_count
+    # (equal-weight Shapley approximation), not 0.0.
+    assert res["marginal_alpha"]["ml_gate"] == -1.0
+    assert res["marginal_alpha"]["meta_label_gate"] == -1.0
 
 def test_chronological_replay_exit_intelligence():
     # Build dummy minute-by-minute dataframe (60 minutes)
@@ -128,9 +131,11 @@ def test_shadow_ledger_endpoints(monkeypatch):
     res_gate = client.get("/api/shadow-ledger/gate-alpha")
     assert res_gate.status_code == 200
     data_gate = res_gate.json()
-    assert "ml_gate" in data_gate
-    assert data_gate["ml_gate"]["unique_vetoes"] == 1
-    assert data_gate["ml_gate"]["unique_veto_alpha"] == 1.5
+    # Fix C8 (Issue #199): gate-alpha response is now wrapped in 'gates' key.
+    assert "gates" in data_gate
+    assert "ml_gate" in data_gate["gates"]
+    assert data_gate["gates"]["ml_gate"]["unique_vetoes"] == 1
+    assert data_gate["gates"]["ml_gate"]["unique_veto_alpha"] == 1.5
 
     # Verify GET /api/shadow-ledger/analytics
     res_an = client.get("/api/shadow-ledger/analytics")

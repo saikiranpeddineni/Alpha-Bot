@@ -106,7 +106,10 @@ def test_veto_attribution_logic():
     assert attrib["unique_veto_alpha"]["ml_gate"] == 0.0
     assert attrib["shared_veto_alpha"]["ml_gate"] == -1.5
     assert attrib["shared_veto_alpha"]["meta_label_gate"] == -1.5
-    assert attrib["marginal_alpha"]["ml_gate"] == 0.0
+    # Fix B1 (Issue #177): marginal_alpha for shared vetoes is now -realized_r / veto_count
+    # (equal-weight Shapley approximation). For 2 vetoes of a +3.0R trade: -3.0/2 = -1.5
+    assert attrib["marginal_alpha"]["ml_gate"] == -1.5
+    assert attrib["marginal_alpha"]["meta_label_gate"] == -1.5
     assert attrib["coalition_veto_count"] == 2
 
     # 4. Redundant Veto of a loser (-1.0R realized)
@@ -121,7 +124,9 @@ def test_veto_attribution_logic():
     assert attrib["shared_veto_alpha"]["ml_gate"] == 0.3333
     assert attrib["shared_veto_alpha"]["meta_label_gate"] == 0.3333
     assert attrib["shared_veto_alpha"]["trade_score_gate"] == 0.3333
-    assert attrib["marginal_alpha"]["ml_gate"] == 0.0
+    # Fix B1 (Issue #177): marginal_alpha for shared vetoes is now equal-weight Shapley:
+    # -realized_r / veto_count = -(-1.0)/3 = 0.3333 (previously was always 0.0)
+    assert attrib["marginal_alpha"]["ml_gate"] == 0.3333
     assert attrib["coalition_veto_count"] == 3
 
 
