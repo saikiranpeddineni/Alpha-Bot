@@ -71,6 +71,7 @@ class Signal(BaseModel):
     score: float | None = None
     candidate_id: str | None = None
     strategy_params: dict | None = None
+    parent_candidate_id: str | None = None
 
 
 class OrderRequest(BaseModel):

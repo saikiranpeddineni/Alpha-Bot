@@ -133,6 +133,9 @@ class PolicyNomineeRow(Base):
     edge_over_champion: Mapped[float] = mapped_column(Float, default=0.0)
     champion_expectancy: Mapped[float] = mapped_column(Float, default=0.0)
     status: Mapped[str] = mapped_column(String(20), default="pending")  # pending | approved | dismissed
+    cohort_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    config_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    champion_config_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class PortfolioCheckpointRow(Base):
@@ -179,6 +182,22 @@ class Database:
                         conn.exec_driver_sql(f"ALTER TABLE shadow_ledger ADD COLUMN {col_name} {col_type}")
                         needs_commit = True
                 if needs_commit:
+                    conn.commit()
+
+                # Self-healing migration for policy_nominees table columns
+                cursor = conn.exec_driver_sql("PRAGMA table_info(policy_nominees)")
+                existing_nominee_cols = {row[1] for row in cursor.fetchall()}
+                nominee_new_cols = {
+                    "cohort_fingerprint": "VARCHAR(64)",
+                    "config_fingerprint": "VARCHAR(64)",
+                    "champion_config_fingerprint": "VARCHAR(64)",
+                }
+                needs_nominee_commit = False
+                for col_name, col_type in nominee_new_cols.items():
+                    if col_name not in existing_nominee_cols:
+                        conn.exec_driver_sql(f"ALTER TABLE policy_nominees ADD COLUMN {col_name} {col_type}")
+                        needs_nominee_commit = True
+                if needs_nominee_commit:
                     conn.commit()
         except Exception as exc:
             # Avoid cyclical import for applog at early initialization
@@ -530,18 +549,46 @@ class Database:
         """Persists a Challenger promotion nomination for human review.
         Does NOT change any production configuration.
         """
+        from sqlalchemy import select as sa_select
         with self._session() as s:
-            s.merge(
-                PolicyNomineeRow(
-                    policy_id=record["policy_id"],
-                    nominated_at=record["nominated_at"],
-                    approved_count=record.get("approved_count", 0),
-                    expectancy=record.get("expectancy", 0.0),
-                    edge_over_champion=record.get("edge_over_champion", 0.0),
-                    champion_expectancy=record.get("champion_expectancy", 0.0),
-                    status=record.get("status", "pending"),
+            # Find any existing pending nominee for this policy_id
+            existing = s.execute(
+                sa_select(PolicyNomineeRow)
+                .where(PolicyNomineeRow.policy_id == record["policy_id"])
+                .where(PolicyNomineeRow.status == "pending")
+            ).scalars().all()
+
+            # Deduplicate if config is identical, update in place
+            same_config_found = False
+            for row in existing:
+                if row.config_fingerprint == record.get("config_fingerprint"):
+                    row.nominated_at = record["nominated_at"]
+                    row.approved_count = record.get("approved_count", 0)
+                    row.expectancy = record.get("expectancy", 0.0)
+                    row.edge_over_champion = record.get("edge_over_champion", 0.0)
+                    row.champion_expectancy = record.get("champion_expectancy", 0.0)
+                    row.cohort_fingerprint = record.get("cohort_fingerprint")
+                    row.champion_config_fingerprint = record.get("champion_config_fingerprint")
+                    same_config_found = True
+                else:
+                    # Configuration changed: supersede/dismiss the old pending nomination
+                    row.status = "dismissed"
+
+            if not same_config_found:
+                s.merge(
+                    PolicyNomineeRow(
+                        policy_id=record["policy_id"],
+                        nominated_at=record["nominated_at"],
+                        approved_count=record.get("approved_count", 0),
+                        expectancy=record.get("expectancy", 0.0),
+                        edge_over_champion=record.get("edge_over_champion", 0.0),
+                        champion_expectancy=record.get("champion_expectancy", 0.0),
+                        status=record.get("status", "pending"),
+                        cohort_fingerprint=record.get("cohort_fingerprint"),
+                        config_fingerprint=record.get("config_fingerprint"),
+                        champion_config_fingerprint=record.get("champion_config_fingerprint"),
+                    )
                 )
-            )
             s.commit()
 
     def get_pending_nominees(self) -> list[dict]:
@@ -562,9 +609,49 @@ class Database:
                     "edge_over_champion": r.edge_over_champion,
                     "champion_expectancy": r.champion_expectancy,
                     "status": r.status,
+                    "cohort_fingerprint": r.cohort_fingerprint,
+                    "config_fingerprint": r.config_fingerprint,
+                    "champion_config_fingerprint": r.champion_config_fingerprint,
                 }
                 for r in rows
             ]
+
+    def get_pending_nominee_for_policy(self, policy_id: str) -> dict | None:
+        """Returns the pending nominee for the exact policy_id, if any."""
+        from sqlalchemy import select as sa_select
+        with self._session() as s:
+            row = s.execute(
+                sa_select(PolicyNomineeRow)
+                .where(PolicyNomineeRow.policy_id == policy_id)
+                .where(PolicyNomineeRow.status == "pending")
+            ).scalars().first()
+            if row is None:
+                return None
+            return {
+                "policy_id": row.policy_id,
+                "nominated_at": row.nominated_at,
+                "approved_count": row.approved_count,
+                "expectancy": row.expectancy,
+                "edge_over_champion": row.edge_over_champion,
+                "champion_expectancy": row.champion_expectancy,
+                "status": row.status,
+                "cohort_fingerprint": row.cohort_fingerprint,
+                "config_fingerprint": row.config_fingerprint,
+                "champion_config_fingerprint": row.champion_config_fingerprint,
+            }
+
+    def mark_nomination_approved(self, policy_id: str, nominated_at: str) -> None:
+        """Sets the status of a nomination to 'approved'."""
+        from sqlalchemy import select as sa_select
+        with self._session() as s:
+            row = s.execute(
+                sa_select(PolicyNomineeRow)
+                .where(PolicyNomineeRow.policy_id == policy_id)
+                .where(PolicyNomineeRow.nominated_at == nominated_at)
+            ).scalars().first()
+            if row:
+                row.status = "approved"
+            s.commit()
 
     def close(self) -> None:
         global _ACTIVE_DATABASE

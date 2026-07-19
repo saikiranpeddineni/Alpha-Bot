@@ -17,6 +17,7 @@ from app.core.domain import OrderRequest, OrderSide, OrderType, utcnow
 from app.core.logging import applog
 
 router = APIRouter(prefix="/api")
+_promotion_lock = asyncio.Lock()
 
 
 def _engine(request: Request):  # noqa: ANN202
@@ -323,6 +324,12 @@ class BacktestBody(BaseModel):
     end_date: str | None = None
 
 
+class ValidationBody(BaseModel):
+    symbols: list[str] | None = None
+    start_date: str | None = None
+    end_date: str | None = None
+
+
 @router.post("/backtest")
 async def post_backtest(body: BacktestBody, request: Request) -> dict:
     """Run a historical backtest.
@@ -443,6 +450,46 @@ async def get_backtest(run_id: str, request: Request) -> dict:
     if payload is None:
         raise HTTPException(status_code=404, detail="backtest not found")
     return payload
+
+
+@router.post("/validation/profit-optimization")
+async def run_profit_validation_suite(body: ValidationBody, request: Request) -> dict:
+    import sys
+    from pathlib import Path
+    lock: asyncio.Lock = request.app.state.backtest_lock
+    if lock.locked():
+        raise HTTPException(status_code=409, detail="A backtest or validation is already running")
+
+    async with lock:
+        # Build command-line arguments dynamically from request body
+        args = ["run_profit_validation.py"]
+        if body.start_date:
+            args.extend(["--start", body.start_date])
+        if body.end_date:
+            args.extend(["--end", body.end_date])
+        if body.symbols:
+            args.extend(["--symbols", ",".join(body.symbols)])
+
+        # Run run_profit_validation.py via subprocess to ensure clean process isolation
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+
+        if proc.returncode != 0:
+            err_msg = stderr.decode(errors="ignore") or stdout.decode(errors="ignore")
+            raise HTTPException(status_code=500, detail=f"Validation failed: {err_msg}")
+
+        report_path = Path("analysis_results.md")
+        if report_path.exists():
+            content = report_path.read_text(encoding="utf-8")
+        else:
+            content = "Validation completed, but analysis_results.md was not found."
+
+        return {"status": "success", "report": content}
 
 
 @router.post("/scanner/run")
@@ -653,75 +700,179 @@ async def get_policy_nominees(request: Request) -> list[dict]:
 
 @router.post("/strategies/promote")
 async def promote_policy(request: Request, body: PromoteRequest) -> dict:
-    engine = _engine(request)
-    db = _db(request)
+    # 1. Bearer Authentication Guard
+    from app.config import get_settings
+    settings_obj = get_settings()
+    if settings_obj.admin_token:
+        auth_header = request.headers.get("Authorization")
+        x_token = request.headers.get("X-Admin-Token")
+        token = None
+        if auth_header and auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+        elif x_token:
+            token = x_token
+
+        if not token:
+            raise HTTPException(status_code=401, detail="Authentication token required.")
+        if token != settings_obj.admin_token:
+            raise HTTPException(status_code=403, detail="Forbidden: Invalid authentication token.")
+
+    # 2. Strict Input Schema Validation
     policy_id = body.policy_id
-    
+    if not isinstance(policy_id, str) or not policy_id.strip():
+        raise HTTPException(status_code=400, detail="Invalid policy_id payload.")
+    policy_id = policy_id.strip()
+
     if policy_id == "champion":
         raise HTTPException(status_code=400, detail="Champion is already production.")
-        
-    from app.strategies.challenger import get_active_challengers
-    challengers = get_active_challengers()
-    target_challenger = next((c for c in challengers if c.policy_id == policy_id), None)
-    if not target_challenger:
-        raise HTTPException(status_code=404, detail=f"Challenger policy {policy_id!r} not found.")
-        
-    try:
-        snapshot = target_challenger.to_snapshot()
-        db.set_setting("active_policy_snapshot", snapshot)
-        applog.info(
-            "engine.promotion",
-            f"Policy snapshot persisted before promotion: {snapshot}"
-        )
 
-        # Apply settings from the snapshot (not individual field references) for atomicity
-        db.set_setting("ml_threshold", snapshot["ml_threshold"])
-        
-        # Reset engine risk config back to base settings from the DB first (without prior offsets)
-        stored_risk = db.get_setting("risk_config") or {}
-        default_risk = engine.settings.risk_config().model_dump()
-        merged_risk = {**default_risk, **stored_risk}
-        
-        # Apply the new offset to the merged base risk config in-memory
-        from app.config import RiskConfig
-        engine.risk_config = RiskConfig(**merged_risk)
-        
-        offset = float(snapshot.get("score_threshold_offset", 0.0))
-        if offset != 0.0:
-            engine.risk_config.score_threshold_event = max(0.0, engine.risk_config.score_threshold_event + offset)
-            engine.risk_config.score_threshold_trend = max(0.0, engine.risk_config.score_threshold_trend + offset)
-            engine.risk_config.score_threshold_range = max(0.0, engine.risk_config.score_threshold_range + offset)
-            engine.risk_config.score_threshold_volatile = max(0.0, engine.risk_config.score_threshold_volatile + offset)
+    engine = _engine(request)
+    db = _db(request)
+
+    # 3. Serialization Lock
+    async with _promotion_lock:
+        # 4. Idempotency Check
+        active_snapshot = db.get_setting("active_policy_snapshot")
+        if active_snapshot and active_snapshot.get("policy_id") == policy_id:
+            applog.info("engine.promotion", f"Idempotent request: policy {policy_id} is already Champion.")
+            return {
+                "status": "success",
+                "message": f"Promoted policy {policy_id!r} successfully.",
+                "config": {
+                    "ml_threshold": active_snapshot["ml_threshold"],
+                    "score_threshold_offset": float(active_snapshot.get("score_threshold_offset", 0.0)),
+                },
+                "snapshot": active_snapshot,
+            }
+
+        # 5. Verify Challenger Config Exists
+        from app.strategies.challenger import get_active_challengers
+        challengers = get_active_challengers()
+        target_challenger = next((c for c in challengers if c.policy_id == policy_id), None)
+        if not target_challenger:
+            raise HTTPException(status_code=404, detail=f"Challenger policy {policy_id!r} not found in active configurations.")
+
+        # 6. Verify Pending Nomination Exists
+        pending_nominee = db.get_pending_nominee_for_policy(policy_id)
+        if not pending_nominee:
+            raise HTTPException(status_code=400, detail=f"No pending nomination found for Challenger {policy_id!r}.")
+
+        import hashlib
+        import json
+        def get_config_fingerprint(snapshot_dict: dict) -> str:
+            cleaned = {k: v for k, v in snapshot_dict.items() if k not in ("snapshot_at", "snapshot_version")}
+            serialized = json.dumps(cleaned, sort_keys=True, default=str)
+            return hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:16]
+
+        snapshot = target_challenger.to_snapshot()
+        current_chall_fp = get_config_fingerprint(snapshot)
+        if pending_nominee.get("config_fingerprint") != current_chall_fp:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Nomination configuration mismatch for {policy_id}. Challenger settings have changed since nomination."
+            )
+
+        # 7. Compare-And-Swap (CAS): Verify current Champion configuration fingerprint matches nomination expectation
+        def get_champion_config_fingerprint(db_inst) -> str:
+            snapshot_dict = db_inst.get_setting("active_policy_snapshot")
+            if not snapshot_dict:
+                snapshot_dict = {
+                    "policy_id": "champion",
+                    "ml_threshold": settings_obj.ml_confidence_threshold,
+                    "score_threshold_offset": 0.0,
+                    "risk_config": settings_obj.risk_config().model_dump()
+                }
+            return get_config_fingerprint(snapshot_dict)
+
+        current_champ_fp = get_champion_config_fingerprint(db)
+        if pending_nominee.get("champion_config_fingerprint") != current_champ_fp:
+            raise HTTPException(
+                status_code=409,
+                detail="Conflict: Champion configuration has changed since this nomination was generated. Re-evaluation required."
+            )
+
+        # 8. Atomic / Compensating Transaction Setup
+        # Capture pre-promotion DB values
+        old_snapshot = db.get_setting("active_policy_snapshot")
+        old_ml_threshold = db.get_setting("ml_threshold")
+        old_risk_config = db.get_setting("risk_config")
+
+        # Capture pre-promotion engine runtime state
+        old_engine_risk_config = engine.risk_config
+        old_pipeline_ml_threshold = getattr(engine.pipeline, "ml_threshold", None) if getattr(engine, "pipeline", None) else None
+        old_evaluator_ml_threshold = getattr(engine.evidence_evaluator, "ml_threshold", None) if getattr(engine, "evidence_evaluator", None) else None
+        old_trade_score_engine_config = getattr(engine.pipeline.trade_score_engine, "risk_config", None) if (getattr(engine, "pipeline", None) and getattr(engine.pipeline, "trade_score_engine", None)) else None
+
+        try:
+            # Apply DB writes
+            db.set_setting("active_policy_snapshot", snapshot)
+            db.set_setting("ml_threshold", snapshot["ml_threshold"])
             
-        # Synchronize risk manager and pipeline engines
-        if engine.risk:
-            engine.risk.config = engine.risk_config
+            # Reset engine risk config back to base settings from the DB first (without prior offsets)
+            stored_risk = db.get_setting("risk_config") or {}
+            default_risk = engine.settings.risk_config().model_dump()
+            merged_risk = {**default_risk, **stored_risk}
             
-        # Update running engine properties in-place from the snapshot
-        pipeline = getattr(engine, "pipeline", None)
-        if pipeline:
-            pipeline.ml_threshold = snapshot["ml_threshold"]
-            if hasattr(pipeline, "trade_score_engine") and pipeline.trade_score_engine is not None:
-                pipeline.trade_score_engine.risk_config = engine.risk_config
+            # Apply the new offset to the merged base risk config in-memory
+            from app.config import RiskConfig
+            engine.risk_config = RiskConfig(**merged_risk)
             
-        evaluator = getattr(engine, "evidence_evaluator", None)
-        if evaluator:
-            evaluator.ml_threshold = snapshot["ml_threshold"]
+            offset = float(snapshot.get("score_threshold_offset", 0.0))
+            if offset != 0.0:
+                engine.risk_config.score_threshold_event = max(0.0, engine.risk_config.score_threshold_event + offset)
+                engine.risk_config.score_threshold_trend = max(0.0, engine.risk_config.score_threshold_trend + offset)
+                engine.risk_config.score_threshold_range = max(0.0, engine.risk_config.score_threshold_range + offset)
+                engine.risk_config.score_threshold_volatile = max(0.0, engine.risk_config.score_threshold_volatile + offset)
+                
+            # Synchronize risk manager and pipeline engines
+            if engine.risk:
+                engine.risk.config = engine.risk_config
+                
+            # Update running engine properties in-place from the snapshot
+            pipeline = getattr(engine, "pipeline", None)
+            if pipeline:
+                pipeline.ml_threshold = snapshot["ml_threshold"]
+                if hasattr(pipeline, "trade_score_engine") and pipeline.trade_score_engine is not None:
+                    pipeline.trade_score_engine.risk_config = engine.risk_config
+                
+            evaluator = getattr(engine, "evidence_evaluator", None)
+            if evaluator:
+                evaluator.ml_threshold = snapshot["ml_threshold"]
+
+            # Consume nomination
+            db.mark_nomination_approved(policy_id, pending_nominee["nominated_at"])
             
-        applog.info(
-            "engine.promotion",
-            f"SUCCESS: Promoted policy {policy_id!r} to Champion production state in-place. "
-            f"Snapshot: {snapshot}"
-        )
-        
-        return {
-            "status": "success",
-            "message": f"Promoted policy {policy_id!r} successfully.",
-            "config": {
-                "ml_threshold": snapshot["ml_threshold"],
-                "score_threshold_offset": offset,
-            },
-            "snapshot": snapshot,
-        }
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to promote policy: {exc}") from exc
+            applog.info(
+                "engine.promotion",
+                f"SUCCESS: Promoted policy {policy_id!r} to Champion production state in-place. "
+                f"Snapshot: {snapshot}"
+            )
+            
+            return {
+                "status": "success",
+                "message": f"Promoted policy {policy_id!r} successfully.",
+                "config": {
+                    "ml_threshold": snapshot["ml_threshold"],
+                    "score_threshold_offset": offset,
+                },
+                "snapshot": snapshot,
+            }
+        except Exception as exc:
+            # Compensating Rollback - DB State
+            db.set_setting("active_policy_snapshot", old_snapshot)
+            db.set_setting("ml_threshold", old_ml_threshold)
+            db.set_setting("risk_config", old_risk_config)
+
+            # Compensating Rollback - Engine Runtime State
+            engine.risk_config = old_engine_risk_config
+            if engine.risk:
+                engine.risk.config = old_engine_risk_config
+            if getattr(engine, "pipeline", None):
+                engine.pipeline.ml_threshold = old_pipeline_ml_threshold
+                if getattr(engine.pipeline, "trade_score_engine", None):
+                    engine.pipeline.trade_score_engine.risk_config = old_trade_score_engine_config
+            if getattr(engine, "evidence_evaluator", None):
+                engine.evidence_evaluator.ml_threshold = old_evaluator_ml_threshold
+
+            applog.error("engine.promotion", f"FAILED: Rolled back promotion mutation for {policy_id}: {exc}")
+            raise HTTPException(status_code=500, detail=f"Failed to promote policy: {exc}") from exc

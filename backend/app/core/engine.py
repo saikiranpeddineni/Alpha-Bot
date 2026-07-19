@@ -806,7 +806,15 @@ class TradingEngine:
                                 self.publish("insight", self.insights.on_signal(sig, gated=False).model_dump(mode="json"))
                                 self.publish("orders", self.orders_payload())
                                 if getattr(sig, "candidate_id", None) is not None:
-                                    self._update_shadow_decision(sig.candidate_id, "accepted", "", "none")
+                                    if order.status == OrderStatus.REJECTED:
+                                        self._update_shadow_decision(
+                                            sig.candidate_id,
+                                            "rejected",
+                                            order.reason or "Broker rejected order",
+                                            "broker_rejected"
+                                        )
+                                    else:
+                                        self._update_shadow_decision(sig.candidate_id, "accepted", "", "none")
                             except Exception as exc:
                                 applog.error("engine", f"Ambiguous submission exception for {decision.order.symbol} ({client_order_id}): {exc}")
                                 order = Order(

@@ -49,6 +49,7 @@ class RiskConfig(BaseModel):
     midday_score_boost: float = Field(15.0, ge=0.0, le=50.0)
     midday_start_et: int = Field(690, ge=570, le=960)
     midday_end_et: int = Field(795, ge=570, le=960)
+    scanner_watchlist_ttl: int = Field(3, ge=1, le=30)
 
 
 class Settings(BaseSettings):
@@ -115,6 +116,7 @@ class Settings(BaseSettings):
     midday_end_et: int = Field(795, validation_alias="MIDDAY_END_ET")
     dq_min_bars_warmup: int = Field(50, validation_alias="DQ_MIN_BARS_WARMUP")
     db_path: str = Field("", validation_alias="ALPHADESK_DB_PATH")
+    admin_token: str = Field("", validation_alias="ALPHADESK_ADMIN_TOKEN")
 
     def model_post_init(self, __context) -> None:  # noqa: ANN001
         if self.mode not in VALID_MODES:
