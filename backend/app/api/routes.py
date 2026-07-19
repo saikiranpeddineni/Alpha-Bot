@@ -526,6 +526,117 @@ async def get_shadow_ledger_analytics(request: Request) -> dict:
     avg_mfe = (sum((s.get("mfe_pct") or 0.0) for s in replayed_signals) / total_replayed) if total_replayed > 0 else 0.0
     avg_mae = (sum((s.get("mae_pct") or 0.0) for s in replayed_signals) / total_replayed) if total_replayed > 0 else 0.0
     
+    # Exit capture and avoided loss vs missed profit analytics (Population separation)
+    winner_capture_ratios = []
+    give_backs = []
+    mfe_before_losses = []
+    
+    avoided_loss_count = 0
+    avoided_loss_r = 0.0
+    missed_profit_count = 0
+    missed_profit_r = 0.0
+    
+    for s in replayed_signals:
+        outcomes = s.get("outcomes") or {}
+        outcome_std = outcomes.get("15m") or outcomes.get("close")
+        
+        # Determine realized R return
+        realized_r = 0.0
+        mfe_r = 0.0
+        gave_back_r = 0.0
+        
+        if outcome_std:
+            realized_r = outcome_std.get("realized_r", 0.0)
+            mfe_r = outcome_std.get("mfe_r", 0.0)
+            gave_back_r = outcome_std.get("gave_back_r", 0.0)
+            
+            if realized_r > 0:
+                winner_capture_ratios.append(outcome_std.get("winner_capture_ratio", 0.0))
+            give_backs.append(gave_back_r)
+            if realized_r <= 0:
+                mfe_before_losses.append(outcome_std.get("mfe_before_loss_r", mfe_r))
+        else:
+            # Fallback to simulated P&L / R from payload
+            sim_pnl = s.get("simulated_pnl") or 0.0
+            realized_r = sim_pnl / 100.0  # approximate
+            mfe_r = (s.get("mfe_pct") or 0.0) / 100.0
+            gave_back_r = max(0.0, mfe_r - realized_r)
+            
+            if realized_r > 0:
+                winner_capture_ratios.append(realized_r / mfe_r if mfe_r > 0 else 0.0)
+            give_backs.append(gave_back_r)
+            if realized_r <= 0:
+                mfe_before_losses.append(mfe_r)
+
+        # Avoided Loss vs Missed Profit (Population C: Rejected Counterfactuals)
+        if s.get("final_decision") == "rejected":
+            if realized_r < 0:
+                avoided_loss_count += 1
+                avoided_loss_r += -realized_r
+            elif realized_r > 0:
+                missed_profit_count += 1
+                missed_profit_r += realized_r
+
+    avg_winner_capture = sum(winner_capture_ratios) / len(winner_capture_ratios) if winner_capture_ratios else 0.0
+    avg_give_back = sum(give_backs) / len(give_backs) if give_backs else 0.0
+    avg_mfe_before_loss = sum(mfe_before_losses) / len(mfe_before_losses) if mfe_before_losses else 0.0
+    
+    # Alternative exits comparison
+    alt_exits_totals = {}
+    alt_policies = getattr(engine.risk_config, "alternative_exits", [])
+    policy_ids = ["exit_production"] + [alt["policy_id"] for alt in alt_policies if alt.get("policy_id")]
+    
+    for pid in policy_ids:
+        alt_exits_totals[pid] = {
+            "policy_id": pid,
+            "count": 0,
+            "total_pnl": 0.0,
+            "total_r": 0.0,
+            "wins": 0,
+            "losses": 0,
+            "total_mfe_r": 0.0,
+            "total_mae_r": 0.0,
+            "bars_held": 0,
+        }
+        
+    for s in signals:
+        alt_data = s.get("alternative_exits") or {}
+        for pid in policy_ids:
+            if pid in alt_data:
+                res = alt_data[pid]
+                stat = alt_exits_totals[pid]
+                stat["count"] += 1
+                pnl = res.get("pnl_pct", 0.0)
+                stat["total_pnl"] += pnl
+                stat["total_r"] += res.get("realized_r", 0.0)
+                stat["total_mfe_r"] += res.get("mfe_r", 0.0)
+                stat["total_mae_r"] += res.get("mae_r", 0.0)
+                stat["bars_held"] += res.get("bars_held", 0)
+                if pnl > 0:
+                    stat["wins"] += 1
+                else:
+                    stat["losses"] += 1
+
+    alt_exits_comparison = []
+    for pid, data in alt_exits_totals.items():
+        cnt = data["count"]
+        win_rate = (data["wins"] / cnt * 100.0) if cnt > 0 else 0.0
+        avg_pnl_val = (data["total_pnl"] / cnt) if cnt > 0 else 0.0
+        avg_r_val = (data["total_r"] / cnt) if cnt > 0 else 0.0
+        avg_mfe_val = (data["total_mfe_r"] / cnt) if cnt > 0 else 0.0
+        avg_mae_val = (data["total_mae_r"] / cnt) if cnt > 0 else 0.0
+        avg_held_val = (data["bars_held"] / cnt) if cnt > 0 else 0.0
+        alt_exits_comparison.append({
+            "policy_id": pid,
+            "count": cnt,
+            "win_rate_pct": round(win_rate, 2),
+            "avg_simulated_return_pct": round(avg_pnl_val, 4),
+            "avg_realized_r": round(avg_r_val, 4),
+            "avg_mfe_r": round(avg_mfe_val, 4),
+            "avg_mae_r": round(avg_mae_val, 4),
+            "avg_bars_held": round(avg_held_val, 1),
+        })
+
     by_strategy = {}
     for s in signals:
         strat = s.get("strategy", "unknown")
@@ -626,10 +737,88 @@ async def get_shadow_ledger_analytics(request: Request) -> dict:
             "avg_simulated_return_pct": round(avg_pnl, 4),
             "avg_mfe_pct": round(avg_mfe, 4),
             "avg_mae_pct": round(avg_mae, 4),
+            "avg_winner_capture_ratio": round(avg_winner_capture, 4),
+            "avg_give_back_r": round(avg_give_back, 4),
+            "avg_mfe_before_loss_r": round(avg_mfe_before_loss, 4),
+            "avoided_loss_count": avoided_loss_count,
+            "avoided_loss_r": round(avoided_loss_r, 4),
+            "missed_profit_count": missed_profit_count,
+            "missed_profit_r": round(missed_profit_r, 4),
         },
         "by_strategy": strategy_breakdown,
         "by_rejection_stage": rejection_breakdown,
+        "alternative_exits_comparison": alt_exits_comparison,
     }
+
+
+@router.get("/shadow-ledger/gate-alpha")
+async def get_shadow_ledger_gate_alpha(request: Request) -> dict:
+    engine = _engine(request)
+    signals = _db(request).get_shadow_signals(mode=engine.mode, limit=5000)
+    
+    gates = ["ml_gate", "meta_label_gate", "trade_score_gate"]
+    stats = {
+        g: {
+            "total_vetoes": 0,
+            "unique_vetoes": 0,
+            "unique_veto_alpha": 0.0,
+            "shared_veto_alpha": 0.0,
+            "marginal_alpha": 0.0,
+            "avoided_losses": 0,
+            "missed_profits": 0,
+        }
+        for g in gates
+    }
+    
+    for s in signals:
+        gate_evidence = s.get("gate_evidence_json")
+        if not gate_evidence or "vetoes" not in gate_evidence:
+            continue
+            
+        vetoes = gate_evidence["vetoes"]
+        for g in gates:
+            if g in vetoes:
+                stats[g]["total_vetoes"] += 1
+                
+        # Read attribution fields from payload
+        unique_veto = s.get("unique_veto_alpha") or {}
+        shared_veto = s.get("shared_veto_alpha") or {}
+        marginal = s.get("marginal_alpha") or {}
+        
+        replayed = s.get("replayed", False)
+        realized_r = 0.0
+        outcomes = s.get("outcomes") or {}
+        if outcomes:
+            if "15m" in outcomes:
+                realized_r = outcomes["15m"].get("realized_r", 0.0)
+            elif "close" in outcomes:
+                realized_r = outcomes["close"].get("realized_r", 0.0)
+        else:
+            sim_pnl = s.get("simulated_pnl")
+            if sim_pnl is not None:
+                realized_r = sim_pnl / 100.0
+                
+        for g in gates:
+            if g in unique_veto and unique_veto[g] != 0.0:
+                stats[g]["unique_vetoes"] += 1
+                stats[g]["unique_veto_alpha"] += unique_veto[g]
+                if replayed:
+                    if realized_r < 0:
+                        stats[g]["avoided_losses"] += 1
+                    elif realized_r > 0:
+                        stats[g]["missed_profits"] += 1
+                        
+            if g in shared_veto:
+                stats[g]["shared_veto_alpha"] += shared_veto[g]
+            if g in marginal:
+                stats[g]["marginal_alpha"] += marginal[g]
+                
+    for g in gates:
+        stats[g]["unique_veto_alpha"] = round(stats[g]["unique_veto_alpha"], 4)
+        stats[g]["shared_veto_alpha"] = round(stats[g]["shared_veto_alpha"], 4)
+        stats[g]["marginal_alpha"] = round(stats[g]["marginal_alpha"], 4)
+        
+    return stats
 
 
 class PromoteRequest(BaseModel):

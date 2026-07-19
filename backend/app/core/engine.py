@@ -1631,6 +1631,60 @@ class TradingEngine:
                 s["sl_hit"] = replay_res["sl_hit"]
                 s["replay_60m"] = replay_res
 
+                # Alternative exits simulation (chronological chronological replaying)
+                alt_outcomes = {}
+                alt_outcomes["exit_production"] = {
+                    "pnl_pct": replay_res["pnl_pct"],
+                    "realized_r": replay_res.get("realized_r", 0.0),
+                    "exit_reason": replay_res["exit_reason"],
+                    "tp_hit": replay_res["tp_hit"],
+                    "sl_hit": replay_res["sl_hit"],
+                    "bars_held": replay_res["bars_held"],
+                    "mfe_r": replay_res.get("mfe_r", 0.0),
+                    "mae_r": replay_res.get("mae_r", 0.0),
+                }
+
+                alt_policies = getattr(self.risk_config, "alternative_exits", [])
+                for alt in alt_policies:
+                    alt_policy_id = alt.get("policy_id")
+                    if not alt_policy_id:
+                        continue
+                    
+                    alt_tp = None
+                    if "take_profit_pct" in alt:
+                        alt_tp = entry_price * (1.0 + alt["take_profit_pct"]/100.0 if direction == "long" else 1.0 - alt["take_profit_pct"]/100.0)
+                    alt_sl = None
+                    if "stop_loss_pct" in alt:
+                        alt_sl = entry_price * (1.0 - alt["stop_loss_pct"]/100.0 if direction == "long" else 1.0 + alt["stop_loss_pct"]/100.0)
+                    
+                    alt_params = {**strategy_params} if strategy_params else {}
+                    if "trailing_stop_atr_mult" in alt:
+                        alt_params["trailing_stop_atr_mult"] = alt["trailing_stop_atr_mult"]
+                    
+                    alt_res = ShadowLedger.replay_signal_60m(
+                        df=df,
+                        entry_idx=i + 1,
+                        direction=direction,
+                        stop_loss=alt_sl or stop_loss,
+                        take_profit=alt_tp or take_profit,
+                        entry_price=entry_price,
+                        strategy_name=strategy_name,
+                        strategy_params=alt_params,
+                    )
+                    
+                    if alt_res:
+                        alt_outcomes[alt_policy_id] = {
+                            "pnl_pct": alt_res["pnl_pct"],
+                            "realized_r": alt_res.get("realized_r", 0.0),
+                            "exit_reason": alt_res["exit_reason"],
+                            "tp_hit": alt_res["tp_hit"],
+                            "sl_hit": alt_res["sl_hit"],
+                            "bars_held": alt_res["bars_held"],
+                            "mfe_r": alt_res.get("mfe_r", 0.0),
+                            "mae_r": alt_res.get("mae_r", 0.0),
+                        }
+                s["alternative_exits"] = alt_outcomes
+
                 if not s.get("outcomes") or not s["outcomes"]:
                     try:
                         s["outcomes"] = ShadowLedger.calculate_forward_outcomes(
@@ -1638,6 +1692,23 @@ class TradingEngine:
                         )
                     except Exception:
                         pass
+
+                # Calculate unique/shared/marginal veto attribution at replay time
+                gate_evidence = s.get("gate_evidence_json")
+                if gate_evidence and "vetoes" in gate_evidence:
+                    vetoes = gate_evidence["vetoes"]
+                    realized_r = 0.0
+                    if s.get("outcomes"):
+                        if "15m" in s["outcomes"]:
+                            realized_r = s["outcomes"]["15m"].get("realized_r", 0.0)
+                        elif "close" in s["outcomes"]:
+                            realized_r = s["outcomes"]["close"].get("realized_r", 0.0)
+                    else:
+                        realized_r = replay_res.get("realized_r", 0.0)
+
+                    from app.strategies.evaluator import ParallelEvidenceEvaluator
+                    attrib = ParallelEvidenceEvaluator.calculate_veto_attribution(vetoes, realized_r)
+                    s.update(attrib)
 
                 self.db.save_shadow_signal(
                     candidate_id=candidate_id,

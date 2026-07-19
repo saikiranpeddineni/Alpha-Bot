@@ -248,3 +248,65 @@ export interface Bootstrap {
   positions?: PositionRow[];
   account?: Account;
 }
+
+export interface GateAlphaStats {
+  total_vetoes: number;
+  unique_vetoes: number;
+  unique_veto_alpha: number;
+  shared_veto_alpha: number;
+  marginal_alpha: number;
+  avoided_losses: number;
+  missed_profits: number;
+}
+
+export type GateAlphaResponse = Record<string, GateAlphaStats>;
+
+export interface AltExitStats {
+  policy_id: string;
+  count: number;
+  win_rate_pct: number;
+  avg_simulated_return_pct: number;
+  avg_realized_r: number;
+  avg_mfe_r: number;
+  avg_mae_r: number;
+  avg_bars_held: number;
+}
+
+export interface ShadowAnalyticsResponse {
+  summary: {
+    total_signals: number;
+    rejected_signals: number;
+    accepted_signals: number;
+    replayed_signals: number;
+    win_rate_pct: number;
+    avg_simulated_return_pct: number;
+    avg_mfe_pct: number;
+    avg_mae_pct: number;
+    avg_winner_capture_ratio: number;
+    avg_give_back_r: number;
+    avg_mfe_before_loss_r: number;
+    avoided_loss_count: number;
+    avoided_loss_r: number;
+    missed_profit_count: number;
+    missed_profit_r: number;
+  };
+  by_strategy: Record<string, {
+    total_signals: number;
+    rejected_signals: number;
+    accepted_signals: number;
+    replayed_signals: number;
+    win_rate: number;
+    avg_simulated_return: number;
+    avg_mfe: number;
+    avg_mae: number;
+  }>;
+  by_rejection_stage: Record<string, {
+    count: number;
+    replayed_count: number;
+    win_rate: number;
+    avg_simulated_return_if_traded: number;
+    avg_mfe: number;
+    avg_mae: number;
+  }>;
+  alternative_exits_comparison: AltExitStats[];
+}

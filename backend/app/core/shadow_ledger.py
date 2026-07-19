@@ -263,6 +263,82 @@ class ShadowLedger:
             attrib = ParallelEvidenceEvaluator.calculate_veto_attribution(vetoes, realized_r)
             payload.update(attrib)
 
+        # Run alternative exits if future data is present (backtest mode)
+        if df is not None and not df.empty and i != -1 and outcomes:
+            from app.config import get_settings
+            try:
+                settings = get_settings()
+                alt_policies = settings.risk_config().alternative_exits
+            except Exception:
+                alt_policies = [
+                    {"policy_id": "exit_bracket_tight", "take_profit_pct": 1.0, "stop_loss_pct": 0.5},
+                    {"policy_id": "exit_bracket_wide", "take_profit_pct": 3.0, "stop_loss_pct": 1.5},
+                    {"policy_id": "exit_atr_trailing", "trailing_stop_atr_mult": 2.0},
+                ]
+
+            alt_outcomes = {}
+            # Run replay for production to get precise metrics
+            prod_res = ShadowLedger.replay_signal_60m(
+                df=df,
+                entry_idx=i + 1,
+                direction=direction,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                entry_price=entry_price,
+                strategy_name=strategy,
+                strategy_params=strategy_params,
+            )
+            if prod_res:
+                alt_outcomes["exit_production"] = {
+                    "pnl_pct": prod_res["pnl_pct"],
+                    "realized_r": prod_res.get("realized_r", 0.0),
+                    "exit_reason": prod_res["exit_reason"],
+                    "tp_hit": prod_res["tp_hit"],
+                    "sl_hit": prod_res["sl_hit"],
+                    "bars_held": prod_res["bars_held"],
+                    "mfe_r": prod_res.get("mfe_r", 0.0),
+                    "mae_r": prod_res.get("mae_r", 0.0),
+                }
+
+            for alt in alt_policies:
+                alt_policy_id = alt.get("policy_id")
+                if not alt_policy_id:
+                    continue
+                
+                alt_tp_val = None
+                if "take_profit_pct" in alt:
+                    alt_tp_val = entry_price * (1.0 + alt["take_profit_pct"]/100.0 if direction == "long" else 1.0 - alt["take_profit_pct"]/100.0)
+                alt_sl_val = None
+                if "stop_loss_pct" in alt:
+                    alt_sl_val = entry_price * (1.0 - alt["stop_loss_pct"]/100.0 if direction == "long" else 1.0 + alt["stop_loss_pct"]/100.0)
+                
+                alt_params = {**strategy_params} if strategy_params else {}
+                if "trailing_stop_atr_mult" in alt:
+                    alt_params["trailing_stop_atr_mult"] = alt["trailing_stop_atr_mult"]
+                
+                alt_res = ShadowLedger.replay_signal_60m(
+                    df=df,
+                    entry_idx=i + 1,
+                    direction=direction,
+                    stop_loss=alt_sl_val or stop_loss,
+                    take_profit=alt_tp_val or take_profit,
+                    entry_price=entry_price,
+                    strategy_name=strategy,
+                    strategy_params=alt_params,
+                )
+                if alt_res:
+                    alt_outcomes[alt_policy_id] = {
+                        "pnl_pct": alt_res["pnl_pct"],
+                        "realized_r": alt_res.get("realized_r", 0.0),
+                        "exit_reason": alt_res["exit_reason"],
+                        "tp_hit": alt_res["tp_hit"],
+                        "sl_hit": alt_res["sl_hit"],
+                        "bars_held": alt_res["bars_held"],
+                        "mfe_r": alt_res.get("mfe_r", 0.0),
+                        "mae_r": alt_res.get("mae_r", 0.0),
+                    }
+            payload["alternative_exits"] = alt_outcomes
+
         # Save to SQLite database if available
         if db_engine is not None:
             try:
@@ -344,6 +420,8 @@ class ShadowLedger:
         mae_price = entry_price
         mfe_time = None
         mae_time = None
+        mfe_step = 0
+        mae_step = 0
         tp_triggered = False
         sl_triggered = False
         exit_price = None
@@ -371,16 +449,20 @@ class ShadowLedger:
                 if high_val > mfe_price:
                     mfe_price = high_val
                     mfe_time = ts.strftime("%H:%M:%S")
+                    mfe_step = step + 1
                 if low_val < mae_price:
                     mae_price = low_val
                     mae_time = ts.strftime("%H:%M:%S")
+                    mae_step = step + 1
             else:
                 if low_val < mfe_price:
                     mfe_price = low_val
                     mfe_time = ts.strftime("%H:%M:%S")
+                    mfe_step = step + 1
                 if high_val > mae_price:
                     mae_price = high_val
                     mae_time = ts.strftime("%H:%M:%S")
+                    mae_step = step + 1
 
             # Update simulated position's current market price
             sim_pos.market_price = close_val
@@ -496,6 +578,19 @@ class ShadowLedger:
         mfe_pct = (mfe / entry_price * 100.0) if entry_price > 0 else 0.0
         mae_pct = (mae / entry_price * 100.0) if entry_price > 0 else 0.0
 
+        # Calculate initial risk for R calculations
+        initial_risk = abs(entry_price - initial_stop)
+        initial_risk = max(initial_risk, entry_price * 0.002, 0.05)
+
+        mfe_r = mfe / initial_risk
+        mae_r = mae / initial_risk
+        realized_r = pnl / initial_risk
+
+        winner_capture_ratio = realized_r / mfe_r if (realized_r > 0 and mfe_r > 0) else 0.0
+        gave_back_r = mfe_r - realized_r
+        gave_back_pct_of_mfe = (gave_back_r / mfe_r * 100.0) if mfe_r > 0 else 0.0
+        mfe_before_loss_r = mfe_r if realized_r <= 0 else 0.0
+
         return {
             "entry_price": round(entry_price, 4),
             "exit_price": round(exit_price, 4),
@@ -503,6 +598,15 @@ class ShadowLedger:
             "bars_held": bars_held,
             "mfe_pct": round(mfe_pct, 4),
             "mae_pct": round(mae_pct, 4),
+            "mfe_r": round(mfe_r, 4),
+            "mae_r": round(mae_r, 4),
+            "realized_r": round(realized_r, 4),
+            "winner_capture_ratio": round(winner_capture_ratio, 4),
+            "gave_back_r": round(gave_back_r, 4),
+            "gave_back_pct_of_mfe": round(gave_back_pct_of_mfe, 2),
+            "mfe_before_loss_r": round(mfe_before_loss_r, 4),
+            "time_to_mfe": mfe_step,
+            "time_to_mae": mae_step,
             "mfe_time": mfe_time or slice_df.index[0].strftime("%H:%M:%S"),
             "mae_time": mae_time or slice_df.index[0].strftime("%H:%M:%S"),
             "tp_hit": tp_triggered,
