@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 import asyncio
+import hashlib
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -61,6 +62,7 @@ class BacktestParams(BaseModel):
     risk: RiskConfig | None = None
     use_corrected_trailing: bool = True
     ignore_temporal_leakage: bool = False
+    model_eligibility_mode: str = "walk_forward"  # "walk_forward" or "retrospective_current_model"
     cache_policy: str = "default"  # "default" or "immutable_cache_only"
     verify_dataset_immutability: bool = False
 
@@ -92,6 +94,7 @@ class BacktestResult(BaseModel):
     code_state_sha256: str = ""
     dataset_sha256: str = ""
     model_sha256: str = ""
+    decision_artifacts_sha256: str = ""
     provenance: dict = Field(default_factory=dict)
 
 
@@ -131,6 +134,57 @@ def compute_code_state_sha256() -> str:
     return h.hexdigest()
 
 
+def get_file_sha256(path: Path | None) -> str:
+    if path is None or not path.exists():
+        return "NOT_FOUND"
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def compute_decision_artifacts_manifest(
+    models_dir: Path | None,
+    active_policy: dict | None = None,
+    challenger_policies: list | None = None,
+    spawned_strategies: list | None = None,
+) -> tuple[dict, str]:
+    import hashlib
+    import json
+    manifest = {
+        "base_models": {},
+        "specialist_models": {},
+        "meta_label_models": {},
+        "active_policy": active_policy or {},
+        "challengers": challenger_policies or [],
+        "spawned_strategies": spawned_strategies or [],
+    }
+    h = hashlib.sha256()
+
+    if models_dir and models_dir.exists():
+        for item in sorted(models_dir.glob("*.joblib")):
+            fname = item.name
+            file_hash = get_file_sha256(item)
+            if fname in ("signal_model_long.joblib", "signal_model_short.joblib"):
+                manifest["base_models"][fname] = file_hash
+            elif fname.startswith("specialist_"):
+                manifest["specialist_models"][fname] = file_hash
+            elif "meta" in fname:
+                manifest["meta_label_models"][fname] = file_hash
+            else:
+                manifest["base_models"][fname] = file_hash
+            h.update(f"{fname}:{file_hash}".encode())
+
+    # Fingerprint policy and challenger configuration
+    h.update(json.dumps(active_policy or {}, sort_keys=True).encode())
+    h.update(json.dumps(challenger_policies or [], sort_keys=True).encode())
+    h.update(json.dumps(spawned_strategies or [], sort_keys=True).encode())
+
+    decision_artifacts_sha = h.hexdigest()
+    return manifest, decision_artifacts_sha
+
+
 def _downsample_curve(curve: list[tuple[datetime, float]]) -> list[tuple[datetime, float]]:
     if len(curve) <= MAX_CURVE_POINTS:
         return curve
@@ -162,15 +216,6 @@ async def run_backtest(
     # starts from a known-clean state regardless of any stale value that may
     # have been on the live singleton at deepcopy time.
     model.backtest_start_time = None
-
-    def get_file_sha256(path):
-        if path is None or not path.exists():
-            return "NOT_FOUND"
-        h = hashlib.sha256()
-        with open(path, "rb") as f:
-            for chunk in iter(lambda: f.read(65536), b""):
-                h.update(chunk)
-        return h.hexdigest()
 
     models_dir = getattr(model, "models_dir", None)
     sha_long = get_file_sha256(models_dir / "signal_model_long.joblib") if models_dir else "N/A"
@@ -1298,7 +1343,16 @@ async def run_backtest(
                 else:
                     h.update(f"MISSING:{fname}".encode())
             model_sha = h.hexdigest()
-            
+
+        # Issue #215: Comprehensive decision-artifact manifest and fingerprint
+        active_policy_snap = getattr(risk, "active_policy_snapshot", None)
+        active_challengers = getattr(risk, "challengers", None)
+        artifacts_manifest, decision_artifacts_sha = compute_decision_artifacts_manifest(
+            models_dir=models_dir,
+            active_policy=active_policy_snap if isinstance(active_policy_snap, dict) else {},
+            challenger_policies=active_challengers if isinstance(active_challengers, list) else [],
+        )
+
         dataset_sha = ""
         if not data.is_synthetic:
             dataset_sha = data.cache.compute_canonical_hash()
@@ -1313,6 +1367,11 @@ async def run_backtest(
             f"rejected={gate_value_report['rejected']['candidates']} "
             f"rejected_expectancy_r={gate_value_report['rejected']['expectancy_r']}",
         )
+
+        combined_provenance = dict(data.provenance) if data.provenance else {}
+        combined_provenance["decision_artifacts_manifest"] = artifacts_manifest
+        combined_provenance["model_eligibility_mode"] = params.model_eligibility_mode
+
         result = BacktestResult(
             params=params.model_dump(mode="json"),
             metrics=metrics,
@@ -1337,7 +1396,8 @@ async def run_backtest(
             code_state_sha256=code_sha,
             dataset_sha256=dataset_sha,
             model_sha256=model_sha,
-            provenance=data.provenance,
+            decision_artifacts_sha256=decision_artifacts_sha,
+            provenance=combined_provenance,
         )
         
         if params.debug_mode:
