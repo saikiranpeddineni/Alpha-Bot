@@ -927,6 +927,103 @@ async def get_shadow_ledger_gate_alpha(
     }
 
 
+class RejectNomineeRequest(BaseModel):
+    operator_id: str
+    reason: str
+
+
+class ResurrectNomineeRequest(BaseModel):
+    operator_id: str
+    reason: str
+    override_approved: bool = False
+
+
+@router.post("/strategies/nominees/{policy_id}/reject")
+async def reject_policy_nominee(policy_id: str, body: RejectNomineeRequest, request: Request) -> dict:
+    db = _db(request)
+    pending_nominee = db.get_pending_nominee_for_policy(policy_id)
+    if not pending_nominee:
+        raise HTTPException(status_code=404, detail="No pending nomination found for this policy.")
+    
+    if not body.reason.strip():
+        raise HTTPException(status_code=400, detail="Rejection reason/comment is required.")
+        
+    config_fingerprint = pending_nominee.get("config_fingerprint")
+    
+    db.record_policy_rejection(
+        policy_id=policy_id,
+        rejected_by=body.operator_id,
+        reason=body.reason,
+        config_fingerprint=config_fingerprint
+    )
+    
+    return {
+        "status": "success",
+        "message": f"Nomination for policy {policy_id} has been rejected and logged in history.",
+        "policy_id": policy_id
+    }
+
+
+@router.post("/strategies/nominees/{policy_id}/resurrect")
+async def resurrect_policy_nominee(policy_id: str, body: ResurrectNomineeRequest, request: Request) -> dict:
+    db = _db(request)
+    # Check resurrection count
+    count = db.get_policy_resurrection_count(policy_id)
+    if count >= 3:
+        raise HTTPException(status_code=400, detail=f"Max resurrection limit of 3 reached for policy {policy_id}.")
+        
+    # Check if this policy has been rejected and exists in status = 'rejected'
+    rejected_nominee = db.get_rejected_nominee_for_policy(policy_id)
+    if not rejected_nominee:
+        raise HTTPException(status_code=404, detail="No rejected nomination found for this policy to resurrect.")
+        
+    last_rejection = db.get_last_policy_rejection(policy_id)
+    if not last_rejection:
+        raise HTTPException(status_code=400, detail="Only rejected nominee policies can be resurrected.")
+        
+    # Check cooling-off period (7 days)
+    rejected_at = last_rejection["rejected_at"]
+    if rejected_at.tzinfo is None:
+        rejected_at = rejected_at.replace(tzinfo=UTC)
+        
+    is_in_cooling_off = (utcnow() - rejected_at).total_seconds() < 7 * 86400
+    
+    if is_in_cooling_off:
+        if not body.override_approved:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Policy {policy_id} is currently in a 7-day cooling-off period. Manual override is required to resurrect."
+            )
+        if not body.reason.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="Manual override reason/comments are required during cooling-off period."
+            )
+    else:
+        if not body.reason.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="Resurrect reason/comments are required."
+            )
+            
+    config_fingerprint = last_rejection.get("config_fingerprint")
+    
+    db.record_policy_resurrection(
+        policy_id=policy_id,
+        resurrected_by=body.operator_id,
+        reason=body.reason,
+        config_fingerprint=config_fingerprint,
+        override_approved=body.override_approved
+    )
+    
+    return {
+        "status": "success",
+        "message": f"Nomination for policy {policy_id} has been resurrected to pending.",
+        "policy_id": policy_id,
+        "resurrection_count": count + 1
+    }
+
+
 class PromoteRequest(BaseModel):
     policy_id: str
     promoter_id: str = "anonymous"
@@ -1365,8 +1462,7 @@ async def get_policy_nominees(request: Request) -> list[dict]:
 @router.post("/strategies/promote")
 async def promote_policy(request: Request, body: PromoteRequest) -> dict:
     # 1. Bearer Authentication Guard
-    from app.config import get_settings
-    settings_obj = get_settings()
+    settings_obj = request.app.state.settings
     if settings_obj.admin_token:
         auth_header = request.headers.get("Authorization")
         x_token = request.headers.get("X-Admin-Token")

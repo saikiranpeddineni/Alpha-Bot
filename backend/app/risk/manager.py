@@ -284,10 +284,11 @@ class RiskManager:
             return RiskDecision(False, f"stop too tight ({stop_distance:.4f})")
 
         # Determine effective risk fraction
+        risk_mult = getattr(signal, "risk_multiplier", 1.0)
         if kelly_override is not None:
             # Phase 3: fractional Kelly from CapitalAllocationOptimizer
             kelly_cap = getattr(cfg, "kelly_fraction_cap", 0.15)
-            effective_allocation = min(kelly_override, kelly_cap)
+            effective_allocation = min(kelly_override, kelly_cap) * risk_mult
             target_notional = ctx.equity * effective_allocation
             qty = int(target_notional / price)
             risk_amount = qty * stop_distance
@@ -297,7 +298,11 @@ class RiskManager:
             if self.core_watchlist is not None and symbol not in self.core_watchlist:
                 effective_risk_pct *= 0.5
                 applog.info("risk", f"Scanned asset {symbol}: scaling risk down to {effective_risk_pct}% (50% reduction)")
-
+            
+            effective_risk_pct *= risk_mult
+            if risk_mult != 1.0:
+                applog.info("risk", f"Dynamic safety risk multiplier applied: scaling risk to {effective_risk_pct}%")
+                
             kelly_used = effective_risk_pct / 100.0
             risk_amount = ctx.equity * kelly_used
             qty = int(risk_amount / stop_distance)

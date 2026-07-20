@@ -243,6 +243,85 @@ def test_promotion_governance_controls(client):
     assert log["evidence_package"]["evidence_package_id"] == evidence_package_id
 
 
+def test_promotion_authorization_enforcement(tmp_path):
+    # Set up settings with admin token configured
+    settings = Settings(
+        ALPHADESK_MODE="demo",
+        DATA_PROVIDER="synthetic",
+        ALPHADESK_DB_PATH=str(tmp_path / "test_auth.db"),
+        DEFAULT_WATCHLIST="SPY,QQQ",
+        DEMO_BAR_SECONDS=3600,
+        ALPHADESK_ADMIN_TOKEN="supersecret"
+    )
+    app = create_app(settings)
+    
+    with TestClient(app) as client:
+        db = client.app.state.db
+        policy_id = "challenger_low_ml"
+        nominate_policy_for_test(db, settings, policy_id)
+        
+        # 1. Promote without token -> 401
+        r = client.post("/api/strategies/promote", json={
+            "policy_id": policy_id,
+            "promoter_id": "admin_user",
+            "reason": "testing auth",
+            "evidence_package_id": ""
+        })
+        assert r.status_code == 401
+        
+        # 2. Promote with invalid token -> 403
+        r = client.post("/api/strategies/promote", json={
+            "policy_id": policy_id,
+            "promoter_id": "admin_user",
+            "reason": "testing auth",
+            "evidence_package_id": ""
+        }, headers={"Authorization": "Bearer wrongtoken"})
+        assert r.status_code == 403
+        
+        # 3. Promote with valid token -> 200
+        r = client.post("/api/strategies/promote", json={
+            "policy_id": policy_id,
+            "promoter_id": "admin_user",
+            "reason": "testing auth",
+            "evidence_package_id": ""
+        }, headers={"Authorization": "Bearer supersecret"})
+        assert r.status_code == 200
+
+
+def test_promotion_atomic_rollback_on_failure(client):
+    db = client.app.state.db
+    engine = client.app.state.engine
+    settings = client.app.state.settings
+    policy_id = "challenger_low_ml"
+    
+    nominate_policy_for_test(db, settings, policy_id)
+    
+    # Store initial Champion values
+    initial_snapshot = db.get_setting("active_policy_snapshot")
+    initial_ml_thresh = db.get_setting("ml_threshold")
+    
+    # Inject database failure during promotion save
+    db.save_policy_promotion = MagicMock(side_effect=Exception("Disk full / DB connection lost"))
+    
+    # Attempt promotion -> should return 500 and trigger rollback
+    r = client.post("/api/strategies/promote", json={
+        "policy_id": policy_id,
+        "promoter_id": "admin_user",
+        "reason": "approved outperformance",
+        "evidence_package_id": ""
+    })
+    assert r.status_code == 500
+    assert "Failed to promote policy" in r.json()["detail"]
+    
+    # Verify DB states were rolled back to original Champion values
+    assert db.get_setting("active_policy_snapshot") == initial_snapshot
+    assert db.get_setting("ml_threshold") == initial_ml_thresh
+    
+    # Verify engine runtime config was also rolled back
+    if getattr(engine, "pipeline", None) is not None:
+        assert engine.pipeline.ml_threshold == (initial_snapshot["ml_threshold"] if initial_snapshot else settings.ml_confidence_threshold)
+
+
 def test_immutable_history_no_update_delete():
     # Assert that no update/delete methods exist for PolicyPromotionRow or PolicyEvidenceRow on the Database class
     from app.db.database import Database

@@ -742,25 +742,29 @@ class TradingEngine:
             pos_by_symbol = {p.symbol: p for p in positions}
             candidates = []
 
+            # Retrieve active safety decision entries permission
+            decision = getattr(self, "last_safety_decision", None)
+            allow_entries = decision.allow_new_entries if decision is not None else self.allow_new_entries
+
             # Process resurrected signals from queue (CR-146 Phase 4)
             # SAFETY: Resurrection uses stale signal price/SL/TP from the original rejection tick.
             # Enabled only for paper/shadow sessions. Live sessions skip entirely to avoid stale orders.
             _resurrection_enabled = getattr(self.broker, "is_paper", False) is True
             resurrected = []
-            if _resurrection_enabled and self.state == EngineState.RUNNING and self.allow_new_entries:
+            if _resurrection_enabled and self.state == EngineState.RUNNING and allow_entries:
                 resurrected = await self._process_resurrection_queue(account.equity, now)
             elif self.resurrection_queue:
-                if not _resurrection_enabled or self.state != EngineState.RUNNING or not self.allow_new_entries:
+                if not _resurrection_enabled or self.state != EngineState.RUNNING or not allow_entries:
                     self.resurrection_queue.clear()
             candidates.extend(resurrected)
 
             symbols_to_evaluate = list(new_closed.keys())
-            if self.state != EngineState.RUNNING or not self.allow_new_entries:
+            if self.state != EngineState.RUNNING or not allow_entries:
                 symbols_to_evaluate = [sym for sym in symbols_to_evaluate if sym in pos_by_symbol]
 
             for symbol in symbols_to_evaluate:
                 entries = await self._evaluate_symbol(symbol, pos_by_symbol.get(symbol), account.equity, now)
-                if self.state == EngineState.RUNNING and self.allow_new_entries:
+                if self.state == EngineState.RUNNING and allow_entries:
                     candidates.extend(entries)
 
             if candidates:
@@ -819,6 +823,19 @@ class TradingEngine:
                         reservations = SameCycleEntryReservations.from_snapshot(account.cash, positions)
 
                         for sig, kelly_val in decision_outcome.approved_entries:
+                            # Attach risk_multiplier from SafetyDecision
+                            decision_safety = getattr(self, "last_safety_decision", None)
+                            sig.risk_multiplier = decision_safety.risk_multiplier if decision_safety is not None else 1.0
+
+                            # Run behavioral safety check
+                            behavioral_reason = await self._check_behavioral_safety(sig, now)
+                            if behavioral_reason:
+                                applog.info("engine", f"{sig.symbol.upper()}: entry rejected by Behavioral Loop Detector — {behavioral_reason}")
+                                self.publish("insight", self.insights.on_signal(sig, gated=True, gate_reason=behavioral_reason).model_dump(mode="json"))
+                                if getattr(sig, "candidate_id", None) is not None:
+                                    self._update_shadow_decision(sig.candidate_id, "rejected", behavioral_reason, "behavioral_safety_gate")
+                                continue
+
                             df = df_by_symbol[sig.symbol]
                             ctx = AccountContext(
                                 equity=account.equity,
@@ -985,6 +1002,9 @@ class TradingEngine:
         signals = []
         for strat in self.strategies:
             if not strat.enabled:
+                continue
+            decision = getattr(self, "last_safety_decision", None)
+            if decision is not None and strat.name not in decision.allowed_strategies:
                 continue
             try:
                 sig = strat.on_bar(sctx, symbol, df)
@@ -2462,6 +2482,284 @@ class TradingEngine:
             applog.warning("engine.heartbeat", "VIX volatility feed unavailable. Falling back to conservative market-risk tier.")
 
         self.heartbeat_diagnostics = diagnostics
+
+        # Phase F2: Market Risk Evaluation
+        market_risk_state, risk_multiplier, allowed_strategies, risk_allow_entries = self._evaluate_market_risk(now)
+        
+        # System-level entry gating: respect manual toggle gating (_force_gated)
+        system_allow_entries = self.allow_new_entries and not getattr(self, "_force_gated", False)
+        
+        is_halted = (self.system_health == "HALTED") or (self.state == EngineState.HALTED) or getattr(self.risk, "hard_halted", False)
+        
+        # Override allowed entries if system_health is DEGRADED, SAFE_MODE, or HALTED, or if we are halted
+        allow_new_entries = system_allow_entries and risk_allow_entries and (self.system_health == "NORMAL") and not is_halted
+        
+        # require_exit_only is True if system_health is SAFE_MODE or HALTED or if allow_new_entries is False or if we are halted
+        require_exit_only = not allow_new_entries or (self.system_health in ("SAFE_MODE", "HALTED")) or is_halted
+        
+        # halt_reason is set if system_health is HALTED or SAFE_MODE or we are hard halted
+        halt_reason = None
+        if is_halted:
+            halt_reason = getattr(self.risk, "hard_halt_reason", None) or "Critical system health failure (HALTED)"
+        elif self.system_health == "SAFE_MODE":
+            halt_reason = "Position/order reconciliation discrepancy (SAFE_MODE)"
+            
+        from app.core.domain import SafetyDecision
+        self.last_safety_decision = SafetyDecision(
+            system_state="HALTED" if is_halted else self.system_health,
+            market_risk_state=market_risk_state,
+            allow_new_entries=allow_new_entries,
+            risk_multiplier=risk_multiplier,
+            allowed_strategies=allowed_strategies,
+            require_exit_only=require_exit_only,
+            halt_reason=halt_reason
+        )
+
+    def _evaluate_market_risk(self, now: datetime) -> tuple[str, float, list[str], bool]:
+        """
+        Determines the market risk state: NORMAL -> CAUTION -> DEFENSIVE -> SURVIVAL.
+        Returns:
+            market_risk_state: str
+            risk_multiplier: float
+            allowed_strategies: list[str]
+            allow_new_entries: bool
+        """
+        # Default fallback values
+        vix_price = 15.0
+        vix_percentile = 30.0
+        vix_roc = 0.0
+        market_trend_bullish = True
+        breadth_positive = True
+
+        # 1. Fetch VIX data
+        vix_sym = "VIX"
+        for sym in ["VIX", "^VIX"]:
+            p = self.data.last_price(sym)
+            if p is not None:
+                vix_price = p
+                vix_sym = sym
+                break
+        
+        # Calculate VIX percentile and velocity
+        try:
+            vix_df = self.data.frame(vix_sym, "1Min")
+            if vix_df is not None and not vix_df.empty:
+                closes = vix_df["close"].dropna().values
+                if len(closes) > 0:
+                    vix_price = closes[-1]
+                    try:
+                        vix_daily = vix_df.resample("1D").last().dropna()
+                    except Exception:
+                        vix_daily = vix_df
+                    
+                    daily_closes = vix_daily["close"].dropna().values
+                    if len(daily_closes) > 0:
+                        history = daily_closes[-200:]
+                        vix_percentile = float((history < vix_price).sum() / len(history) * 100.0)
+                    
+                    # VIX velocity (ROC over last 10 minutes)
+                    if len(closes) >= 10:
+                        vix_prev = closes[-10]
+                        if vix_prev > 0:
+                            vix_roc = float((vix_price - vix_prev) / vix_prev * 100.0)
+        except Exception as e:
+            applog.warning("engine.risk", f"Failed to compute VIX metrics: {e}")
+
+        # 2. Fetch Broad-market Trend (using SPY 200-period SMA on 1Min)
+        spy_sym = "SPY"
+        try:
+            spy_df = self.data.frame(spy_sym, "1Min")
+            if spy_df is not None and not spy_df.empty:
+                closes = spy_df["close"].dropna().values
+                if len(closes) > 0:
+                    spy_price = closes[-1]
+                    if len(closes) >= 200:
+                        spy_sma = float(closes[-200:].mean())
+                    else:
+                        spy_sma = float(closes.mean())
+                    market_trend_bullish = spy_price >= spy_sma
+        except Exception as e:
+            applog.warning("engine.risk", f"Failed to compute Broad-market Trend: {e}")
+
+        # 3. Breadth Confirmation (percentage of watchlist symbols above their 20-period SMA)
+        above_count = 0
+        total_count = 0
+        for symbol in self.watchlist:
+            try:
+                df = self.data.frame(symbol, "1Min")
+                if df is not None and not df.empty:
+                    closes = df["close"].dropna().values
+                    if len(closes) > 0:
+                        total_count += 1
+                        sma_20 = float(closes[-20:].mean()) if len(closes) >= 20 else float(closes.mean())
+                        if closes[-1] >= sma_20:
+                            above_count += 1
+            except Exception:
+                pass
+        if total_count > 0:
+            breadth_positive = (above_count / total_count) >= 0.5
+
+        # 4. Classify Risk State
+        # If VIX feed is explicitly unavailable, fall back to DEFENSIVE (conservative tier)
+        if getattr(self, "vix_unavailable", False):
+            state = "DEFENSIVE"
+        elif vix_price >= 30.0 or vix_percentile >= 90.0 or vix_roc >= 50.0:
+            state = "SURVIVAL"
+        elif vix_price >= 22.0 or vix_percentile >= 75.0 or vix_roc >= 25.0 or not market_trend_bullish:
+            state = "DEFENSIVE"
+        elif vix_price >= 16.0 or vix_percentile >= 50.0 or not breadth_positive:
+            state = "CAUTION"
+        else:
+            state = "NORMAL"
+
+        # Allowed strategies mapping
+        all_strategies = []
+        try:
+            if hasattr(self, "db"):
+                all_strategies = list(self.db.get_setting("strategies") or {})
+        except Exception:
+            pass
+        if not all_strategies:
+            all_strategies = [s.name for s in self.strategies] if hasattr(self, "strategies") else ["momentum", "mean_reversion"]
+
+        if state == "NORMAL":
+            risk_multiplier = 1.0
+            allowed_strategies = all_strategies
+            allow_new_entries = True
+        elif state == "CAUTION":
+            risk_multiplier = 0.75
+            allowed_strategies = all_strategies
+            allow_new_entries = True
+        elif state == "DEFENSIVE":
+            risk_multiplier = 0.50
+            # Under Defensive, restrict allowed strategies to mean reversion or non-momentum
+            allowed_strategies = [s for s in all_strategies if "momentum" not in s.lower()]
+            if not allowed_strategies:
+                allowed_strategies = ["mean_reversion"]
+            allow_new_entries = True
+        else: # SURVIVAL
+            risk_multiplier = 0.0
+            allowed_strategies = []
+            allow_new_entries = False
+
+        return state, risk_multiplier, allowed_strategies, allow_new_entries
+
+    async def _check_behavioral_safety(self, sig: Signal, now: datetime) -> str | None:
+        """
+        Runs the Behavioral Loop Detector checks for a candidate signal.
+        Returns:
+            rejection_reason (str | None): None if safety checks pass, otherwise the failure reason.
+        """
+        import json
+        symbol = sig.symbol.upper()
+        policy_id = getattr(sig, "policy_id", None) or sig.strategy
+        
+        # 1. Re-entry on same symbol/thesis within 30 minutes after a stop-loss exit
+        try:
+            cutoff = now - timedelta(minutes=30)
+            with self.db._session() as s:
+                from app.db.database import TradeRow
+                from sqlalchemy import select
+                stmt = select(TradeRow).where(
+                    TradeRow.symbol == symbol,
+                    TradeRow.exit_at >= cutoff
+                )
+                rows = s.scalars(stmt).all()
+                for r in rows:
+                    try:
+                        trade_data = json.loads(r.payload)
+                    except Exception:
+                        continue
+                    exit_reason = trade_data.get("exit_reason", "")
+                    sl_hit = trade_data.get("sl_hit", False)
+                    if exit_reason == "stop_loss" or sl_hit:
+                        return f"behavioral_loop_detector: re-entry on same symbol {symbol} within 30 mins after stop"
+        except Exception as e:
+            applog.warning("engine.behavioral", f"Failed re-entry check: {e}")
+
+        # 2. 3 consecutive same-symbol losses
+        try:
+            with self.db._session() as s:
+                from app.db.database import TradeRow
+                from sqlalchemy import select
+                stmt = select(TradeRow).where(
+                    TradeRow.symbol == symbol
+                ).order_by(TradeRow.exit_at.desc()).limit(3)
+                rows = s.scalars(stmt).all()
+                if len(rows) == 3:
+                    losses = []
+                    for r in rows:
+                        try:
+                            trade_data = json.loads(r.payload)
+                        except Exception:
+                            continue
+                        pnl = trade_data.get("pnl", r.pnl)
+                        losses.append(pnl < 0)
+                    if len(losses) == 3 and all(losses):
+                        return f"behavioral_loop_detector: 3 consecutive losses on symbol {symbol}"
+        except Exception as e:
+            applog.warning("engine.behavioral", f"Failed consecutive loss check: {e}")
+
+        # 3. Churn/turnover loop detection
+        try:
+            cutoff_24h = now - timedelta(hours=24)
+            with self.db._session() as s:
+                from app.db.database import TradeRow
+                from sqlalchemy import select
+                stmt = select(TradeRow).where(
+                    TradeRow.exit_at >= cutoff_24h
+                )
+                rows = s.scalars(stmt).all()
+                total_volume = 0.0
+                for r in rows:
+                    try:
+                        trade_data = json.loads(r.payload)
+                    except Exception:
+                        continue
+                    entry_price = trade_data.get("entry_price", 0.0)
+                    qty = trade_data.get("qty", 0.0)
+                    total_volume += abs(qty * entry_price)
+                
+                equity = self.portfolio.equity
+                if equity > 0:
+                    turnover = total_volume / equity
+                    if turnover > 2.0:
+                        return f"behavioral_loop_detector: high portfolio churn/turnover (ROC={turnover:.1%})"
+        except Exception as e:
+            applog.warning("engine.behavioral", f"Failed churn check: {e}")
+
+        # 4. Duplicate/pending-order loop detection
+        for pending_cid, pending_info in self.pending_reconciliation_orders.items():
+            if pending_info["symbol"].upper() == symbol:
+                return f"behavioral_loop_detector: duplicate pending order for symbol {symbol}"
+
+        # 5. Reject -> Resurrect -> Reject loop detection
+        if self.db.get_policy_resurrection_count(policy_id) >= 3:
+            return f"behavioral_loop_detector: policy {policy_id} exceeded max resurrection limit of 3"
+
+        # 6. Strategy/thesis correlation clustering check
+        try:
+            open_symbols = list(self.portfolio._lots.keys())
+            if open_symbols:
+                import pandas as pd
+                cand_df = self.data.frame(symbol, "1Min")
+                if cand_df is not None and not cand_df.empty:
+                    cand_series = cand_df["close"].dropna()
+                    for open_sym in open_symbols:
+                        if open_sym == symbol:
+                            continue
+                        open_df = self.data.frame(open_sym, "1Min")
+                        if open_df is not None and not open_df.empty:
+                            open_series = open_df["close"].dropna()
+                            combined = pd.concat([cand_series, open_series], axis=1, join="inner")
+                            if len(combined) > 5:
+                                corr = combined.corr().iloc[0, 1]
+                                if corr > 0.7:
+                                    return f"behavioral_loop_detector: high correlation ({corr:.2f}) with open symbol {open_sym}"
+        except Exception as e:
+            applog.warning("engine.behavioral", f"Failed correlation clustering check: {e}")
+
+        return None
 
     def _run_heartbeat_tasks(self, now: datetime) -> None:
         """Executes periodic heartbeat tasks (e.g. dynamic universe refresh based on sector leadership)."""

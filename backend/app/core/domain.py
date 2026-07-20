@@ -216,3 +216,13 @@ class EngineState(StrEnum):
     RUNNING = "running"
     HALTED = "halted"  # kill switch tripped; manual reset required
     SAFE_MODE = "safe_mode"
+
+
+class SafetyDecision(BaseModel):
+    system_state: str  # NORMAL | DEGRADED | SAFE_MODE | HALTED
+    market_risk_state: str  # NORMAL | CAUTION | DEFENSIVE | SURVIVAL
+    allow_new_entries: bool
+    risk_multiplier: float
+    allowed_strategies: list[str]
+    require_exit_only: bool
+    halt_reason: str | None = None
