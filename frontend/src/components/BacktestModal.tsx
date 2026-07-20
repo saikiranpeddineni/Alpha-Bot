@@ -36,7 +36,7 @@ export function BacktestModal(props: { onClose: () => void }) {
   });
   const [endDate, setEndDate] = useState(() => new Date().toISOString().split("T")[0]);
   const [mlGate, setMlGate] = useState(true);
-  const [dynamicScanner, setDynamicScanner] = useState(false);
+  const [dynamicScanner, setDynamicScanner] = useState(true);
   const [ignoreTemporalLeakage, setIgnoreTemporalLeakage] = useState(false);
   const [cash, setCash] = useState(100000);
   const [running, setRunning] = useState(false);
