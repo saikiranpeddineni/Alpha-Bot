@@ -2334,15 +2334,17 @@ class TradingEngine:
                     
                     from zoneinfo import ZoneInfo
                     now_et = now.astimezone(ZoneInfo("America/New_York"))
+                    is_synthetic = getattr(getattr(self.data, "provider", None), "name", "") == "synthetic"
                     if 9 * 60 + 30 <= now_et.hour * 60 + now_et.minute <= 16 * 60:
                         delay = (now - last_bar_time).total_seconds()
-                        if delay > 600:
+                        if delay > 600 and self.mode != "demo" and not is_synthetic:
                             diagnostics["market_data_fresh"] = False
                             self.allow_new_entries = False
                             applog.warning("engine.heartbeat", f"Market data is stale. Delay: {delay}s")
             except Exception as exc:
                 diagnostics["market_data_fresh"] = False
-                self.allow_new_entries = False
+                if self.mode != "demo":
+                    self.allow_new_entries = False
                 applog.warning("engine.heartbeat", f"Failed to check market data freshness: {exc}")
 
         # Monitor 3: Database health
@@ -2373,13 +2375,13 @@ class TradingEngine:
             return
 
         # Monitor 5: Model availability
-        if not self.model or not hasattr(self.model, "info") or not self.model.info():
+        if (not self.model or not hasattr(self.model, "info") or not self.model.info()) and self.mode != "demo":
             diagnostics["model_ready"] = False
             if self.system_health not in ("SAFE_MODE", "HALTED"):
                 self.system_health = "DEGRADED"
 
         # Monitor 6: Scanner health
-        if self._last_scan_date is None:
+        if self._last_scan_date is None and self.mode != "demo":
             diagnostics["scanner_ok"] = False
             if self.system_health not in ("SAFE_MODE", "HALTED"):
                 self.system_health = "DEGRADED"
@@ -2469,7 +2471,8 @@ class TradingEngine:
                     if last_vix_time.tzinfo is None and now.tzinfo is not None:
                         last_vix_time = last_vix_time.replace(tzinfo=now.tzinfo)
                     
-                    if (now - last_vix_time).total_seconds() < 1800:
+                    is_synthetic = getattr(getattr(self.data, "provider", None), "name", "") == "synthetic"
+                    if (now - last_vix_time).total_seconds() < 1800 or self.mode == "demo" or is_synthetic:
                         vix_fresh = True
                         break
             except Exception:
@@ -2534,7 +2537,15 @@ class TradingEngine:
         # 1. Fetch VIX data
         vix_sym = "VIX"
         for sym in ["VIX", "^VIX"]:
-            p = getattr(self.data, "last_price", lambda s: None)(sym) if hasattr(self.data, "last_price") else (self.data.last_prices([sym]).get(sym) if hasattr(self.data, "last_prices") else None)
+            p = None
+            try:
+                if hasattr(self.data, "last_price") and callable(getattr(self.data, "last_price", None)):
+                    p = self.data.last_price(sym)
+                elif hasattr(self.data, "last_prices") and callable(getattr(self.data, "last_prices", None)):
+                    prices = self.data.last_prices([sym])
+                    p = prices.get(sym) if isinstance(prices, dict) else None
+            except Exception:
+                p = None
             if p is not None:
                 vix_price = p
                 vix_sym = sym
@@ -2613,14 +2624,17 @@ class TradingEngine:
             state = "NORMAL"
 
         # Allowed strategies mapping
-        all_strategies = []
+        all_strategies = [s.name for s in self.strategies] if hasattr(self, "strategies") and self.strategies else []
         try:
-            if hasattr(self, "db"):
-                all_strategies = list(self.db.get_setting("strategies") or {})
+            if hasattr(self, "db") and self.db:
+                db_strats = list(self.db.get_setting("strategies") or {})
+                for st in db_strats:
+                    if st not in all_strategies:
+                        all_strategies.append(st)
         except Exception:
             pass
         if not all_strategies:
-            all_strategies = [s.name for s in self.strategies] if hasattr(self, "strategies") else ["momentum", "mean_reversion"]
+            all_strategies = ["momentum", "mean_reversion"]
 
         if state == "NORMAL":
             risk_multiplier = 1.0
