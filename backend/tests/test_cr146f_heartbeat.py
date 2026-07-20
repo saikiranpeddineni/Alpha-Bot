@@ -41,20 +41,14 @@ def setup_healthy_mocks(engine):
     engine.model = MagicMock()
     engine.model.info = MagicMock(return_value={"loaded": True})
     
-    # Mock healthy broker account (using thread-safe async def)
+    # Mock healthy broker account (using thread-safe AsyncMock)
     class MockAccount:
         buying_power = 200000.0
         equity = 100000.0
         cash = 100000.0
         
-    async def mock_account():
-        return MockAccount()
-    engine.broker.account = mock_account
-    
-    # Mock empty positions
-    async def mock_positions():
-        return []
-    engine.broker.positions = mock_positions
+    engine.broker.account = AsyncMock(return_value=MockAccount())
+    engine.broker.positions = AsyncMock(return_value=[])
 
 
 @pytest.fixture
@@ -104,9 +98,7 @@ def test_heartbeat_broker_disconnect(client):
     setup_healthy_mocks(engine)
     
     # Mock broker.account to raise connection error
-    async def mock_account_fail():
-        raise ConnectionError("Alpaca connection failed")
-    engine.broker.account = mock_account_fail
+    engine.broker.account = AsyncMock(side_effect=ConnectionError("Alpaca connection failed"))
     
     loop = asyncio.new_event_loop()
     try:
@@ -206,9 +198,7 @@ def test_heartbeat_buying_power_check(client):
         equity = 100000.0
         cash = 100000.0
         
-    async def mock_account_low():
-        return MockAccount()
-    engine.broker.account = mock_account_low
+    engine.broker.account = AsyncMock(return_value=MockAccount())
     
     loop = asyncio.new_event_loop()
     try:

@@ -31,7 +31,32 @@ from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import Any
 
+import inspect
 import pandas as pd
+
+
+async def _safe_history(
+    data: Any, symbol: str, timeframe: str, start: datetime, end: datetime, prefer_cache: bool = True
+) -> pd.DataFrame:
+    if data is None:
+        return pd.DataFrame()
+    try:
+        fn = getattr(data, "history", None) or getattr(data, "frame", None)
+        if fn is None:
+            return pd.DataFrame()
+        try:
+            res = fn(symbol, timeframe, start, end, prefer_cache=prefer_cache)
+        except TypeError:
+            try:
+                res = fn(symbol, timeframe, start, end)
+            except TypeError:
+                res = fn(symbol, timeframe)
+        if inspect.isawaitable(res):
+            res = await res
+        return res if (isinstance(res, pd.DataFrame) or hasattr(res, "index")) else pd.DataFrame()
+    except Exception as exc:
+        applog.debug("market_regime", f"_safe_history failed for {symbol}: {exc}")
+        return pd.DataFrame()
 
 from app.core.logging import applog
 
@@ -259,7 +284,7 @@ class MarketRiskAggregator:
         """SPY or QQQ ATR/vol percentile family."""
         try:
             start = T - timedelta(days=20)
-            df = await self._data.history(symbol, "1Min", start, T, prefer_cache=True)
+            df = await _safe_history(self._data, symbol, "1Min", start, T, prefer_cache=True)
             pct, reason = _atr_percentile(df)
             if pct is None:
                 return SignalVote(
@@ -310,7 +335,7 @@ class MarketRiskAggregator:
             errors = 0
             for sym in self._universe[:20]:  # cap at 20 for latency
                 try:
-                    df = await self._data.history(sym, "1Day", start, T, prefer_cache=True)
+                    df = await _safe_history(self._data, sym, "1Day", start, T, prefer_cache=True)
                     if len(df) >= 2:
                         advancing += int(float(df["close"].iloc[-1]) >= float(df["close"].iloc[-2]))
                         total += 1
@@ -384,7 +409,7 @@ class MarketRiskAggregator:
             errors = 0
             for sym in self._universe[:20]:
                 try:
-                    df = await self._data.history(sym, "1Day", start, T, prefer_cache=True)
+                    df = await _safe_history(self._data, sym, "1Day", start, T, prefer_cache=True)
                     if not df.empty:
                         atr_pct = float(
                             ((df["high"] - df["low"]) / df["close"] * 100.0).iloc[-1]

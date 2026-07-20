@@ -43,7 +43,7 @@ class ContinuousTrainer(_LegacyContinuousTrainer):
             applog.info(
                 "trainer",
                 f"Model training already owned by {self.training_coordinator.owner or 'another writer'} "
-                "— skipping continuous trigger.",
+                "- skipping continuous trigger.",
             )
             return
         try:

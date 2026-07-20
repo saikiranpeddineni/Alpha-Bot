@@ -251,6 +251,7 @@ async def test_promotion_idempotency_and_concurrency_cas(temp_db):
     cleaned_chall = {k: v for k, v in chall_snapshot.items() if k not in ("snapshot_at", "snapshot_version")}
     config_fp = hashlib.sha256(json.dumps(cleaned_chall, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
 
+    temp_db.save_spawned_strategy("challenger_high_ml", 10000.0)
     temp_db.save_policy_nominee({
         "policy_id": "challenger_high_ml",
         "nominated_at": "2026-01-06T12:00:00",
@@ -328,6 +329,7 @@ async def test_atomic_promotion_rollback_on_failure(temp_db):
     cleaned_champ = {k: v for k, v in champ_snapshot.items() if k not in ("snapshot_at", "snapshot_version")}
     champ_fp = hashlib.sha256(json.dumps(cleaned_champ, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
 
+    temp_db.save_spawned_strategy("challenger_high_ml", 10000.0)
     temp_db.save_policy_nominee({
         "policy_id": "challenger_high_ml",
         "nominated_at": "2026-01-06T12:00:00",
