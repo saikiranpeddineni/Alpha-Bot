@@ -108,5 +108,7 @@ export const api = {
       body: body ? JSON.stringify(body) : undefined,
     }),
   shadowLedgerAnalytics: () => request<ShadowAnalyticsResponse>("/api/shadow-ledger/analytics"),
-  shadowLedgerGateAlpha: () => request<GateAlphaResponse>("/api/shadow-ledger/gate-alpha"),
+  shadowLedgerGateAlpha: () =>
+    request<{ gates: GateAlphaResponse; population_meta: unknown }>("/api/shadow-ledger/gate-alpha")
+      .then((r) => r.gates),
 };
