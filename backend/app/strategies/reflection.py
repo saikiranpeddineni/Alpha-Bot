@@ -18,6 +18,9 @@ def generate_eod_reflection_report(db: Database, now: datetime | None = None, en
     if now is None:
         now = datetime.now(UTC)
 
+    if not db:
+        return "# EOD Reflection Report\n\nNo database instance available for reflection."
+
     try:
         # Fetch last 5000 signals to compare
         records = db.get_shadow_signals(limit=5000)
