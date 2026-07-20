@@ -46,6 +46,12 @@ def nominate_policy_for_test(db, settings, policy_id: str):
         "champion_config_fingerprint": champ_fp,
     })
 
+    with db._session() as s:
+        from app.db.database import SpawnedStrategyRow
+        from datetime import UTC, datetime
+        s.add(SpawnedStrategyRow(policy_id=policy_id, status="ACTIVE", seed_capital=10000.0, spawned_at=datetime.now(UTC)))
+        s.commit()
+
 
 @pytest.fixture
 def client(tmp_path):
