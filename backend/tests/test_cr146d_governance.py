@@ -45,6 +45,7 @@ def nominate_policy_for_test(db, settings, policy_id: str):
         "config_fingerprint": config_fp,
         "champion_config_fingerprint": champ_fp,
     })
+    db.save_spawned_strategy(policy_id, 1000.0)
 
 
 @pytest.fixture

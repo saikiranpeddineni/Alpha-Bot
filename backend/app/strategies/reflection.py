@@ -171,7 +171,18 @@ def generate_eod_reflection_report(db: Database, now: datetime | None = None, en
 
         # Statistical nomination criteria check (matched approved count >= 15 and edge >= +0.15R)
         if chall_approved >= 15 and edge >= 0.15:
-            if chall_expectancy > best_expectancy:
+            # E1 Loop Safety: Check if policy is in cooling-off period after rejection
+            in_cooling = False
+            last_rejection = db.get_last_policy_rejection(policy_id)
+            if last_rejection:
+                rejected_at = last_rejection["rejected_at"]
+                if rejected_at.tzinfo is None:
+                    rejected_at = rejected_at.replace(tzinfo=UTC)
+                if (now - rejected_at).total_seconds() < 7 * 86400:
+                    in_cooling = True
+                    applog.info("reflection", f"Skipping auto-nomination for policy {policy_id} because it is within 7-day cooling-off period after rejection.")
+
+            if not in_cooling and chall_expectancy > best_expectancy:
                 best_expectancy = chall_expectancy
                 best_edge = edge
                 best_policy = policy_id

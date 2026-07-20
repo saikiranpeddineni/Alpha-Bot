@@ -174,6 +174,36 @@ class PolicyPromotionRow(Base):
     dataset_window_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
+class SpawnedStrategyRow(Base):
+    __tablename__ = "spawned_strategies"
+    policy_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    spawned_at: Mapped[datetime]
+    seed_capital: Mapped[float]
+    status: Mapped[str] = mapped_column(String(20)) # "ACTIVE", "RETIRED"
+    retired_at: Mapped[datetime | None]
+
+
+class PolicyRejectionRow(Base):
+    __tablename__ = "policy_rejections"
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    policy_id: Mapped[str] = mapped_column(String(64))
+    rejected_at: Mapped[datetime]
+    rejected_by: Mapped[str] = mapped_column(String(64))
+    reason: Mapped[str] = mapped_column(Text)
+    config_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
+class PolicyResurrectionRow(Base):
+    __tablename__ = "policy_resurrections"
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    policy_id: Mapped[str] = mapped_column(String(64))
+    resurrected_at: Mapped[datetime]
+    resurrected_by: Mapped[str] = mapped_column(String(64))
+    reason: Mapped[str] = mapped_column(Text)
+    config_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    override_approved: Mapped[bool] = mapped_column(default=False)
+
+
 class Database:
     def __init__(self, path: Path) -> None:
         global _ACTIVE_DATABASE
@@ -758,6 +788,164 @@ class Database:
                 }
                 for r in rows
             ]
+
+    def record_policy_rejection(self, policy_id: str, rejected_by: str, reason: str, config_fingerprint: str | None = None) -> None:
+        """Records a policy rejection in the append-only ledger and marks the nominee status as 'rejected'."""
+        with self._session() as s:
+            nominee = s.query(PolicyNomineeRow).filter(
+                PolicyNomineeRow.policy_id == policy_id,
+                PolicyNomineeRow.status == "pending"
+            ).first()
+            if nominee:
+                nominee.status = "rejected"
+            
+            rejection = PolicyRejectionRow(
+                policy_id=policy_id,
+                rejected_at=datetime.utcnow(),
+                rejected_by=rejected_by,
+                reason=reason,
+                config_fingerprint=config_fingerprint
+            )
+            s.add(rejection)
+            s.commit()
+
+    def record_policy_resurrection(self, policy_id: str, resurrected_by: str, reason: str, config_fingerprint: str | None = None, override_approved: bool = False) -> None:
+        """Records a policy resurrection in the append-only ledger and resets nominee status back to 'pending'."""
+        with self._session() as s:
+            nominee = s.query(PolicyNomineeRow).filter(
+                PolicyNomineeRow.policy_id == policy_id,
+                PolicyNomineeRow.status == "rejected"
+            ).first()
+            if nominee:
+                nominee.status = "pending"
+            
+            resurrection = PolicyResurrectionRow(
+                policy_id=policy_id,
+                resurrected_at=datetime.utcnow(),
+                resurrected_by=resurrected_by,
+                reason=reason,
+                config_fingerprint=config_fingerprint,
+                override_approved=override_approved
+            )
+            s.add(resurrection)
+            s.commit()
+
+    def get_policy_resurrection_count(self, policy_id: str) -> int:
+        """Returns the number of times a policy has been resurrected."""
+        with self._session() as s:
+            return s.query(PolicyResurrectionRow).filter(PolicyResurrectionRow.policy_id == policy_id).count()
+
+    def get_last_policy_rejection(self, policy_id: str) -> dict | None:
+        """Returns the last rejection entry for the policy if any."""
+        with self._session() as s:
+            rejection = s.query(PolicyRejectionRow).filter(
+                PolicyRejectionRow.policy_id == policy_id
+            ).order_by(PolicyRejectionRow.rejected_at.desc()).first()
+            if rejection:
+                return {
+                    "id": rejection.id,
+                    "policy_id": rejection.policy_id,
+                    "rejected_at": rejection.rejected_at,
+                    "rejected_by": rejection.rejected_by,
+                    "reason": rejection.reason,
+                    "config_fingerprint": rejection.config_fingerprint
+                }
+            return None
+
+    def get_rejected_nominee_for_policy(self, policy_id: str) -> dict | None:
+        """Returns the rejected nominee for the exact policy_id, if any."""
+        from sqlalchemy import select as sa_select
+        with self._session() as s:
+            row = s.execute(
+                sa_select(PolicyNomineeRow)
+                .where(PolicyNomineeRow.policy_id == policy_id)
+                .where(PolicyNomineeRow.status == "rejected")
+            ).scalars().first()
+            if row is None:
+                return None
+            return {
+                "policy_id": row.policy_id,
+                "nominated_at": row.nominated_at,
+                "approved_count": row.approved_count,
+                "expectancy": row.expectancy,
+                "edge_over_champion": row.edge_over_champion,
+                "champion_expectancy": row.champion_expectancy,
+                "status": row.status,
+                "cohort_fingerprint": row.cohort_fingerprint,
+                "config_fingerprint": row.config_fingerprint,
+                "champion_config_fingerprint": row.champion_config_fingerprint,
+            }
+
+    def get_total_realized_pnl(self, mode: str | None = None) -> float:
+        """Returns the sum of all realized P&L from closed trades."""
+        with self._session() as s:
+            from app.db.database import TradeRow
+            from sqlalchemy import select, func
+            stmt = select(func.sum(TradeRow.pnl))
+            if mode:
+                stmt = stmt.where(TradeRow.mode == mode)
+            val = s.scalar(stmt)
+            return float(val) if val is not None else 0.0
+
+    def save_spawned_strategy(self, policy_id: str, seed_capital: float) -> None:
+        """Saves a spawned strategy or sets it to ACTIVE."""
+        with self._session() as s:
+            from app.db.database import SpawnedStrategyRow
+            row = s.query(SpawnedStrategyRow).filter(SpawnedStrategyRow.policy_id == policy_id).first()
+            if row:
+                row.status = "ACTIVE"
+                row.seed_capital = seed_capital
+                row.spawned_at = datetime.utcnow()
+                row.retired_at = None
+            else:
+                row = SpawnedStrategyRow(
+                    policy_id=policy_id,
+                    spawned_at=datetime.utcnow(),
+                    seed_capital=seed_capital,
+                    status="ACTIVE",
+                    retired_at=None
+                )
+                s.add(row)
+            s.commit()
+
+    def retire_spawned_strategy(self, policy_id: str) -> bool:
+        """Retires a spawned strategy. Returns True if retired successfully, else False."""
+        with self._session() as s:
+            from app.db.database import SpawnedStrategyRow
+            row = s.query(SpawnedStrategyRow).filter(
+                SpawnedStrategyRow.policy_id == policy_id,
+                SpawnedStrategyRow.status == "ACTIVE"
+            ).first()
+            if row:
+                row.status = "RETIRED"
+                row.retired_at = datetime.utcnow()
+                s.commit()
+                return True
+            return False
+
+    def get_active_spawned_strategies(self) -> list[dict]:
+        """Returns all ACTIVE spawned strategies."""
+        with self._session() as s:
+            from app.db.database import SpawnedStrategyRow
+            rows = s.query(SpawnedStrategyRow).filter(SpawnedStrategyRow.status == "ACTIVE").all()
+            return [
+                {
+                    "policy_id": r.policy_id,
+                    "spawned_at": r.spawned_at.isoformat() if hasattr(r.spawned_at, "isoformat") else str(r.spawned_at),
+                    "seed_capital": r.seed_capital,
+                    "status": r.status
+                }
+                for r in rows
+            ]
+
+    def get_active_spawned_capital(self) -> float:
+        """Returns the sum of seed capital of all ACTIVE spawned strategies."""
+        with self._session() as s:
+            from app.db.database import SpawnedStrategyRow
+            from sqlalchemy import select, func
+            stmt = select(func.sum(SpawnedStrategyRow.seed_capital)).where(SpawnedStrategyRow.status == "ACTIVE")
+            val = s.scalar(stmt)
+            return float(val) if val is not None else 0.0
 
     def close(self) -> None:
         global _ACTIVE_DATABASE

@@ -1517,6 +1517,14 @@ async def promote_policy(request: Request, body: PromoteRequest) -> dict:
         if not pending_nominee:
             raise HTTPException(status_code=400, detail=f"No pending nomination found for Challenger {policy_id!r}.")
 
+        # Verify Sandbox / Challenger Staging Check: cannot promote without going through the sandbox staging phase first
+        active_spawned = db.get_active_spawned_strategies()
+        if not any(x["policy_id"] == policy_id for x in active_spawned):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Lifecycle violation: policy {policy_id} must be spawned and staged in the sandbox environment before it can be promoted to Champion."
+            )
+
         import hashlib
         import json
         def get_config_fingerprint(snapshot_dict: dict) -> str:
@@ -1683,3 +1691,188 @@ async def promote_policy(request: Request, body: PromoteRequest) -> dict:
 
             applog.error("engine.promotion", f"FAILED: Rolled back promotion mutation for {policy_id}: {exc}")
             raise HTTPException(status_code=500, detail=f"Failed to promote policy: {exc}") from exc
+
+
+class ProfitAllocatorConfig(BaseModel):
+    compound_capital_pct: float
+    protected_reserve_pct: float
+    research_capital_pct: float
+
+
+@router.get("/strategies/profit-allocator")
+async def get_profit_allocator(request: Request) -> dict:
+    db = _db(request)
+    config = db.get_setting("profit_allocator_config")
+    if not config:
+        config = {
+            "compound_capital_pct": 50.0,
+            "protected_reserve_pct": 30.0,
+            "research_capital_pct": 20.0
+        }
+    
+    engine = _engine(request)
+    total_pnl = db.get_total_realized_pnl(mode=engine.mode)
+    
+    cc_pct = float(config.get("compound_capital_pct", 50.0))
+    pr_pct = float(config.get("protected_reserve_pct", 30.0))
+    rc_pct = float(config.get("research_capital_pct", 20.0))
+    
+    return {
+        "compound_capital_pct": cc_pct,
+        "protected_reserve_pct": pr_pct,
+        "research_capital_pct": rc_pct,
+        "compound_capital_value": round(total_pnl * cc_pct / 100.0, 2),
+        "protected_reserve_value": round(total_pnl * pr_pct / 100.0, 2),
+        "research_capital_value": round(total_pnl * rc_pct / 100.0, 2),
+        "total_realized_pnl": round(total_pnl, 2),
+        "mode": engine.mode
+    }
+
+
+@router.post("/strategies/profit-allocator")
+async def post_profit_allocator(body: ProfitAllocatorConfig, request: Request) -> dict:
+    import math
+    total_pct = body.compound_capital_pct + body.protected_reserve_pct + body.research_capital_pct
+    if not math.isclose(total_pct, 100.0, rel_tol=1e-9):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid configuration: percentages must sum exactly to 100.0 (got {total_pct:.2f}%)."
+        )
+    
+    if body.compound_capital_pct < 0.0 or body.protected_reserve_pct < 0.0 or body.research_capital_pct < 0.0:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid configuration: percentages cannot be negative."
+        )
+        
+    db = _db(request)
+    config = {
+        "compound_capital_pct": body.compound_capital_pct,
+        "protected_reserve_pct": body.protected_reserve_pct,
+        "research_capital_pct": body.research_capital_pct
+    }
+    db.set_setting("profit_allocator_config", config)
+    
+    engine = _engine(request)
+    total_pnl = db.get_total_realized_pnl(mode=engine.mode)
+    
+    return {
+        "status": "success",
+        "message": "Profit allocator configuration updated successfully.",
+        "config": config,
+        "allocations": {
+            "compound_capital_value": round(total_pnl * body.compound_capital_pct / 100.0, 2),
+            "protected_reserve_value": round(total_pnl * body.protected_reserve_pct / 100.0, 2),
+            "research_capital_value": round(total_pnl * body.research_capital_pct / 100.0, 2),
+            "total_realized_pnl": round(total_pnl, 2)
+        }
+    }
+
+
+class SpawnStrategyRequest(BaseModel):
+    policy_id: str
+    seed_capital: float
+
+
+class RetireStrategyRequest(BaseModel):
+    policy_id: str
+
+
+@router.get("/strategies/spawner/status")
+async def get_spawner_status(request: Request) -> dict:
+    db = _db(request)
+    engine = _engine(request)
+    
+    config = db.get_setting("profit_allocator_config") or {
+        "compound_capital_pct": 50.0,
+        "protected_reserve_pct": 30.0,
+        "research_capital_pct": 20.0
+    }
+    rc_pct = float(config.get("research_capital_pct", 20.0))
+    total_pnl = db.get_total_realized_pnl(mode=engine.mode)
+    
+    total_allocated_research = max(0.0, total_pnl) * rc_pct / 100.0
+    active_spawned_capital = db.get_active_spawned_capital()
+    research_pool_balance = max(0.0, total_allocated_research - active_spawned_capital)
+    
+    active_strategies = db.get_active_spawned_strategies()
+    
+    return {
+        "active_strategies": active_strategies,
+        "child_count": len(active_strategies),
+        "research_capital_pool": round(research_pool_balance, 2),
+        "total_allocated_research": round(total_allocated_research, 2),
+        "active_spawned_capital": round(active_spawned_capital, 2),
+        "mode": engine.mode
+    }
+
+
+@router.post("/strategies/spawner/spawn")
+async def spawn_strategy(body: SpawnStrategyRequest, request: Request) -> dict:
+    db = _db(request)
+    engine = _engine(request)
+    
+    with db._session() as s:
+        from app.db.database import PolicyNomineeRow
+        nominee = s.query(PolicyNomineeRow).filter(PolicyNomineeRow.policy_id == body.policy_id).first()
+        if not nominee:
+            raise HTTPException(status_code=404, detail=f"Nomination not found for policy {body.policy_id}.")
+        if nominee.status not in ("approved", "promoted"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Lifecycle violation: policy {body.policy_id} is in status '{nominee.status}', must be 'approved' or 'promoted' to spawn."
+            )
+            
+    active_strategies = db.get_active_spawned_strategies()
+    if len(active_strategies) >= 5:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Child strategy limit reached: maximum of 5 active spawned strategies allowed (currently {len(active_strategies)})."
+        )
+        
+    config = db.get_setting("profit_allocator_config") or {
+        "compound_capital_pct": 50.0,
+        "protected_reserve_pct": 30.0,
+        "research_capital_pct": 20.0
+    }
+    rc_pct = float(config.get("research_capital_pct", 20.0))
+    total_pnl = db.get_total_realized_pnl(mode=engine.mode)
+    
+    total_allocated_research = max(0.0, total_pnl) * rc_pct / 100.0
+    active_spawned_capital = db.get_active_spawned_capital()
+    research_pool_balance = total_allocated_research - active_spawned_capital
+    
+    if body.seed_capital <= 0.0:
+        raise HTTPException(status_code=400, detail="Seed capital must be positive.")
+        
+    if body.seed_capital > research_pool_balance:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Insufficient research capital: required {body.seed_capital:.2f}, available {research_pool_balance:.2f}."
+        )
+        
+    db.save_spawned_strategy(body.policy_id, body.seed_capital)
+    
+    return {
+        "status": "success",
+        "message": f"Strategy {body.policy_id} spawned successfully with seed capital {body.seed_capital:.2f}.",
+        "policy_id": body.policy_id,
+        "seed_capital": body.seed_capital
+    }
+
+
+@router.post("/strategies/spawner/retire")
+async def retire_strategy(body: RetireStrategyRequest, request: Request) -> dict:
+    db = _db(request)
+    
+    success = db.retire_spawned_strategy(body.policy_id)
+    if not success:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Active spawned strategy {body.policy_id} not found."
+        )
+        
+    return {
+        "status": "success",
+        "message": f"Strategy {body.policy_id} retired successfully and its virtual capital released."
+    }
