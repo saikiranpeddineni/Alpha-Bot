@@ -159,6 +159,25 @@ export function SettingsModal(props: { onClose: () => void }) {
         </div>
 
         <div style={{ marginTop: 18, borderTop: "1px solid var(--border)", paddingTop: 12 }}>
+          <label style={{ display: "block", marginBottom: 6, fontWeight: 600, fontSize: 13 }}>
+            UI Heartbeat Indicator Style
+          </label>
+          <select
+            value={useStore.getState().heartbeatStyle}
+            onChange={(e) => useStore.getState().setHeartbeatStyle(e.target.value as any)}
+            style={{ width: "100%", padding: "6px 10px" }}
+          >
+            <option value="ekg">EKG Waveform + Status Dot (Recommended Default)</option>
+            <option value="heart">EKG Waveform + Micro Heart + Status Dot</option>
+            <option value="minimal">Minimal Status Dot Only</option>
+            <option value="off">Off (Disable Heartbeat Indicator)</option>
+          </select>
+          <span className="hint" style={{ marginTop: 4, display: "block" }}>
+            Controls the real-time event-driven telemetry indicator in the top header bar.
+          </span>
+        </div>
+
+        <div style={{ marginTop: 18, borderTop: "1px solid var(--border)", paddingTop: 12 }}>
           <div className="muted" style={{ fontSize: 12, lineHeight: 1.7 }}>
             <b>Environment</b> (from <span className="mono">.env</span>, restart to change):
             data provider <b>{status?.provider ?? "—"}</b> · broker <b>{status?.broker ?? "auto"}</b> ·

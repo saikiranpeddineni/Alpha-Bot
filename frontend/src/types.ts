@@ -224,6 +224,54 @@ export interface BacktestResult {
   warnings: string[];
 }
 
+export type HealthState = "NORMAL" | "WARNING" | "DEGRADED" | "HALTED";
+export type ActivityState = "IDLE" | "SCANNING" | "EVALUATING" | "TRAINING" | "REPLAYING" | "TRADING";
+export type PulseIntensity = "small" | "medium" | "large" | "flash";
+export type HeartbeatStyle = "minimal" | "ekg" | "heart" | "off";
+
+export interface HeartbeatEvent {
+  type: string;
+  title: string;
+  detail: string;
+  symbol?: string | null;
+  strategy?: string | null;
+  pulse: PulseIntensity;
+}
+
+export interface SubsystemTimestamps {
+  last_scan?: string | null;
+  last_bar?: string | null;
+  last_order?: string | null;
+  last_strategy?: string | null;
+  last_replay?: string | null;
+  last_training?: string | null;
+  last_broker_ping?: string | null;
+}
+
+export interface HeartbeatStats {
+  broker_connected: boolean;
+  market_data_fresh: boolean;
+  scanner_ok: boolean;
+  market_regime: string;
+  watchlist_count: number;
+  universe_count: number;
+  signals_evaluated_today: number;
+  evaluations_last_sec: number;
+  orders_today: number;
+  replay_queue_depth: number;
+  latency_ms: number;
+}
+
+export interface HeartbeatTelemetry {
+  seq: number;
+  ts: string;
+  health: HealthState;
+  activity: ActivityState;
+  event: HeartbeatEvent;
+  timestamps: SubsystemTimestamps;
+  stats: HeartbeatStats;
+}
+
 export type WsMessage =
   | { type: "bootstrap"; data: Bootstrap }
   | { type: "status"; data: Status }
@@ -236,7 +284,8 @@ export type WsMessage =
   | { type: "insight"; data: Insight }
   | { type: "bar"; data: { symbol: string; bar: Bar } }
   | { type: "metrics"; data: Metrics }
-  | { type: "backtest_progress"; data: { progress: number } };
+  | { type: "backtest_progress"; data: { progress: number } }
+  | { type: "heartbeat"; data: HeartbeatTelemetry };
 
 export interface Bootstrap {
   status: Status;

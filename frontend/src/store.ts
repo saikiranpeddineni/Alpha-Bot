@@ -36,6 +36,8 @@ interface AppState {
   selectedSymbol: string;
   liveBar: { symbol: string; bar: Bar } | null;
   backtestProgress: number | null;
+  heartbeat: HeartbeatTelemetry | null;
+  heartbeatStyle: HeartbeatStyle;
   toast: { kind: "info" | "error"; text: string } | null;
 
   setConnected(v: boolean): void;
@@ -46,6 +48,7 @@ interface AppState {
   setStrategies(s: StrategyInfo[]): void;
   setTrades(t: TradeRow[]): void;
   setPositions(p: PositionRow[]): void;
+  setHeartbeatStyle(style: HeartbeatStyle): void;
   showToast(kind: "info" | "error", text: string): void;
   clearToast(): void;
 }
@@ -65,6 +68,8 @@ export const useStore = create<AppState>((set, get) => ({
   selectedSymbol: "SPY",
   liveBar: null,
   backtestProgress: null,
+  heartbeat: null,
+  heartbeatStyle: (localStorage.getItem("alphadesk_heartbeat_style") as HeartbeatStyle) || "ekg",
   toast: null,
 
   setConnected: (v) => set({ connected: v }),
@@ -123,6 +128,9 @@ export const useStore = create<AppState>((set, get) => ({
       case "backtest_progress":
         set({ backtestProgress: msg.data.progress >= 1 ? null : msg.data.progress });
         break;
+      case "heartbeat":
+        set({ heartbeat: msg.data });
+        break;
     }
   },
 
@@ -131,6 +139,10 @@ export const useStore = create<AppState>((set, get) => ({
   setStrategies: (s) => set({ strategies: s }),
   setTrades: (t) => set({ trades: t }),
   setPositions: (p) => set({ positions: p }),
+  setHeartbeatStyle: (style) => {
+    localStorage.setItem("alphadesk_heartbeat_style", style);
+    set({ heartbeatStyle: style });
+  },
   showToast: (kind, text) => {
     set({ toast: { kind, text } });
     window.setTimeout(() => {

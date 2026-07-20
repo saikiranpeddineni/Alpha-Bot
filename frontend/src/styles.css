@@ -759,3 +759,213 @@ a { color: var(--accent); }
   }
 }
 
+/* ============ Heartbeat Telemetry & EKG Indicator ============ */
+
+.heartbeat-container {
+  position: relative;
+  display: flex;
+  align-items: center;
+  margin-left: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.heartbeat-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--panel-2, rgba(20, 24, 33, 0.65));
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+  border-radius: 6px;
+  padding: 3px 8px;
+  height: 24px;
+  transition: all 0.2s ease;
+}
+
+.heartbeat-container:hover .heartbeat-bar {
+  border-color: var(--border-strong, rgba(255, 255, 255, 0.2));
+  background: var(--panel-3, rgba(30, 36, 48, 0.85));
+}
+
+.hb-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+  box-shadow: 0 0 6px currentColor;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.hb-dot.pulse-small { transform: scale(1.3); }
+.hb-dot.pulse-medium { transform: scale(1.6); }
+.hb-dot.pulse-large { transform: scale(2.0); }
+.hb-dot.pulse-flash { transform: scale(2.2); box-shadow: 0 0 14px var(--red); }
+
+.hb-heart {
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  transition: transform 0.2s ease;
+}
+
+.hb-heart.beat {
+  transform: scale(1.4);
+}
+
+.hb-ekg {
+  width: 48px;
+  height: 14px;
+  display: block;
+}
+
+.hb-ekg path {
+  transition: d 0.15s ease-out, stroke 0.3s ease;
+}
+
+.hb-ekg.resting path {
+  animation: ekg-resting 8s ease-in-out infinite;
+}
+
+@keyframes ekg-resting {
+  0%, 90%, 100% { opacity: 0.65; }
+  95% { opacity: 0.95; }
+}
+
+.hb-label {
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+
+/* Glassmorphic Telemetry Card */
+.hb-card {
+  position: absolute;
+  top: 32px;
+  left: 0;
+  width: 290px;
+  background: rgba(15, 18, 26, 0.94);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--border-strong, rgba(255, 255, 255, 0.15));
+  border-radius: 8px;
+  padding: 12px;
+  z-index: 150;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.65);
+  font-size: 11px;
+  color: var(--fg);
+}
+
+.hb-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 8px;
+  margin-bottom: 10px;
+}
+
+.hb-card-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 700;
+  font-size: 12px;
+}
+
+.hb-badge {
+  font-size: 9px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--panel-3, rgba(255, 255, 255, 0.08));
+  color: var(--accent);
+  border: 1px solid rgba(82, 107, 255, 0.3);
+}
+
+.hb-card-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 12px;
+  margin-bottom: 10px;
+}
+
+.hb-item {
+  display: flex;
+  flex-direction: column;
+}
+
+.hb-k {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+
+.hb-v {
+  font-size: 11.5px;
+  font-weight: 600;
+  margin-top: 1px;
+}
+
+.hb-v.pos { color: var(--green); }
+.hb-v.neg { color: var(--red); }
+
+.hb-event-box {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+  margin-bottom: 10px;
+}
+
+.hb-event-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+.hb-ago {
+  font-size: 9.5px;
+  color: var(--accent);
+}
+
+.hb-event-body {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+}
+
+.hb-chip {
+  font-size: 9px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: var(--border);
+}
+
+.hb-event-detail {
+  font-size: 10px;
+  margin-top: 3px;
+}
+
+.hb-subsystems {
+  border-top: 1px dashed var(--border);
+  padding-top: 6px;
+  font-size: 10px;
+}
+
+.hb-sub-k {
+  font-weight: 700;
+  font-size: 9px;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.hb-sub-row {
+  display: flex;
+  justify-content: space-between;
+  line-height: 1.5;
+}
+
