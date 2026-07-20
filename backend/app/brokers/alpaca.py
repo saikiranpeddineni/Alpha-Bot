@@ -119,11 +119,36 @@ class AlpacaBroker(Broker):
                 qty = float(p.qty)
                 if str(p.side) == "PositionSide.SHORT" or qty < 0:
                     qty = -abs(qty)
-                lots[p.symbol.upper()] = {
+                sym = p.symbol.upper()
+                avg_price = float(p.avg_entry_price)
+
+                # Reconstruct protective stop loss and initial risk per share
+                stop_loss = None
+                for o in orders:
+                    o_sym = getattr(o, "symbol", "")
+                    if o_sym and o_sym.upper() == sym:
+                        st_price = getattr(o, "stop_price", None)
+                        if st_price is not None:
+                            try:
+                                stop_loss = float(st_price)
+                                break
+                            except (ValueError, TypeError):
+                                pass
+
+                if stop_loss is None or stop_loss <= 0:
+                    # Safe fallback stop loss: 2% from avg entry price
+                    stop_pct = 0.02
+                    stop_loss = round(avg_price * (1.0 - stop_pct), 4) if qty > 0 else round(avg_price * (1.0 + stop_pct), 4)
+
+                risk_per_share = round(abs(avg_price - stop_loss), 4)
+                if risk_per_share <= 0:
+                    risk_per_share = round(avg_price * 0.02, 4)
+
+                lots[sym] = {
                     "qty": qty,
-                    "avg_price": float(p.avg_entry_price),
-                    "stop_loss": None,
-                    "initial_risk_per_share": None,
+                    "avg_price": avg_price,
+                    "stop_loss": stop_loss,
+                    "initial_risk_per_share": risk_per_share,
                 }
             checkpoint = {
                 "realized_pnl": 0.0,
