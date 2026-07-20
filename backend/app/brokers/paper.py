@@ -41,6 +41,8 @@ class PaperBroker(Broker):
         slippage_bps: float = 2.0,
         commission_per_share: float = 0.0,
         fill_market_on: str = "next_open",  # immediate | next_open
+        execution_model: str = "deterministic_bar_fill_v1",
+        max_volume_participation_pct: float | None = None,
     ) -> None:
         if fill_market_on not in ("immediate", "next_open"):
             raise ValueError("fill_market_on must be 'immediate' or 'next_open'")
@@ -49,6 +51,8 @@ class PaperBroker(Broker):
         self.slippage = slippage_bps / 10_000.0
         self.commission_per_share = commission_per_share
         self.fill_market_on = fill_market_on
+        self.execution_model = execution_model
+        self.max_volume_participation_pct = max_volume_participation_pct
 
         self._positions: dict[str, Position] = {}
         self._orders: dict[str, Order] = {}
@@ -163,15 +167,23 @@ class PaperBroker(Broker):
             return True
         return self._short_notional() + opening_short_qty * price <= self.equity() + 1e-6
 
-    def _fill(self, order: Order, price: float) -> None:
-        commission = self.commission_per_share * order.qty
-        signed_qty = order.qty if order.side == OrderSide.BUY else -order.qty
+    def _fill(self, order: Order, price: float, fill_qty: float | None = None) -> None:
+        qty_to_fill = fill_qty if fill_qty is not None else (order.qty - order.filled_qty)
+        if qty_to_fill <= 0:
+            return
+
+        commission = self.commission_per_share * qty_to_fill
+        signed_qty = qty_to_fill if order.side == OrderSide.BUY else -qty_to_fill
         self.cash -= signed_qty * price
         self.cash -= commission
         self._apply_to_position(order, signed_qty, price)
 
-        order.status = OrderStatus.FILLED
-        order.filled_qty = order.qty
+        order.filled_qty = round(order.filled_qty + qty_to_fill, 4)
+        if order.filled_qty >= order.qty - 1e-6:
+            order.status = OrderStatus.FILLED
+        else:
+            order.status = OrderStatus.PARTIALLY_FILLED
+
         order.filled_avg_price = round(price, 4)
         order.filled_at = self._now
         self._fills.append(
@@ -179,7 +191,7 @@ class PaperBroker(Broker):
                 order_id=order.id,
                 symbol=order.symbol,
                 side=order.side,
-                qty=order.qty,
+                qty=qty_to_fill,
                 price=round(price, 4),
                 commission=commission,
                 strategy=order.strategy,
@@ -297,8 +309,9 @@ class PaperBroker(Broker):
         symbol = symbol.upper()
         self._now = ts
         o, h, low, c = float(bar["open"]), float(bar["high"]), float(bar["low"]), float(bar["close"])
+        vol = float(bar["volume"]) if "volume" in bar else None
 
-        self._fill_resting(symbol, o, h, low)
+        self._fill_resting(symbol, o, h, low, vol=vol)
         self._check_brackets(symbol, o, h, low)
         self._last_price[symbol] = c
         if symbol in self._positions:
@@ -314,24 +327,40 @@ class PaperBroker(Broker):
         if symbol in self._positions:
             self._positions[symbol].market_price = price
 
-    def _fill_resting(self, symbol: str, o: float, h: float, low: float) -> None:
+    def _fill_resting(self, symbol: str, o: float, h: float, low: float, vol: float | None = None) -> None:
+        import math
         for oid in list(self._resting):
             order = self._orders[oid]
             if order.symbol != symbol:
                 continue
+
+            rem_qty = order.qty - order.filled_qty
+            fill_qty = rem_qty
+            if self.max_volume_participation_pct is not None and vol is not None and vol > 0:
+                max_vol_qty = max(1.0, float(math.floor(vol * self.max_volume_participation_pct)))
+                fill_qty = min(rem_qty, max_vol_qty)
+
             if order.order_type == OrderType.MARKET:
-                self._resting.remove(oid)
                 if not self._check_buying_power(order, o):
+                    if oid in self._resting:
+                        self._resting.remove(oid)
                     order.status = OrderStatus.REJECTED
                     order.reason += " | rejected: insufficient buying power at fill time"
                     continue
-                self._fill(order, self._slip(o, order.side))
+                self._fill(order, self._slip(o, order.side), fill_qty=fill_qty)
+                if order.filled_qty >= order.qty - 1e-6:
+                    if oid in self._resting:
+                        self._resting.remove(oid)
             elif order.side == OrderSide.BUY and low <= order.limit_price:
-                self._resting.remove(oid)
-                self._fill(order, min(o, order.limit_price))
+                self._fill(order, min(o, order.limit_price), fill_qty=fill_qty)
+                if order.filled_qty >= order.qty - 1e-6:
+                    if oid in self._resting:
+                        self._resting.remove(oid)
             elif order.side == OrderSide.SELL and h >= order.limit_price:
-                self._resting.remove(oid)
-                self._fill(order, max(o, order.limit_price))
+                self._fill(order, max(o, order.limit_price), fill_qty=fill_qty)
+                if order.filled_qty >= order.qty - 1e-6:
+                    if oid in self._resting:
+                        self._resting.remove(oid)
 
     def _check_brackets(self, symbol: str, o: float, h: float, low: float) -> None:
         pos = self._positions.get(symbol)
