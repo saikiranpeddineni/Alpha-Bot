@@ -22,7 +22,7 @@ _spawner_lock = asyncio.Lock()
 
 
 def _engine(request: Request):  # noqa: ANN202
-    return request.app.state.engine
+    return getattr(request.app.state, "engine", None)
 
 
 def _db(request: Request):  # noqa: ANN202
@@ -1463,8 +1463,9 @@ async def get_policy_nominees(request: Request) -> list[dict]:
 @router.post("/strategies/promote")
 async def promote_policy(request: Request, body: PromoteRequest) -> dict:
     # 1. Bearer Authentication Guard
-    settings_obj = request.app.state.settings
-    if settings_obj.admin_token:
+    from app.config import get_settings
+    settings_obj = getattr(request.app.state, "settings", None) or get_settings()
+    if settings_obj and getattr(settings_obj, "admin_token", None):
         auth_header = request.headers.get("Authorization")
         x_token = request.headers.get("X-Admin-Token")
         token = None
@@ -1585,42 +1586,43 @@ async def promote_policy(request: Request, body: PromoteRequest) -> dict:
         old_risk_config = db.get_setting("risk_config")
 
         # Capture pre-promotion engine runtime state
-        old_engine_risk_config = engine.risk_config
+        old_engine_risk_config = getattr(engine, "risk_config", None) if engine else None
         old_pipeline_ml_threshold = getattr(engine.pipeline, "ml_threshold", None) if getattr(engine, "pipeline", None) else None
         old_evaluator_ml_threshold = getattr(engine.evidence_evaluator, "ml_threshold", None) if getattr(engine, "evidence_evaluator", None) else None
         old_trade_score_engine_config = getattr(engine.pipeline.trade_score_engine, "risk_config", None) if (getattr(engine, "pipeline", None) and getattr(engine.pipeline, "trade_score_engine", None)) else None
 
         try:
-            # Reset engine risk config back to base settings from the DB first (without prior offsets)
-            stored_risk = db.get_setting("risk_config") or {}
-            default_risk = engine.settings.risk_config().model_dump()
-            merged_risk = {**default_risk, **stored_risk}
-            
-            # Apply the new offset to the merged base risk config in-memory
-            from app.config import RiskConfig
-            engine.risk_config = RiskConfig(**merged_risk)
-            
-            offset = float(snapshot.get("score_threshold_offset", 0.0))
-            if offset != 0.0:
-                engine.risk_config.score_threshold_event = max(0.0, engine.risk_config.score_threshold_event + offset)
-                engine.risk_config.score_threshold_trend = max(0.0, engine.risk_config.score_threshold_trend + offset)
-                engine.risk_config.score_threshold_range = max(0.0, engine.risk_config.score_threshold_range + offset)
-                engine.risk_config.score_threshold_volatile = max(0.0, engine.risk_config.score_threshold_volatile + offset)
+            if engine:
+                # Reset engine risk config back to base settings from the DB first (without prior offsets)
+                stored_risk = db.get_setting("risk_config") or {}
+                default_risk = engine.settings.risk_config().model_dump()
+                merged_risk = {**default_risk, **stored_risk}
                 
-            # Synchronize risk manager and pipeline engines
-            if engine.risk:
-                engine.risk.config = engine.risk_config
+                # Apply the new offset to the merged base risk config in-memory
+                from app.config import RiskConfig
+                engine.risk_config = RiskConfig(**merged_risk)
                 
-            # Update running engine properties in-place from the snapshot
-            pipeline = getattr(engine, "pipeline", None)
-            if pipeline:
-                pipeline.ml_threshold = snapshot["ml_threshold"]
-                if hasattr(pipeline, "trade_score_engine") and pipeline.trade_score_engine is not None:
-                    pipeline.trade_score_engine.risk_config = engine.risk_config
-                
-            evaluator = getattr(engine, "evidence_evaluator", None)
-            if evaluator:
-                evaluator.ml_threshold = snapshot["ml_threshold"]
+                offset = float(snapshot.get("score_threshold_offset", 0.0))
+                if offset != 0.0:
+                    engine.risk_config.score_threshold_event = max(0.0, engine.risk_config.score_threshold_event + offset)
+                    engine.risk_config.score_threshold_trend = max(0.0, engine.risk_config.score_threshold_trend + offset)
+                    engine.risk_config.score_threshold_range = max(0.0, engine.risk_config.score_threshold_range + offset)
+                    engine.risk_config.score_threshold_volatile = max(0.0, engine.risk_config.score_threshold_volatile + offset)
+                    
+                # Synchronize risk manager and pipeline engines
+                if engine.risk:
+                    engine.risk.config = engine.risk_config
+                    
+                # Update running engine properties in-place from the snapshot
+                pipeline = getattr(engine, "pipeline", None)
+                if pipeline:
+                    pipeline.ml_threshold = snapshot["ml_threshold"]
+                    if hasattr(pipeline, "trade_score_engine") and pipeline.trade_score_engine is not None:
+                        pipeline.trade_score_engine.risk_config = engine.risk_config
+                    
+                evaluator = getattr(engine, "evidence_evaluator", None)
+                if evaluator:
+                    evaluator.ml_threshold = snapshot["ml_threshold"]
 
             # Record promotion log in the immutable append-only audit trail
             from datetime import datetime, UTC

@@ -251,6 +251,7 @@ async def test_promotion_idempotency_and_concurrency_cas(temp_db):
     cleaned_chall = {k: v for k, v in chall_snapshot.items() if k not in ("snapshot_at", "snapshot_version")}
     config_fp = hashlib.sha256(json.dumps(cleaned_chall, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
 
+    temp_db.save_spawned_strategy("challenger_high_ml", 10000.0)
     temp_db.save_policy_nominee({
         "policy_id": "challenger_high_ml",
         "nominated_at": "2026-01-06T12:00:00",
@@ -305,6 +306,7 @@ async def test_atomic_promotion_rollback_on_failure(temp_db):
     app.include_router(router)
 
     settings_mock = MagicMock()
+    settings_mock.mode = "demo"
     settings_mock.admin_token = ""
     settings_mock.ml_confidence_threshold = 0.55
     settings_mock.risk_config().model_dump.return_value = {}
@@ -328,6 +330,7 @@ async def test_atomic_promotion_rollback_on_failure(temp_db):
     cleaned_champ = {k: v for k, v in champ_snapshot.items() if k not in ("snapshot_at", "snapshot_version")}
     champ_fp = hashlib.sha256(json.dumps(cleaned_champ, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
 
+    temp_db.save_spawned_strategy("challenger_high_ml", 10000.0)
     temp_db.save_policy_nominee({
         "policy_id": "challenger_high_ml",
         "nominated_at": "2026-01-06T12:00:00",
@@ -365,7 +368,7 @@ async def test_atomic_promotion_rollback_on_failure(temp_db):
         if res.status_code != 500:
             print("FAILED ROLLBACK RESPONSE:", res.status_code, res.json())
         assert res.status_code == 500
-        assert "internal server error" in res.text.lower()
+        assert "failed to promote policy" in res.text.lower()
 
         # Assert DB settings rolled back (ml_threshold should still be None or pre-promotion state)
         temp_db.set_setting = original_set_setting  # restore original set_setting helper
@@ -436,7 +439,7 @@ async def test_broker_rejection_updates_shadow_decision(temp_db):
         reason="Buying power exceeded"
     )
     engine.broker.submit.return_value = rejected_order
-    engine.broker.account.return_value = MagicMock(cash=10000.0, equity=10000.0)
+    engine.broker.account.return_value = MagicMock(cash=10000.0, equity=10000.0, buying_power=40000.0)
     engine.broker.positions.return_value = []
     engine.broker.open_orders.return_value = []
     engine.broker.drain_fills = MagicMock(return_value=[])
@@ -464,6 +467,15 @@ async def test_broker_rejection_updates_shadow_decision(temp_db):
         symbol="AAPL", action=SignalAction.ENTER_LONG, strategy="orb", price=100.0, confidence=0.6, reason=""
     )
     sig.candidate_id = "CAND_REJECT_SL"
+    payload = {
+        "policy_id": "champion",
+        "candidate_id": "CAND_REJECT_SL",
+        "symbol": "AAPL",
+        "strategy": "orb",
+        "direction": "long",
+        "timestamp": datetime.now(UTC).isoformat(),
+    }
+    temp_db.save_shadow_signal("CAND_REJECT_SL", datetime.now(UTC), "AAPL", "orb", "long", "champion", payload)
     
     # Mock strategies loop
     strat_mock = MagicMock()
@@ -472,6 +484,10 @@ async def test_broker_rejection_updates_shadow_decision(temp_db):
     strat_mock.params = {}
     strat_mock.on_bar.return_value = sig
     engine.strategies = [strat_mock]
+
+    engine._check_system_heartbeat = AsyncMock()
+    from types import SimpleNamespace
+    engine.last_safety_decision = SimpleNamespace(allow_new_entries=True, allowed_strategies={"orb"}, risk_multiplier=1.0)
 
     # Evaluate symbol -> approved by risk, goes to submission
     engine.risk.evaluate_entry.return_value = MagicMock(approved=True, order=rejected_order)
