@@ -347,3 +347,44 @@ def test_promotion_staging_constraint(client):
         
     finally:
         app.strategies.challenger.get_active_challengers = original_get_active
+
+
+def test_spawner_global_capital_cap(client):
+    db = client.app.state.db
+    
+    # 1. Setup a nominee policy
+    from app.db.database import PolicyNomineeRow
+    db.save_policy_nominee({
+        "policy_id": "strategy_cap_test",
+        "nominated_at": datetime.now(UTC).isoformat(),
+        "status": "approved",
+        "approved_count": 10, "expectancy": 0.5, "edge_over_champion": 0.2, "champion_expectancy": 0.3,
+        "cohort_fingerprint": "cohort_cap", "config_fingerprint": "config_cap", "champion_config_fingerprint": "config_champ"
+    })
+    
+    # 2. Add enough realised P&L so research pool allows $120,000 allocation (e.g. $300,000 total profits with 50% allocation)
+    client.post("/api/strategies/profit-allocator", json={
+        "compound_capital_pct": 30.0,
+        "protected_reserve_pct": 20.0,
+        "research_capital_pct": 50.0
+    })
+    
+    from app.db.database import TradeRow
+    with db._session() as s:
+        s.add(TradeRow(
+            id="cap_pnl_trade",
+            symbol="AAPL",
+            pnl=300000.0,
+            exit_at=datetime.now(UTC),
+            mode="demo",
+            payload="{}"
+        ))
+        s.commit()
+        
+    # 3. Attempt to spawn a strategy allocating $120,000 -> should fail with 400 because it exceeds the $100,000 global ceiling
+    r = client.post("/api/strategies/spawner/spawn", json={
+        "policy_id": "strategy_cap_test",
+        "seed_capital": 120000.0
+    })
+    assert r.status_code == 400
+    assert "Global sandbox capital ceiling reached" in r.json()["detail"]

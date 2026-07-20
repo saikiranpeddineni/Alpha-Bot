@@ -1845,6 +1845,12 @@ async def spawn_strategy(body: SpawnStrategyRequest, request: Request) -> dict:
     if body.seed_capital <= 0.0:
         raise HTTPException(status_code=400, detail="Seed capital must be positive.")
         
+    if active_spawned_capital + body.seed_capital > 100000.0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Global sandbox capital ceiling reached: active spawned capital ({active_spawned_capital:.2f}) + requested seed ({body.seed_capital:.2f}) exceeds $100,000.00."
+        )
+        
     if body.seed_capital > research_pool_balance:
         raise HTTPException(
             status_code=400,
