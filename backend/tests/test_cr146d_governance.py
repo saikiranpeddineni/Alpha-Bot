@@ -302,7 +302,7 @@ def test_promotion_atomic_rollback_on_failure(client):
     initial_ml_thresh = db.get_setting("ml_threshold")
     
     # Inject database failure during promotion save
-    db.save_policy_promotion = MagicMock(side_effect=Exception("Disk full / DB connection lost"))
+    db.execute_policy_promotion_atomic = MagicMock(side_effect=Exception("Disk full / DB connection lost"))
     
     # Attempt promotion -> should return 500 and trigger rollback
     r = client.post("/api/strategies/promote", json={

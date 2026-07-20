@@ -759,6 +759,47 @@ class Database:
             s.add(row)
             s.commit()
 
+    def execute_policy_promotion_atomic(self, policy_id: str, nominated_at: str, snapshot: dict, promotion_log: dict) -> None:
+        """Atomically updates champion settings, marks nominee as approved, and logs promotion audit data in a single transaction."""
+        from sqlalchemy import select as sa_select
+        with self._session() as s:
+            # 1. Update setting: active_policy_snapshot
+            s.merge(SettingRow(key="active_policy_snapshot", value=json.dumps(snapshot, default=str)))
+            # 2. Update setting: ml_threshold
+            s.merge(SettingRow(key="ml_threshold", value=json.dumps(snapshot["ml_threshold"], default=str)))
+            
+            # 3. Mark nomination approved
+            nominee_row = s.execute(
+                sa_select(PolicyNomineeRow)
+                .where(PolicyNomineeRow.policy_id == policy_id)
+                .where(PolicyNomineeRow.nominated_at == nominated_at)
+            ).scalars().first()
+            if nominee_row:
+                nominee_row.status = "approved"
+                
+            # 4. Save policy promotion audit row
+            promotion_row = PolicyPromotionRow(
+                policy_id=promotion_log["policy_id"],
+                champion_policy_id=promotion_log.get("champion_policy_id"),
+                champion_policy_version=promotion_log.get("champion_policy_version"),
+                challenger_policy_id=promotion_log.get("challenger_policy_id"),
+                challenger_policy_version=promotion_log.get("challenger_policy_version"),
+                promoter_id=promotion_log["promoter_id"],
+                timestamp=promotion_log["timestamp"],
+                reason=promotion_log["reason"],
+                previous_snapshot=json.dumps(promotion_log["previous_snapshot"]),
+                new_snapshot=json.dumps(promotion_log["new_snapshot"]),
+                evidence_package_id=promotion_log["evidence_package_id"],
+                evidence_package=json.dumps(promotion_log["evidence_package"]),
+                mode=promotion_log["mode"],
+                evidence_generation_timestamp=promotion_log["evidence_generation_timestamp"],
+                code_commit_sha=promotion_log.get("code_commit_sha"),
+                dataset_window_id=promotion_log.get("dataset_window_id")
+            )
+            s.add(promotion_row)
+            
+            s.commit()
+
     def get_policy_promotions(self) -> list[dict]:
         """Returns all policy promotions logs ordered by timestamp descending."""
         from sqlalchemy import select as sa_select

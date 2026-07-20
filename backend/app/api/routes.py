@@ -1591,10 +1591,6 @@ async def promote_policy(request: Request, body: PromoteRequest) -> dict:
         old_trade_score_engine_config = getattr(engine.pipeline.trade_score_engine, "risk_config", None) if (getattr(engine, "pipeline", None) and getattr(engine.pipeline, "trade_score_engine", None)) else None
 
         try:
-            # Apply DB writes
-            db.set_setting("active_policy_snapshot", snapshot)
-            db.set_setting("ml_threshold", snapshot["ml_threshold"])
-            
             # Reset engine risk config back to base settings from the DB first (without prior offsets)
             stored_risk = db.get_setting("risk_config") or {}
             default_risk = engine.settings.risk_config().model_dump()
@@ -1626,9 +1622,6 @@ async def promote_policy(request: Request, body: PromoteRequest) -> dict:
             if evaluator:
                 evaluator.ml_threshold = snapshot["ml_threshold"]
 
-            # Consume nomination
-            db.mark_nomination_approved(policy_id, pending_nominee["nominated_at"])
-            
             # Record promotion log in the immutable append-only audit trail
             from datetime import datetime, UTC
             import subprocess
@@ -1656,7 +1649,14 @@ async def promote_policy(request: Request, body: PromoteRequest) -> dict:
                 "code_commit_sha": code_sha,
                 "dataset_window_id": evidence_pkg.get("dataset_window_id", "default_window")
             }
-            db.save_policy_promotion(promotion_log)
+            
+            # Apply all database changes atomically in a single transaction
+            db.execute_policy_promotion_atomic(
+                policy_id=policy_id,
+                nominated_at=pending_nominee["nominated_at"],
+                snapshot=snapshot,
+                promotion_log=promotion_log
+            )
             
             applog.info(
                 "engine.promotion",
