@@ -18,6 +18,7 @@ from app.core.logging import applog
 
 router = APIRouter(prefix="/api")
 _promotion_lock = asyncio.Lock()
+_spawner_lock = asyncio.Lock()
 
 
 def _engine(request: Request):  # noqa: ANN202
@@ -1812,59 +1813,60 @@ async def spawn_strategy(body: SpawnStrategyRequest, request: Request) -> dict:
     db = _db(request)
     engine = _engine(request)
     
-    with db._session() as s:
-        from app.db.database import PolicyNomineeRow
-        nominee = s.query(PolicyNomineeRow).filter(PolicyNomineeRow.policy_id == body.policy_id).first()
-        if not nominee:
-            raise HTTPException(status_code=404, detail=f"Nomination not found for policy {body.policy_id}.")
-        if nominee.status not in ("approved", "promoted"):
+    async with _spawner_lock:
+        with db._session() as s:
+            from app.db.database import PolicyNomineeRow
+            nominee = s.query(PolicyNomineeRow).filter(PolicyNomineeRow.policy_id == body.policy_id).first()
+            if not nominee:
+                raise HTTPException(status_code=404, detail=f"Nomination not found for policy {body.policy_id}.")
+            if nominee.status not in ("approved", "promoted"):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Lifecycle violation: policy {body.policy_id} is in status '{nominee.status}', must be 'approved' or 'promoted' to spawn."
+                )
+                
+        active_strategies = db.get_active_spawned_strategies()
+        if len(active_strategies) >= 5:
             raise HTTPException(
                 status_code=400,
-                detail=f"Lifecycle violation: policy {body.policy_id} is in status '{nominee.status}', must be 'approved' or 'promoted' to spawn."
+                detail=f"Child strategy limit reached: maximum of 5 active spawned strategies allowed (currently {len(active_strategies)})."
             )
             
-    active_strategies = db.get_active_spawned_strategies()
-    if len(active_strategies) >= 5:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Child strategy limit reached: maximum of 5 active spawned strategies allowed (currently {len(active_strategies)})."
-        )
+        config = db.get_setting("profit_allocator_config") or {
+            "compound_capital_pct": 50.0,
+            "protected_reserve_pct": 30.0,
+            "research_capital_pct": 20.0
+        }
+        rc_pct = float(config.get("research_capital_pct", 20.0))
+        total_pnl = db.get_total_realized_pnl(mode=engine.mode)
         
-    config = db.get_setting("profit_allocator_config") or {
-        "compound_capital_pct": 50.0,
-        "protected_reserve_pct": 30.0,
-        "research_capital_pct": 20.0
-    }
-    rc_pct = float(config.get("research_capital_pct", 20.0))
-    total_pnl = db.get_total_realized_pnl(mode=engine.mode)
-    
-    total_allocated_research = max(0.0, total_pnl) * rc_pct / 100.0
-    active_spawned_capital = db.get_active_spawned_capital()
-    research_pool_balance = total_allocated_research - active_spawned_capital
-    
-    if body.seed_capital <= 0.0:
-        raise HTTPException(status_code=400, detail="Seed capital must be positive.")
+        total_allocated_research = max(0.0, total_pnl) * rc_pct / 100.0
+        active_spawned_capital = db.get_active_spawned_capital()
+        research_pool_balance = total_allocated_research - active_spawned_capital
         
-    if active_spawned_capital + body.seed_capital > 100000.0:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Global sandbox capital ceiling reached: active spawned capital ({active_spawned_capital:.2f}) + requested seed ({body.seed_capital:.2f}) exceeds $100,000.00."
-        )
+        if body.seed_capital <= 0.0:
+            raise HTTPException(status_code=400, detail="Seed capital must be positive.")
+            
+        if active_spawned_capital + body.seed_capital > 100000.0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Global sandbox capital ceiling reached: active spawned capital ({active_spawned_capital:.2f}) + requested seed ({body.seed_capital:.2f}) exceeds $100,000.00."
+            )
+            
+        if body.seed_capital > research_pool_balance:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Insufficient research capital: required {body.seed_capital:.2f}, available {research_pool_balance:.2f}."
+            )
+            
+        db.save_spawned_strategy(body.policy_id, body.seed_capital)
         
-    if body.seed_capital > research_pool_balance:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Insufficient research capital: required {body.seed_capital:.2f}, available {research_pool_balance:.2f}."
-        )
-        
-    db.save_spawned_strategy(body.policy_id, body.seed_capital)
-    
-    return {
-        "status": "success",
-        "message": f"Strategy {body.policy_id} spawned successfully with seed capital {body.seed_capital:.2f}.",
-        "policy_id": body.policy_id,
-        "seed_capital": body.seed_capital
-    }
+        return {
+            "status": "success",
+            "message": f"Strategy {body.policy_id} spawned successfully with seed capital {body.seed_capital:.2f}.",
+            "policy_id": body.policy_id,
+            "seed_capital": body.seed_capital
+        }
 
 
 @router.post("/strategies/spawner/retire")
