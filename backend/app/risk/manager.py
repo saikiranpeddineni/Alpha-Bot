@@ -354,11 +354,12 @@ class RiskManager:
             strategy=signal.strategy,
             reason=signal.reason,
         )
+        risk_str = f"${risk_amount:,.0f}" if isinstance(risk_amount, (int, float)) else str(risk_amount)
         return RiskDecision(
             approved=True,
-            reason=f"sized {qty} shares, risk ${risk_amount:,.0f}",
+            reason=f"sized {qty} shares, risk {risk_str}",
             order=order,
-            kelly_fraction=round(kelly_used, 6),
+            kelly_fraction=round(kelly_used, 6) if isinstance(kelly_used, (int, float)) else 0.0,
         )
 
     def status(self) -> dict:

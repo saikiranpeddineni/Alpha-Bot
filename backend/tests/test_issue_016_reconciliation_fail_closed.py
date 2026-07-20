@@ -44,6 +44,13 @@ class _FakeData:
     async def warmup(self, _watchlist):
         return None
 
+    def last_price(self, symbol):
+        sym_upper = symbol.upper().lstrip("^")
+        return 15.0 if sym_upper == "VIX" else 100.0
+
+    def last_prices(self, symbols):
+        return {s: self.last_price(s) for s in symbols}
+
     async def poll(self, _watchlist):
         return {"AAPL": self.frame("AAPL", "1Min")}
 
@@ -53,7 +60,7 @@ class _FakeData:
         val = 15.0 if sym_upper == "VIX" else 100.0
         return pd.DataFrame(
             {"open": [val]*60, "high": [val]*60, "low": [val]*60,
-             "close": [val]*60, "volume": [1000.0]*60},
+             "close": [val]*60, "volume": [10000.0]*60},
             index=idx,
         )
 
@@ -75,7 +82,7 @@ class _FakeData:
         val = 15.0 if sym_upper == "VIX" else 100.0
         return pd.DataFrame(
             {"open": [val]*len(idx), "high": [val]*len(idx), "low": [val]*len(idx),
-             "close": [val]*len(idx), "volume": [1000.0]*len(idx)},
+             "close": [val]*len(idx), "volume": [10000.0]*len(idx)},
             index=idx,
         )
 
@@ -354,6 +361,9 @@ async def test_phase5_entries_unblocked_after_recovery(engine_with_failed_reconc
     strat.signals_to_return.append(entry_sig)
     broker.submitted_orders.clear()
     engine.portfolio._lots.clear()
+    engine.system_health = "NORMAL"
+    engine.vix_unavailable = False
+    engine.risk.clock.always_open = True
 
     await engine._tick()
 
