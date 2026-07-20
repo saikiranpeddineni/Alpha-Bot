@@ -1,5 +1,6 @@
 import pytest
 import asyncio
+import logging
 import pandas as pd
 from datetime import datetime, UTC, timedelta
 from fastapi.testclient import TestClient
@@ -7,16 +8,16 @@ from unittest.mock import MagicMock, AsyncMock
 
 from app.config import Settings
 from app.main import create_app
-from app.core.domain import EngineState, Position
+from app.core.domain import EngineState, Position, Signal, SignalAction
 from app.core.engine import TradingEngine
 
 
-def make_fresh_df(price=15.0, ts=None):
+def make_fresh_df(price=15.0, ts=None, volume=100000.0):
     if ts is None:
         ts = datetime.now(UTC)
     return pd.DataFrame(
         index=[ts],
-        data={"open": [price], "high": [price], "low": [price], "close": [price], "volume": [100.0]}
+        data={"open": [price], "high": [price], "low": [price], "close": [price], "volume": [volume]}
     )
 
 
@@ -140,8 +141,11 @@ def test_heartbeat_stale_market_data(client):
         
     engine.data.frame = MagicMock(side_effect=side_effect)
     
-    # Set engine state to RUNNING to trigger stale check
+    # Set engine state to RUNNING in paper mode to trigger stale check
     engine.state = EngineState.RUNNING
+    engine.mode = "paper"
+    engine.data.provider = AsyncMock()
+    engine.data.provider.name = "alpaca"
     
     loop = asyncio.new_event_loop()
     try:
@@ -261,7 +265,7 @@ def test_heartbeat_order_reconciliation_failure(client):
     assert engine.heartbeat_diagnostics["orders_reconciled"] is False
 
 
-def test_heartbeat_vix_feed_unavailable(client):
+def test_heartbeat_vix_feed_unavailable_allows_defensive_entries(client):
     engine = client.app.state.engine
     setup_healthy_mocks(engine)
     
@@ -275,8 +279,111 @@ def test_heartbeat_vix_feed_unavailable(client):
         loop.close()
     
     assert engine.vix_unavailable is True
-    assert engine.system_health == "DEGRADED"
+    assert engine.system_health == "NORMAL"
     assert engine.heartbeat_diagnostics["vix_fresh"] is False
+    assert engine.last_safety_decision.market_risk_state == "DEFENSIVE"
+    assert engine.last_safety_decision.allow_new_entries is True
+    assert engine.last_safety_decision.risk_multiplier == 0.50
+
+
+def test_heartbeat_vix_unavailable_plus_stale_market_data_blocks_entries(client):
+    engine = client.app.state.engine
+    setup_healthy_mocks(engine)
+    engine.watchlist = ["SPY"]
+    engine.mode = "paper"
+    engine.data.provider = AsyncMock()
+    engine.data.provider.name = "alpaca"
+    engine.state = EngineState.RUNNING
+    
+    test_market_time = datetime(2026, 1, 6, 16, 0, 0, tzinfo=UTC)
+    stale_time = test_market_time - timedelta(minutes=20)
+    mock_df_spy = make_fresh_df(100.0, stale_time)
+    
+    def side_effect(symbol, *args, **kwargs):
+        if symbol in ("VIX", "^VIX"):
+            return pd.DataFrame()
+        return mock_df_spy
+        
+    engine.data.frame = MagicMock(side_effect=side_effect)
+    
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(engine._check_system_heartbeat(test_market_time))
+    finally:
+        loop.close()
+        
+    assert engine.vix_unavailable is True
+    assert engine.system_health == "NORMAL"  # market data check fails but allow_new_entries is False
+    assert engine.allow_new_entries is False
+    assert engine.last_safety_decision.allow_new_entries is False
+
+
+def test_heartbeat_vix_unavailable_plus_reconciliation_failure_blocks_entries(client):
+    engine = client.app.state.engine
+    setup_healthy_mocks(engine)
+    engine.reconciliation_mismatch = True
+    engine.data.frame = MagicMock(return_value=pd.DataFrame())
+    
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(engine._check_system_heartbeat(datetime.now(UTC)))
+    finally:
+        loop.close()
+        
+    assert engine.vix_unavailable is True
+    assert engine.system_health == "SAFE_MODE"
+    assert engine.allow_new_entries is False
+    assert engine.last_safety_decision.allow_new_entries is False
+
+
+def test_heartbeat_vix_state_transition_logging(client, caplog):
+    caplog.set_level(logging.INFO)
+    engine = client.app.state.engine
+    setup_healthy_mocks(engine)
+    
+    now = datetime.now(UTC)
+    loop = asyncio.new_event_loop()
+    try:
+        # 1. VIX unavailable -> Warn ONCE
+        engine.data.frame = MagicMock(return_value=pd.DataFrame())
+        caplog.clear()
+        loop.run_until_complete(engine._check_system_heartbeat(now))
+        warn_count_1 = sum(1 for rec in caplog.records if "VIX volatility feed unavailable" in rec.message)
+        assert warn_count_1 == 1
+        assert engine._vix_unavailable_last_state is True
+        
+        # 2. Remains unavailable -> No repeated warning
+        caplog.clear()
+        loop.run_until_complete(engine._check_system_heartbeat(now))
+        warn_count_2 = sum(1 for rec in caplog.records if "VIX volatility feed unavailable" in rec.message)
+        assert warn_count_2 == 0
+        assert engine._vix_unavailable_last_state is True
+        
+        # 3. VIX recovers -> Info recovery ONCE
+        fresh_df = make_fresh_df(15.0, now)
+        engine.data.frame = MagicMock(return_value=fresh_df)
+        caplog.clear()
+        loop.run_until_complete(engine._check_system_heartbeat(now))
+        info_recovery_count = sum(1 for rec in caplog.records if "VIX volatility feed restored" in rec.message)
+        assert info_recovery_count == 1
+        assert engine._vix_unavailable_last_state is False
+        
+        # 4. Remains healthy -> No repeated recovery message
+        caplog.clear()
+        loop.run_until_complete(engine._check_system_heartbeat(now))
+        info_recovery_count_2 = sum(1 for rec in caplog.records if "VIX volatility feed restored" in rec.message)
+        assert info_recovery_count_2 == 0
+        assert engine._vix_unavailable_last_state is False
+        
+        # 5. VIX fails again -> New warning ONCE
+        engine.data.frame = MagicMock(return_value=pd.DataFrame())
+        caplog.clear()
+        loop.run_until_complete(engine._check_system_heartbeat(now))
+        warn_count_3 = sum(1 for rec in caplog.records if "VIX volatility feed unavailable" in rec.message)
+        assert warn_count_3 == 1
+        assert engine._vix_unavailable_last_state is True
+    finally:
+        loop.close()
 
 
 def test_heartbeat_weekly_checks(client):
@@ -399,3 +506,40 @@ def test_dynamic_recovery_and_latching(client):
     assert r.json()["system_health"] == "NORMAL"
     assert r.json()["allow_new_entries"] is True
     assert engine.reconciliation_mismatch is False
+
+
+def test_vix_unavailable_defensive_risk_multiplier_sizing_propagation(client):
+    engine = client.app.state.engine
+    setup_healthy_mocks(engine)
+    
+    from app.risk.manager import AccountContext
+    ctx = AccountContext(
+        equity=100000.0, cash=100000.0, positions=[], day_pnl=0.0,
+        session_start_equity=100000.0, peak_equity=100000.0, day_trades_today=0, is_paper=True
+    )
+    df = make_fresh_df(100.0)
+    
+    # 1. Normal state signal evaluation (risk_multiplier = 1.0)
+    sig_normal = Signal(
+        symbol="SPY", action=SignalAction.ENTER_LONG, strategy="mean_reversion", price=100.0, confidence=0.8, reason=""
+    )
+    sig_normal.stop_loss = 95.0
+    sig_normal.risk_multiplier = 1.0
+    
+    decision_normal = engine.risk.evaluate_entry(sig_normal, ctx, df)
+    assert decision_normal.approved is True
+    qty_normal = decision_normal.order.qty
+    
+    # 2. VIX unavailable state (risk_multiplier = 0.50)
+    sig_defensive = Signal(
+        symbol="SPY", action=SignalAction.ENTER_LONG, strategy="mean_reversion", price=100.0, confidence=0.8, reason=""
+    )
+    sig_defensive.stop_loss = 95.0
+    sig_defensive.risk_multiplier = 0.50
+    
+    decision_defensive = engine.risk.evaluate_entry(sig_defensive, ctx, df)
+    assert decision_defensive.approved is True
+    qty_defensive = decision_defensive.order.qty
+    
+    # 3. Verify position sizing is reduced by ~50%
+    assert qty_defensive == qty_normal // 2

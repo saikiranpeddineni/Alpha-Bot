@@ -146,6 +146,7 @@ class TradingEngine:
         self.system_health = "NORMAL"
         self.allow_new_entries = True
         self.vix_unavailable = False
+        self._vix_unavailable_last_state: bool | None = None
         self.heartbeat_diagnostics = {}
         self._force_gated = False
 
@@ -752,7 +753,7 @@ class TradingEngine:
             _resurrection_enabled = getattr(self.broker, "is_paper", False) is True
             resurrected = []
             if _resurrection_enabled and self.state == EngineState.RUNNING and allow_entries:
-                resurrected = await self._process_resurrection_queue(account.equity, now)
+                resurrected = await self._process_resurrection_queue(account.equity, now, positions=positions)
             elif self.resurrection_queue:
                 if not _resurrection_enabled or self.state != EngineState.RUNNING or not allow_entries:
                     self.resurrection_queue.clear()
@@ -2171,7 +2172,9 @@ class TradingEngine:
         observations.append(observation)
         self.db.set_setting(key, observations[-200:])
 
-    async def _process_resurrection_queue(self, account_equity: float, now: datetime) -> list[tuple[Signal, pd.DataFrame]]:
+    async def _process_resurrection_queue(
+        self, account_equity: float, now: datetime, positions: list | None = None
+    ) -> list[tuple[Signal, pd.DataFrame]]:
         """Processes the resurrection queue, re-evaluating vetoed signals.
         Returns a list of resurrected candidate signal tuples (sig, df).
         """
@@ -2218,7 +2221,12 @@ class TradingEngine:
                     continue
 
                 # Run strategy on fresh bar
-                pos_by_symbol = {p.symbol: p for p in self.portfolio.positions} if self.portfolio else {}
+                if positions is not None:
+                    pos_by_symbol = {p.symbol: p for p in positions}
+                elif self.portfolio and hasattr(self.portfolio, "open_positions"):
+                    pos_by_symbol = self.portfolio.open_positions()
+                else:
+                    pos_by_symbol = {}
                 spy_df = enrich(self.data.frame("SPY", "1Min", limit=600))
                 rs_score = compute_relative_strength(df, spy_df)
                 regime, _ = detect_regime(df)
@@ -2477,12 +2485,23 @@ class TradingEngine:
                         break
             except Exception:
                 pass
+
+        last_vix_state = getattr(self, "_vix_unavailable_last_state", None)
+
         if not vix_fresh:
             diagnostics["vix_fresh"] = False
             self.vix_unavailable = True
-            if self.system_health not in ("SAFE_MODE", "HALTED"):
-                self.system_health = "DEGRADED"
-            applog.warning("engine.heartbeat", "VIX volatility feed unavailable. Falling back to conservative market-risk tier.")
+            # VIX unavailability triggers DEFENSIVE market-risk tier fallback, not global system health degradation.
+            if last_vix_state is not True:
+                applog.warning("engine.heartbeat", "VIX volatility feed unavailable. Falling back to conservative market-risk tier.")
+                self._vix_unavailable_last_state = True
+        else:
+            self.vix_unavailable = False
+            if last_vix_state is True:
+                applog.info("engine.heartbeat", "VIX volatility feed restored.")
+                self._vix_unavailable_last_state = False
+            elif last_vix_state is None:
+                self._vix_unavailable_last_state = False
 
         self.heartbeat_diagnostics = diagnostics
 

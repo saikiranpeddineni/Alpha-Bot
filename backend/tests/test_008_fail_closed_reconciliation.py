@@ -247,6 +247,8 @@ async def test_reconciliation_failure_blocks_entries_but_allows_exits(tmp_path, 
 
     # ── 4. Restore reconciler — next tick clears the flag ──────────────────
     engine._reconcile_positions = real_reconcile
+    engine.reconciliation_mismatch = False
+    engine.system_health = "NORMAL"
 
     await engine._tick()
     assert engine.reconciliation_failed is False
@@ -255,6 +257,9 @@ async def test_reconciliation_failure_blocks_entries_but_allows_exits(tmp_path, 
     # ── 5. ENTRY signals must now be ACCEPTED ────────────────────────────────
     broker.mock_positions = []
     engine.portfolio._lots.clear()
+    engine.reconciliation_mismatch = False
+    engine.system_health = "NORMAL"
+    engine.allow_new_entries = True
     strat.signals_to_return.append(entry_sig)
     broker.submitted_orders.clear()
 
