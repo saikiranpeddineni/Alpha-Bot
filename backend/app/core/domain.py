@@ -34,6 +34,7 @@ class OrderType(StrEnum):
 class OrderStatus(StrEnum):
     PENDING = "pending"
     SUBMITTED = "submitted"
+    PARTIALLY_FILLED = "partially_filled"
     FILLED = "filled"
     CANCELED = "canceled"
     REJECTED = "rejected"
