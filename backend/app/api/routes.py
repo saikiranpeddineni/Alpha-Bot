@@ -1674,11 +1674,6 @@ async def promote_policy(request: Request, body: PromoteRequest) -> dict:
                 "snapshot": snapshot,
             }
         except Exception as exc:
-            # Compensating Rollback - DB State
-            db.set_setting("active_policy_snapshot", old_snapshot)
-            db.set_setting("ml_threshold", old_ml_threshold)
-            db.set_setting("risk_config", old_risk_config)
-
             # Compensating Rollback - Engine Runtime State
             engine.risk_config = old_engine_risk_config
             if engine.risk:
