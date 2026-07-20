@@ -2534,7 +2534,7 @@ class TradingEngine:
         # 1. Fetch VIX data
         vix_sym = "VIX"
         for sym in ["VIX", "^VIX"]:
-            p = self.data.last_price(sym)
+            p = getattr(self.data, "last_price", lambda s: None)(sym) if hasattr(self.data, "last_price") else (self.data.last_prices([sym]).get(sym) if hasattr(self.data, "last_prices") else None)
             if p is not None:
                 vix_price = p
                 vix_sym = sym
