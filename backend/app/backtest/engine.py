@@ -714,10 +714,11 @@ async def run_backtest(
                         else:
                             applog.warning("backtest", "No historical data for daily adaptive training.")
                     except Exception as exc:
-                        applog.warning("backtest", f"Historical scanner/adaptive training failed: {exc}. Using fallback.")
-                        scanned_watchlist = []
-                        current_watchlist = list(core_watchlist)
-                        risk.core_watchlist = list(core_watchlist)
+                        applog.warning("backtest", f"Historical scanner/adaptive training failed: {exc}. Retaining last-known-good candidates.")
+                        new_watchlist = sorted(list(set(core_watchlist + scanned_watchlist)))
+                        if new_watchlist != current_watchlist:
+                            current_watchlist = new_watchlist
+                            risk.core_watchlist = list(current_watchlist)
                 
                 # Recompute correlation matrix daily for the current active watchlist
                 corr_frames = {}

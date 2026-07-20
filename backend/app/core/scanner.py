@@ -209,14 +209,14 @@ class MarketScanner:
 
         diag_records = {}
 
-        history_fn = getattr(self.data, "original_history", self.data.history)
+        history_fn = self.data.history
 
         async def _check(symbol: str) -> dict | None:
             symbol = symbol.upper()
             record = {
                 "symbol": symbol,
                 "T": end.isoformat(),
-                "adapter": "HistoricalAsOfDataAdapter" if hasattr(self.data, "original_history") else self.data.provider.__class__.__name__,
+                "adapter": self.data.provider.__class__.__name__,
                 "timeframe": "1Day",
                 "required_bars": 8,
                 "bars_raw": 0,
@@ -263,7 +263,10 @@ class MarketScanner:
                     now_et = now_tz.astimezone(ZoneInfo("America/New_York"))
                     et_mins = now_et.hour * 60 + now_et.minute
 
-                    allowed_lag = timedelta(hours=100) if et_mins < 9 * 60 + 30 else timedelta(hours=1)
+                    # Allow prior completed session daily bars (up to 120 hours / 5 calendar days
+                    # to accommodate long weekends and market holidays). A prior-session completed
+                    # 1Day bar is expected to be 17-24+ hours old during regular market hours.
+                    allowed_lag = timedelta(hours=120)
 
                     raw_lag = now_tz - latest_bar_ts
                     time_since_midnight = now_et - now_et.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -279,9 +282,10 @@ class MarketScanner:
                         return None
 
                     price = float(df["close"].iloc[-1])
+                    intraday_df = None
                     try:
                         intraday_df = await history_fn(symbol, "1Min", end - timedelta(minutes=15), end, prefer_cache=True)
-                        if not intraday_df.empty:
+                        if intraday_df is not None and not intraday_df.empty:
                             price = float(intraday_df["close"].iloc[-1])
                     except Exception:
                         pass
@@ -316,7 +320,16 @@ class MarketScanner:
                     record["FINAL_PASS"] = True
                     record["FINAL_REJECTION_REASON"] = "NONE"
 
-                    rvol = float(df["volume"].iloc[-1] / avg_vol) if avg_vol > 0 else 0.0
+                    # Time-normalized RVOL calculation for partial session comparison
+                    if et_mins >= 9 * 60 + 30 and et_mins <= 16 * 60:
+                        session_elapsed_frac = min(1.0, max(0.05, (et_mins - (9 * 60 + 30)) / 390.0))
+                    else:
+                        session_elapsed_frac = 1.0
+
+                    last_bar_vol = float(df["volume"].iloc[-1])
+                    normalized_last_vol = last_bar_vol / session_elapsed_frac if session_elapsed_frac > 0 else last_bar_vol
+                    rvol = float(normalized_last_vol / avg_vol) if avg_vol > 0 else 0.0
+
                     atr_pct = float(((df["high"] - df["low"]) / df["close"] * 100.0).mean())
                     yesterday_close = float(df["close"].iloc[-2]) if len(df) >= 2 else price
                     today_open = float(df["open"].iloc[-1])
@@ -340,9 +353,18 @@ class MarketScanner:
 
         results = await asyncio.gather(*[_check(sym) for sym in all_symbols])
         candidates = [r for r in results if r is not None]
+
+        # Aggregate rejection reasons for diagnostics
+        rejection_counts = {}
+        for rec in diag_records.values():
+            if not rec.get("FINAL_PASS"):
+                reason = rec.get("FINAL_REJECTION_REASON", "UNKNOWN")
+                rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+
+        self._last_stage1_rejections = rejection_counts
         applog.info(
             "scanner",
-            f"[Stage 1] {len(candidates)}/{len(all_symbols)} symbols passed pre-filter.",
+            f"[Stage 1] {len(candidates)}/{len(all_symbols)} symbols passed pre-filter. Rejections: {rejection_counts}",
         )
         return candidates
 
@@ -535,7 +557,12 @@ class MarketScanner:
             stage1_symbols = await self._stage1_symbols(as_of=as_of)
             stage1 = await self._stage1_prefilter_parallel(as_of=as_of, symbols=stage1_symbols)
             if not stage1:
-                applog.warning("scanner", "Stage 1 returned no candidates.")
+                rejections = getattr(self, "_last_stage1_rejections", {})
+                data_errors = rejections.get("STALE_DATA", 0) + rejections.get("MISSING_DATA", 0) + rejections.get("CALCULATION_ERROR", 0)
+                if data_errors > 0 and data_errors >= 0.5 * len(stage1_symbols):
+                    applog.warning("scanner", f"Stage 1 FAILED due to systemic data infrastructure issues. Rejections: {rejections}")
+                    return ScannerOutcome.FAILED, []
+                applog.warning("scanner", f"Stage 1 returned no candidates due to market filters. Rejections: {rejections}")
                 return ScannerOutcome.SUCCESS_EMPTY, []
 
             stage2 = self._stage2_technical_score(stage1, as_of=as_of)
