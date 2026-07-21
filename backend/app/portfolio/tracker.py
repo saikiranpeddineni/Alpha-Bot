@@ -287,7 +287,8 @@ class PortfolioTracker:
         }
 
     def on_fill(self, fill: Fill, peak_price: float | None = None, trough_price: float | None = None,
-                initial_stop: float | None = None, risk_state: dict | None = None) -> TradeRecord | None:
+                initial_stop: float | None = None, risk_state: dict | None = None,
+                risk_manager: Any | None = None, now: datetime | None = None) -> TradeRecord | None:
         if fill.broker_fill_key and fill.cumulative_qty is not None and fill.broker_mode:
             from app.db.database import Database
             db = Database.active()
@@ -305,6 +306,14 @@ class PortfolioTracker:
                 before = copy.deepcopy(self.__dict__)
                 try:
                     trade = self._apply_fill(effective, peak_price, trough_price, initial_stop)
+                    # fix(#43): invoke risk manager on trade close BEFORE capturing checkpoint
+                    # so post-close loss-streak & cooldown state are saved atomically in DB
+                    if trade is not None and risk_manager is not None:
+                        risk_manager.on_trade_closed(trade, now=now)
+                        risk_state = risk_manager.get_risk_state()
+                    elif risk_state is None and risk_manager is not None:
+                        risk_state = risk_manager.get_risk_state()
+
                     db.commit_fill_processing(
                         fill_key=fill.broker_fill_key,
                         cumulative_qty=float(fill.cumulative_qty),
@@ -318,6 +327,7 @@ class PortfolioTracker:
                     self.__dict__.clear()
                     self.__dict__.update(before)
                     raise
+
 
         return self._apply_fill(fill, peak_price, trough_price, initial_stop)
 

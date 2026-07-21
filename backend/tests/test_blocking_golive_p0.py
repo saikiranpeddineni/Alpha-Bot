@@ -211,6 +211,43 @@ class TestIssue43WatermarkCommitOrder:
         assert rm_restored.consecutive_losses == 3
         assert "AAPL" in rm_restored.symbol_cooldowns
 
+    def test_post_close_risk_state_persisted_atomically_on_trade_close(self, tmp_path):
+        """#43: RiskManager.on_trade_closed runs BEFORE checkpoint persistence, saving post-close risk state."""
+        from app.portfolio.tracker import PortfolioTracker, _OpenLot
+        from app.brokers.base import Fill
+        from app.core.domain import OrderSide
+        from app.risk.manager import RiskManager
+        from app.config import RiskConfig
+        from app.core.clock import MarketClock
+        from app.db.database import Database
+
+        db = Database(tmp_path / "test_risk_atomic.db")
+        rm = RiskManager(RiskConfig(), MarketClock())
+
+        tracker = PortfolioTracker(restore_mode="paper")
+        tracker._lots["AAPL"] = _OpenLot(
+            qty=100.0, avg_price=100.0,
+            entry_ts=datetime(2025, 1, 2, 14, 0, tzinfo=UTC),
+            strategy="test",
+        )
+
+        close_fill = Fill(
+            order_id="close-losing", symbol="AAPL",
+            side=OrderSide.SELL, qty=100.0, price=90.0,
+            ts=datetime(2025, 1, 2, 15, 30, tzinfo=UTC),
+            strategy="test", broker_fill_key="close-losing",
+            cumulative_qty=100.0, broker_mode="paper"
+        )
+
+        with patch("app.db.database.Database.active", return_value=db):
+            tracker.on_fill(close_fill, risk_manager=rm, now=close_fill.ts)
+
+        cp = db.get_portfolio_checkpoint("paper")
+        assert cp is not None
+        assert "risk_state" in cp
+        assert "AAPL" in cp["risk_state"]["symbol_cooldowns"], "#43: Post-close symbol cooldown must be persisted in DB checkpoint"
+
+
 
 
 # ---------------------------------------------------------------------------

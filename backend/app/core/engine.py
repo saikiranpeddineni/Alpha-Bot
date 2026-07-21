@@ -1483,14 +1483,15 @@ class TradingEngine:
             else:
                 self._position_initial_stops[symbol] = init_stop
 
-            risk_state = self.risk.get_risk_state() if self.risk else None
-            trade = self.portfolio.on_fill(fill, peak_price=peak, trough_price=trough, initial_stop=init_stop, risk_state=risk_state)
+            trade = self.portfolio.on_fill(
+                fill, peak_price=peak, trough_price=trough, initial_stop=init_stop,
+                risk_manager=self.risk, now=now
+            )
             if trade is not None:
-                self.risk.on_trade_closed(trade, now=now)
-
                 self.perf_tracker.update(trade, now=now)
                 self.db.save_trade(trade, self.mode)
                 self.publish("trade", trade.model_dump(mode="json"))
+
 
                 # Exit counterfactuals replay on live completed trade
                 try:

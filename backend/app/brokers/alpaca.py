@@ -392,12 +392,13 @@ class AlpacaBroker(Broker):
         from app.db.database import Database
 
         db = Database.active()
-        # fix(#47): start recovery from the durable reconciliation cursor in DB if available
+        # fix(#47): start recovery from the forward reconciliation cursor in DB if available
         after = datetime.now(UTC) - timedelta(days=30)
         if db and self.account_id:
             cursor_ts = db.get_fill_recovery_cursor_timestamp(self._broker_mode, self.account_id)
             if cursor_ts is not None:
-                after = cursor_ts - timedelta(hours=1)
+                after = cursor_ts - timedelta(minutes=15)
+
 
         try:
             # fix(#50): full paginated sweep — never silently drop fills beyond 500

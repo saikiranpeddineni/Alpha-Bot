@@ -352,15 +352,16 @@ class Database:
             return float(row.cumulative_qty) if row else 0.0
 
     def get_fill_recovery_cursor_timestamp(self, mode: str, account_id: str) -> datetime | None:
-        """Return oldest processed_at from FillProgressRow for cursor recovery (#47)."""
-        from sqlalchemy import func
+        """Return most recent processed_at from FillProgressRow for forward cursor recovery (#47)."""
+        from sqlalchemy import func, select
         with self._session() as s:
             stmt = (
-                select(func.min(FillProgressRow.processed_at))
+                select(func.max(FillProgressRow.processed_at))
                 .where(FillProgressRow.mode == mode)
                 .where(FillProgressRow.account_id == account_id)
             )
             return s.scalar(stmt)
+
 
 
     def get_portfolio_checkpoint(self, mode: str) -> dict | None:
