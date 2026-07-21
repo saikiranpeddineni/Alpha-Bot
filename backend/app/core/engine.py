@@ -878,6 +878,17 @@ class TradingEngine:
                                     self._update_shadow_decision(sig.candidate_id, "rejected", decision.reason, "risk_gate")
                                 continue
 
+                            # Check if asset is shortable before submitting short entries
+                            if sig.action == SignalAction.ENTER_SHORT:
+                                is_short = await self.broker.is_shortable(sig.symbol)
+                                if not is_short:
+                                    reason = "Asset is not shortable at broker"
+                                    applog.info("engine", f"{sig.symbol.upper()}: entry rejected — {reason}")
+                                    self.publish("insight", self.insights.on_signal(sig, gated=True, gate_reason=reason).model_dump(mode="json"))
+                                    if getattr(sig, "candidate_id", None) is not None:
+                                        self._update_shadow_decision(sig.candidate_id, "rejected", reason, "broker_gate")
+                                    continue
+
                             client_order_id = decision.order.client_order_id
                             self.pending_reconciliation_orders[client_order_id] = {
                                 "symbol": decision.order.symbol.upper(),
