@@ -1,41 +1,39 @@
-"""Market Session Exchange Calendar Helper (#231).
+"""Market-session calendar helpers used by intraday replay.
 
-Resolves session close datetime for a given entry timestamp, handling regular trading
-sessions (16:00 ET close) and known early-close dates (13:00 ET close).
+Session boundaries are resolved from the XNYS exchange calendar rather than a
+hand-maintained holiday/early-close table.  This keeps replay evidence inside
+the actual trading session, including holidays and year-specific early closes.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, time
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
-ET = ZoneInfo("America/New_York")
+import exchange_calendars as xcals
 
-# Known early close dates (Month, Day) -> Close Time (13:00 ET)
-EARLY_CLOSE_DATES: set[tuple[int, int]] = {
-    (7, 3),   # Day before Independence Day
-    (11, 27), # Day after Thanksgiving
-    (12, 24), # Christmas Eve
-}
+ET = ZoneInfo("America/New_York")
+_XNYS = xcals.get_calendar("XNYS")
 
 
 def get_session_close(entry_dt: datetime) -> datetime:
-    """Return exchange session close datetime in Eastern Time for the given entry timestamp (#231).
-    
-    Session close is 16:00 ET on standard trading days, and 13:00 ET on early close dates.
+    """Return the authoritative XNYS session close for ``entry_dt``.
+
+    ``entry_dt`` may be naive (treated as UTC) or timezone-aware.  A timestamp
+    whose Eastern calendar date is not an exchange session fails closed with
+    ``ValueError`` instead of inventing a 16:00 close.
     """
     if entry_dt.tzinfo is None:
         from datetime import UTC
+
         entry_dt = entry_dt.replace(tzinfo=UTC)
 
     et_dt = entry_dt.astimezone(ET)
-    month_day = (et_dt.month, et_dt.day)
+    session_date = et_dt.date().isoformat()
 
-    close_hour = 13 if month_day in EARLY_CLOSE_DATES else 16
-    session_close_et = datetime.combine(
-        et_dt.date(),
-        time(close_hour, 0, 0),
-        tzinfo=ET
-    )
+    if not _XNYS.is_session(session_date):
+        raise ValueError(f"{session_date} is not an XNYS trading session")
 
-    return session_close_et
+    close_ts = _XNYS.session_close(session_date)
+    close_dt = close_ts.to_pydatetime()
+    return close_dt.astimezone(ET)
