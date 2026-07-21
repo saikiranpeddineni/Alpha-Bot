@@ -2866,28 +2866,10 @@ class TradingEngine:
         breadth_positive = True
 
         # 1. Fetch VIX data
-<<<<<<< HEAD
-        vix_sym = "^VIX"
-        for sym in ["^VIX", "VIX"]:
-            p = None
-            try:
-                if hasattr(self.data, "last_price") and callable(getattr(self.data, "last_price", None)):
-                    p = self.data.last_price(sym)
-                elif hasattr(self.data, "last_prices") and callable(getattr(self.data, "last_prices", None)):
-                    prices = self.data.last_prices([sym])
-                    p = prices.get(sym) if isinstance(prices, dict) else None
-            except Exception:
-                p = None
-            if p is not None:
-                vix_price = p
-                vix_sym = sym
-                break
-=======
         vix_sym = self._vix_symbols()[0]
         vix_df = getattr(self, "_latest_vix_frame", None)
         if vix_df is None or vix_df.empty:
             vix_df = self._fetch_vix_frame(vix_sym, now)
->>>>>>> feature/governance-and-engine-safeguards
         
         # Calculate VIX percentile and velocity
         try:
