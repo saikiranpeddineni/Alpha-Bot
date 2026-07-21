@@ -22,18 +22,21 @@ if ((Test-Path "key.pem") -and (Test-Path "cert.pem")) {
     $protocol = "https"
 }
 
+$openHost = $bind
+if ($bind -eq "0.0.0.0") { $openHost = "127.0.0.1" }
+
 Write-Host "Starting frontend dev server..." -ForegroundColor Cyan
 $feProcess = Start-Process cmd.exe -ArgumentList "/c npm run dev" -WorkingDirectory (Join-Path $PSScriptRoot "frontend") -PassThru -NoNewWindow
 
 Write-Host "=== AlphaDesk starting on ${protocol}://${bind}:${port} ===" -ForegroundColor Cyan
-Write-Host "Opening UI dashboard on http://127.0.0.1:5173" -ForegroundColor Cyan
+Write-Host "Opening UI dashboard on ${protocol}://${openHost}:${port}" -ForegroundColor Cyan
 Write-Host "Press Ctrl+C to stop both backend & frontend."
 Write-Host ""
 
 try {
-    # Give the dev server a brief moment to initialize, then open the browser
+    # Give the dev server a brief moment to initialize, then open the browser to backend directly
     Start-Sleep -Seconds 2
-    Start-Process "http://127.0.0.1:5173"
+    Start-Process "${protocol}://${openHost}:${port}"
     
     # Run the backend in the foreground
     & $venvPy backend\run_server.py
