@@ -2090,6 +2090,9 @@ class TradingEngine:
         scanner = MarketScanner(self.data, self.user_watchlist, risk_config=self.risk_config)
         scan_label = "Intraday refresh" if is_intraday else "Pre-market"
         applog.info("engine", f"Starting autonomous market scanner ({scan_label} scan)...")
+        # Mark scanner as run so Monitor 6 doesn't report scanner_never_run (covers manual triggers too)
+        from zoneinfo import ZoneInfo
+        self._last_scan_date = datetime.now(ZoneInfo("America/New_York")).date()
         outcome, new_watchlist = await scanner.run()
         if outcome == ScannerOutcome.FAILED:
             applog.error("engine", "Market scanner failed; preserving the existing watchlist")
