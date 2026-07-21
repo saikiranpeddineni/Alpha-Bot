@@ -602,6 +602,12 @@ class TradingEngine:
         self._tick_count += 1
         now = utcnow()
 
+        # Poll real fills at the start of the tick to prevent position reconciliation race conditions
+        from app.brokers.paper import PaperBroker
+        if not isinstance(self.broker, PaperBroker) and hasattr(self.broker, "poll_fills"):
+            await self.broker.poll_fills()
+            await self._drain_fills(now)
+
         # System Heartbeat Checks (CR-146 Phase F)
         await self._check_system_heartbeat(now)
         if self.state == EngineState.HALTED:
@@ -676,9 +682,11 @@ class TradingEngine:
             for symbol, bars in new_closed.items():
                 for ts, row in bars.iterrows():
                     self.broker.process_bar(symbol, row, (ts + timedelta(minutes=1)).to_pydatetime())
-        elif hasattr(self.broker, "poll_fills"):
-            await self.broker.poll_fills()
-        await self._drain_fills(now)
+            await self._drain_fills(now)
+        else:
+            if hasattr(self.broker, "poll_fills"):
+                await self.broker.poll_fills()
+            await self._drain_fills(now)
 
         try:
             account = await self.broker.account()
