@@ -185,10 +185,45 @@ class CanonicalOutcomeResolver:
 
             valid_filtered.append(ev)
 
-        metadata = {
-            "error": None,
+        return valid_filtered, {
             "sources": list(sources_observed),
             "valid_r_count": len(valid_filtered),
             "total_records": len(records),
         }
-        return valid_filtered, metadata
+
+    @classmethod
+    def calculate_matched_nomination_evidence(
+        cls,
+        champion_records: list[dict],
+        candidate_records: list[dict],
+        min_promotion_sample: int = 30,
+    ) -> dict:
+        """Calculate nomination denominator using matched valid observation pairs (#237).
+        
+        Requires matched valid evidence count >= min_promotion_sample.
+        """
+        champ_map = {}
+        for r in champion_records:
+            cid = r.get("candidate_id") or r.get("id")
+            ev = cls.resolve(r)
+            if ev.valid and ev.realized_r is not None and cid:
+                champ_map[cid] = ev
+
+        cand_map = {}
+        for r in candidate_records:
+            cid = r.get("candidate_id") or r.get("id")
+            ev = cls.resolve(r)
+            if ev.valid and ev.realized_r is not None and cid:
+                cand_map[cid] = ev
+
+        matched_keys = set(champ_map.keys()) & set(cand_map.keys())
+        matched_valid_count = len(matched_keys)
+        eligible = matched_valid_count >= min_promotion_sample
+
+        return {
+            "matched_valid_count": matched_valid_count,
+            "min_promotion_sample": min_promotion_sample,
+            "nomination_eligible": eligible,
+            "reason": "VALID_MATCHED_SAMPLES" if eligible else "INSUFFICIENT_MATCHED_SAMPLES",
+            "matched_keys": list(matched_keys),
+        }

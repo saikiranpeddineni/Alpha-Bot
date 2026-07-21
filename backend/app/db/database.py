@@ -650,6 +650,30 @@ class Database:
                 "last_replay_success_at": last_success_iso,
             }
 
+    def update_shadow_signal_atomic(
+        self,
+        candidate_id: str,
+        policy_id: str,
+        updates: dict
+    ) -> bool:
+        """Execute targeted SQL update asserting affected_rows == 1 (#242)."""
+        from sqlalchemy import update
+        row_id = f"{candidate_id}_{policy_id}"
+        with self._session() as s:
+            stmt = (
+                update(ShadowLedgerRow)
+                .where(ShadowLedgerRow.id == row_id)
+                .values(**updates)
+            )
+            res = s.execute(stmt)
+            if res.rowcount != 1:
+                s.rollback()
+                raise ValueError(
+                    f"update_shadow_signal_atomic failed for '{row_id}': affected_rows={res.rowcount} (expected 1)"
+                )
+            s.commit()
+            return True
+
     def get_shadow_signal(self, candidate_id: str, policy_id: str = "champion") -> dict | None:
         with self._session() as s:
             row = s.get(ShadowLedgerRow, f"{candidate_id}_{policy_id}")
