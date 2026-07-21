@@ -360,7 +360,7 @@ async def test_atomic_promotion_rollback_on_failure(temp_db):
     
     temp_db.set_setting = mock_set_setting
 
-    temp_db.save_policy_evidence({
+    temp_db.save_policy_evidence("ev_fix_rollback_123", "challenger_high_ml", datetime.now(UTC), {
         "evidence_package_id": "ev_fix_rollback_123",
         "policy_id": "challenger_high_ml",
         "timestamp": "2026-01-06T12:00:00",
