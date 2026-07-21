@@ -98,17 +98,15 @@ class PortfolioTracker:
             return
         checkpoint = db.get_portfolio_checkpoint(self.restore_mode)
         if checkpoint:
-            # fix(#61): reject checkpoint if account_id does not match the live broker account
             stored_account_id = checkpoint.get("account_id")
-            if stored_account_id and self.restore_account_id and stored_account_id != self.restore_account_id:
+            if self.restore_account_id is not None and stored_account_id != self.restore_account_id:
                 applog.error(
                     "portfolio",
-                    f"#61 CRITICAL: Refusing to restore {self.restore_mode} portfolio checkpoint — "
-                    f"stored account_id={stored_account_id!r} does NOT match current broker "
-                    f"account_id={self.restore_account_id!r}. Starting with a clean slate to "
-                    "prevent cross-account lot state pollution.",
+                    f"#61 CRITICAL: Refusing to restore {self.restore_mode} checkpoint: "
+                    f"stored account_id={stored_account_id!r} does not match required account_id={self.restore_account_id!r}."
                 )
                 return
+
             self.restore_checkpoint(checkpoint)
             applog.info("portfolio", f"Restored durable {self.restore_mode} portfolio checkpoint (account_id={stored_account_id!r})")
 

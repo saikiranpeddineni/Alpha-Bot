@@ -68,15 +68,15 @@ async def _call(fn, *args, timeout: float = _API_TIMEOUT, label: str = "", **kwa
 
 
 async def _paginate_orders(client: object, request: object, label: str = "get_orders") -> list:
-    """fix(#50): Paginate Alpaca get_orders until page is smaller than limit.
+    """fix(#50): Paginate Alpaca get_orders until no new orders are returned.
 
-    Alpaca returns at most 500 orders per call. If exactly 500 are returned there
-    may be more.  We iterate using ``after`` on the last record's filled_at /
-    submitted_at until a page smaller than the page size comes back.
+    Handles deduplication across overlapping pages, orders sharing identical timestamps,
+    and multi-page results without skipping orders sharing the cursor timestamp.
     """
     from alpaca.trading.requests import GetOrdersRequest
     page_size: int = getattr(request, "limit", 500) or 500
     all_orders: list = []
+    seen_ids: set[str] = set()
     current_after = getattr(request, "after", None)
 
     while True:
@@ -88,10 +88,18 @@ async def _paginate_orders(client: object, request: object, label: str = "get_or
         page = await _call(client.get_orders, paged_req, label=f"{label}/page{len(all_orders)//page_size + 1}")
         if not page:
             break
-        all_orders.extend(page)
-        if len(page) < page_size:
+
+        new_count = 0
+        for o in page:
+            oid = str(getattr(o, "id", ""))
+            if oid and oid not in seen_ids:
+                seen_ids.add(oid)
+                all_orders.append(o)
+                new_count += 1
+
+        if new_count == 0 or len(page) < page_size:
             break
-        # Advance cursor: use the latest timestamp in this page
+
         last = page[-1]
         ts = getattr(last, "filled_at", None) or getattr(last, "updated_at", None) or getattr(last, "submitted_at", None)
         if ts is None:
@@ -99,6 +107,7 @@ async def _paginate_orders(client: object, request: object, label: str = "get_or
         current_after = ts
 
     return all_orders
+
 
 
 class AlpacaBroker(Broker):

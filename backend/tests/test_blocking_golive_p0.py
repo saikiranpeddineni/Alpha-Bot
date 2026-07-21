@@ -671,3 +671,99 @@ class TestIssue86MarketDataGapGate:
         source = inspect.getsource(TradingEngine.__init__)
         assert "_data_gap_symbols" in source, "#86: _data_gap_symbols must be initialized in __init__"
         assert "_last_data_bar_ts" in source, "#86: _last_data_bar_ts must be initialized in __init__"
+
+    def test_xnys_calendar_early_close_and_holiday_session_bounds(self):
+        """#86: XNYS calendar correctly identifies 13:00 ET early close days and holidays."""
+        from app.core.calendar_helper import get_session_close, ET
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        # July 3, 2025 (Day before Independence Day — 13:00 ET early close)
+        july3 = datetime(2025, 7, 3, 10, 0, tzinfo=ZoneInfo("America/New_York"))
+        close_july3 = get_session_close(july3)
+        assert close_july3.hour == 13, f"#86: July 3 close expected 13:00 ET, got {close_july3}"
+
+        # July 4, 2025 (Independence Day — Exchange Holiday)
+        july4 = datetime(2025, 7, 4, 10, 0, tzinfo=ZoneInfo("America/New_York"))
+        with pytest.raises(ValueError, match="not an XNYS trading session"):
+            get_session_close(july4)
+
+
+class TestEdgeCases:
+    @pytest.mark.asyncio
+    async def test_paginate_orders_deduplicates_and_handles_identical_timestamps(self):
+        """#50: Paginate orders deduplicates overlap and does not infinite loop on identical timestamps."""
+        from app.brokers.alpaca import _paginate_orders
+        from alpaca.trading.requests import GetOrdersRequest
+        from types import SimpleNamespace
+
+        ts_same = datetime(2025, 5, 1, 14, 0, tzinfo=UTC)
+        o1 = SimpleNamespace(id="ord-1", filled_at=ts_same)
+        o2 = SimpleNamespace(id="ord-2", filled_at=ts_same)
+
+        client = MagicMock()
+        with patch("app.brokers.alpaca._call", new_callable=AsyncMock) as mock_call:
+            # First call returns 2 orders; second call returns same 2 orders (overlapping page)
+            mock_call.side_effect = [[o1, o2], [o1, o2]]
+            result = await _paginate_orders(client, GetOrdersRequest(limit=2))
+
+        assert len(result) == 2, f"#50: Expected 2 unique orders, got {len(result)}"
+
+    @pytest.mark.asyncio
+    async def test_interleaved_partial_fills_execution_chronology(self):
+        """#51: Interleaved partial fills across multiple orders sort deterministically by (ts, order_id, cumulative_qty)."""
+        from app.core.domain import OrderSide
+        from app.brokers.base import Fill
+        from app.core.engine import TradingEngine
+
+        ts = datetime(2025, 1, 2, 14, 0, tzinfo=UTC)
+
+        f_b1 = Fill(order_id="ord-B", symbol="MSFT", side=OrderSide.BUY, qty=10.0, price=200.0, ts=ts, strategy="test", cumulative_qty=10.0)
+        f_a2 = Fill(order_id="ord-A", symbol="AAPL", side=OrderSide.BUY, qty=20.0, price=100.0, ts=ts, strategy="test", cumulative_qty=30.0)
+        f_a1 = Fill(order_id="ord-A", symbol="AAPL", side=OrderSide.BUY, qty=10.0, price=100.0, ts=ts, strategy="test", cumulative_qty=10.0)
+
+        mock_broker = MagicMock()
+        mock_broker.drain_fills.return_value = [f_b1, f_a2, f_a1]
+
+        mock_portfolio = MagicMock()
+        engine = MagicMock()
+        engine.broker = mock_broker
+        engine.portfolio = mock_portfolio
+        engine.recent_orders = []
+        engine.db = MagicMock()
+        engine.db.get_order.return_value = None
+        engine._position_peaks = {}
+        engine._position_troughs = {}
+        engine._position_initial_stops = {}
+        engine._pending_close_symbols = set()
+        engine.risk = MagicMock()
+        engine._trades_since_insight = 0
+        engine.perf_tracker = MagicMock()
+
+
+        await TradingEngine._drain_fills(engine, ts)
+
+        calls = mock_portfolio.on_fill.call_args_list
+        assert len(calls) == 3
+        # Sorted order: (ord-A, cum 10.0) -> (ord-A, cum 30.0) -> (ord-B, cum 10.0)
+        assert calls[0][0][0].order_id == "ord-A" and calls[0][0][0].cumulative_qty == 10.0
+        assert calls[1][0][0].order_id == "ord-A" and calls[1][0][0].cumulative_qty == 30.0
+        assert calls[2][0][0].order_id == "ord-B" and calls[2][0][0].cumulative_qty == 10.0
+
+    def test_missing_account_id_fails_closed(self):
+        """#61: Checkpoint with missing account_id fails closed when restore_account_id is required."""
+        from app.portfolio.tracker import PortfolioTracker
+
+        mock_db = MagicMock()
+        mock_db.get_portfolio_checkpoint.return_value = {
+            # account_id is None / missing
+            "realized_pnl": 99999.0,
+            "lots": {},
+            "trades": [],
+        }
+
+        with patch("app.db.database.Database.active", return_value=mock_db):
+            tracker = PortfolioTracker(restore_mode="live", restore_account_id="account-REQUIRED")
+
+        assert tracker.realized_pnl == 0.0, "#61: Missing account_id in checkpoint must fail closed"
+

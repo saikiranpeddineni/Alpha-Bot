@@ -725,8 +725,18 @@ class TradingEngine:
         new_closed = await self.data.poll(self.watchlist)
 
         # fix(#86): detect market-data gaps >2 min during regular trading hours and gate entries
-        _DATA_GAP_THRESHOLD_SECS = 120  # 2 minutes
-        _is_regular_session = 9 * 60 + 30 <= et_mins <= 16 * 60  # 9:30–16:00 ET
+        _is_regular_session = False
+        try:
+            from app.core.calendar_helper import get_session_close
+            from datetime import time as dtime
+            session_close = get_session_close(now)
+            if now_et.time() >= dtime(9, 30) and now_et <= session_close:
+                _is_regular_session = True
+        except ValueError:
+            _is_regular_session = False
+        except Exception:
+            _is_regular_session = 9 * 60 + 30 <= et_mins <= 16 * 60
+
         if _is_regular_session:
             for sym in self.watchlist:
                 sym_upper = sym.upper()
