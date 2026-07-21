@@ -208,6 +208,7 @@ class ShadowLedger:
         vix_value: float | None = None,
         vix_age: float | None = None,
         vix_feed_status: str | None = None,
+        regime_source: str | None = None,
     ) -> dict:
         """Assembles a telemetry record, computes future outcomes, and saves it to the DB."""
         if candidate_id is None:
@@ -217,6 +218,9 @@ class ShadowLedger:
 
         clock_phase = classify_clock_phase(ts)
         behavior_state = classify_market_behavior(spy_df, ts)
+
+        # Track whether market_regime was supplied externally (VIX-derived) before we estimate
+        _regime_externally_supplied = market_regime is not None
 
         if market_regime is None:
             # Estimate regime based on spy_vol if VIX is not provided (e.g. in backtests)
@@ -229,6 +233,15 @@ class ShadowLedger:
                     market_regime = "NORMAL"
             else:
                 market_regime = "NORMAL"
+
+        # Determine regime_source: explicit > caller-supplied > proxy
+        if regime_source is None:
+            if _regime_externally_supplied:
+                regime_source = "VIX"
+            elif spy_vol is not None:
+                regime_source = "SPY_VOL_PROXY"
+            else:
+                regime_source = "UNKNOWN"
 
         # Classify opportunity mapper class using premarket subset
         # We can extract premarket bars for today (up to 09:30 AM ET)
@@ -313,6 +326,7 @@ class ShadowLedger:
             "vix_value": round(vix_value, 4) if vix_value is not None else None,
             "vix_age": round(vix_age, 2) if vix_age is not None else None,
             "vix_feed_status": vix_feed_status,
+            "regime_source": regime_source,
         }
 
         # Calculate unique/shared/redundant veto attribution if gate_evidence_json is present
