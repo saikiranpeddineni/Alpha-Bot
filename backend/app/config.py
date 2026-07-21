@@ -56,6 +56,9 @@ class RiskConfig(BaseModel):
     bb_squeeze_base_fallback_bypass_start_et: int = Field(840, ge=570, le=960)
     bb_squeeze_base_fallback_bypass_end_et: int = Field(930, ge=570, le=960)
     scanner_watchlist_ttl: int = Field(3, ge=1, le=30)
+    promotion_min_valid_observations: int = Field(30, ge=1, le=1000)
+    promotion_min_win_rate_pct: float = Field(50.0, ge=0.0, le=100.0)
+    promotion_min_expectancy_r: float = Field(0.1, ge=-1.0, le=10.0)
     alternative_exits: list[dict] = Field(
         default=[
             {"policy_id": "exit_bracket_tight", "take_profit_pct": 1.0, "stop_loss_pct": 0.5},
