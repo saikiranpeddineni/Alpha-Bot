@@ -1733,6 +1733,40 @@ async def promote_policy(request: Request, body: PromoteRequest) -> dict:
                 detail="Conflict: Evidence package policy_id does not match target policy."
             )
 
+        # Cryptographic Integrity & Safety Checks Validation (#246, #251)
+        if "safety_checks" in evidence_pkg and "envelope_signature" in evidence_pkg:
+            from app.core.promotion import PromotionEvidenceEnvelope, SafetyCheckEvidence, SafetyCheckStatus
+            sc_list = [
+                SafetyCheckEvidence(
+                    rule_name=sc["rule_name"],
+                    status=SafetyCheckStatus(sc["status"]),
+                    details=sc.get("details", ""),
+                    timestamp=sc.get("timestamp", "")
+                )
+                for sc in evidence_pkg.get("safety_checks", [])
+            ]
+            envelope = PromotionEvidenceEnvelope(
+                policy_id=evidence_pkg.get("policy_id", policy_id),
+                git_commit_sha=evidence_pkg.get("git_commit_sha", ""),
+                package_hash=evidence_pkg.get("package_hash", ""),
+                safety_checks=sc_list,
+                canonical_evidence_metadata=evidence_pkg.get("canonical_evidence_metadata", {}),
+                timestamp=evidence_pkg.get("timestamp", ""),
+                envelope_signature=evidence_pkg.get("envelope_signature", "")
+            )
+            if not envelope.verify_integrity():
+                raise HTTPException(
+                    status_code=400,
+                    detail="Invalid evidence package: cryptographic envelope signature mismatch or evidence payload tampered."
+                )
+            all_passed = all(sc.status == SafetyCheckStatus.PASS for sc in sc_list)
+            if not all_passed:
+                failed_rules = [sc.rule_name for sc in sc_list if sc.status != SafetyCheckStatus.PASS]
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Rejected: Evidence package safety checks failed for rules: {failed_rules}."
+                )
+
         # 8. Capture pre-promotion state & record promotion log
         old_snapshot = db.get_setting("active_policy_snapshot")
         old_ml_threshold = db.get_setting("ml_threshold")

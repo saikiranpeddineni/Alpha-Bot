@@ -220,7 +220,17 @@ def test_promotion_governance_controls(client):
     })
     assert r.status_code == 400
 
-    # 3. Verify promotion fails with invalid evidence package ID
+    # 3. Verify promotion fails with blank evidence package ID (#246)
+    r = client.post("/api/strategies/promote", json={
+        "policy_id": policy_id,
+        "promoter_id": "admin_user",
+        "reason": "testing governance",
+        "evidence_package_id": ""
+    })
+    assert r.status_code == 400
+    assert "evidence_package_id is required" in r.json()["detail"]
+
+    # 3b. Verify promotion fails with invalid evidence package ID
     r = client.post("/api/strategies/promote", json={
         "policy_id": policy_id,
         "promoter_id": "admin_user",
@@ -228,6 +238,49 @@ def test_promotion_governance_controls(client):
         "evidence_package_id": "invalid_package_id"
     })
     assert r.status_code == 400
+
+    # 3c. Verify promotion fails with tampered envelope signature (#251)
+    from app.core.promotion import PromotionEvidenceEnvelope, SafetyCheckEvidence, SafetyCheckStatus
+    sc_pass = SafetyCheckEvidence(rule_name="min_observations", status=SafetyCheckStatus.PASS, details="35 >= 30")
+    tampered_envelope = PromotionEvidenceEnvelope(
+        policy_id=policy_id,
+        git_commit_sha="e4d0891",
+        package_hash="pkg_hash_tampered",
+        safety_checks=[sc_pass],
+        canonical_evidence_metadata={"dataset_window_id": "win_1"},
+    )
+    tampered_dict = asdict(tampered_envelope)
+    tampered_dict["envelope_signature"] = "invalid_signature_123"
+    db.save_policy_evidence("ev_tampered", policy_id, datetime.now(UTC), tampered_dict)
+
+    r = client.post("/api/strategies/promote", json={
+        "policy_id": policy_id,
+        "promoter_id": "admin_user",
+        "reason": "testing governance",
+        "evidence_package_id": "ev_tampered"
+    })
+    assert r.status_code == 400
+    assert "envelope signature mismatch" in r.json()["detail"]
+
+    # 3d. Verify promotion fails with failing safety checks (#246, #247)
+    sc_fail = SafetyCheckEvidence(rule_name="adversarial_robustness", status=SafetyCheckStatus.FAIL, details="Failed")
+    failed_envelope = PromotionEvidenceEnvelope(
+        policy_id=policy_id,
+        git_commit_sha="e4d0891",
+        package_hash="pkg_hash_failed",
+        safety_checks=[sc_fail],
+        canonical_evidence_metadata={},
+    )
+    db.save_policy_evidence("ev_failed_check", policy_id, datetime.now(UTC), asdict(failed_envelope))
+
+    r = client.post("/api/strategies/promote", json={
+        "policy_id": policy_id,
+        "promoter_id": "admin_user",
+        "reason": "testing governance",
+        "evidence_package_id": "ev_failed_check"
+    })
+    assert r.status_code == 400
+    assert "safety checks failed" in r.json()["detail"]
 
     # 4. Successful Promotion with all fields
     r = client.post("/api/strategies/promote", json={
