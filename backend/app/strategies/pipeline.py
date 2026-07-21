@@ -112,30 +112,46 @@ class SignalPipeline:
     ) -> bool:
         """Return True if ML failure should cause hard veto.
 
-        For rsi2_reversion ENTER_LONG using BASE_FALLBACK models during the configured
-        midday window (default 11:00-13:00 ET), the ML model has no validated predictive
-        authority (ROC-AUC ~0.486). The prediction is logged as BASE_FALLBACK_BYPASS
-        and the signal is evaluated by remaining downstream gates.
+        Advisory bypass is active for strategy/direction combinations where generic BASE_FALLBACK
+        models have demonstrated zero predictive authority (ROC-AUC <= 0.50):
+          1. rsi2_reversion ENTER_LONG between 11:00 AM and 2:00 PM ET (660 <= mins_et < 840)
+          2. bb_squeeze ENTER_SHORT between 2:00 PM and 3:30 PM ET (840 <= mins_et < 930)
+
+        When bypassed, predictions are logged as BASE_FALLBACK_BYPASS and candidates continue
+        through all downstream gates (Meta-Label, Trade Score, Portfolio, Behavioral, RiskManager).
         """
         cfg = getattr(self.trade_score_engine, "risk_config", None)
-        if cfg is None or not getattr(cfg, "rsi2_base_fallback_bypass_enabled", True):
+        if cfg is None:
             return True
-
-        start_et = getattr(cfg, "rsi2_base_fallback_bypass_start_et", 660)
-        end_et = getattr(cfg, "rsi2_base_fallback_bypass_end_et", 780)
 
         is_base = (
             model_source.upper() in ("BASE", "BASE_FALLBACK")
             or specialist_status in ("NO_ARTIFACT", "SPECIALIST_INFERENCE_FAILED", "REJECTED_LOW_AUC", "TEMPORAL_BYPASS", "INVALID_SCORE")
         )
 
-        if (
-            strategy == "rsi2_reversion"
-            and action == SignalAction.ENTER_LONG
-            and is_base
-            and start_et <= mins_et < end_et
-        ):
-            return False
+        # 1. RSI2 LONG bypass check
+        if getattr(cfg, "rsi2_base_fallback_bypass_enabled", True):
+            rsi2_start_et = getattr(cfg, "rsi2_base_fallback_bypass_start_et", 660)
+            rsi2_end_et = getattr(cfg, "rsi2_base_fallback_bypass_end_et", 840)
+            if (
+                strategy == "rsi2_reversion"
+                and action == SignalAction.ENTER_LONG
+                and is_base
+                and rsi2_start_et <= mins_et < rsi2_end_et
+            ):
+                return False
+
+        # 2. BB Squeeze SHORT bypass check
+        if getattr(cfg, "bb_squeeze_base_fallback_bypass_enabled", True):
+            bb_start_et = getattr(cfg, "bb_squeeze_base_fallback_bypass_start_et", 840)
+            bb_end_et = getattr(cfg, "bb_squeeze_base_fallback_bypass_end_et", 930)
+            if (
+                strategy == "bb_squeeze"
+                and action == SignalAction.ENTER_SHORT
+                and is_base
+                and bb_start_et <= mins_et < bb_end_et
+            ):
+                return False
 
         return True
 
