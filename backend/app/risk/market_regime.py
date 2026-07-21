@@ -260,6 +260,11 @@ class MarketRiskAggregator:
         try:
             start = T - timedelta(days=20)
             df = await self._data.history(symbol, "1Min", start, T, prefer_cache=True)
+            if not df.empty:
+                span = df.index[-1] - df.index[0]
+                if span > timedelta(days=3):
+                    from app.data.base import filter_session_view
+                    df = filter_session_view(df, "REGULAR_SESSION")
             pct, reason = _atr_percentile(df)
             if pct is None:
                 return SignalVote(
@@ -304,6 +309,11 @@ class MarketRiskAggregator:
         """
         family = "breadth"
         try:
+            from zoneinfo import ZoneInfo
+            tz_aware_T = T if T.tzinfo is not None else T.replace(tzinfo=UTC)
+            now_et = tz_aware_T.astimezone(ZoneInfo("America/New_York"))
+            is_pre_market = now_et.hour < 9 or (now_et.hour == 9 and now_et.minute < 30)
+
             start = T - timedelta(days=_BREADTH_LOOKBACK_DAYS)  # was days=2
             advancing = 0
             total = 0
@@ -311,6 +321,10 @@ class MarketRiskAggregator:
             for sym in self._universe[:20]:  # cap at 20 for latency
                 try:
                     df = await self._data.history(sym, "1Day", start, T, prefer_cache=True)
+                    if is_pre_market and not df.empty:
+                        last_date = df.index[-1].date()
+                        if last_date == now_et.date():
+                            df = df.iloc[:-1]
                     if len(df) >= 2:
                         advancing += int(float(df["close"].iloc[-1]) >= float(df["close"].iloc[-2]))
                         total += 1
@@ -378,6 +392,11 @@ class MarketRiskAggregator:
         """Cross-sectional stress: fraction of universe with extreme intraday vol."""
         family = "universe_stress"
         try:
+            from zoneinfo import ZoneInfo
+            tz_aware_T = T if T.tzinfo is not None else T.replace(tzinfo=UTC)
+            now_et = tz_aware_T.astimezone(ZoneInfo("America/New_York"))
+            is_pre_market = now_et.hour < 9 or (now_et.hour == 9 and now_et.minute < 30)
+
             start = T - timedelta(days=2)
             extreme = 0
             total = 0
@@ -385,6 +404,10 @@ class MarketRiskAggregator:
             for sym in self._universe[:20]:
                 try:
                     df = await self._data.history(sym, "1Day", start, T, prefer_cache=True)
+                    if is_pre_market and not df.empty:
+                        last_date = df.index[-1].date()
+                        if last_date == now_et.date():
+                            df = df.iloc[:-1]
                     if not df.empty:
                         atr_pct = float(
                             ((df["high"] - df["low"]) / df["close"] * 100.0).iloc[-1]
