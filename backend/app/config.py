@@ -51,7 +51,7 @@ class RiskConfig(BaseModel):
     midday_end_et: int = Field(795, ge=570, le=960)
     rsi2_base_fallback_bypass_enabled: bool = Field(True)
     rsi2_base_fallback_bypass_start_et: int = Field(660, ge=570, le=960)
-    rsi2_base_fallback_bypass_end_et: int = Field(780, ge=570, le=960)
+    rsi2_base_fallback_bypass_end_et: int = Field(840, ge=570, le=960)
     scanner_watchlist_ttl: int = Field(3, ge=1, le=30)
     alternative_exits: list[dict] = Field(
         default=[
@@ -126,7 +126,7 @@ class Settings(BaseSettings):
     midday_end_et: int = Field(795, validation_alias="MIDDAY_END_ET")
     rsi2_base_fallback_bypass_enabled: bool = Field(True, validation_alias="RSI2_BASE_FALLBACK_BYPASS_ENABLED")
     rsi2_base_fallback_bypass_start_et: int = Field(660, validation_alias="RSI2_BASE_FALLBACK_BYPASS_START_ET")
-    rsi2_base_fallback_bypass_end_et: int = Field(780, validation_alias="RSI2_BASE_FALLBACK_BYPASS_END_ET")
+    rsi2_base_fallback_bypass_end_et: int = Field(840, validation_alias="RSI2_BASE_FALLBACK_BYPASS_END_ET")
     dq_min_bars_warmup: int = Field(50, validation_alias="DQ_MIN_BARS_WARMUP")
     db_path: str = Field("", validation_alias="ALPHADESK_DB_PATH")
     admin_token: str = Field("", validation_alias="ALPHADESK_ADMIN_TOKEN")

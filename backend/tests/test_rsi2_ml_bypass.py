@@ -151,12 +151,45 @@ def test_momentum_base_fallback_not_bypassed_1130():
     assert len(ml_rejections) == 1
 
 
-def test_rsi2_base_fallback_outside_window_1330():
-    """Test 4: RSI2 LONG at 13:30 ET with BASE_FALLBACK ML < 0.52 -> REJECTED by ml_gate."""
+def test_rsi2_base_fallback_bypass_active_1330():
+    """Test 4: RSI2 LONG at 13:30 ET with BASE_FALLBACK ML < 0.52 -> Advisory bypass active inside 11:00-14:00 ET window."""
     mock_model = DummySignalModel(prob=0.38, model_source="BASE", specialist_status="NO_ARTIFACT")
     pipeline = SignalPipeline(model=mock_model, ml_threshold=0.52)
     
     ts_et = datetime(2026, 7, 21, 13, 30, tzinfo=ET)
+    df = make_dummy_df(ts_et)
+    feats = dummy_features()
+    
+    sig = Signal(
+        symbol="AAPL",
+        action=SignalAction.ENTER_LONG,
+        confidence=0.6,
+        strategy="rsi2_reversion",
+        reason="RSI(2) dip",
+        price=100.0,
+        stop_loss=98.5,
+        take_profit=101.5
+    )
+    
+    accepted, rejected = pipeline.process(
+        symbol="AAPL",
+        df=df,
+        signals=[sig],
+        regime=Regime.RANGE,
+        features=feats,
+    )
+    
+    assert getattr(sig, "ml_gate_decision", None) == "BASE_FALLBACK_BYPASS"
+    ml_rejections = [r for s, r in rejected if "ML confidence" in r]
+    assert len(ml_rejections) == 0
+
+
+def test_rsi2_base_fallback_outside_window_1430():
+    """Test 5: RSI2 LONG at 14:30 ET with BASE_FALLBACK ML < 0.52 -> REJECTED by ml_gate outside 11:00-14:00 ET window."""
+    mock_model = DummySignalModel(prob=0.38, model_source="BASE", specialist_status="NO_ARTIFACT")
+    pipeline = SignalPipeline(model=mock_model, ml_threshold=0.52)
+    
+    ts_et = datetime(2026, 7, 21, 14, 30, tzinfo=ET)
     df = make_dummy_df(ts_et)
     feats = dummy_features()
     
@@ -185,7 +218,7 @@ def test_rsi2_base_fallback_outside_window_1330():
 
 
 def test_boundary_and_killswitch():
-    """Boundary & Kill-switch tests."""
+    """Boundary & Kill-switch tests for 11:00 - 14:00 ET window."""
     mock_model = DummySignalModel(prob=0.38, model_source="BASE", specialist_status="NO_ARTIFACT")
     pipeline = SignalPipeline(model=mock_model, ml_threshold=0.52)
     feats = dummy_features()
@@ -202,17 +235,17 @@ def test_boundary_and_killswitch():
     pipeline.process("AAPL", df_1100, [sig_1100], Regime.RANGE, features=feats)
     assert getattr(sig_1100, "ml_gate_decision", None) == "BASE_FALLBACK_BYPASS"
 
-    # 12:59 ET -> Should BYPASS
-    df_1259 = make_dummy_df(datetime(2026, 7, 21, 12, 59, tzinfo=ET))
-    sig_1259 = Signal(symbol="AAPL", action=SignalAction.ENTER_LONG, confidence=0.6, strategy="rsi2_reversion", reason="dip", price=100.0, stop_loss=98.5, take_profit=101.5)
-    pipeline.process("AAPL", df_1259, [sig_1259], Regime.RANGE, features=feats)
-    assert getattr(sig_1259, "ml_gate_decision", None) == "BASE_FALLBACK_BYPASS"
+    # 13:59 ET -> Should BYPASS
+    df_1359 = make_dummy_df(datetime(2026, 7, 21, 13, 59, tzinfo=ET))
+    sig_1359 = Signal(symbol="AAPL", action=SignalAction.ENTER_LONG, confidence=0.6, strategy="rsi2_reversion", reason="dip", price=100.0, stop_loss=98.5, take_profit=101.5)
+    pipeline.process("AAPL", df_1359, [sig_1359], Regime.RANGE, features=feats)
+    assert getattr(sig_1359, "ml_gate_decision", None) == "BASE_FALLBACK_BYPASS"
 
-    # 13:00 ET -> Should REJECT
-    df_1300 = make_dummy_df(datetime(2026, 7, 21, 13, 0, tzinfo=ET))
-    sig_1300 = Signal(symbol="AAPL", action=SignalAction.ENTER_LONG, confidence=0.6, strategy="rsi2_reversion", reason="dip", price=100.0, stop_loss=98.5, take_profit=101.5)
-    pipeline.process("AAPL", df_1300, [sig_1300], Regime.RANGE, features=feats)
-    assert getattr(sig_1300, "ml_gate_decision", None) == "REJECT"
+    # 14:00 ET -> Should REJECT
+    df_1400 = make_dummy_df(datetime(2026, 7, 21, 14, 0, tzinfo=ET))
+    sig_1400 = Signal(symbol="AAPL", action=SignalAction.ENTER_LONG, confidence=0.6, strategy="rsi2_reversion", reason="dip", price=100.0, stop_loss=98.5, take_profit=101.5)
+    pipeline.process("AAPL", df_1400, [sig_1400], Regime.RANGE, features=feats)
+    assert getattr(sig_1400, "ml_gate_decision", None) == "REJECT"
 
     # Kill-switch test: rsi2_base_fallback_bypass_enabled = False -> Should REJECT
     pipeline.trade_score_engine.risk_config.rsi2_base_fallback_bypass_enabled = False
