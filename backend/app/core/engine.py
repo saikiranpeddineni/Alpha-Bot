@@ -128,6 +128,13 @@ class TradingEngine:
         self.resurrection_queue: list[dict] = []
         self._last_heartbeat_hour: int | None = None
         self._last_heartbeat_week: int | None = None
+        # fix(#45): in-flight flatten guard — deduplicate concurrent flatten for same symbol
+        self._flattening_symbols: set[str] = set()
+        # fix(#56): retain emergency flatten task reference for cancellation on stop()
+        self._emergency_flatten_task: asyncio.Task | None = None
+        # fix(#86): track market-data stale timestamps per symbol
+        self._last_data_bar_ts: dict[str, datetime] = {}
+        self._data_gap_symbols: set[str] = set()
 
         # Feature 4: Economic calendar / event guard
         from app.core.calendar import EventCalendar
@@ -280,13 +287,16 @@ class TradingEngine:
             )
 
         restore_mode = None
+        restore_account_id = None
         try:
             from app.brokers.alpaca import AlpacaBroker
             if isinstance(self.broker, AlpacaBroker) and mode in {"paper", "live"}:
                 restore_mode = mode
+                # fix(#61): bind portfolio restore to the specific Alpaca account
+                restore_account_id = getattr(self.broker, "account_id", None)
         except Exception:
             pass
-        self.portfolio = PortfolioTracker(restore_mode=restore_mode)
+        self.portfolio = PortfolioTracker(restore_mode=restore_mode, restore_account_id=restore_account_id)
 
         from app.portfolio.allocator import PortfolioAIGate, CapitalAllocationOptimizer
         self.portfolio_gate = PortfolioAIGate(
@@ -379,6 +389,14 @@ class TradingEngine:
             except asyncio.CancelledError:
                 pass
             self._task = None
+        # fix(#56): cancel emergency flatten task when engine is explicitly stopped
+        if self._emergency_flatten_task is not None and not self._emergency_flatten_task.done():
+            self._emergency_flatten_task.cancel()
+            try:
+                await self._emergency_flatten_task
+            except asyncio.CancelledError:
+                pass
+            self._emergency_flatten_task = None
         if self.broker is not None and flatten is None:
             flatten = isinstance(self.broker, PaperBroker)  # clean slate for the sim
         if self.broker is not None and flatten:
@@ -414,8 +432,8 @@ class TradingEngine:
                     )
                     self.state = EngineState.HALTED
                     self.publish("status", self.status())
-                    # Spawn emergency flattening task
-                    asyncio.create_task(
+                    # fix(#56): retain task reference so stop() can cancel it
+                    self._emergency_flatten_task = asyncio.create_task(
                         self._emergency_flatten_loop(),
                         name="trading-engine-emergency-flatten"
                     )
@@ -668,14 +686,40 @@ class TradingEngine:
                     self.pipeline.set_midday_active(is_midday)
                 applog.info(
                     "engine",
-                    f"Midday filter {'ACTIVE — threshold +' + str(rc.midday_score_boost) if is_midday else 'CLEARED'} "
-                    f"(et_mins={et_mins}, window={rc.midday_start_et}–{rc.midday_end_et})",
+                    f"Midday filter {'ACTIVE \u2014 threshold +' + str(rc.midday_score_boost) if is_midday else 'CLEARED'} "
+                    f"(et_mins={et_mins}, window={rc.midday_start_et}\u2013{rc.midday_end_et})",
                 )
             if 9 * 60 + 30 <= et_mins <= 16 * 60 and et_mins % 5 == 0 and self._last_event_monitor_min != et_mins:
                 self._last_event_monitor_min = et_mins
                 await self.run_event_monitor(now)
 
         new_closed = await self.data.poll(self.watchlist)
+
+        # fix(#86): detect market-data gaps >2 min during regular trading hours and gate entries
+        _DATA_GAP_THRESHOLD_SECS = 120  # 2 minutes
+        _is_regular_session = 9 * 60 + 30 <= et_mins <= 16 * 60  # 9:30–16:00 ET
+        if _is_regular_session:
+            for sym in self.watchlist:
+                sym_upper = sym.upper()
+                if sym_upper in new_closed and not new_closed[sym_upper].empty:
+                    # Fresh bar arrived — clear gap flag
+                    self._last_data_bar_ts[sym_upper] = now
+                    self._data_gap_symbols.discard(sym_upper)
+                elif sym_upper in self._last_data_bar_ts:
+                    elapsed = (now - self._last_data_bar_ts[sym_upper]).total_seconds()
+                    if elapsed > _DATA_GAP_THRESHOLD_SECS and sym_upper not in self._data_gap_symbols:
+                        self._data_gap_symbols.add(sym_upper)
+                        applog.warning(
+                            "engine",
+                            f"#86: Market-data gap detected for {sym_upper}: no bar for {elapsed:.0f}s "
+                            f"during regular session. New entries BLOCKED until data resumes.",
+                        )
+                elif sym_upper not in self._last_data_bar_ts:
+                    # Initialize timestamp on first tick
+                    self._last_data_bar_ts[sym_upper] = now
+        else:
+            # Outside regular session: clear all gap flags
+            self._data_gap_symbols.clear()
 
         # 1. advance fill simulation / poll real fills
         if isinstance(self.broker, PaperBroker):
@@ -792,6 +836,11 @@ class TradingEngine:
                 symbols_to_evaluate = [sym for sym in symbols_to_evaluate if sym in pos_by_symbol]
 
             for symbol in symbols_to_evaluate:
+                # fix(#86): skip new ENTRY signals for symbols with active market-data gaps
+                sym_upper = symbol.upper()
+                if sym_upper in self._data_gap_symbols and sym_upper not in pos_by_symbol:
+                    applog.debug("engine", f"#86: Skipping {sym_upper} entry evaluation \u2014 market-data gap active")
+                    continue
                 entries = await self._evaluate_symbol(symbol, pos_by_symbol.get(symbol), account.equity, now)
                 if self.state == EngineState.RUNNING and allow_entries:
                     candidates.extend(entries)
@@ -1348,20 +1397,27 @@ class TradingEngine:
         """Close a position, skipping if a close order is already in-flight for this symbol."""
         if not hasattr(self, "_pending_close_symbols"):
             self._pending_close_symbols = set()
-        if symbol in self._pending_close_symbols:
-            applog.debug("engine", f"{symbol}: skipping duplicate close — close already in-flight")
+        # fix(#45): also guard against concurrent per-tick flatten submissions
+        if symbol in self._pending_close_symbols or symbol in self._flattening_symbols:
+            applog.debug("engine", f"{symbol}: skipping duplicate close — close already in-flight (#45)")
             return
+        self._flattening_symbols.add(symbol)
         self._pending_close_symbols.add(symbol)
-        order = await self.broker.close_position(symbol, reason=reason)
-        # If close failed immediately (None returned), release the guard so retries work
-        if order is None:
-            self._pending_close_symbols.discard(symbol)
+        try:
+            order = await self.broker.close_position(symbol, reason=reason)
+            # If close failed immediately (None returned), release the guard so retries work
+            if order is None:
+                self._pending_close_symbols.discard(symbol)
+        finally:
+            self._flattening_symbols.discard(symbol)
 
     async def _drain_fills(self, now: datetime) -> None:
         assert self.broker and self.portfolio and self.risk
         fills = self.broker.drain_fills()
         if not fills:
             return
+        # fix(#51): enforce causal replay order — sort by (ts ASC, order_id) before processing
+        fills = sorted(fills, key=lambda f: (f.ts, f.order_id or ""))
         order_by_id = {}
         for o in self.recent_orders:
             order_by_id[o.id] = o
@@ -1642,6 +1698,7 @@ class TradingEngine:
             "allow_new_entries": getattr(self, "allow_new_entries", True),
             "heartbeat_diagnostics": getattr(self, "heartbeat_diagnostics", {}),
             "replay_queue": self.db.get_replay_queue_telemetry(mode=self.mode) if self.db else {},
+            "data_gap_symbols": sorted(self._data_gap_symbols),
         }
 
     def _reconcile_positions(self, positions: list[Position]) -> None:
@@ -1670,6 +1727,21 @@ class TradingEngine:
                         opened_at = datetime.fromisoformat(submitted_at_str)
                     except Exception:
                         pass
+
+            # fix(#41): every reconciled live position MUST have a verified protective stop.
+            # If none found in DB, synthesize a 1.5% protective stop as the safe fallback.
+            if stop_loss is None or stop_loss <= 0:
+                stop_pct = 0.015  # 1.5% conservative protective exit
+                if p.qty > 0:
+                    stop_loss = round(p.avg_entry_price * (1.0 - stop_pct), 4)
+                else:
+                    stop_loss = round(p.avg_entry_price * (1.0 + stop_pct), 4)
+                initial_risk = abs(p.avg_entry_price - stop_loss)
+                applog.warning(
+                    "engine",
+                    f"#41: No verified stop loss for reconciled position {p.symbol}. "
+                    f"Synthesized protective stop at {stop_loss:.4f} (1.5% from avg_entry {p.avg_entry_price:.4f}).",
+                )
 
             from app.portfolio.tracker import _OpenLot
             self.portfolio._lots[p.symbol] = _OpenLot(

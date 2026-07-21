@@ -67,6 +67,40 @@ async def _call(fn, *args, timeout: float = _API_TIMEOUT, label: str = "", **kwa
         raise BrokerTimeoutError(msg) from exc
 
 
+async def _paginate_orders(client: object, request: object, label: str = "get_orders") -> list:
+    """fix(#50): Paginate Alpaca get_orders until page is smaller than limit.
+
+    Alpaca returns at most 500 orders per call. If exactly 500 are returned there
+    may be more.  We iterate using ``after`` on the last record's filled_at /
+    submitted_at until a page smaller than the page size comes back.
+    """
+    from alpaca.trading.requests import GetOrdersRequest
+    page_size: int = getattr(request, "limit", 500) or 500
+    all_orders: list = []
+    current_after = getattr(request, "after", None)
+
+    while True:
+        paged_req = GetOrdersRequest(
+            status=getattr(request, "status", "all"),
+            after=current_after,
+            limit=page_size,
+        )
+        page = await _call(client.get_orders, paged_req, label=f"{label}/page{len(all_orders)//page_size + 1}")
+        if not page:
+            break
+        all_orders.extend(page)
+        if len(page) < page_size:
+            break
+        # Advance cursor: use the latest timestamp in this page
+        last = page[-1]
+        ts = getattr(last, "filled_at", None) or getattr(last, "updated_at", None) or getattr(last, "submitted_at", None)
+        if ts is None:
+            break
+        current_after = ts
+
+    return all_orders
+
+
 class AlpacaBroker(Broker):
     name = "alpaca"
 
@@ -109,12 +143,10 @@ class AlpacaBroker(Broker):
         try:
             from alpaca.trading.requests import GetOrdersRequest
             raw_positions = await _call(self._client.get_all_positions, label="get_all_positions")
-            after = datetime.now(UTC) - timedelta(hours=24)
-            orders = await _call(
-                self._client.get_orders,
-                GetOrdersRequest(status="all", after=after, limit=500),
-                label="get_orders/bootstrap",
-            )
+            # fix(#47): extend lookback to 30 days to survive extended downtime >24h
+            after = datetime.now(UTC) - timedelta(days=30)
+            # fix(#50): paginate until fewer than page_size records returned (no silent omissions)
+            orders = await _paginate_orders(self._client, GetOrdersRequest(status="all", after=after, limit=500), label="get_orders/bootstrap")
             lots = {}
             for p in raw_positions:
                 qty = float(p.qty)
@@ -355,13 +387,11 @@ class AlpacaBroker(Broker):
         from alpaca.trading.requests import GetOrdersRequest
         from app.db.database import Database
 
-        after = datetime.now(UTC) - timedelta(hours=24)
+        # fix(#47): use 30-day lookback so fills survive >24h downtime
+        after = datetime.now(UTC) - timedelta(days=30)
         try:
-            raw = await _call(
-                self._client.get_orders,
-                GetOrdersRequest(status="all", after=after, limit=500),
-                label="get_orders/poll_fills",
-            )
+            # fix(#50): full paginated sweep — never silently drop fills beyond 500
+            raw = await _paginate_orders(self._client, GetOrdersRequest(status="all", after=after, limit=500), label="get_orders/poll_fills")
         except BrokerTimeoutError:
             applog.warning("broker.alpaca", "poll_fills skipped: API call timed out")
             return
@@ -417,7 +447,10 @@ class AlpacaBroker(Broker):
                     broker_account_id=self.account_id,
                 )
             )
-            self._processed_fill_qty[oid] = cumulative
+            # fix(#43): do NOT advance _processed_fill_qty here — the in-memory watermark
+            # must only advance AFTER commit_fill_processing durably persists the fill and
+            # updated portfolio checkpoint atomically. local_watermarks prevents duplicate
+            # enqueue within this poll cycle only.
             local_watermarks[oid] = cumulative
 
     def drain_fills(self) -> list[Fill]:

@@ -74,6 +74,8 @@ class _OpenLot:
 class PortfolioTracker:
     max_curve_points: int = 5000
     restore_mode: str | None = None
+    # fix(#61): bind checkpoint restoration to a specific broker account_id
+    restore_account_id: str | None = None
     realized_pnl: float = 0.0
     day_realized_pnl: float = 0.0
     session_date: date | None = None
@@ -96,8 +98,20 @@ class PortfolioTracker:
             return
         checkpoint = db.get_portfolio_checkpoint(self.restore_mode)
         if checkpoint:
+            # fix(#61): reject checkpoint if account_id does not match the live broker account
+            stored_account_id = checkpoint.get("account_id")
+            if stored_account_id and self.restore_account_id and stored_account_id != self.restore_account_id:
+                applog.error(
+                    "portfolio",
+                    f"#61 CRITICAL: Refusing to restore {self.restore_mode} portfolio checkpoint — "
+                    f"stored account_id={stored_account_id!r} does NOT match current broker "
+                    f"account_id={self.restore_account_id!r}. Starting with a clean slate to "
+                    "prevent cross-account lot state pollution.",
+                )
+                return
             self.restore_checkpoint(checkpoint)
-            applog.info("portfolio", f"Restored durable {self.restore_mode} portfolio checkpoint")
+            applog.info("portfolio", f"Restored durable {self.restore_mode} portfolio checkpoint (account_id={stored_account_id!r})")
+
 
     # ------------------------------------------------------------------
     # PDT rolling-window counter
@@ -221,8 +235,10 @@ class PortfolioTracker:
         """Return a snapshot of all symbols with non-zero open lots."""
         return {s: lot for s, lot in self._lots.items() if abs(lot.qty) >= 1e-9}
 
-    def checkpoint(self) -> dict:
+    def checkpoint(self, account_id: str | None = None) -> dict:
         return {
+            # fix(#61): embed account_id in checkpoint for cross-account validation on restore
+            "account_id": account_id or self.restore_account_id,
             "realized_pnl": self.realized_pnl,
             "day_realized_pnl": self.day_realized_pnl,
             "session_date": self.session_date.isoformat() if self.session_date else None,
