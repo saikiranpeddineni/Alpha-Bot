@@ -791,12 +791,6 @@ class TradingEngine:
             if self.state != EngineState.RUNNING or not allow_entries:
                 symbols_to_evaluate = [sym for sym in symbols_to_evaluate if sym in pos_by_symbol]
 
-            # Exclude symbols with an in-flight close order — prevents immediate strategy re-entry
-            # on the same bar after a manual sell fires before the fill drains.
-            pending_close = getattr(self, "_pending_close_symbols", set())
-            if pending_close:
-                symbols_to_evaluate = [sym for sym in symbols_to_evaluate if sym not in pending_close]
-
             for symbol in symbols_to_evaluate:
                 entries = await self._evaluate_symbol(symbol, pos_by_symbol.get(symbol), account.equity, now)
                 if self.state == EngineState.RUNNING and allow_entries:
@@ -855,7 +849,12 @@ class TradingEngine:
                         effective_pending_entries = set(pending_entries)
                         for info in self.pending_reconciliation_orders.values():
                             effective_pending_entries.add(info["symbol"].upper())
+                        # Also block re-entries for symbols with an in-flight close order
+                        # (manual sells/covers that haven't filled yet). EXIT signals
+                        # are unaffected — only the entry gate in evaluate_entry checks this.
+                        effective_pending_entries.update(getattr(self, "_pending_close_symbols", set()))
                         reservations = SameCycleEntryReservations.from_snapshot(account.cash, positions)
+
 
                         for sig, kelly_val in decision_outcome.approved_entries:
                             # Attach risk_multiplier from SafetyDecision
