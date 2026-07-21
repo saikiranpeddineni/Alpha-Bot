@@ -15,6 +15,8 @@ import type {
   StrategyInfo,
   TradeRow,
   WsMessage,
+  HeartbeatTelemetry,
+  HeartbeatStyle,
 } from "./types";
 
 const MAX_LOGS = 400;

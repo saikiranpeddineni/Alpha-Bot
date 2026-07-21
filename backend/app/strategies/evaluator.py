@@ -167,9 +167,11 @@ class ParallelEvidenceEvaluator:
             return {"error": str(exc), "veto_count": 0, "vetoes": {}}
 
     @staticmethod
-    def calculate_veto_attribution(vetoes: dict, realized_r: float) -> dict[str, Any]:
+    def calculate_veto_attribution(vetoes: dict, realized_r: float | None) -> dict[str, Any]:
         """Calculate unique, shared, and redundant veto attribution for a given realized R outcome.
         """
+        if realized_r is None:
+            realized_r = 0.0
         unique_veto_alpha = {}
         shared_veto_alpha = {}
         marginal_alpha = {}
