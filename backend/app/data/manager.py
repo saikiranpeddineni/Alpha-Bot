@@ -56,7 +56,7 @@ class DataManager:
     async def warmup(self, symbols: list[str], lookback_bars: int = 800) -> None:
         extended = list(symbols)
         if not self.is_synthetic:
-            for v in ["VIX", "^VIX"]:
+            for v in ["^VIX"]:
                 if v not in extended:
                     extended.append(v)
         for symbol in extended:
@@ -87,7 +87,7 @@ class DataManager:
         """Fetch newest bars; return {symbol: frame_of_newly_closed_bars}."""
         extended = list(symbols)
         if not self.is_synthetic:
-            for v in ["VIX", "^VIX"]:
+            for v in ["^VIX"]:
                 if v not in extended:
                     extended.append(v)
 

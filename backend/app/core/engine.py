@@ -2553,7 +2553,7 @@ class TradingEngine:
 
         # Monitor 10: VIX feed availability
         vix_fresh = False
-        for vix_sym in ["VIX", "^VIX"]:
+        for vix_sym in ["^VIX", "VIX"]:
             try:
                 vix_df = self.data.frame(vix_sym, "1Min", limit=1)
                 if vix_df is not None and not vix_df.empty:
@@ -2638,8 +2638,8 @@ class TradingEngine:
         breadth_positive = True
 
         # 1. Fetch VIX data
-        vix_sym = "VIX"
-        for sym in ["VIX", "^VIX"]:
+        vix_sym = "^VIX"
+        for sym in ["^VIX", "VIX"]:
             p = None
             try:
                 if hasattr(self.data, "last_price") and callable(getattr(self.data, "last_price", None)):
