@@ -258,7 +258,7 @@ class MarketRiskAggregator:
     ) -> SignalVote:
         """SPY or QQQ ATR/vol percentile family."""
         try:
-            start = T - timedelta(days=20)
+            start = T - timedelta(days=60)
             df = await self._data.history(symbol, "1Min", start, T, prefer_cache=True)
             if not df.empty:
                 span = df.index[-1] - df.index[0]
@@ -312,7 +312,7 @@ class MarketRiskAggregator:
             from zoneinfo import ZoneInfo
             tz_aware_T = T if T.tzinfo is not None else T.replace(tzinfo=UTC)
             now_et = tz_aware_T.astimezone(ZoneInfo("America/New_York"))
-            is_pre_market = now_et.hour < 9 or (now_et.hour == 9 and now_et.minute < 30)
+            is_pre_market = now_et.hour < 9 or (now_et.hour == 9 and now_et.minute < 45)
 
             start = T - timedelta(days=_BREADTH_LOOKBACK_DAYS)  # was days=2
             advancing = 0
@@ -395,7 +395,7 @@ class MarketRiskAggregator:
             from zoneinfo import ZoneInfo
             tz_aware_T = T if T.tzinfo is not None else T.replace(tzinfo=UTC)
             now_et = tz_aware_T.astimezone(ZoneInfo("America/New_York"))
-            is_pre_market = now_et.hour < 9 or (now_et.hour == 9 and now_et.minute < 30)
+            is_pre_market = now_et.hour < 9 or (now_et.hour == 9 and now_et.minute < 45)
 
             start = T - timedelta(days=2)
             extreme = 0
