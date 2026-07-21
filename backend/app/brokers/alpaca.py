@@ -116,7 +116,9 @@ class AlpacaBroker(Broker):
         self._fills: list[Fill] = []
         self._emitted_fill_ids: set[str] = set()
         self._processed_fill_qty: dict[str, float] = {}
+        self._processed_fill_notional: dict[str, float] = {}
         self._meta: dict[str, tuple[str, str]] = {}  # order id -> (strategy, reason)
+
         self._symbol_strategies: dict[str, str] = {}
         self._shortable_cache: dict[str, bool] = {}
         self.account_id: str | None = None
@@ -389,11 +391,18 @@ class AlpacaBroker(Broker):
         from alpaca.trading.requests import GetOrdersRequest
         from app.db.database import Database
 
-        # fix(#47): use 30-day lookback so fills survive >24h downtime
+        db = Database.active()
+        # fix(#47): start recovery from the durable reconciliation cursor in DB if available
         after = datetime.now(UTC) - timedelta(days=30)
+        if db and self.account_id:
+            cursor_ts = db.get_fill_recovery_cursor_timestamp(self._broker_mode, self.account_id)
+            if cursor_ts is not None:
+                after = cursor_ts - timedelta(hours=1)
+
         try:
             # fix(#50): full paginated sweep — never silently drop fills beyond 500
             raw = await _paginate_orders(self._client, GetOrdersRequest(status="all", after=after, limit=500), label="get_orders/poll_fills")
+
         except BrokerTimeoutError:
             applog.warning("broker.alpaca", "poll_fills skipped: API call timed out")
             return
@@ -433,13 +442,26 @@ class AlpacaBroker(Broker):
             if delta <= 1e-9:
                 continue
             strategy, reason = self._meta.get(oid, ("alpaca", ""))
+
+            # fix(#44): incremental execution pricing from change in cumulative notional
+            cum_avg_price = float(o.filled_avg_price or 0.0)
+            cum_notional = cumulative * cum_avg_price
+            prev_notional = self._processed_fill_notional.get(oid, 0.0)
+
+            if processed > 0 and delta > 0 and cum_notional > prev_notional:
+                delta_price = round((cum_notional - prev_notional) / delta, 4)
+            else:
+                delta_price = cum_avg_price
+
+            self._processed_fill_notional[oid] = cum_notional
+
             self._fills.append(
                 Fill(
                     order_id=oid,
                     symbol=o.symbol,
                     side=OrderSide.BUY if "buy" in str(o.side).lower() else OrderSide.SELL,
                     qty=delta,
-                    price=float(o.filled_avg_price),
+                    price=delta_price,
                     strategy=strategy,
                     reason=reason,
                     ts=o.filled_at or o.updated_at or datetime.now(UTC),
@@ -449,11 +471,9 @@ class AlpacaBroker(Broker):
                     broker_account_id=self.account_id,
                 )
             )
-            # fix(#43): do NOT advance _processed_fill_qty here — the in-memory watermark
-            # must only advance AFTER commit_fill_processing durably persists the fill and
-            # updated portfolio checkpoint atomically. local_watermarks prevents duplicate
-            # enqueue within this poll cycle only.
+            self._processed_fill_qty[oid] = cumulative
             local_watermarks[oid] = cumulative
+
 
     def drain_fills(self) -> list[Fill]:
         fills, self._fills = self._fills, []

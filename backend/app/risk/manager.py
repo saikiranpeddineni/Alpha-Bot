@@ -95,6 +95,45 @@ class RiskManager:
         self._pdt_warned = False
         self.core_watchlist: list[str] | None = None
 
+    def get_risk_state(self) -> dict:
+        """Return serializable snapshot of safety-critical risk state for #43 atomic persistence."""
+        return {
+            "consecutive_losses": self.consecutive_losses,
+            "strategy_consecutive_losses": dict(self.strategy_consecutive_losses),
+            "cooldown_until": self.cooldown_until.isoformat() if self.cooldown_until else None,
+            "symbol_cooldowns": {sym: ts.isoformat() for sym, ts in self.symbol_cooldowns.items()},
+            "strategy_cooldowns": {strat: ts.isoformat() for strat, ts in self.strategy_cooldowns.items()},
+            "hard_halted": self.hard_halted,
+            "daily_halted": self.daily_halted,
+        }
+
+    def restore_risk_state(self, data: dict) -> None:
+        """Restore safety-critical risk state from checkpoint (#43)."""
+        if not isinstance(data, dict):
+            return
+        self.consecutive_losses = data.get("consecutive_losses", 0)
+        self.strategy_consecutive_losses = data.get("strategy_consecutive_losses", {})
+        if data.get("cooldown_until"):
+            try:
+                self.cooldown_until = datetime.fromisoformat(data["cooldown_until"])
+            except Exception:
+                pass
+        if data.get("symbol_cooldowns"):
+            for sym, ts_str in data["symbol_cooldowns"].items():
+                try:
+                    self.symbol_cooldowns[sym] = datetime.fromisoformat(ts_str)
+                except Exception:
+                    pass
+        if data.get("strategy_cooldowns"):
+            for strat, ts_str in data["strategy_cooldowns"].items():
+                try:
+                    self.strategy_cooldowns[strat] = datetime.fromisoformat(ts_str)
+                except Exception:
+                    pass
+        self.hard_halted = data.get("hard_halted", False)
+        self.daily_halted = data.get("daily_halted", False)
+
+
     # ---- lifecycle hooks ----
 
     def on_trade_closed(self, trade: TradeRecord, now: datetime | None = None) -> None:

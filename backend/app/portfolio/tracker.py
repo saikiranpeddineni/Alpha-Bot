@@ -235,11 +235,14 @@ class PortfolioTracker:
         """Return a snapshot of all symbols with non-zero open lots."""
         return {s: lot for s, lot in self._lots.items() if abs(lot.qty) >= 1e-9}
 
-    def checkpoint(self, account_id: str | None = None) -> dict:
+    def checkpoint(self, account_id: str | None = None, risk_state: dict | None = None) -> dict:
         return {
             # fix(#61): embed account_id in checkpoint for cross-account validation on restore
             "account_id": account_id or self.restore_account_id,
+            # fix(#43): embed safety-critical risk state (loss streak, cooldowns, halts)
+            "risk_state": risk_state or {},
             "realized_pnl": self.realized_pnl,
+
             "day_realized_pnl": self.day_realized_pnl,
             "session_date": self.session_date.isoformat() if self.session_date else None,
             "session_start_equity": self.session_start_equity,
@@ -284,7 +287,7 @@ class PortfolioTracker:
         }
 
     def on_fill(self, fill: Fill, peak_price: float | None = None, trough_price: float | None = None,
-                initial_stop: float | None = None) -> TradeRecord | None:
+                initial_stop: float | None = None, risk_state: dict | None = None) -> TradeRecord | None:
         if fill.broker_fill_key and fill.cumulative_qty is not None and fill.broker_mode:
             from app.db.database import Database
             db = Database.active()
@@ -307,7 +310,7 @@ class PortfolioTracker:
                         cumulative_qty=float(fill.cumulative_qty),
                         mode=fill.broker_mode,
                         account_id=fill.broker_account_id or "default_account",
-                        checkpoint=self.checkpoint(),
+                        checkpoint=self.checkpoint(risk_state=risk_state),
                         trade=trade
                     )
                     return trade
@@ -315,6 +318,7 @@ class PortfolioTracker:
                     self.__dict__.clear()
                     self.__dict__.update(before)
                     raise
+
         return self._apply_fill(fill, peak_price, trough_price, initial_stop)
 
     def _apply_fill(self, fill: Fill, peak_price: float | None = None, trough_price: float | None = None, initial_stop: float | None = None) -> TradeRecord | None:

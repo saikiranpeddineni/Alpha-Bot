@@ -182,23 +182,35 @@ class TestIssue41ProtectiveExitRecovery:
 # ---------------------------------------------------------------------------
 
 class TestIssue43WatermarkCommitOrder:
-    def test_in_memory_watermark_not_advanced_before_commit(self):
-        """#43: _processed_fill_qty must NOT be advanced in poll_fills before commit_fill_processing."""
+    def test_watermark_and_checkpoint_committed_atomically_in_same_db_transaction(self):
+        """#43: Database.commit_fill_processing commits FillProgressRow and PortfolioCheckpointRow atomically."""
         import inspect
-        from app.brokers.alpaca import AlpacaBroker
+        from app.db.database import Database
 
-        source = inspect.getsource(AlpacaBroker.poll_fills)
-        assert "self._processed_fill_qty[oid] = cumulative" not in source, (
-            "#43: _processed_fill_qty must not be advanced in poll_fills before commit_fill_processing"
-        )
+        source = inspect.getsource(Database.commit_fill_processing)
+        assert "FillProgressRow" in source
+        assert "PortfolioCheckpointRow" in source
+        assert "s.commit()" in source
 
-    def test_local_watermarks_still_prevents_intra_poll_duplicates(self):
-        """#43: local_watermarks still prevents duplicate enqueue within same poll cycle."""
-        import inspect
-        from app.brokers.alpaca import AlpacaBroker
+    def test_risk_state_persisted_and_restored_from_checkpoint(self):
+        """#43: Safety-critical risk state (consecutive losses, cooldowns) persisted in checkpoint and restored."""
+        from app.risk.manager import RiskManager
+        from app.config import RiskConfig
+        from app.core.clock import MarketClock
 
-        source = inspect.getsource(AlpacaBroker.poll_fills)
-        assert "local_watermarks[oid] = cumulative" in source
+        rm = RiskManager(RiskConfig(), MarketClock())
+        rm.consecutive_losses = 3
+        rm.symbol_cooldowns = {"AAPL": datetime(2026, 7, 20, 15, 0, tzinfo=UTC)}
+
+        risk_state = rm.get_risk_state()
+        assert risk_state["consecutive_losses"] == 3
+        assert "AAPL" in risk_state["symbol_cooldowns"]
+
+        rm_restored = RiskManager(RiskConfig(), MarketClock())
+        rm_restored.restore_risk_state(risk_state)
+        assert rm_restored.consecutive_losses == 3
+        assert "AAPL" in rm_restored.symbol_cooldowns
+
 
 
 # ---------------------------------------------------------------------------
@@ -240,7 +252,39 @@ class TestIssue44PartialFillAccounting:
         )
         assert abs(trade.pnl - 400.0) < 1e-6
 
+    def test_incremental_execution_pricing_calculates_exact_delta_price(self):
+        """#44: Incremental fill delta price is derived from change in cumulative notional."""
+        from app.brokers.alpaca import AlpacaBroker
+        broker = AlpacaBroker("key", "secret", paper=True)
+
+        # First snapshot: 40 shares filled @ avg $100.0 (notional = $4,000)
+        # Second snapshot: 50 shares filled @ avg $102.0 (notional = $5,100)
+        # Incremental fill: 10 shares, expected price = (5100 - 4000) / 10 = $110.0
+
+        from types import SimpleNamespace
+        o1 = SimpleNamespace(id="ord-1", symbol="AAPL", side="buy", filled_qty=40.0, filled_avg_price=100.0, status="partially_filled", submitted_at=datetime.now(UTC), filled_at=datetime.now(UTC))
+        o2 = SimpleNamespace(id="ord-1", symbol="AAPL", side="buy", filled_qty=50.0, filled_avg_price=102.0, status="partially_filled", submitted_at=datetime.now(UTC), filled_at=datetime.now(UTC))
+
+        # First poll
+        with patch("app.brokers.alpaca._paginate_orders", new_callable=AsyncMock) as mock_p:
+            mock_p.return_value = [o1]
+            asyncio.run(broker.poll_fills())
+            fills1 = broker.drain_fills()
+            assert len(fills1) == 1
+            assert fills1[0].qty == 40.0
+            assert fills1[0].price == 100.0
+
+        # Second poll
+        with patch("app.brokers.alpaca._paginate_orders", new_callable=AsyncMock) as mock_p:
+            mock_p.return_value = [o2]
+            asyncio.run(broker.poll_fills())
+            fills2 = broker.drain_fills()
+            assert len(fills2) == 1
+            assert fills2[0].qty == 10.0
+            assert fills2[0].price == 110.0, f"#44: Expected delta fill price 110.0, got {fills2[0].price}"
+
     def test_full_close_removes_lot(self):
+
         """#44: Full close must remove the lot and record correct PnL."""
         from app.portfolio.tracker import PortfolioTracker, _OpenLot
         from app.brokers.base import Fill

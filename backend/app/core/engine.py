@@ -319,6 +319,14 @@ class TradingEngine:
             pass
         self.portfolio = PortfolioTracker(restore_mode=restore_mode, restore_account_id=restore_account_id)
 
+        # fix(#43): restore safety-critical risk state (loss streak, cooldowns, halts) from checkpoint
+        if restore_mode and self.db:
+            checkpoint = self.db.get_portfolio_checkpoint(restore_mode)
+            if checkpoint and "risk_state" in checkpoint and self.risk:
+                self.risk.restore_risk_state(checkpoint["risk_state"])
+                applog.info("engine", f"#43: Restored safety-critical risk state from {restore_mode} checkpoint")
+
+
         from app.portfolio.allocator import PortfolioAIGate, CapitalAllocationOptimizer
         self.portfolio_gate = PortfolioAIGate(
             max_correlation=self.risk_config.max_correlation_penalty,
@@ -1440,8 +1448,9 @@ class TradingEngine:
         fills = self.broker.drain_fills()
         if not fills:
             return
-        # fix(#51): enforce causal replay order — sort by (ts ASC, order_id) before processing
-        fills = sorted(fills, key=lambda f: (f.ts, f.order_id or ""))
+        # fix(#51): enforce causal replay order — sort by (ts ASC, order_id, cumulative_qty ASC)
+        fills = sorted(fills, key=lambda f: (f.ts, f.order_id or "", getattr(f, "cumulative_qty", 0.0) or 0.0))
+
         order_by_id = {}
         for o in self.recent_orders:
             order_by_id[o.id] = o
@@ -1474,9 +1483,11 @@ class TradingEngine:
             else:
                 self._position_initial_stops[symbol] = init_stop
 
-            trade = self.portfolio.on_fill(fill, peak_price=peak, trough_price=trough, initial_stop=init_stop)
+            risk_state = self.risk.get_risk_state() if self.risk else None
+            trade = self.portfolio.on_fill(fill, peak_price=peak, trough_price=trough, initial_stop=init_stop, risk_state=risk_state)
             if trade is not None:
                 self.risk.on_trade_closed(trade, now=now)
+
                 self.perf_tracker.update(trade, now=now)
                 self.db.save_trade(trade, self.mode)
                 self.publish("trade", trade.model_dump(mode="json"))
