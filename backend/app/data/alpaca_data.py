@@ -116,11 +116,12 @@ class AlpacaDataProvider(DataProvider):
             try:
                 def fetch_screener() -> list[str]:
                     from alpaca.data import MostActivesRequest, MarketMoversRequest, MarketType
+                    from alpaca.data.enums import MostActivesBy
                     symbols = set()
 
                     # 1. Fetch top 50 most active stocks by volume
                     try:
-                        actives = screener.get_most_actives(MostActivesRequest(top=50))
+                        actives = screener.get_most_actives(MostActivesRequest(top=50, by=MostActivesBy.VOLUME))
                         if hasattr(actives, "most_actives") and actives.most_actives:
                             for item in actives.most_actives:
                                 if getattr(item, "symbol", None):

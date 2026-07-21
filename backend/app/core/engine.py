@@ -791,6 +791,12 @@ class TradingEngine:
             if self.state != EngineState.RUNNING or not allow_entries:
                 symbols_to_evaluate = [sym for sym in symbols_to_evaluate if sym in pos_by_symbol]
 
+            # Exclude symbols with an in-flight close order — prevents immediate strategy re-entry
+            # on the same bar after a manual sell fires before the fill drains.
+            pending_close = getattr(self, "_pending_close_symbols", set())
+            if pending_close:
+                symbols_to_evaluate = [sym for sym in symbols_to_evaluate if sym not in pending_close]
+
             for symbol in symbols_to_evaluate:
                 entries = await self._evaluate_symbol(symbol, pos_by_symbol.get(symbol), account.equity, now)
                 if self.state == EngineState.RUNNING and allow_entries:
@@ -1974,7 +1980,21 @@ class TradingEngine:
             )
 
         req.strategy = "manual"
+
+        # If this is a manual sell/cover (closing or reducing), add to pending-close guard so
+        # strategies cannot immediately re-enter on the same/next tick before the fill drains.
+        if not hasattr(self, "_pending_close_symbols"):
+            self._pending_close_symbols = set()
+        sym_upper = req.symbol.upper()
+        if not is_entry and req.side == OrderSide.SELL:
+            self._pending_close_symbols.add(sym_upper)  # long → guard against immediate re-buy
+        elif not is_entry and req.side == OrderSide.BUY:
+            self._pending_close_symbols.add(sym_upper)  # short cover → guard against immediate re-short
+
         order = await self.broker.submit(req)
+        if order.status in (OrderStatus.REJECTED,) and not is_entry:
+            # Order was rejected — release the guard immediately
+            self._pending_close_symbols.discard(sym_upper)
         self.recent_orders.appendleft(order)
         self.db.save_order(order, self.mode)
         await self._drain_fills(utcnow())
@@ -1985,10 +2005,18 @@ class TradingEngine:
     async def close_symbol(self, symbol: str) -> Order | None:
         if self.broker is None:
             raise RuntimeError("Engine is not running")
+        # Guard: add to pending-close so strategies cannot immediately re-enter on the same/next tick
+        sym_upper = symbol.upper()
+        if not hasattr(self, "_pending_close_symbols"):
+            self._pending_close_symbols = set()
+        self._pending_close_symbols.add(sym_upper)
         order = await self.broker.close_position(symbol, reason="manual close")
         if order is not None:
             self.recent_orders.appendleft(order)
             self.db.save_order(order, self.mode)
+        else:
+            # Close failed — release guard so retries work
+            self._pending_close_symbols.discard(sym_upper)
         await self._drain_fills(utcnow())
         await self._publish_positions()
         return order
