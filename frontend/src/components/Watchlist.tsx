@@ -56,7 +56,7 @@ export function Watchlist() {
   }
 
   return (
-    <div className="panel">
+    <div className="panel watchlist-panel">
       <div className="panel-head" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
           <span>Watchlist</span>
