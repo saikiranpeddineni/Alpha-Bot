@@ -68,6 +68,7 @@ class Signal(BaseModel):
     decision_bar_timestamp_utc: datetime | None = None
     # Enriched by the AI signal pipeline:
     ml_probability: float | None = None
+    ml_gate_decision: str | None = None
     regime: Regime | None = None
     score: float | None = None
     candidate_id: str | None = None

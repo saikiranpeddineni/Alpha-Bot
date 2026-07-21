@@ -49,6 +49,9 @@ class RiskConfig(BaseModel):
     midday_score_boost: float = Field(15.0, ge=0.0, le=50.0)
     midday_start_et: int = Field(690, ge=570, le=960)
     midday_end_et: int = Field(795, ge=570, le=960)
+    rsi2_base_fallback_bypass_enabled: bool = Field(True)
+    rsi2_base_fallback_bypass_start_et: int = Field(660, ge=570, le=960)
+    rsi2_base_fallback_bypass_end_et: int = Field(780, ge=570, le=960)
     scanner_watchlist_ttl: int = Field(3, ge=1, le=30)
     alternative_exits: list[dict] = Field(
         default=[
@@ -121,6 +124,9 @@ class Settings(BaseSettings):
     midday_score_boost: float = Field(15.0, validation_alias="MIDDAY_SCORE_BOOST")
     midday_start_et: int = Field(690, validation_alias="MIDDAY_START_ET")
     midday_end_et: int = Field(795, validation_alias="MIDDAY_END_ET")
+    rsi2_base_fallback_bypass_enabled: bool = Field(True, validation_alias="RSI2_BASE_FALLBACK_BYPASS_ENABLED")
+    rsi2_base_fallback_bypass_start_et: int = Field(660, validation_alias="RSI2_BASE_FALLBACK_BYPASS_START_ET")
+    rsi2_base_fallback_bypass_end_et: int = Field(780, validation_alias="RSI2_BASE_FALLBACK_BYPASS_END_ET")
     dq_min_bars_warmup: int = Field(50, validation_alias="DQ_MIN_BARS_WARMUP")
     db_path: str = Field("", validation_alias="ALPHADESK_DB_PATH")
     admin_token: str = Field("", validation_alias="ALPHADESK_ADMIN_TOKEN")
@@ -176,6 +182,9 @@ class Settings(BaseSettings):
             midday_score_boost=self.midday_score_boost,
             midday_start_et=self.midday_start_et,
             midday_end_et=self.midday_end_et,
+            rsi2_base_fallback_bypass_enabled=self.rsi2_base_fallback_bypass_enabled,
+            rsi2_base_fallback_bypass_start_et=self.rsi2_base_fallback_bypass_start_et,
+            rsi2_base_fallback_bypass_end_et=self.rsi2_base_fallback_bypass_end_et,
             kelly_fraction_cap=self.kelly_fraction_cap,
             max_positions_per_sector=self.max_positions_per_sector,
             max_correlation_penalty=self.max_correlation_penalty,

@@ -102,6 +102,43 @@ class SignalPipeline:
     def regime_weight(self, strategy: str, regime: Regime) -> float:
         return self.regime_weights.get(strategy, {}).get(regime, 1.0)
 
+    def should_enforce_ml_veto(
+        self,
+        strategy: str,
+        action: SignalAction,
+        model_source: str,
+        specialist_status: str,
+        mins_et: int,
+    ) -> bool:
+        """Return True if ML failure should cause hard veto.
+
+        For rsi2_reversion ENTER_LONG using BASE_FALLBACK models during the configured
+        midday window (default 11:00-13:00 ET), the ML model has no validated predictive
+        authority (ROC-AUC ~0.486). The prediction is logged as BASE_FALLBACK_BYPASS
+        and the signal is evaluated by remaining downstream gates.
+        """
+        cfg = getattr(self.trade_score_engine, "risk_config", None)
+        if cfg is None or not getattr(cfg, "rsi2_base_fallback_bypass_enabled", True):
+            return True
+
+        start_et = getattr(cfg, "rsi2_base_fallback_bypass_start_et", 660)
+        end_et = getattr(cfg, "rsi2_base_fallback_bypass_end_et", 780)
+
+        is_base = (
+            model_source.upper() in ("BASE", "BASE_FALLBACK")
+            or specialist_status in ("NO_ARTIFACT", "SPECIALIST_INFERENCE_FAILED", "REJECTED_LOW_AUC", "TEMPORAL_BYPASS", "INVALID_SCORE")
+        )
+
+        if (
+            strategy == "rsi2_reversion"
+            and action == SignalAction.ENTER_LONG
+            and is_base
+            and start_et <= mins_et < end_et
+        ):
+            return False
+
+        return True
+
     def process(
         self,
         symbol: str,
@@ -199,7 +236,9 @@ class SignalPipeline:
                 if score_res.specialist_status == "TEMPORAL_BYPASS":
                     applog.info("pipeline", f"{symbol}: ML_GATE_BYPASSED_TEMPORAL")
                     sig.ml_probability = None
+                    sig.ml_gate_decision = "PASS"
                 else:
+                    sig.ml_gate_decision = "REJECT"
                     rejected.append((
                         sig,
                         f"ML probability unavailable ({score_res.fallback_reason or 'unknown reason'})",
@@ -207,12 +246,47 @@ class SignalPipeline:
                     continue
             else:
                 sig.ml_probability = round(ml, 4)
+                
+                # Determine current minute ET from df or clock
+                from zoneinfo import ZoneInfo
+                from datetime import datetime, UTC
+                ET_TZ = ZoneInfo("America/New_York")
+                if df is not None and len(df) > 0 and hasattr(df.index, "tz_convert"):
+                    try:
+                        now_et = df.index[-1].tz_convert(ET_TZ)
+                    except Exception:
+                        now_et = datetime.now(ET_TZ)
+                elif df is not None and len(df) > 0 and isinstance(df.index[-1], datetime):
+                    now_et = df.index[-1].astimezone(ET_TZ) if df.index[-1].tzinfo else df.index[-1].replace(tzinfo=UTC).astimezone(ET_TZ)
+                else:
+                    now_et = datetime.now(ET_TZ)
+                mins_et = now_et.hour * 60 + now_et.minute
+
+                enforce_veto = self.should_enforce_ml_veto(
+                    strategy=sig.strategy,
+                    action=sig.action,
+                    model_source=score_res.model_source,
+                    specialist_status=score_res.specialist_status,
+                    mins_et=mins_et,
+                )
+
                 if ml < self.ml_threshold:
-                    rejected.append((
-                        sig,
-                        f"ML confidence {ml:.4f} < threshold {self.ml_threshold:.4f}",
-                    ))
-                    continue
+                    if enforce_veto:
+                        sig.ml_gate_decision = "REJECT"
+                        rejected.append((
+                            sig,
+                            f"ML confidence {ml:.4f} < threshold {self.ml_threshold:.4f}",
+                        ))
+                        continue
+                    else:
+                        sig.ml_gate_decision = "BASE_FALLBACK_BYPASS"
+                        applog.info(
+                            "pipeline",
+                            f"{symbol}: RSI2 BASE_FALLBACK ML advisory bypass active: "
+                            f"prob={ml:.4f} < threshold={self.ml_threshold:.4f} (mins_et={mins_et})"
+                        )
+                else:
+                    sig.ml_gate_decision = "PASS"
 
             # ---- Stage 3: Excursion estimates ----
             # ATR-based fallback

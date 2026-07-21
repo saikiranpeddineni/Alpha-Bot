@@ -1221,7 +1221,7 @@ class TradingEngine:
                 spy_vol=spy_vol,
                 # Fix A5 (Issue #176): Pass runtime-tuned alternative exits from the engine.
                 alternative_exits=getattr(self.risk_config, "alternative_exits", None),
-                market_regime=getattr(self.last_safety_decision, "market_risk_state", "NORMAL"),
+                market_regime=getattr(getattr(self, "last_safety_decision", None), "market_risk_state", "NORMAL"),
                 vix_value=self._last_vix_value,
                 vix_age=(now - self._last_vix_timestamp).total_seconds() if self._last_vix_timestamp else None,
                 vix_feed_status=self._last_vix_status,
