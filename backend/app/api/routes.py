@@ -819,6 +819,55 @@ async def get_shadow_ledger_analytics(
             "avg_mae": round(data["total_mae"] / rep, 4) if rep > 0 else 0.0,
         }
 
+    by_market_regime = {}
+    for s in signals:
+        regime_name = s.get("market_regime") or "NORMAL"
+        if regime_name not in by_market_regime:
+            by_market_regime[regime_name] = {
+                "total": 0,
+                "rejected": 0,
+                "accepted": 0,
+                "replayed": 0,
+                "wins": 0,
+                "losses": 0,
+                "total_pnl": 0.0,
+                "total_mfe": 0.0,
+                "total_mae": 0.0,
+            }
+        
+        stat = by_market_regime[regime_name]
+        stat["total"] += 1
+        dec = s.get("final_decision")
+        if dec == "rejected":
+            stat["rejected"] += 1
+        elif dec in ACCEPTED_DECISIONS:
+            stat["accepted"] += 1
+            
+        if s.get("replayed"):
+            stat["replayed"] += 1
+            pnl = s.get("simulated_pnl") or 0.0
+            stat["total_pnl"] += pnl
+            stat["total_mfe"] += s.get("mfe_pct") or 0.0
+            stat["total_mae"] += s.get("mae_pct") or 0.0
+            if pnl > 0:
+                stat["wins"] += 1
+            elif pnl < 0:
+                stat["losses"] += 1
+
+    market_regime_breakdown = {}
+    for regime_name, data in by_market_regime.items():
+        rep = data["replayed"]
+        market_regime_breakdown[regime_name] = {
+            "total_signals": data["total"],
+            "rejected_signals": data["rejected"],
+            "accepted_signals": data["accepted"],
+            "replayed_signals": rep,
+            "win_rate": round(data["wins"] / rep * 100.0, 2) if rep > 0 else 0.0,
+            "avg_simulated_return": round(data["total_pnl"] / rep, 4) if rep > 0 else 0.0,
+            "avg_mfe": round(data["total_mfe"] / rep, 4) if rep > 0 else 0.0,
+            "avg_mae": round(data["total_mae"] / rep, 4) if rep > 0 else 0.0,
+        }
+
     # Fix A9 (Issue #191): Expose persistence-failure count in analytics response.
     from app.core.shadow_ledger import get_persistence_failure_count
 
@@ -843,6 +892,7 @@ async def get_shadow_ledger_analytics(
         },
         "by_strategy": strategy_breakdown,
         "by_rejection_stage": rejection_breakdown,
+        "by_market_regime": market_regime_breakdown,
         "alternative_exits_comparison": alt_exits_comparison,
         # Fix C8 (Issue #199): Expose truncation metadata.
         "population_meta": {

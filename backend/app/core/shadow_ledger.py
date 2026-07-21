@@ -204,6 +204,10 @@ class ShadowLedger:
         # Fix A5 (Issue #176): Accept runtime-tuned alternative exits from the engine.
         # When None, falls back to boot-time settings (backward-compatible).
         alternative_exits: list[dict] | None = None,
+        market_regime: str | None = None,
+        vix_value: float | None = None,
+        vix_age: float | None = None,
+        vix_feed_status: str | None = None,
     ) -> dict:
         """Assembles a telemetry record, computes future outcomes, and saves it to the DB."""
         if candidate_id is None:
@@ -213,6 +217,18 @@ class ShadowLedger:
 
         clock_phase = classify_clock_phase(ts)
         behavior_state = classify_market_behavior(spy_df, ts)
+
+        if market_regime is None:
+            # Estimate regime based on spy_vol if VIX is not provided (e.g. in backtests)
+            if spy_vol is not None:
+                if spy_vol > 0.15:
+                    market_regime = "STRESS"
+                elif spy_vol > 0.08:
+                    market_regime = "CAUTION"
+                else:
+                    market_regime = "NORMAL"
+            else:
+                market_regime = "NORMAL"
 
         # Classify opportunity mapper class using premarket subset
         # We can extract premarket bars for today (up to 09:30 AM ET)
@@ -293,6 +309,10 @@ class ShadowLedger:
             "policy_version": policy_version,
             "gate_evidence_json": gate_evidence_json,
             "spy_vol": spy_vol,
+            "market_regime": market_regime,
+            "vix_value": round(vix_value, 4) if vix_value is not None else None,
+            "vix_age": round(vix_age, 2) if vix_age is not None else None,
+            "vix_feed_status": vix_feed_status,
         }
 
         # Calculate unique/shared/redundant veto attribution if gate_evidence_json is present

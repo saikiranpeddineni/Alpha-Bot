@@ -93,6 +93,10 @@ class ShadowLedgerRow(Base):
     parent_policy_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     policy_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
     gate_evidence_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    market_regime: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    vix_value: Mapped[float | None] = mapped_column(nullable=True)
+    vix_age: Mapped[float | None] = mapped_column(nullable=True)
+    vix_feed_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
 
 
 class ContextualPerformanceMemoryRow(Base):
@@ -233,6 +237,10 @@ class Database:
                     "parent_policy_id": "VARCHAR(64)",
                     "policy_version": "VARCHAR(20)",
                     "gate_evidence_json": "TEXT",
+                    "market_regime": "VARCHAR(20)",
+                    "vix_value": "FLOAT",
+                    "vix_age": "FLOAT",
+                    "vix_feed_status": "VARCHAR(20)",
                 }
 
                 needs_commit = False
@@ -490,6 +498,10 @@ class Database:
                     parent_policy_id=payload.get("parent_policy_id"),
                     policy_version=payload.get("policy_version"),
                     gate_evidence_json=json.dumps(payload["gate_evidence_json"]) if payload.get("gate_evidence_json") is not None else None,
+                    market_regime=payload.get("market_regime"),
+                    vix_value=payload.get("vix_value"),
+                    vix_age=payload.get("vix_age"),
+                    vix_feed_status=payload.get("vix_feed_status"),
                 )
             )
             s.commit()
@@ -519,6 +531,10 @@ class Database:
                     data["parent_policy_id"] = r.parent_policy_id
                     data["policy_version"] = r.policy_version
                     data["gate_evidence_json"] = json.loads(r.gate_evidence_json) if r.gate_evidence_json else None
+                    data["market_regime"] = r.market_regime
+                    data["vix_value"] = r.vix_value
+                    data["vix_age"] = r.vix_age
+                    data["vix_feed_status"] = r.vix_feed_status
                     results.append(data)
                 except Exception:
                     pass
@@ -546,6 +562,10 @@ class Database:
                 data["parent_policy_id"] = row.parent_policy_id
                 data["policy_version"] = row.policy_version
                 data["gate_evidence_json"] = json.loads(row.gate_evidence_json) if row.gate_evidence_json else None
+                data["market_regime"] = row.market_regime
+                data["vix_value"] = row.vix_value
+                data["vix_age"] = row.vix_age
+                data["vix_feed_status"] = row.vix_feed_status
                 return data
             except Exception:
                 return None
