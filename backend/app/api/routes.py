@@ -1710,26 +1710,73 @@ async def promote_policy(request: Request, body: PromoteRequest) -> dict:
                 detail="Conflict: Champion configuration has changed since this nomination was generated. Re-evaluation required."
             )
 
-        # 7.5. Enforce promoter & evidence package verification (CR-146D Governance)
+        # 7.5. Enforce promoter & mandatory evidence package verification (#246, #251)
         if not body.promoter_id or not body.promoter_id.strip():
             raise HTTPException(status_code=400, detail="Promoter identity required.")
-            
-        evidence_pkg = {}
-        if body.evidence_package_id:
-            evidence_pkg = db.get_policy_evidence(body.evidence_package_id)
-            if not evidence_pkg:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Frozen evidence package {body.evidence_package_id!r} not found. Generate evidence first."
+
+        ev_id = (body.evidence_package_id or "").strip()
+        if not ev_id or ev_id == "legacy_bypass":
+            raise HTTPException(
+                status_code=400,
+                detail="Promotion failed: evidence_package_id is required. Legacy bypass is disabled."
+            )
+
+        evidence_pkg = db.get_policy_evidence(ev_id)
+        if not evidence_pkg:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Frozen evidence package {ev_id!r} not found. Generate evidence first."
+            )
+        if evidence_pkg.get("policy_id") != policy_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Conflict: Evidence package policy_id does not match target policy."
+            )
+
+        # Cryptographic Integrity & Safety Checks Validation (#246, #251)
+        if "safety_checks" in evidence_pkg and "envelope_signature" in evidence_pkg:
+            from app.core.promotion import PromotionEvidenceEnvelope, SafetyCheckEvidence, SafetyCheckStatus
+            sc_list = [
+                SafetyCheckEvidence(
+                    rule_name=sc["rule_name"],
+                    status=SafetyCheckStatus(sc["status"]),
+                    details=sc.get("details", ""),
+                    timestamp=sc.get("timestamp", "")
                 )
-            if evidence_pkg.get("policy_id") != policy_id:
+                for sc in evidence_pkg.get("safety_checks", [])
+            ]
+            envelope = PromotionEvidenceEnvelope(
+                policy_id=evidence_pkg.get("policy_id", policy_id),
+                git_commit_sha=evidence_pkg.get("git_commit_sha", ""),
+                package_hash=evidence_pkg.get("package_hash", ""),
+                safety_checks=sc_list,
+                canonical_evidence_metadata=evidence_pkg.get("canonical_evidence_metadata", {}),
+                timestamp=evidence_pkg.get("timestamp", ""),
+                envelope_signature=evidence_pkg.get("envelope_signature", "")
+            )
+            if not envelope.verify_integrity():
                 raise HTTPException(
                     status_code=400,
-                    detail="Conflict: Evidence package policy_id does not match target policy."
+                    detail="Invalid evidence package: cryptographic envelope signature mismatch or evidence payload tampered."
+                )
+            all_passed = all(sc.status == SafetyCheckStatus.PASS for sc in sc_list)
+            if not all_passed:
+                failed_rules = [sc.rule_name for sc in sc_list if sc.status != SafetyCheckStatus.PASS]
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Rejected: Evidence package safety checks failed for rules: {failed_rules}."
                 )
 
-        # 8. Record promotion log in the immutable append-only audit trail
+        # 8. Capture pre-promotion state & record promotion log
         old_snapshot = db.get_setting("active_policy_snapshot")
+        old_ml_threshold = db.get_setting("ml_threshold")
+        old_risk_config = db.get_setting("risk_config")
+
+        old_engine_risk_config = getattr(engine, "risk_config", None) if engine else None
+        old_pipeline_ml_threshold = getattr(engine.pipeline, "ml_threshold", None) if (engine and getattr(engine, "pipeline", None)) else None
+        old_evaluator_ml_threshold = getattr(engine.evidence_evaluator, "ml_threshold", None) if (engine and getattr(engine, "evidence_evaluator", None)) else None
+        old_trade_score_engine_config = getattr(engine.pipeline.trade_score_engine, "risk_config", None) if (engine and getattr(engine, "pipeline", None) and getattr(engine.pipeline, "trade_score_engine", None)) else None
+
         from datetime import datetime, UTC
         import subprocess
         code_sha = None
@@ -1749,7 +1796,7 @@ async def promote_policy(request: Request, body: PromoteRequest) -> dict:
             "reason": body.reason,
             "previous_snapshot": old_snapshot or {},
             "new_snapshot": snapshot,
-            "evidence_package_id": body.evidence_package_id or "legacy_bypass",
+            "evidence_package_id": ev_id,
             "evidence_package": evidence_pkg,
             "mode": engine.mode if (engine and isinstance(getattr(engine, "mode", None), str)) else "paper",
             "evidence_generation_timestamp": datetime.fromisoformat(evidence_pkg.get("timestamp")) if evidence_pkg.get("timestamp") else datetime.now(UTC),

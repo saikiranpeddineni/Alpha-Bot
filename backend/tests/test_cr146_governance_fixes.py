@@ -360,11 +360,22 @@ async def test_atomic_promotion_rollback_on_failure(temp_db):
     
     temp_db.set_setting = mock_set_setting
 
+    temp_db.save_policy_evidence("ev_fix_rollback_123", "challenger_high_ml", datetime.now(UTC), {
+        "evidence_package_id": "ev_fix_rollback_123",
+        "policy_id": "challenger_high_ml",
+        "timestamp": "2026-01-06T12:00:00",
+        "safety_checks": []
+    })
+
     with patch("app.config.get_settings", return_value=settings_mock), \
          patch("app.api.routes._db", return_value=temp_db), \
          patch("app.api.routes._engine", return_value=engine_mock):
         client = TestClient(app, raise_server_exceptions=False)
-        res = client.post("/api/strategies/promote", json={"policy_id": "challenger_high_ml"})
+        res = client.post("/api/strategies/promote", json={
+            "policy_id": "challenger_high_ml",
+            "promoter_id": "admin_user",
+            "evidence_package_id": "ev_fix_rollback_123"
+        })
         if res.status_code != 500:
             print("FAILED ROLLBACK RESPONSE:", res.status_code, res.json())
         assert res.status_code == 500
