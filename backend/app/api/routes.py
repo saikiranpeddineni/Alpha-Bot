@@ -73,6 +73,15 @@ async def post_allow_new_entries(body: AllowNewEntriesBody, request: Request) ->
 async def post_reset_health(request: Request) -> dict:
     engine = _engine(request)
     
+    # Re-reconcile positions to match the broker before heartbeat check
+    if engine.broker:
+        try:
+            positions = await engine.broker.positions()
+            engine._reconcile_positions(positions)
+            applog.info("routes", f"Successfully re-reconciled {len(positions)} positions from broker on manual health reset")
+        except Exception as exc:
+            applog.error("routes", f"Failed to reconcile positions from broker during reset: {exc}")
+
     # Reset reconciliation failure states
     engine.reconciliation_failed = False
     engine.reconciliation_mismatch = False
