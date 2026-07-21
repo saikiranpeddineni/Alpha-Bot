@@ -149,6 +149,9 @@ class TradingEngine:
         self._vix_unavailable_last_state: bool | None = None
         self.heartbeat_diagnostics = {}
         self._force_gated = False
+        self._last_vix_value: float | None = None
+        self._last_vix_timestamp: datetime | None = None
+        self._last_vix_status: str = "UNAVAILABLE"
 
         # Heartbeat Telemetry & EKG Tracker
         self._heartbeat_seq = 0
@@ -1194,6 +1197,10 @@ class TradingEngine:
                 spy_vol=spy_vol,
                 # Fix A5 (Issue #176): Pass runtime-tuned alternative exits from the engine.
                 alternative_exits=getattr(self.risk_config, "alternative_exits", None),
+                market_regime=getattr(self.last_safety_decision, "market_risk_state", "NORMAL"),
+                vix_value=self._last_vix_value,
+                vix_age=(now - self._last_vix_timestamp).total_seconds() if self._last_vix_timestamp else None,
+                vix_feed_status=self._last_vix_status,
             )
 
             # Run and record all active Challengers (CR-146 Phase 3)
@@ -1257,6 +1264,10 @@ class TradingEngine:
                         spy_vol=spy_vol,
                         # Fix A5 (Issue #176): Runtime-tuned alternative exits for challenger replays.
                         alternative_exits=getattr(self.risk_config, "alternative_exits", None),
+                        market_regime=getattr(self.last_safety_decision, "market_risk_state", "NORMAL"),
+                        vix_value=self._last_vix_value,
+                        vix_age=(now - self._last_vix_timestamp).total_seconds() if self._last_vix_timestamp else None,
+                        vix_feed_status=self._last_vix_status,
                     )
                 except Exception as exc:
                     applog.error("engine.challenger", f"Challenger {challenger.policy_id} failed for {symbol}: {exc}")
@@ -2553,6 +2564,9 @@ class TradingEngine:
 
         # Monitor 10: VIX feed availability
         vix_fresh = False
+        self._last_vix_status = "UNAVAILABLE"
+        self._last_vix_value = None
+        self._last_vix_timestamp = None
         for vix_sym in ["^VIX", "VIX"]:
             try:
                 vix_df = self.data.frame(vix_sym, "1Min", limit=1)
@@ -2563,9 +2577,16 @@ class TradingEngine:
                     if last_vix_time.tzinfo is None and now.tzinfo is not None:
                         last_vix_time = last_vix_time.replace(tzinfo=now.tzinfo)
                     
+                    vix_price_val = float(vix_df["close"].iloc[-1])
+                    vix_age_seconds = (now - last_vix_time).total_seconds()
+                    self._last_vix_value = vix_price_val
+                    self._last_vix_timestamp = last_vix_time
+                    self._last_vix_status = "STALE"
+                    
                     is_synthetic = getattr(getattr(self.data, "provider", None), "name", "") == "synthetic"
-                    if (now - last_vix_time).total_seconds() < 1800 or self.mode == "demo" or is_synthetic:
+                    if vix_age_seconds < 1800 or self.mode == "demo" or is_synthetic:
                         vix_fresh = True
+                        self._last_vix_status = "HEALTHY"
                         break
             except Exception:
                 pass
