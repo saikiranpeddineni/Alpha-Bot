@@ -1728,41 +1728,63 @@ async def promote_policy(request: Request, body: PromoteRequest) -> dict:
                     detail="Conflict: Evidence package policy_id does not match target policy."
                 )
 
-        # 8. Atomic / Compensating Transaction Setup
-        # Capture pre-promotion DB values
+        # 8. Record promotion log in the immutable append-only audit trail
         old_snapshot = db.get_setting("active_policy_snapshot")
-        old_ml_threshold = db.get_setting("ml_threshold")
-        old_risk_config = db.get_setting("risk_config")
+        from datetime import datetime, UTC
+        import subprocess
+        code_sha = None
+        try:
+            code_sha = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode("utf-8").strip()
+        except Exception:
+            code_sha = None
 
-        # Capture pre-promotion engine runtime state
-        old_engine_risk_config = getattr(engine, "risk_config", None) if engine else None
-        old_pipeline_ml_threshold = getattr(engine.pipeline, "ml_threshold", None) if getattr(engine, "pipeline", None) else None
-        old_evaluator_ml_threshold = getattr(engine.evidence_evaluator, "ml_threshold", None) if getattr(engine, "evidence_evaluator", None) else None
-        old_trade_score_engine_config = getattr(engine.pipeline.trade_score_engine, "risk_config", None) if (getattr(engine, "pipeline", None) and getattr(engine.pipeline, "trade_score_engine", None)) else None
+        promotion_log = {
+            "policy_id": policy_id,
+            "champion_policy_id": old_snapshot.get("policy_id") if old_snapshot else None,
+            "champion_policy_version": old_snapshot.get("snapshot_version", "1.0.0") if old_snapshot else None,
+            "challenger_policy_id": policy_id,
+            "challenger_policy_version": snapshot.get("snapshot_version", "1.0.0"),
+            "promoter_id": body.promoter_id,
+            "timestamp": datetime.now(UTC),
+            "reason": body.reason,
+            "previous_snapshot": old_snapshot or {},
+            "new_snapshot": snapshot,
+            "evidence_package_id": body.evidence_package_id or "legacy_bypass",
+            "evidence_package": evidence_pkg,
+            "mode": engine.mode if (engine and isinstance(getattr(engine, "mode", None), str)) else "paper",
+            "evidence_generation_timestamp": datetime.fromisoformat(evidence_pkg.get("timestamp")) if evidence_pkg.get("timestamp") else datetime.now(UTC),
+            "code_commit_sha": code_sha,
+            "dataset_window_id": evidence_pkg.get("dataset_window_id", "default_window")
+        }
 
         try:
+            # 9. Apply ALL database changes atomically in a single transaction FIRST (#247)
+            db.execute_policy_promotion_atomic(
+                policy_id=policy_id,
+                nominated_at=pending_nominee["nominated_at"],
+                snapshot=snapshot,
+                promotion_log=promotion_log
+            )
+
+            # 10. ONLY update engine runtime state AFTER DB commit succeeds (#247)
+            offset = float(snapshot.get("score_threshold_offset", 0.0))
             if engine:
-                # Reset engine risk config back to base settings from the DB first (without prior offsets)
                 stored_risk = db.get_setting("risk_config") or {}
                 default_risk = engine.settings.risk_config().model_dump()
                 merged_risk = {**default_risk, **stored_risk}
                 
-                # Apply the new offset to the merged base risk config in-memory
                 from app.config import RiskConfig
                 engine.risk_config = RiskConfig(**merged_risk)
                 
-                offset = float(snapshot.get("score_threshold_offset", 0.0))
                 if offset != 0.0:
                     engine.risk_config.score_threshold_event = max(0.0, engine.risk_config.score_threshold_event + offset)
                     engine.risk_config.score_threshold_trend = max(0.0, engine.risk_config.score_threshold_trend + offset)
                     engine.risk_config.score_threshold_range = max(0.0, engine.risk_config.score_threshold_range + offset)
                     engine.risk_config.score_threshold_volatile = max(0.0, engine.risk_config.score_threshold_volatile + offset)
                     
-                # Synchronize risk manager and pipeline engines
                 if engine.risk:
                     engine.risk.config = engine.risk_config
                     
-                # Update running engine properties in-place from the snapshot
                 pipeline = getattr(engine, "pipeline", None)
                 if pipeline:
                     pipeline.ml_threshold = snapshot["ml_threshold"]
@@ -1773,42 +1795,6 @@ async def promote_policy(request: Request, body: PromoteRequest) -> dict:
                 if evaluator:
                     evaluator.ml_threshold = snapshot["ml_threshold"]
 
-            # Record promotion log in the immutable append-only audit trail
-            from datetime import datetime, UTC
-            import subprocess
-            code_sha = None
-            try:
-                code_sha = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode("utf-8").strip()
-            except Exception:
-                code_sha = None
-
-            promotion_log = {
-                "policy_id": policy_id,
-                "champion_policy_id": old_snapshot.get("policy_id") if old_snapshot else None,
-                "champion_policy_version": old_snapshot.get("snapshot_version", "1.0.0") if old_snapshot else None,
-                "challenger_policy_id": policy_id,
-                "challenger_policy_version": snapshot.get("snapshot_version", "1.0.0"),
-                "promoter_id": body.promoter_id,
-                "timestamp": datetime.now(UTC),
-                "reason": body.reason,
-                "previous_snapshot": old_snapshot or {},
-                "new_snapshot": snapshot,
-                "evidence_package_id": body.evidence_package_id or "legacy_bypass",
-                "evidence_package": evidence_pkg,
-                "mode": engine.mode if isinstance(getattr(engine, "mode", None), str) else "paper",
-                "evidence_generation_timestamp": datetime.fromisoformat(evidence_pkg.get("timestamp")) if evidence_pkg.get("timestamp") else datetime.now(UTC),
-                "code_commit_sha": code_sha,
-                "dataset_window_id": evidence_pkg.get("dataset_window_id", "default_window")
-            }
-            
-            # Apply all database changes atomically in a single transaction
-            db.execute_policy_promotion_atomic(
-                policy_id=policy_id,
-                nominated_at=pending_nominee["nominated_at"],
-                snapshot=snapshot,
-                promotion_log=promotion_log
-            )
-            
             applog.info(
                 "engine.promotion",
                 f"SUCCESS: Promoted policy {policy_id!r} to Champion production state in-place. "
