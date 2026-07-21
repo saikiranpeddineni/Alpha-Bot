@@ -263,15 +263,17 @@ class AlpacaBroker(Broker):
             side=OrderSide.BUY if str(o.side).endswith("BUY") or str(o.side) == "buy" else OrderSide.SELL,
             qty=float(o.qty or 0),
             order_type=OrderType.LIMIT if str(o.type).endswith("limit") else OrderType.MARKET,
-            limit_price=float(o.limit_price) if o.limit_price else None,
+            limit_price=float(o.limit_price) if getattr(o, "limit_price", None) else None,
+            stop_loss=float(o.stop_price) if getattr(o, "stop_price", None) else None,
             status=_STATUS_MAP.get(str(o.status).split(".")[-1].lower(), OrderStatus.SUBMITTED),
             filled_qty=float(o.filled_qty or 0),
-            filled_avg_price=float(o.filled_avg_price) if o.filled_avg_price else None,
+            filled_avg_price=float(o.filled_avg_price) if getattr(o, "filled_avg_price", None) else None,
             strategy=strategy,
             reason=reason,
             submitted_at=o.submitted_at or datetime.now(UTC),
-            filled_at=o.filled_at,
+            filled_at=getattr(o, "filled_at", None),
         )
+
 
     async def submit(self, req: OrderRequest) -> Order:
         from alpaca.trading.enums import OrderSide as ASide

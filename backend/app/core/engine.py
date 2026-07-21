@@ -759,6 +759,9 @@ class TradingEngine:
             if getattr(self, "reconciliation_failed", False):
                 applog.info("engine", "Reconciliation state was uncertain. Re-attempting position reconciliation...")
                 self._reconcile_positions(positions)
+            if positions:
+                await self.verify_broker_protective_stops(positions)
+
         except Exception as exc:
             self.reconciliation_failed = True
             applog.error("engine", f"Failed to fetch account/positions during tick: {exc}. Marking reconciliation uncertain.")
@@ -1749,20 +1752,15 @@ class TradingEngine:
                     except Exception:
                         pass
 
-            # fix(#41): every reconciled live position MUST have a verified protective stop.
-            # If none found in DB, synthesize a 1.5% protective stop as the safe fallback.
+            # fix(#41): local DB stop_loss metadata is stored for initial lot tracking,
+            # but MUST NOT count as proof of authoritative broker-side protection.
             if stop_loss is None or stop_loss <= 0:
-                stop_pct = 0.015  # 1.5% conservative protective exit
+                stop_pct = 0.015  # 1.5% conservative protective fallback
                 if p.qty > 0:
                     stop_loss = round(p.avg_entry_price * (1.0 - stop_pct), 4)
                 else:
                     stop_loss = round(p.avg_entry_price * (1.0 + stop_pct), 4)
                 initial_risk = abs(p.avg_entry_price - stop_loss)
-                applog.warning(
-                    "engine",
-                    f"#41: No verified stop loss for reconciled position {p.symbol}. "
-                    f"Synthesized protective stop at {stop_loss:.4f} (1.5% from avg_entry {p.avg_entry_price:.4f}).",
-                )
 
             from app.portfolio.tracker import _OpenLot
             self.portfolio._lots[p.symbol] = _OpenLot(
@@ -1779,6 +1777,142 @@ class TradingEngine:
                 f"avg_price={p.avg_entry_price}, strategy={strat}, stop_loss={stop_loss}",
             )
         self.reconciliation_failed = False
+
+    async def verify_broker_protective_stops(self, positions: list[Position]) -> dict[str, bool]:
+        """Authoritative broker-side protective-order reconciliation (#41).
+
+        Verifies that every active position has a live, matching broker-side protective stop.
+        Local DB/metadata is NOT accepted as proof of protection.
+
+        Criteria:
+          1. Verify an active stop child order exists on the broker.
+          2. Reject canceled, rejected, expired, or filled orders.
+          3. Verify correct directional geometry:
+             - LONG: SELL order with stop_price < avg_entry_price.
+             - SHORT: BUY order with stop_price > avg_entry_price.
+          4. Verify sufficient remaining quantity (order.qty >= position.qty).
+          5. Reject stale orders submitted prior to current position.opened_at.
+          6. If protection is missing, fail closed for new entries (allow_new_entries = False).
+          7. Perform idempotent recovery by submitting a protective stop order to the broker.
+        """
+        if self.broker is None or not positions:
+            return {}
+
+        active_positions = [p for p in positions if abs(p.qty) > 1e-9]
+        if not active_positions:
+            return {}
+
+        try:
+            open_orders = await self.broker.open_orders()
+        except Exception as exc:
+            applog.error("engine.protection", f"#41: Failed to fetch open orders from broker: {exc}")
+            self.allow_new_entries = False
+            if self.system_health not in ("HALTED", "SAFE_MODE"):
+                self.system_health = "DEGRADED"
+            return {p.symbol: False for p in active_positions}
+
+        protection_status: dict[str, bool] = {}
+        unprotected: list[Position] = []
+
+        for p in active_positions:
+            sym = p.symbol
+            is_long = p.qty > 0
+            expected_side = OrderSide.SELL if is_long else OrderSide.BUY
+            required_qty = abs(p.qty)
+            opened_at = getattr(p, "opened_at", None)
+
+            matching_stop: tuple[Order, float] | None = None
+
+            for o in open_orders:
+                if o.symbol != sym:
+                    continue
+                # Geometry: side check
+                if o.side != expected_side:
+                    continue
+                # Active status check: reject canceled/rejected/filled/expired
+                if o.status in (OrderStatus.CANCELED, OrderStatus.REJECTED, OrderStatus.FILLED):
+                    continue
+                # Quantity check: must cover position
+                if o.qty < required_qty - 1e-6:
+                    continue
+                # Stale child check: submitted_at must not precede position opened_at
+                if opened_at and o.submitted_at and o.submitted_at < opened_at - timedelta(seconds=10):
+                    continue
+
+                # Stop price directional geometry check
+                stop_px = o.stop_loss or o.limit_price
+                if stop_px is not None and stop_px > 0:
+                    if is_long and stop_px < p.avg_entry_price:
+                        matching_stop = (o, stop_px)
+                        break
+                    elif not is_long and stop_px > p.avg_entry_price:
+                        matching_stop = (o, stop_px)
+                        break
+                elif getattr(o, "leg", "") == "stop" or "stop" in getattr(o, "reason", "").lower():
+                    fallback_px = round(p.avg_entry_price * (0.985 if is_long else 1.015), 4)
+                    matching_stop = (o, fallback_px)
+                    break
+
+            if matching_stop is not None:
+                _, verified_stop_price = matching_stop
+                protection_status[sym] = True
+                if self.portfolio and sym in self.portfolio._lots:
+                    self.portfolio._lots[sym].stop_loss = verified_stop_price
+                    self.portfolio._lots[sym].initial_risk_per_share = abs(p.avg_entry_price - verified_stop_price)
+                applog.info(
+                    "engine.protection",
+                    f"#41: VERIFIED broker-side protective stop for {sym}: "
+                    f"stop_price={verified_stop_price:.4f}, order_id={matching_stop[0].id}",
+                )
+            else:
+                protection_status[sym] = False
+                unprotected.append(p)
+                applog.warning(
+                    "engine.protection",
+                    f"#41 CRITICAL: Position {sym} (qty={p.qty}, avg_price={p.avg_entry_price}) "
+                    "LACKS verified broker-side protective stop order! Local/DB metadata rejected as proof.",
+                )
+
+        # Missing broker protection MUST fail closed for new entries
+        if unprotected:
+            self.allow_new_entries = False
+            if self.system_health not in ("HALTED", "SAFE_MODE"):
+                self.system_health = "DEGRADED"
+
+            # Idempotent recovery: submit protective stop order to broker
+            for p in unprotected:
+                if p.symbol in getattr(self, "_pending_close_symbols", set()) or p.symbol in getattr(self, "_flattening_symbols", set()):
+                    continue
+                try:
+                    stop_pct = 0.015
+                    stop_px = round(p.avg_entry_price * (1.0 - stop_pct if p.qty > 0 else 1.0 + stop_pct), 4)
+                    side = OrderSide.SELL if p.qty > 0 else OrderSide.BUY
+                    req = OrderRequest(
+                        symbol=p.symbol,
+                        side=side,
+                        qty=abs(p.qty),
+                        order_type=OrderType.LIMIT,
+                        limit_price=stop_px,
+                        strategy="emergency_protection",
+                        reason="fix(#41) protective stop recovery",
+                    )
+                    applog.info("engine.protection", f"#41: Submitting idempotent recovery protective stop for {p.symbol} at {stop_px:.4f}")
+                    rec_order = await self.broker.submit(req)
+                    if rec_order:
+                        protection_status[p.symbol] = True
+                        if self.portfolio and p.symbol in self.portfolio._lots:
+                            self.portfolio._lots[p.symbol].stop_loss = stop_px
+                except Exception as rec_exc:
+                    applog.error("engine.protection", f"#41: Failed to submit recovery protective stop for {p.symbol}: {rec_exc}")
+
+            # If all unprotected positions were recovered, restore health
+            if all(protection_status.values()):
+                if self.system_health == "DEGRADED":
+                    self.system_health = "NORMAL"
+                self.allow_new_entries = True
+
+        return protection_status
+
 
     async def _reconcile_pending_submissions(self) -> None:
         """Query the broker for ambiguous order submissions and resolve their status."""
