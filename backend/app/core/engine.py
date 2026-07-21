@@ -401,7 +401,8 @@ class TradingEngine:
             except Exception as exc:  # noqa: BLE001
                 self._consec_errors += 1
                 self.last_error = str(exc)
-                applog.error("engine", f"tick failed ({self._consec_errors}): {exc}")
+                import traceback
+                applog.error("engine", f"tick failed ({self._consec_errors}): {exc}\n{traceback.format_exc()}")
                 if self._consec_errors >= MAX_CONSECUTIVE_TICK_ERRORS:
                     applog.error(
                         "engine",
