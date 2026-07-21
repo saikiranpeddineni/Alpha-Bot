@@ -84,9 +84,10 @@ def generate_eod_reflection_report(db: Database, now: datetime | None = None, en
                 outcomes = r.get("outcomes")
                 if outcomes:
                     realized_r = _canonical_realized_r(strategy, outcomes)
-                    champ_global_total_r += realized_r
-                    if realized_r > 0.0:
-                        champ_global_wins += 1
+                    if realized_r is not None:
+                        champ_global_total_r += realized_r
+                        if realized_r > 0.0:
+                            champ_global_wins += 1
             else:
                 champ_global_rejected += 1
 
@@ -142,9 +143,10 @@ def generate_eod_reflection_report(db: Database, now: datetime | None = None, en
                 outcomes = r.get("outcomes")
                 if outcomes:
                     realized_r = _canonical_realized_r(strategy, outcomes)
-                    chall_total_r += realized_r
-                    if realized_r > 0.0:
-                        chall_wins += 1
+                    if realized_r is not None:
+                        chall_total_r += realized_r
+                        if realized_r > 0.0:
+                            chall_wins += 1
             else:
                 chall_rejected += 1
 
@@ -162,7 +164,9 @@ def generate_eod_reflection_report(db: Database, now: datetime | None = None, en
                 strategy = r.get("strategy")
                 outcomes = r.get("outcomes")
                 if outcomes:
-                    champ_matched_total_r += _canonical_realized_r(strategy, outcomes)
+                    cr = _canonical_realized_r(strategy, outcomes)
+                    if cr is not None:
+                        champ_matched_total_r += cr
 
         champ_matched_expectancy = (champ_matched_total_r / champ_matched_approved) if champ_matched_approved > 0 else 0.0
         edge = chall_expectancy - champ_matched_expectancy
@@ -285,14 +289,14 @@ def generate_eod_reflection_report(db: Database, now: datetime | None = None, en
             ]
             if len(chall_approved) < 2:
                 continue
-            chall_total_r = sum(_canonical_realized_r(r.get("strategy"), r.get("outcomes")) for r in chall_approved if r.get("outcomes"))
+            chall_total_r = sum(_canonical_realized_r(r.get("strategy"), r.get("outcomes")) or 0.0 for r in chall_approved if r.get("outcomes"))
             expectancy = chall_total_r / len(chall_approved)
 
             champ_approved = [
                 candidate_map[cand_id]["champion"] for cand_id in matched_cands
                 if candidate_map[cand_id]["champion"].get("final_decision") == "pipeline_approved"
             ]
-            champ_total_r = sum(_canonical_realized_r(r.get("strategy"), r.get("outcomes")) for r in champ_approved if r.get("outcomes"))
+            champ_total_r = sum(_canonical_realized_r(r.get("strategy"), r.get("outcomes")) or 0.0 for r in champ_approved if r.get("outcomes"))
             champ_exp = champ_total_r / len(champ_approved) if len(champ_approved) > 0 else 0.0
 
             if expectancy > manual_expectancy:

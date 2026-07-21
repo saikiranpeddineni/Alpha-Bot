@@ -589,22 +589,28 @@ async def get_shadow_ledger_analytics(
     total_available = len(signals)  # best-effort; equals limit when truncated
     truncated = total_available >= limit
     
+    from app.core.canonical_evidence import CanonicalOutcomeResolver
+    
     total_signals = len(signals)
     rejected_signals = [s for s in signals if s.get("final_decision") == "rejected"]
-    # Fix C3 (Issue #192): Use canonical ACCEPTED_DECISIONS set for consistency.
     accepted_signals = [s for s in signals if s.get("final_decision") in ACCEPTED_DECISIONS]
     replayed_signals = [s for s in signals if s.get("replayed")]
     
-    winning_replayed = [s for s in replayed_signals if (s.get("simulated_pnl") or 0.0) > 0.0]
+    # Resolve all signals via CanonicalOutcomeResolver (#218, #219, #220)
+    evidences = [CanonicalOutcomeResolver.resolve(s) for s in signals]
+    valid_evidences = [e for e in evidences if e.valid and e.realized_r is not None]
     
-    total_replayed = len(replayed_signals)
-    win_rate = (len(winning_replayed) / total_replayed * 100.0) if total_replayed > 0 else 0.0
+    winning_valid = [e for e in valid_evidences if e.realized_r > 0.0]
+    valid_r_count = len(valid_evidences)
     
-    avg_pnl = (sum((s.get("simulated_pnl") or 0.0) for s in replayed_signals) / total_replayed) if total_replayed > 0 else 0.0
-    avg_mfe = (sum((s.get("mfe_pct") or 0.0) for s in replayed_signals) / total_replayed) if total_replayed > 0 else 0.0
-    avg_mae = (sum((s.get("mae_pct") or 0.0) for s in replayed_signals) / total_replayed) if total_replayed > 0 else 0.0
+    win_rate = (len(winning_valid) / valid_r_count * 100.0) if valid_r_count > 0 else 0.0
     
-    # Exit capture and avoided loss vs missed profit analytics (Population separation)
+    # Calculate averages over valid canonical evidence population
+    avg_pnl = (sum(e.realized_r for e in valid_evidences) / valid_r_count) if valid_r_count > 0 else 0.0
+    avg_mfe = (sum(e.mfe for e in valid_evidences if e.mfe is not None) / valid_r_count) if valid_r_count > 0 else 0.0
+    avg_mae = (sum(e.mae for e in valid_evidences if e.mae is not None) / valid_r_count) if valid_r_count > 0 else 0.0
+    
+    # Exit capture and avoided loss vs missed profit analytics
     winner_capture_ratios = []
     give_backs = []
     mfe_before_losses = []
@@ -614,57 +620,22 @@ async def get_shadow_ledger_analytics(
     missed_profit_count = 0
     missed_profit_r = 0.0
     
-    for s in replayed_signals:
-        outcomes = s.get("outcomes") or {}
-        # Fix C6 (Issue #173): Use strategy-canonical horizon instead of hardcoded 15m.
-        from app.strategies.memory import _canonical_realized_r
-        strategy_name = s.get("strategy")
-        outcome_std = None
-        # Find the canonical horizon dict for give-back/capture metrics
-        horizons_prio = ["15m", "30m", "60m", "close"]
-        for _h in horizons_prio:
-            if _h in outcomes:
-                outcome_std = outcomes[_h]
-                break
-        
-        # Determine realized R return
-        realized_r = 0.0
-        mfe_r = 0.0
-        gave_back_r = 0.0
-        
-        if outcome_std:
-            realized_r_val = outcome_std.get("realized_r")
-            realized_r = 0.0 if realized_r_val is None else float(realized_r_val)
-            mfe_r_val = outcome_std.get("mfe_r")
-            mfe_r = 0.0 if mfe_r_val is None else float(mfe_r_val)
-            gave_back_r_val = outcome_std.get("gave_back_r")
-            gave_back_r = 0.0 if gave_back_r_val is None else float(gave_back_r_val)
-
-            if realized_r > 0:
-                wcr = outcome_std.get("winner_capture_ratio")
-                if wcr is None:
-                    wcr = 0.0
-                winner_capture_ratios.append(wcr)
-            give_backs.append(gave_back_r)
-            if realized_r <= 0:
-                mfe_blr = outcome_std.get("mfe_before_loss_r")
-                if mfe_blr is None:
-                    mfe_blr = mfe_r
-                mfe_before_losses.append(mfe_blr)
-        else:
-            # Fallback to simulated P&L / R from payload
-            sim_pnl = s.get("simulated_pnl") or 0.0
-            realized_r = sim_pnl / 100.0  # approximate
-            mfe_r = (s.get("mfe_pct") or 0.0) / 100.0
-            gave_back_r = max(0.0, mfe_r - realized_r)
+    for s, e in zip(signals, evidences):
+        if not e.valid or e.realized_r is None:
+            continue
             
-            if realized_r > 0:
-                winner_capture_ratios.append(realized_r / mfe_r if mfe_r > 0 else 0.0)
-            give_backs.append(gave_back_r)
-            if realized_r <= 0:
-                mfe_before_losses.append(mfe_r)
+        realized_r = e.realized_r
+        mfe_r = e.mfe or 0.0
+        gave_back_r = max(0.0, mfe_r - realized_r)
+        
+        if realized_r > 0:
+            wcr = realized_r / mfe_r if mfe_r > 0 else 0.0
+            winner_capture_ratios.append(wcr)
+        give_backs.append(gave_back_r)
+        if realized_r <= 0:
+            mfe_before_losses.append(mfe_r)
 
-        # Avoided Loss vs Missed Profit (Population C: Rejected Counterfactuals)
+        # Avoided Loss vs Missed Profit (Rejected Counterfactuals)
         if s.get("final_decision") == "rejected":
             if realized_r < 0:
                 avoided_loss_count += 1
@@ -978,7 +949,7 @@ async def get_shadow_ledger_analytics(
     # Sort by total_r descending (nulls last) so top missed opportunities surface first
     by_regime_gate.sort(key=lambda x: (x["total_r"] is None, -(x["total_r"] or 0.0)))
 
-    # Fix A9 (Issue #191): Expose persistence-failure count in analytics response.
+    total_replayed = len(replayed_signals)
     from app.core.shadow_ledger import get_persistence_failure_count
 
     return {
@@ -987,6 +958,7 @@ async def get_shadow_ledger_analytics(
             "rejected_signals": len(rejected_signals),
             "accepted_signals": len(accepted_signals),
             "replayed_signals": total_replayed,
+            "valid_r_count": valid_r_count,
             "win_rate_pct": round(win_rate, 2),
             "avg_simulated_return_pct": round(avg_pnl, 4),
             "avg_mfe_pct": round(avg_mfe, 4),
@@ -1425,7 +1397,7 @@ async def get_policy_evidence_endpoint(
     replayed_trades = [s for s in policy_sigs if s.get("replayed")]
     
     # Calculate performance metrics
-    total_r = sum(_canonical_realized_r(s.get("strategy"), s.get("outcomes") or {}) for s in replayed_trades)
+    total_r = sum(_canonical_realized_r(s.get("strategy"), s.get("outcomes") or {}) or 0.0 for s in replayed_trades)
     expectancy_r = total_r / len(replayed_trades) if replayed_trades else 0.0
     win_rate = (sum(1 for s in replayed_trades if (s.get("simulated_pnl") or 0.0) > 0.0) / len(replayed_trades) * 100.0) if replayed_trades else 0.0
     
@@ -1454,7 +1426,7 @@ async def get_policy_evidence_endpoint(
     sim_metrics = sim_res.metrics
 
     # Bootstrap resamples (1000 iterations)
-    r_multiples = [_canonical_realized_r(s.get("strategy"), s.get("outcomes") or {}) for s in replayed_trades]
+    r_multiples = [r for s in replayed_trades if (r := _canonical_realized_r(s.get("strategy"), s.get("outcomes") or {})) is not None]
     if r_multiples:
         arr = np.array(r_multiples)
         bootstrap_means = [np.mean(np.random.choice(arr, size=len(arr), replace=True)) for _ in range(1000)]
@@ -1467,7 +1439,7 @@ async def get_policy_evidence_endpoint(
     # Probability challenger expectancy > champion expectancy
     champ_sigs = [s for s in signals if (s.get("policy_id") or "champion") == "champion" and s.get("final_decision") in ACCEPTED_DECISIONS]
     champ_replayed = [s for s in champ_sigs if s.get("replayed")]
-    champ_r = [_canonical_realized_r(s.get("strategy"), s.get("outcomes") or {}) for s in champ_replayed]
+    champ_r = [r for s in champ_replayed if (r := _canonical_realized_r(s.get("strategy"), s.get("outcomes") or {})) is not None]
     
     prob_better = 0.0
     if r_multiples and champ_r:
@@ -1498,7 +1470,7 @@ async def get_policy_evidence_endpoint(
             w_wins = sum(1 for s in week_sigs if (s.get("simulated_pnl") or 0.0) > 0.0)
             rates.append(w_wins / w_total)
             
-            w_r = sum(_canonical_realized_r(s.get("strategy"), s.get("outcomes") or {}) for s in week_sigs)
+            w_r = sum(_canonical_realized_r(s.get("strategy"), s.get("outcomes") or {}) or 0.0 for s in week_sigs)
             if w_r > 0:
                 wf_passed += 1
             else:
@@ -1522,13 +1494,13 @@ async def get_policy_evidence_endpoint(
         regime = payload.get("regime") or "unknown"
         if isinstance(regime, dict):
             regime = regime.get("regime", "unknown")
-        regime_breakdown[regime] += _canonical_realized_r(s.get("strategy"), s.get("outcomes") or {})
+        regime_breakdown[regime] += _canonical_realized_r(s.get("strategy"), s.get("outcomes") or {}) or 0.0
         
         direction = s.get("direction", "long")
-        direction_breakdown[direction] += _canonical_realized_r(s.get("strategy"), s.get("outcomes") or {})
+        direction_breakdown[direction] += _canonical_realized_r(s.get("strategy"), s.get("outcomes") or {}) or 0.0
         
         strategy = s.get("strategy", "unknown")
-        strategy_breakdown[strategy] += _canonical_realized_r(s.get("strategy"), s.get("outcomes") or {})
+        strategy_breakdown[strategy] += _canonical_realized_r(s.get("strategy"), s.get("outcomes") or {}) or 0.0
 
     # Recent vs Historical Stability (50/50 split)
     recent_vs_historical = {"historical_expectancy": 0.0, "recent_expectancy": 0.0}
@@ -1537,8 +1509,8 @@ async def get_policy_evidence_endpoint(
         mid = len(sorted_trades) // 2
         hist = sorted_trades[:mid]
         rec = sorted_trades[mid:]
-        hist_r = sum(_canonical_realized_r(s.get("strategy"), s.get("outcomes") or {}) for s in hist)
-        rec_r = sum(_canonical_realized_r(s.get("strategy"), s.get("outcomes") or {}) for s in rec)
+        hist_r = sum(_canonical_realized_r(s.get("strategy"), s.get("outcomes") or {}) or 0.0 for s in hist)
+        rec_r = sum(_canonical_realized_r(s.get("strategy"), s.get("outcomes") or {}) or 0.0 for s in rec)
         recent_vs_historical["historical_expectancy"] = hist_r / len(hist)
         recent_vs_historical["recent_expectancy"] = rec_r / len(rec)
 

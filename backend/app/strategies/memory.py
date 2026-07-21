@@ -21,19 +21,19 @@ STRATEGY_HORIZON: dict[str, list[str]] = {
 _DEFAULT_HORIZON = ["15m", "close"]  # fallback for unknown strategies
 
 
-def _canonical_realized_r(strategy: str | None, outcomes: dict) -> float:
-    """Returns the canonical realized R for a candidate using strategy-specific horizon priority.
+def _canonical_realized_r(strategy: str | None, outcomes: dict) -> float | None:
+    """Returns the canonical realized R for a candidate using strategy-specific horizon priority (#238).
 
-    Returns 0.0 when realized_r is None (synthetic-stop records where R cannot be computed).
+    Preserves 0.0 as a valid 0R breakeven trade. Returns None if R evidence is missing/invalid.
     """
+    from app.core.canonical_evidence import CanonicalOutcomeResolver
     horizons = STRATEGY_HORIZON.get(strategy or "", _DEFAULT_HORIZON)
     for h in horizons:
         if h in outcomes:
-            # Fix: realized_r may be None for synthetic-stop records (Issue #194);
-            # treat None as 0.0 rather than crashing float().
             val = outcomes[h].get("realized_r")
-            return float(val) if val is not None else 0.0
-    return 0.0
+            if val is not None:
+                return float(val)
+    return None
 
 
 def get_rvol_bucket(rvol: float | None) -> str:
