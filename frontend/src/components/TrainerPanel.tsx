@@ -44,7 +44,7 @@ export function TrainerPanel() {
 
   return (
     <div className="panel trainer-panel">
-      <div className="panel-header">
+      <div className="panel-head">
         <span className="panel-title">
           🧠 Continuous Learning
           {isTraining && (
@@ -62,54 +62,56 @@ export function TrainerPanel() {
         </button>
       </div>
 
-      <div className="trainer-grid">
-        <div className="trainer-stat">
-          <div className="trainer-stat-label">Last trained</div>
-          <div className="trainer-stat-value">{lastTrained}</div>
+      <div className="panel-body" style={{ padding: "8px 12px 12px" }}>
+        <div className="trainer-grid">
+          <div className="trainer-stat">
+            <div className="trainer-stat-label">Last trained</div>
+            <div className="trainer-stat-value">{lastTrained}</div>
+          </div>
+          {lastResult.elapsed_sec != null && (
+            <div className="trainer-stat">
+              <div className="trainer-stat-label">Training time</div>
+              <div className="trainer-stat-value">{lastResult.elapsed_sec}s</div>
+            </div>
+          )}
+          {lastResult.symbols_trained != null && (
+            <div className="trainer-stat">
+              <div className="trainer-stat-label">Symbols trained</div>
+              <div className="trainer-stat-value">{lastResult.symbols_trained}</div>
+            </div>
+          )}
+          {lastResult.global_auc != null && (
+            <div className="trainer-stat">
+              <div className="trainer-stat-label">Global AUC</div>
+              <div
+                className={`trainer-stat-value num ${
+                  lastResult.global_auc >= 0.55 ? "pos" : lastResult.global_auc > 0.5 ? "" : "neg"
+                }`}
+              >
+                {lastResult.global_auc.toFixed(3)}
+              </div>
+            </div>
+          )}
+          {specialistCount > 0 && (
+            <div className="trainer-stat">
+              <div className="trainer-stat-label">Specialists saved</div>
+              <div className="trainer-stat-value">{specialistCount}</div>
+            </div>
+          )}
+          {bestSpecialist && (
+            <div className="trainer-stat">
+              <div className="trainer-stat-label">Best specialist</div>
+              <div className="trainer-stat-value pos num">
+                {bestSpecialist.symbol} ({bestSpecialist.auc.toFixed(3)})
+              </div>
+            </div>
+          )}
         </div>
-        {lastResult.elapsed_sec != null && (
-          <div className="trainer-stat">
-            <div className="trainer-stat-label">Training time</div>
-            <div className="trainer-stat-value">{lastResult.elapsed_sec}s</div>
-          </div>
-        )}
-        {lastResult.symbols_trained != null && (
-          <div className="trainer-stat">
-            <div className="trainer-stat-label">Symbols trained</div>
-            <div className="trainer-stat-value">{lastResult.symbols_trained}</div>
-          </div>
-        )}
-        {lastResult.global_auc != null && (
-          <div className="trainer-stat">
-            <div className="trainer-stat-label">Global AUC</div>
-            <div
-              className={`trainer-stat-value num ${
-                lastResult.global_auc >= 0.55 ? "pos" : lastResult.global_auc > 0.5 ? "" : "neg"
-              }`}
-            >
-              {lastResult.global_auc.toFixed(3)}
-            </div>
-          </div>
-        )}
-        {specialistCount > 0 && (
-          <div className="trainer-stat">
-            <div className="trainer-stat-label">Specialists saved</div>
-            <div className="trainer-stat-value">{specialistCount}</div>
-          </div>
-        )}
-        {bestSpecialist && (
-          <div className="trainer-stat">
-            <div className="trainer-stat-label">Best specialist</div>
-            <div className="trainer-stat-value pos num">
-              {bestSpecialist.symbol} ({bestSpecialist.auc.toFixed(3)})
-            </div>
-          </div>
-        )}
-      </div>
 
-      <div className="trainer-hint muted">
-        Auto-retrains daily at 16:15 ET. Promotes models only if AUC improves by ≥ 0.2%.
-        Per-symbol specialist models are saved and used for inference automatically.
+        <div className="trainer-hint muted" style={{ marginTop: 8 }}>
+          Auto-retrains daily at 16:15 ET. Promotes models only if AUC improves by &ge; 0.2%.
+          Per-symbol specialist models are saved and used for inference automatically.
+        </div>
       </div>
     </div>
   );
