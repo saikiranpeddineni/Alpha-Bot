@@ -1641,6 +1641,7 @@ class TradingEngine:
             "system_health": getattr(self, "system_health", "NORMAL"),
             "allow_new_entries": getattr(self, "allow_new_entries", True),
             "heartbeat_diagnostics": getattr(self, "heartbeat_diagnostics", {}),
+            "replay_queue": self.db.get_replay_queue_telemetry(mode=self.mode) if self.db else {},
         }
 
     def _reconcile_positions(self, positions: list[Position]) -> None:
@@ -1752,49 +1753,32 @@ class TradingEngine:
             applog.error("engine", f"Failed to update shadow signal decision {candidate_id}: {exc}")
 
     async def _replay_pending_signals(self, now: datetime) -> None:
-        """Scan SQLite database for pending rejected signals, replay them, and update records."""
+        """Scan SQLite database for pending rejected signals, replay them, and update records (#233)."""
         if not self.db or not self.data:
             return
 
         import numpy as np
         try:
-            signals = self.db.get_shadow_signals(mode=self.mode, limit=300)
-            pending = []
-            for s in signals:
-                if s.get("final_decision") == "rejected" and not s.get("replayed"):
-                    try:
-                        ts = datetime.fromisoformat(s["timestamp"])
-                        if now - ts >= timedelta(minutes=60) and ts >= now - timedelta(days=7):
-                            if s.get("replay_attempts", 0) < 5:
-                                pending.append(s)
-                    except Exception:
-                        pass
-
+            # Query pending shadow replays directly from DB ordered by ts ASC (oldest first) (#233)
+            pending = self.db.get_pending_shadow_replays(mode=self.mode, now=now, limit=100)
             if not pending:
                 return
 
-            pending.sort(
-                key=lambda x: (
-                    x.get("timestamp", ""),
-                    x.get("ml_confidence") or 0.0,
-                    x.get("score") or 0.0
-                ),
-                reverse=True
-            )
-
             batch = pending[:5]
-            applog.info("engine", f"Found {len(pending)} pending signals for replay. Executing batch of {len(batch)}.")
+            applog.info("engine", f"Found {len(pending)} pending signals for replay. Executing batch of {len(batch)} (oldest first).")
 
             for s in batch:
                 candidate_id = s["candidate_id"]
                 symbol = s["symbol"]
                 ts = datetime.fromisoformat(s["timestamp"])
                 direction = s["direction"]
-                stop_loss = s.get("stop_loss")
-                take_profit = s.get("take_profit")
-                entry_price = s.get("entry_price") or s.get("signal_price")
-                strategy_name = s.get("strategy")
-                strategy_params = s.get("strategy_params")
+                p = s.get("payload") if isinstance(s.get("payload"), dict) else s
+                stop_loss = s.get("stop_loss") if s.get("stop_loss") is not None else p.get("stop_loss")
+                take_profit = s.get("take_profit") if s.get("take_profit") is not None else p.get("take_profit")
+                entry_price_raw = s.get("entry_price") or p.get("entry_price") or s.get("signal_price") or p.get("signal_price") or p.get("price")
+                entry_price = float(entry_price_raw) if entry_price_raw is not None else 100.0
+                strategy_name = s.get("strategy") or p.get("strategy")
+                strategy_params = s.get("strategy_params") or p.get("strategy_params")
 
                 s["replay_attempts"] = s.get("replay_attempts", 0) + 1
 
@@ -1815,7 +1799,14 @@ class TradingEngine:
                     self.db.save_shadow_signal(candidate_id, ts, symbol, strategy_name, direction, self.mode, s)
                     continue
 
-                ts_pd = pd.Timestamp(ts).tz_convert("UTC")
+                ts_pd = pd.Timestamp(ts)
+                if df.index.tz is None and ts_pd.tz is not None:
+                    ts_pd = ts_pd.tz_localize(None)
+                elif df.index.tz is not None and ts_pd.tz is None:
+                    ts_pd = ts_pd.tz_localize(df.index.tz)
+                elif df.index.tz is not None and ts_pd.tz is not None:
+                    ts_pd = ts_pd.tz_convert(df.index.tz)
+
                 i = -1
                 if ts_pd in df.index:
                     i = df.index.get_loc(ts_pd)
@@ -1843,10 +1834,15 @@ class TradingEngine:
 
                 if not replay_res:
                     applog.warning("engine", f"Replay simulation returned empty result for {candidate_id}.")
+                    s["replayed"] = True
+                    s["replay_failed"] = True
+                    s["replay_failure_reason"] = "empty_replay_simulation_result"
                     self.db.save_shadow_signal(candidate_id, ts, symbol, strategy_name, direction, self.mode, s)
                     continue
 
                 s["replayed"] = True
+                s["replay_failed"] = bool(replay_res.get("replay_failed", False))
+                s["replay_failure_reason"] = replay_res.get("replay_failure_reason")
                 s["replay_timestamp"] = utcnow().isoformat()
                 s["simulated_pnl"] = replay_res["pnl_pct"]
                 s["mfe_pct"] = replay_res["mfe_pct"]

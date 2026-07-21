@@ -1,5 +1,5 @@
 import pytest
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC, timezone
 from unittest.mock import AsyncMock, MagicMock
 import pandas as pd
 import numpy as np
@@ -32,7 +32,7 @@ async def test_shadow_ledger_replay(tmp_path):
         assert "final_decision" in cols
 
     # 2. Record a candidate signal that is rejected (ML gate rejection)
-    ts = utcnow() - timedelta(minutes=70)  # > 60 minutes ago
+    ts = datetime(2026, 7, 20, 14, 30, tzinfo=UTC)
     candidate_id = "TEST_CANDIDATE_1"
     
     payload = {
@@ -100,7 +100,7 @@ async def test_shadow_ledger_replay(tmp_path):
     engine._update_shadow_decision = TradingEngine._update_shadow_decision.__get__(engine, MagicMock)
     
     # 4. Trigger replay pending signals
-    await engine._replay_pending_signals(utcnow())
+    await engine._replay_pending_signals(datetime(2026, 7, 20, 16, 0, tzinfo=UTC))
     
     # 5. Assert database signal was updated with correct metrics
     updated = db.get_shadow_signal(candidate_id)

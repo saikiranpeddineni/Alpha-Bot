@@ -78,6 +78,8 @@ class ShadowLedgerRow(Base):
     # New columns for structured replay outcomes and gating
     replayed: Mapped[bool | None] = mapped_column(nullable=True)
     replay_timestamp: Mapped[datetime | None] = mapped_column(nullable=True)
+    replay_failed: Mapped[bool | None] = mapped_column(nullable=True)
+    replay_failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     simulated_pnl: Mapped[float | None] = mapped_column(nullable=True)
     mfe_pct: Mapped[float | None] = mapped_column(nullable=True)
     mae_pct: Mapped[float | None] = mapped_column(nullable=True)
@@ -225,6 +227,8 @@ class Database:
                 new_cols = {
                     "replayed": "BOOLEAN",
                     "replay_timestamp": "DATETIME",
+                    "replay_failed": "BOOLEAN",
+                    "replay_failure_reason": "TEXT",
                     "simulated_pnl": "FLOAT",
                     "mfe_pct": "FLOAT",
                     "mae_pct": "FLOAT",
@@ -487,6 +491,8 @@ class Database:
                     payload=json.dumps(payload, default=str),
                     replayed=payload.get("replayed"),
                     replay_timestamp=replay_ts,
+                    replay_failed=payload.get("replay_failed"),
+                    replay_failure_reason=payload.get("replay_failure_reason"),
                     simulated_pnl=payload.get("simulated_pnl"),
                     mfe_pct=payload.get("mfe_pct"),
                     mae_pct=payload.get("mae_pct"),
@@ -538,11 +544,111 @@ class Database:
                     data["vix_value"] = r.vix_value
                     data["vix_age"] = r.vix_age
                     data["vix_feed_status"] = r.vix_feed_status
-                    data["regime_source"] = r.regime_source
+                    data["replay_failed"] = r.replay_failed
+                    data["replay_failure_reason"] = r.replay_failure_reason
                     results.append(data)
                 except Exception:
                     pass
             return results
+
+    def get_pending_shadow_replays(
+        self,
+        mode: str = "demo",
+        now: datetime | None = None,
+        limit: int = 100
+    ) -> list[dict]:
+        """Get pending shadow replays from database ordered by timestamp ASC (oldest first) (#233).
+        
+        Filters: final_decision == 'rejected' AND (replayed is None or replayed == False)
+        AND (replay_failed is None or replay_failed == False).
+        """
+        from sqlalchemy import or_
+        with self._session() as s:
+            stmt = (
+                select(ShadowLedgerRow)
+                .where(ShadowLedgerRow.mode == mode)
+                .where(ShadowLedgerRow.final_decision == "rejected")
+                .where(or_(ShadowLedgerRow.replayed == None, ShadowLedgerRow.replayed == False))  # noqa: E711
+                .where(or_(ShadowLedgerRow.replay_failed == None, ShadowLedgerRow.replay_failed == False))  # noqa: E711
+                .order_by(ShadowLedgerRow.ts.asc())
+                .limit(limit)
+            )
+            results = []
+            for r in s.scalars(stmt):
+                try:
+                    p = json.loads(r.payload) if r.payload else {}
+                except Exception:
+                    p = {}
+                row_dict = {
+                    "id": r.id,
+                    "candidate_id": p.get("candidate_id") or r.id,
+                    "timestamp": r.ts.isoformat() if r.ts else None,
+                    "ts": r.ts,
+                    "symbol": r.symbol,
+                    "strategy": r.strategy,
+                    "direction": r.direction,
+                    "mode": r.mode,
+                    "final_decision": r.final_decision,
+                    "rejection_reason": r.rejection_reason,
+                    "rejection_stage": r.rejection_stage,
+                    "policy_id": r.policy_id,
+                    "payload": p,
+                }
+                results.append(row_dict)
+            return results
+
+    def get_replay_queue_telemetry(self, mode: str = "demo", now: datetime | None = None) -> dict:
+        """Derive replay queue telemetry directly from database state (#244)."""
+        from sqlalchemy import or_, func
+        if now is None:
+            from datetime import UTC
+            now = datetime.now(UTC)
+
+        with self._session() as s:
+            total_stmt = (
+                select(func.count(ShadowLedgerRow.id))
+                .where(ShadowLedgerRow.mode == mode)
+                .where(ShadowLedgerRow.final_decision == "rejected")
+                .where(or_(ShadowLedgerRow.replayed == None, ShadowLedgerRow.replayed == False))  # noqa: E711
+                .where(or_(ShadowLedgerRow.replay_failed == None, ShadowLedgerRow.replay_failed == False))  # noqa: E711
+            )
+            pending_total = s.scalar(total_stmt) or 0
+
+            oldest_stmt = (
+                select(func.min(ShadowLedgerRow.ts))
+                .where(ShadowLedgerRow.mode == mode)
+                .where(ShadowLedgerRow.final_decision == "rejected")
+                .where(or_(ShadowLedgerRow.replayed == None, ShadowLedgerRow.replayed == False))  # noqa: E711
+                .where(or_(ShadowLedgerRow.replay_failed == None, ShadowLedgerRow.replay_failed == False))  # noqa: E711
+            )
+            oldest_ts = s.scalar(oldest_stmt)
+            oldest_age_sec = 0.0
+            if oldest_ts:
+                from zoneinfo import ZoneInfo
+                ET_ZONE = ZoneInfo("America/New_York")
+                if oldest_ts.tzinfo is None:
+                    oldest_ts = oldest_ts.replace(tzinfo=ET_ZONE)
+                else:
+                    oldest_ts = oldest_ts.astimezone(ET_ZONE)
+                now_et = now.astimezone(ET_ZONE) if now.tzinfo is not None else now.replace(tzinfo=ET_ZONE)
+                oldest_age_sec = max(0.0, (now_et - oldest_ts).total_seconds())
+
+            last_success_stmt = (
+                select(func.max(ShadowLedgerRow.replay_timestamp))
+                .where(ShadowLedgerRow.mode == mode)
+                .where(ShadowLedgerRow.replayed == True)  # noqa: E712
+                .where(or_(ShadowLedgerRow.replay_failed == None, ShadowLedgerRow.replay_failed == False))  # noqa: E711
+            )
+            last_success_ts = s.scalar(last_success_stmt)
+            last_success_iso = last_success_ts.isoformat() if last_success_ts else None
+
+            return {
+                "replay_pending_total": pending_total,
+                "replay_pending_eligible": pending_total,
+                "replay_expired_unreplayed": 0,
+                "replay_oldest_pending_age_seconds": round(oldest_age_sec, 1),
+                "last_replay_success_at": last_success_iso,
+            }
 
     def get_shadow_signal(self, candidate_id: str, policy_id: str = "champion") -> dict | None:
         with self._session() as s:

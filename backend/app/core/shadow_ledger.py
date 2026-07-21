@@ -490,12 +490,26 @@ class ShadowLedger:
             initial_stop = entry_price * 1.015
             stop_is_synthetic = True
 
-        # Path of the next 60 minutes
+        # Path of the next 60 minutes capped at market session close (#231)
         slice_df = df.iloc[entry_idx : entry_idx + 60]
         if slice_df.empty:
             return {}
 
-        # Fix A8 (#187): Surface strategy construction failures.
+        entry_ts = slice_df.index[0]
+        try:
+            from app.core.calendar_helper import get_session_close, ET
+            session_close_dt = get_session_close(entry_ts)
+            if entry_ts.tzinfo is None:
+                session_close_dt = session_close_dt.astimezone(ET).replace(tzinfo=None)
+            if entry_ts <= session_close_dt:
+                slice_df = slice_df[slice_df.index <= session_close_dt]
+        except Exception:
+            pass
+
+        if slice_df.empty:
+            return {}
+
+        # Surface strategy construction failures (#230).
         strategy_instance = None
         replay_valid = True
         replay_failure_reason: str | None = None
@@ -781,6 +795,7 @@ class ShadowLedger:
                 "time_to_target_mins": time_to_target_mins,
                 "stop_is_synthetic": False,
                 "replay_valid": replay_valid,
+                "replay_failed": not replay_valid,
                 "replay_failure_reason": replay_failure_reason,
             }
         else:
@@ -809,5 +824,6 @@ class ShadowLedger:
                 "time_to_target_mins": time_to_target_mins,
                 "stop_is_synthetic": True,
                 "replay_valid": replay_valid,
+                "replay_failed": not replay_valid,
                 "replay_failure_reason": replay_failure_reason,
             }
