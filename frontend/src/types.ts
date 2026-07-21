@@ -224,7 +224,7 @@ export interface BacktestResult {
   warnings: string[];
 }
 
-export type HealthState = "NORMAL" | "WARNING" | "DEGRADED" | "HALTED";
+export type HealthState = "NORMAL" | "WARNING" | "DEGRADED" | "SAFE_MODE" | "HALTED";
 export type ActivityState = "IDLE" | "SCANNING" | "EVALUATING" | "TRAINING" | "REPLAYING" | "TRADING";
 export type PulseIntensity = "small" | "medium" | "large" | "flash";
 export type HeartbeatStyle = "minimal" | "ekg" | "heart" | "off";
@@ -260,6 +260,7 @@ export interface HeartbeatStats {
   orders_today: number;
   replay_queue_depth: number;
   latency_ms: number;
+  degraded_reasons?: string[];
 }
 
 export interface HeartbeatTelemetry {

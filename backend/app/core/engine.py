@@ -1463,6 +1463,26 @@ class TradingEngine:
             open_pos = self.portfolio.open_positions()
         orders_today = len(closed_trades) + len(open_pos)
 
+        # Build human-readable degraded reasons
+        diag = self.heartbeat_diagnostics
+        degraded_reasons: list[str] = []
+        if getattr(self, "_force_gated", False):
+            degraded_reasons.append("manual_gated")
+        if not diag.get("broker_connected", True):
+            degraded_reasons.append("broker_disconnected")
+        if not diag.get("market_data_fresh", True):
+            degraded_reasons.append("market_data_stale")
+        if not diag.get("db_connected", True):
+            degraded_reasons.append("db_disconnected")
+        if not diag.get("model_ready", True):
+            degraded_reasons.append("model_not_ready")
+        if not diag.get("scanner_ok", True):
+            degraded_reasons.append("scanner_never_run")
+        if not diag.get("buying_power_ok", True):
+            degraded_reasons.append("low_buying_power")
+        if not diag.get("vix_fresh", True):
+            degraded_reasons.append("vix_feed_unavailable")
+
         payload = {
             "seq": self._heartbeat_seq,
             "ts": now_iso,
@@ -1476,9 +1496,9 @@ class TradingEngine:
             },
             "timestamps": self._subsystem_timestamps,
             "stats": {
-                "broker_connected": self.heartbeat_diagnostics.get("broker_connected", True),
-                "market_data_fresh": self.heartbeat_diagnostics.get("market_data_fresh", True),
-                "scanner_ok": self.heartbeat_diagnostics.get("scanner_ok", True),
+                "broker_connected": diag.get("broker_connected", True),
+                "market_data_fresh": diag.get("market_data_fresh", True),
+                "scanner_ok": diag.get("scanner_ok", True),
                 "market_regime": getattr(self, "_last_market_regime", "NORMAL"),
                 "watchlist_count": len(self.watchlist),
                 "universe_count": (len(u) if (u := getattr(self, "universe", None)) is not None and hasattr(u, '__len__') else len(self.watchlist)),
@@ -1487,6 +1507,7 @@ class TradingEngine:
                 "orders_today": orders_today,
                 "replay_queue_depth": 0,
                 "latency_ms": 15,
+                "degraded_reasons": degraded_reasons,
             },
         }
         self._evaluations_window_count = 0

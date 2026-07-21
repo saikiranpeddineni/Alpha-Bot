@@ -17,6 +17,18 @@ function formatAgo(isoStr?: string | null): string {
   }
 }
 
+// Map reason codes → human label + fix hint + whether it's market-side (can't fix)
+const REASON_META: Record<string, { label: string; hint: string; marketSide?: boolean }> = {
+  manual_gated:         { label: "Entries Manually Gated",  hint: "Go to Settings → toggle 'Allow New Entries' back on." },
+  broker_disconnected:  { label: "Broker Disconnected",     hint: "Check your Alpaca API keys and network, then restart." },
+  market_data_stale:    { label: "Market Data Stale",       hint: "Data feed is >10 min old. Check provider or restart." },
+  db_disconnected:      { label: "Database Unreachable",    hint: "SQLite DB may be locked. Restart the backend." },
+  model_not_ready:      { label: "ML Model Not Loaded",     hint: "Click 'Train Now' in the Continuous Learning panel." },
+  scanner_never_run:    { label: "Scanner Never Run",       hint: "Click '🔍 Scan' in the Watchlist to init the scanner." },
+  low_buying_power:     { label: "Buying Power Low",        hint: "Add funds or lower the min_buying_power_threshold." },
+  vix_feed_unavailable: { label: "VIX Feed Unavailable",   hint: "VIX data missing — engine uses conservative risk tier automatically.", marketSide: true },
+};
+
 export function HeartbeatIndicator() {
   const connected = useStore((s) => s.connected);
   const status = useStore((s) => s.status);
@@ -27,13 +39,11 @@ export function HeartbeatIndicator() {
   const [pulse, setPulse] = useState<PulseIntensity | null>(null);
   const [, setTick] = useState(0);
 
-  // Force re-render every second to update relative "ago" timestamps in hover card
   useEffect(() => {
     const timer = setInterval(() => setTick((t) => t + 1), 1000);
     return () => clearInterval(timer);
   }, []);
 
-  // Trigger pulse spike whenever heartbeat sequence changes
   useEffect(() => {
     if (!heartbeat) return;
     const intensity = heartbeat.event?.pulse || "small";
@@ -42,11 +52,8 @@ export function HeartbeatIndicator() {
     return () => clearTimeout(timeout);
   }, [heartbeat?.seq]);
 
-  if (styleMode === "off") {
-    return null;
-  }
+  if (styleMode === "off") return null;
 
-  // Derive Health Color State
   const health = !connected
     ? "HALTED"
     : heartbeat?.health || (status?.state === "halted" ? "HALTED" : "NORMAL");
@@ -77,10 +84,13 @@ export function HeartbeatIndicator() {
     orders_today: 0,
     replay_queue_depth: 0,
     latency_ms: 15,
+    degraded_reasons: [] as string[],
   };
 
   const timestamps = heartbeat?.timestamps || {};
   const lastEvent = heartbeat?.event;
+  const reasons: string[] = stats.degraded_reasons || [];
+  const isDegraded = health === "DEGRADED" || health === "SAFE_MODE";
 
   return (
     <div
@@ -90,17 +100,14 @@ export function HeartbeatIndicator() {
       title="Telemetry System Heartbeat"
     >
       <div className="heartbeat-bar">
-        {/* Status Dot */}
         <span className={`hb-dot ${dotStatus} ${pulse ? `pulse-${pulse}` : ""}`} style={{ backgroundColor: dotColor }} />
 
-        {/* Optional Micro Heart Icon */}
         {styleMode === "heart" && (
           <span className={`hb-heart ${pulse ? "beat" : "resting"}`}>
             ❤️
           </span>
         )}
 
-        {/* Minimalist EKG Waveform SVG */}
         {(styleMode === "ekg" || styleMode === "heart") && (
           <svg className={`hb-ekg ${pulse ? `spike-${pulse}` : "resting"}`} viewBox="0 0 54 16">
             <path
@@ -125,7 +132,6 @@ export function HeartbeatIndicator() {
         <span className="hb-label mono">{activity}</span>
       </div>
 
-      {/* Hover Telemetry Card */}
       {hovered && (
         <div className="hb-card">
           <div className="hb-card-head">
@@ -135,6 +141,25 @@ export function HeartbeatIndicator() {
             </div>
             <span className="hb-badge mono">{activity}</span>
           </div>
+
+          {/* Degraded reasons with actionable fix hints */}
+          {isDegraded && reasons.length > 0 && (
+            <div className="hb-degraded-block">
+              <div className="hb-degraded-header">⚠ Why Degraded</div>
+              {reasons.map((r) => {
+                const meta = REASON_META[r] || { label: r, hint: "Check engine logs for details." };
+                return (
+                  <div key={r} className={`hb-reason-row ${meta.marketSide ? "market-side" : "user-fixable"}`}>
+                    <div className="hb-reason-label">
+                      <span className="hb-reason-icon">{meta.marketSide ? "🌐" : "🔧"}</span>
+                      {meta.label}
+                    </div>
+                    <div className="hb-reason-hint">{meta.hint}</div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
 
           <div className="hb-card-grid">
             <div className="hb-item">
@@ -175,7 +200,6 @@ export function HeartbeatIndicator() {
             </div>
           </div>
 
-          {/* Last Event Detail */}
           {lastEvent && (
             <div className="hb-event-box">
               <div className="hb-event-head">
@@ -191,7 +215,6 @@ export function HeartbeatIndicator() {
             </div>
           )}
 
-          {/* Subsystem Timestamps */}
           <div className="hb-subsystems">
             <div className="hb-sub-k">Subsystem Timestamps</div>
             <div className="hb-sub-row"><span className="faint">Last Scan:</span> <span className="mono">{formatAgo(timestamps.last_scan)}</span></div>
