@@ -1710,26 +1710,39 @@ async def promote_policy(request: Request, body: PromoteRequest) -> dict:
                 detail="Conflict: Champion configuration has changed since this nomination was generated. Re-evaluation required."
             )
 
-        # 7.5. Enforce promoter & evidence package verification (CR-146D Governance)
+        # 7.5. Enforce promoter & mandatory evidence package verification (#246, #251)
         if not body.promoter_id or not body.promoter_id.strip():
             raise HTTPException(status_code=400, detail="Promoter identity required.")
-            
-        evidence_pkg = {}
-        if body.evidence_package_id:
-            evidence_pkg = db.get_policy_evidence(body.evidence_package_id)
-            if not evidence_pkg:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Frozen evidence package {body.evidence_package_id!r} not found. Generate evidence first."
-                )
-            if evidence_pkg.get("policy_id") != policy_id:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Conflict: Evidence package policy_id does not match target policy."
-                )
 
-        # 8. Record promotion log in the immutable append-only audit trail
+        ev_id = (body.evidence_package_id or "").strip()
+        if not ev_id or ev_id == "legacy_bypass":
+            raise HTTPException(
+                status_code=400,
+                detail="Promotion failed: evidence_package_id is required. Legacy bypass is disabled."
+            )
+
+        evidence_pkg = db.get_policy_evidence(ev_id)
+        if not evidence_pkg:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Frozen evidence package {ev_id!r} not found. Generate evidence first."
+            )
+        if evidence_pkg.get("policy_id") != policy_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Conflict: Evidence package policy_id does not match target policy."
+            )
+
+        # 8. Capture pre-promotion state & record promotion log
         old_snapshot = db.get_setting("active_policy_snapshot")
+        old_ml_threshold = db.get_setting("ml_threshold")
+        old_risk_config = db.get_setting("risk_config")
+
+        old_engine_risk_config = getattr(engine, "risk_config", None) if engine else None
+        old_pipeline_ml_threshold = getattr(engine.pipeline, "ml_threshold", None) if (engine and getattr(engine, "pipeline", None)) else None
+        old_evaluator_ml_threshold = getattr(engine.evidence_evaluator, "ml_threshold", None) if (engine and getattr(engine, "evidence_evaluator", None)) else None
+        old_trade_score_engine_config = getattr(engine.pipeline.trade_score_engine, "risk_config", None) if (engine and getattr(engine, "pipeline", None) and getattr(engine.pipeline, "trade_score_engine", None)) else None
+
         from datetime import datetime, UTC
         import subprocess
         code_sha = None
@@ -1749,7 +1762,7 @@ async def promote_policy(request: Request, body: PromoteRequest) -> dict:
             "reason": body.reason,
             "previous_snapshot": old_snapshot or {},
             "new_snapshot": snapshot,
-            "evidence_package_id": body.evidence_package_id or "legacy_bypass",
+            "evidence_package_id": ev_id,
             "evidence_package": evidence_pkg,
             "mode": engine.mode if (engine and isinstance(getattr(engine, "mode", None), str)) else "paper",
             "evidence_generation_timestamp": datetime.fromisoformat(evidence_pkg.get("timestamp")) if evidence_pkg.get("timestamp") else datetime.now(UTC),

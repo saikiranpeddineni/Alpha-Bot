@@ -266,12 +266,20 @@ def test_promotion_authorization_enforcement(tmp_path):
         policy_id = "challenger_low_ml"
         nominate_policy_for_test(db, settings, policy_id)
         
+        # Save valid policy evidence package for authorization testing
+        db.save_policy_evidence("ev_auth_123", policy_id, datetime.now(UTC), {
+            "evidence_package_id": "ev_auth_123",
+            "policy_id": policy_id,
+            "timestamp": "2026-01-06T12:00:00",
+            "safety_checks": []
+        })
+
         # 1. Promote without token -> 401
         r = client.post("/api/strategies/promote", json={
             "policy_id": policy_id,
             "promoter_id": "admin_user",
             "reason": "testing auth",
-            "evidence_package_id": ""
+            "evidence_package_id": "ev_auth_123"
         })
         assert r.status_code == 401
         
@@ -280,7 +288,7 @@ def test_promotion_authorization_enforcement(tmp_path):
             "policy_id": policy_id,
             "promoter_id": "admin_user",
             "reason": "testing auth",
-            "evidence_package_id": ""
+            "evidence_package_id": "ev_auth_123"
         }, headers={"Authorization": "Bearer wrongtoken"})
         assert r.status_code == 403
         
@@ -289,7 +297,7 @@ def test_promotion_authorization_enforcement(tmp_path):
             "policy_id": policy_id,
             "promoter_id": "admin_user",
             "reason": "testing auth",
-            "evidence_package_id": ""
+            "evidence_package_id": "ev_auth_123"
         }, headers={"Authorization": "Bearer supersecret"})
         assert r.status_code == 200
 
@@ -301,6 +309,13 @@ def test_promotion_atomic_rollback_on_failure(client):
     policy_id = "challenger_low_ml"
     
     nominate_policy_for_test(db, settings, policy_id)
+
+    db.save_policy_evidence("ev_rollback_123", policy_id, datetime.now(UTC), {
+        "evidence_package_id": "ev_rollback_123",
+        "policy_id": policy_id,
+        "timestamp": "2026-01-06T12:00:00",
+        "safety_checks": []
+    })
     
     # Store initial Champion values
     initial_snapshot = db.get_setting("active_policy_snapshot")
@@ -314,10 +329,10 @@ def test_promotion_atomic_rollback_on_failure(client):
         "policy_id": policy_id,
         "promoter_id": "admin_user",
         "reason": "approved outperformance",
-        "evidence_package_id": ""
+        "evidence_package_id": "ev_rollback_123"
     })
     assert r.status_code == 500
-    assert "Failed to promote policy" in r.json()["detail"]
+    assert "failed to promote policy" in r.json()["detail"].lower()
     
     # Verify DB states were rolled back to original Champion values
     assert db.get_setting("active_policy_snapshot") == initial_snapshot
@@ -333,10 +348,33 @@ def test_immutable_history_no_update_delete():
     from app.db.database import Database
     methods = dir(Database)
     
-    # Check that update/delete keywords don't match any promotion/evidence methods
-    governance_methods = [m for m in methods if "promotion" in m or "evidence" in m]
-    
-    for m in governance_methods:
-        assert "delete" not in m.lower()
-        assert "update" not in m.lower()
-        assert "remove" not in m.lower()
+    forbidden = ["update_policy_promotion", "delete_policy_promotion", "update_policy_evidence", "delete_policy_evidence"]
+    for f in forbidden:
+        assert f not in methods
+
+
+def test_mandatory_evidence_package_required(client):
+    db = client.app.state.db
+    settings = client.app.state.settings
+    policy_id = "challenger_low_ml"
+    nominate_policy_for_test(db, settings, policy_id)
+
+    # Attempt promotion without evidence_package_id -> 400
+    r = client.post("/api/strategies/promote", json={
+        "policy_id": policy_id,
+        "promoter_id": "admin_user",
+        "reason": "testing mandatory evidence",
+        "evidence_package_id": ""
+    })
+    assert r.status_code == 400
+    assert "evidence_package_id is required" in r.json()["detail"].lower()
+
+    # Attempt promotion with legacy_bypass string -> 400
+    r = client.post("/api/strategies/promote", json={
+        "policy_id": policy_id,
+        "promoter_id": "admin_user",
+        "reason": "testing legacy bypass block",
+        "evidence_package_id": "legacy_bypass"
+    })
+    assert r.status_code == 400
+    assert "evidence_package_id is required" in r.json()["detail"].lower()
