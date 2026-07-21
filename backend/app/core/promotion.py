@@ -105,12 +105,45 @@ class PolicyPromotionGovernor:
 
         # 3. Fail-closed atomic transaction
         try:
-            from app.db.database import SettingRow
+            from app.db.database import SettingRow, PolicyPromotionRow
             with self.db._session() as s:
+                # Read previous snapshot for audit logging
+                prev_setting = s.query(SettingRow).filter(SettingRow.key == "active_policy_snapshot").first()
+                prev_snapshot_str = prev_setting.value if (prev_setting and prev_setting.value) else "{}"
+
                 snapshot_json = json.dumps(policy_snapshot, default=str)
                 s.merge(SettingRow(key="active_policy_snapshot", value=snapshot_json))
                 if "ml_threshold" in policy_snapshot:
                     s.merge(SettingRow(key="ml_threshold", value=json.dumps(policy_snapshot["ml_threshold"], default=str)))
+
+                # Persist policy promotion audit record in the SAME atomic transaction (#246, #247)
+                metadata = envelope.canonical_evidence_metadata or {}
+                now_dt = datetime.now(UTC)
+                if isinstance(envelope.timestamp, str):
+                    try:
+                        now_dt = datetime.fromisoformat(envelope.timestamp.replace("Z", "+00:00"))
+                    except Exception:
+                        pass
+
+                promotion_row = PolicyPromotionRow(
+                    policy_id=envelope.policy_id,
+                    champion_policy_id=metadata.get("champion_policy_id"),
+                    champion_policy_version=metadata.get("champion_policy_version"),
+                    challenger_policy_id=metadata.get("challenger_policy_id"),
+                    challenger_policy_version=metadata.get("challenger_policy_version"),
+                    promoter_id=metadata.get("promoter_id", "PolicyPromotionGovernor"),
+                    timestamp=now_dt,
+                    reason=metadata.get("reason", "Atomic Governor Promotion"),
+                    previous_snapshot=prev_snapshot_str,
+                    new_snapshot=snapshot_json,
+                    evidence_package_id=envelope.package_hash,
+                    evidence_package=json.dumps(asdict(envelope), default=str),
+                    mode=metadata.get("mode", "live"),
+                    evidence_generation_timestamp=now_dt,
+                    code_commit_sha=envelope.git_commit_sha,
+                    dataset_window_id=metadata.get("dataset_window_id"),
+                )
+                s.add(promotion_row)
                 s.commit()
 
             return {

@@ -1848,7 +1848,7 @@ class TradingEngine:
                 stop_loss = s.get("stop_loss") if s.get("stop_loss") is not None else p.get("stop_loss")
                 take_profit = s.get("take_profit") if s.get("take_profit") is not None else p.get("take_profit")
                 entry_price_raw = s.get("entry_price") or p.get("entry_price") or s.get("signal_price") or p.get("signal_price") or p.get("price")
-                entry_price = float(entry_price_raw) if entry_price_raw is not None else 100.0
+                entry_price = float(entry_price_raw) if entry_price_raw is not None else None
                 strategy_name = s.get("strategy") or p.get("strategy")
                 strategy_params = s.get("strategy_params") or p.get("strategy_params")
 
@@ -1890,6 +1890,21 @@ class TradingEngine:
 
                 if i == -1 or i + 1 >= len(df):
                     applog.warning("engine", f"Cannot locate entry bar index for replay of {candidate_id} (i={i}). Skipping.")
+                    self.db.save_shadow_signal(candidate_id, ts, symbol, strategy_name, direction, self.mode, s)
+                    continue
+
+                # Derive entry price from entry bar close if missing from signal payload (#233)
+                if entry_price is None or entry_price <= 0:
+                    if i + 1 < len(df) and "close" in df.columns:
+                        entry_price = float(df["close"].iloc[i + 1])
+                    elif i < len(df) and "close" in df.columns:
+                        entry_price = float(df["close"].iloc[i])
+
+                if entry_price is None or entry_price <= 0:
+                    applog.warning("engine", f"Missing valid entry price for replay of {candidate_id}. Skipping synthetic price fabrication.")
+                    s["replayed"] = True
+                    s["replay_failed"] = True
+                    s["replay_failure_reason"] = "missing_entry_price"
                     self.db.save_shadow_signal(candidate_id, ts, symbol, strategy_name, direction, self.mode, s)
                     continue
 
