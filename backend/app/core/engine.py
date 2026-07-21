@@ -1465,7 +1465,7 @@ class TradingEngine:
                 "scanner_ok": self.heartbeat_diagnostics.get("scanner_ok", True),
                 "market_regime": getattr(self, "_last_market_regime", "NORMAL"),
                 "watchlist_count": len(self.watchlist),
-                "universe_count": len(getattr(self, "universe", [])) or len(self.watchlist),
+                "universe_count": (len(u) if (u := getattr(self, "universe", None)) is not None and hasattr(u, '__len__') else len(self.watchlist)),
                 "signals_evaluated_today": self._signals_evaluated_today,
                 "evaluations_last_sec": self._evaluations_window_count,
                 "orders_today": orders_today,

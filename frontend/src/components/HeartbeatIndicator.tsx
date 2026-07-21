@@ -95,8 +95,8 @@ export function HeartbeatIndicator() {
 
         {/* Optional Micro Heart Icon */}
         {styleMode === "heart" && (
-          <span className={`hb-heart ${pulse ? "beat" : ""}`} style={{ color: dotColor }}>
-            ♡
+          <span className={`hb-heart ${pulse ? "beat" : "resting"}`}>
+            ❤️
           </span>
         )}
 

@@ -802,14 +802,37 @@ a { color: var(--accent); }
 .hb-dot.pulse-flash { transform: scale(2.2); box-shadow: 0 0 14px var(--red); }
 
 .hb-heart {
-  font-size: 11px;
-  font-weight: 700;
+  font-size: 13px;
   line-height: 1;
-  transition: transform 0.2s ease;
+  display: inline-block;
+  transform-origin: center;
+  will-change: transform;
 }
 
 .hb-heart.beat {
-  transform: scale(1.4);
+  animation: whatsapp-heartbeat 0.6s ease-in-out;
+}
+
+.hb-heart.resting {
+  animation: whatsapp-resting 8s ease-in-out infinite;
+}
+
+@keyframes whatsapp-heartbeat {
+  0% { transform: scale(1); }
+  12% { transform: scale(1.45); }
+  24% { transform: scale(1.15); }
+  36% { transform: scale(1.45); }
+  55% { transform: scale(1); }
+  100% { transform: scale(1); }
+}
+
+@keyframes whatsapp-resting {
+  0% { transform: scale(1); }
+  2% { transform: scale(1.25); }
+  4% { transform: scale(1.1); }
+  6% { transform: scale(1.25); }
+  10% { transform: scale(1); }
+  100% { transform: scale(1); }
 }
 
 .hb-ekg {

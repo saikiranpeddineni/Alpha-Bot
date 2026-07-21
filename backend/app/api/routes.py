@@ -621,15 +621,24 @@ async def get_shadow_ledger_analytics(
         gave_back_r = 0.0
         
         if outcome_std:
-            realized_r = outcome_std.get("realized_r", 0.0)
-            mfe_r = outcome_std.get("mfe_r", 0.0)
-            gave_back_r = outcome_std.get("gave_back_r", 0.0)
-            
+            realized_r_val = outcome_std.get("realized_r")
+            realized_r = 0.0 if realized_r_val is None else float(realized_r_val)
+            mfe_r_val = outcome_std.get("mfe_r")
+            mfe_r = 0.0 if mfe_r_val is None else float(mfe_r_val)
+            gave_back_r_val = outcome_std.get("gave_back_r")
+            gave_back_r = 0.0 if gave_back_r_val is None else float(gave_back_r_val)
+
             if realized_r > 0:
-                winner_capture_ratios.append(outcome_std.get("winner_capture_ratio", 0.0))
+                wcr = outcome_std.get("winner_capture_ratio")
+                if wcr is None:
+                    wcr = 0.0
+                winner_capture_ratios.append(wcr)
             give_backs.append(gave_back_r)
             if realized_r <= 0:
-                mfe_before_losses.append(outcome_std.get("mfe_before_loss_r", mfe_r))
+                mfe_blr = outcome_std.get("mfe_before_loss_r")
+                if mfe_blr is None:
+                    mfe_blr = mfe_r
+                mfe_before_losses.append(mfe_blr)
         else:
             # Fallback to simulated P&L / R from payload
             sim_pnl = s.get("simulated_pnl") or 0.0
