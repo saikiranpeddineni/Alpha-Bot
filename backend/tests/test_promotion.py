@@ -8,15 +8,16 @@ from app.main import create_app
 from app.strategies.challenger import ChallengerConfig
 
 
-def nominate_policy_for_test(db, settings, policy_id: str):
+def nominate_policy_for_test(db, settings, policy_id: str) -> str:
     from app.strategies.challenger import get_active_challengers
+    from datetime import UTC, datetime
     import hashlib
     import json
     
     challengers = get_active_challengers()
     challenger = next((c for c in challengers if c.policy_id == policy_id), None)
     if not challenger:
-        return
+        return ""
         
     snapshot = challenger.to_snapshot()
     cleaned = {k: v for k, v in snapshot.items() if k not in ("snapshot_at", "snapshot_version")}
@@ -48,9 +49,17 @@ def nominate_policy_for_test(db, settings, policy_id: str):
 
     with db._session() as s:
         from app.db.database import SpawnedStrategyRow
-        from datetime import UTC, datetime
         s.add(SpawnedStrategyRow(policy_id=policy_id, status="ACTIVE", seed_capital=10000.0, spawned_at=datetime.now(UTC)))
         s.commit()
+
+    ev_id = f"ev_pkg_{policy_id}"
+    db.save_policy_evidence(ev_id, policy_id, datetime.now(UTC), {
+        "evidence_package_id": ev_id,
+        "policy_id": policy_id,
+        "timestamp": datetime.now(UTC).isoformat(),
+        "safety_checks": []
+    })
+    return ev_id
 
 
 @pytest.fixture
@@ -63,8 +72,7 @@ def client(tmp_path):
         DEMO_BAR_SECONDS=3600,
     )
     app = create_app(settings)
-    with TestClient(app) as c:
-        yield c
+    return TestClient(app)
 
 
 def test_get_challengers(client):
@@ -87,19 +95,19 @@ def test_get_shadow_performance(client):
 
 def test_promote_policy(client):
     # Promote a valid challenger
-    nominate_policy_for_test(client.app.state.db, client.app.state.settings, "challenger_low_ml")
-    r = client.post("/api/strategies/promote", json={"policy_id": "challenger_low_ml"})
+    ev_id = nominate_policy_for_test(client.app.state.db, client.app.state.settings, "challenger_low_ml")
+    r = client.post("/api/strategies/promote", json={"policy_id": "challenger_low_ml", "promoter_id": "admin_user", "evidence_package_id": ev_id})
     assert r.status_code == 200
     body = r.json()
     assert body["status"] == "success"
     assert body["config"]["ml_threshold"] == 0.48
 
     # Verify invalid policy raises 404
-    r = client.post("/api/strategies/promote", json={"policy_id": "invalid_policy_name"})
+    r = client.post("/api/strategies/promote", json={"policy_id": "invalid_policy_name", "promoter_id": "admin_user", "evidence_package_id": "some_ev"})
     assert r.status_code == 404
 
     # Verify promoting "champion" raises 400
-    r = client.post("/api/strategies/promote", json={"policy_id": "champion"})
+    r = client.post("/api/strategies/promote", json={"policy_id": "champion", "promoter_id": "admin_user", "evidence_package_id": "some_ev"})
     assert r.status_code == 400
 
 
@@ -116,13 +124,13 @@ def test_engine_restart_restores_snapshot(tmp_path):
     
     # 1. Start initial app, promote "challenger_low_ml"
     app1 = create_app(settings)
-    nominate_policy_for_test(app1.state.db, app1.state.settings, "challenger_low_ml")
+    ev_id = nominate_policy_for_test(app1.state.db, app1.state.settings, "challenger_low_ml")
     with TestClient(app1) as c1:
         # Start engine to initialize
         r_start = c1.post("/api/engine/start", json={"mode": "demo"})
         assert r_start.status_code == 200
 
-        r = c1.post("/api/strategies/promote", json={"policy_id": "challenger_low_ml"})
+        r = c1.post("/api/strategies/promote", json={"policy_id": "challenger_low_ml", "promoter_id": "admin_user", "evidence_package_id": ev_id})
         assert r.status_code == 200
         assert r.json()["config"]["ml_threshold"] == 0.48
 
@@ -149,7 +157,7 @@ def test_promote_aggressive_score_adjusts_thresholds(tmp_path):
         DEMO_BAR_SECONDS=3600,
     )
     app = create_app(settings)
-    nominate_policy_for_test(app.state.db, app.state.settings, "challenger_aggressive_score")
+    ev_id = nominate_policy_for_test(app.state.db, app.state.settings, "challenger_aggressive_score")
     with TestClient(app) as client:
         # Start engine
         r_start = client.post("/api/engine/start", json={"mode": "demo"})
@@ -160,7 +168,7 @@ def test_promote_aggressive_score_adjusts_thresholds(tmp_path):
         baseline_event = engine.risk_config.score_threshold_event
         
         # Promote aggressive score policy (should have offset of -10.0)
-        r = client.post("/api/strategies/promote", json={"policy_id": "challenger_aggressive_score"})
+        r = client.post("/api/strategies/promote", json={"policy_id": "challenger_aggressive_score", "promoter_id": "admin_user", "evidence_package_id": ev_id})
         assert r.status_code == 200
         body = r.json()
         assert body["config"]["score_threshold_offset"] == -10.0
