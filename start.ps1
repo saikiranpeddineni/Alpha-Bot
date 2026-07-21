@@ -1,5 +1,5 @@
 # AlphaDesk launcher (Windows PowerShell)
-# One process serves the API, WebSocket stream and the built UI.
+# Starts both the backend server and the frontend dev server concurrently.
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
@@ -7,9 +7,6 @@ $venvPy = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
 if (-not (Test-Path $venvPy)) {
     Write-Host "Virtual env missing -- run .\install.ps1 first." -ForegroundColor Red
     exit 1
-}
-if (-not (Test-Path "frontend\dist\index.html")) {
-    Write-Host "UI not built -- run .\install.ps1 first." -ForegroundColor Yellow
 }
 
 $bind = "127.0.0.1"; $port = "8742"
@@ -25,12 +22,25 @@ if ((Test-Path "key.pem") -and (Test-Path "cert.pem")) {
     $protocol = "https"
 }
 
-Write-Host ""
+Write-Host "Starting frontend dev server..." -ForegroundColor Cyan
+$feProcess = Start-Process cmd.exe -ArgumentList "/c npm run dev" -WorkingDirectory (Join-Path $PSScriptRoot "frontend") -PassThru -NoNewWindow
+
 Write-Host "=== AlphaDesk starting on ${protocol}://${bind}:${port} ===" -ForegroundColor Cyan
-Write-Host "Press Ctrl+C to stop."
+Write-Host "Opening UI dashboard on http://127.0.0.1:5173" -ForegroundColor Cyan
+Write-Host "Press Ctrl+C to stop both backend & frontend."
 Write-Host ""
 
-$openHost = $bind
-if ($bind -eq "0.0.0.0") { $openHost = "127.0.0.1" }
-Start-Process "${protocol}://${openHost}:${port}"
-& $venvPy backend\run_server.py
+try {
+    # Give the dev server a brief moment to initialize, then open the browser
+    Start-Sleep -Seconds 2
+    Start-Process "http://127.0.0.1:5173"
+    
+    # Run the backend in the foreground
+    & $venvPy backend\run_server.py
+}
+finally {
+    if ($feProcess -and -not $feProcess.HasExited) {
+        Write-Host "Stopping frontend dev server and cleanup..." -ForegroundColor Yellow
+        taskkill /f /t /pid $feProcess.Id 2>$null
+    }
+}
