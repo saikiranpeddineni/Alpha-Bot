@@ -97,6 +97,7 @@ class ShadowLedgerRow(Base):
     vix_value: Mapped[float | None] = mapped_column(nullable=True)
     vix_age: Mapped[float | None] = mapped_column(nullable=True)
     vix_feed_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    regime_source: Mapped[str | None] = mapped_column(String(20), nullable=True)
 
 
 class ContextualPerformanceMemoryRow(Base):
@@ -241,6 +242,7 @@ class Database:
                     "vix_value": "FLOAT",
                     "vix_age": "FLOAT",
                     "vix_feed_status": "VARCHAR(20)",
+                    "regime_source": "VARCHAR(20)",
                 }
 
                 needs_commit = False
@@ -502,6 +504,7 @@ class Database:
                     vix_value=payload.get("vix_value"),
                     vix_age=payload.get("vix_age"),
                     vix_feed_status=payload.get("vix_feed_status"),
+                    regime_source=payload.get("regime_source"),
                 )
             )
             s.commit()
@@ -535,6 +538,7 @@ class Database:
                     data["vix_value"] = r.vix_value
                     data["vix_age"] = r.vix_age
                     data["vix_feed_status"] = r.vix_feed_status
+                    data["regime_source"] = r.regime_source
                     results.append(data)
                 except Exception:
                     pass
@@ -566,6 +570,7 @@ class Database:
                 data["vix_value"] = row.vix_value
                 data["vix_age"] = row.vix_age
                 data["vix_feed_status"] = row.vix_feed_status
+                data["regime_source"] = row.regime_source
                 return data
             except Exception:
                 return None

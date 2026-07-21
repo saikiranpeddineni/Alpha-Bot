@@ -571,7 +571,10 @@ async def get_shadow_ledger_analytics(
     request: Request,
     limit: int = 5000,
     since: str | None = None,
+    min_sample: int = 30,
 ) -> dict:
+    min_sample = max(1, min(min_sample, 200))  # clamp to [1, 200]
+
     engine = _engine(request)
     signals = _db(request).get_shadow_signals(mode=engine.mode, limit=limit)
     total_available = len(signals)  # best-effort; equals limit when truncated
@@ -819,54 +822,152 @@ async def get_shadow_ledger_analytics(
             "avg_mae": round(data["total_mae"] / rep, 4) if rep > 0 else 0.0,
         }
 
-    by_market_regime = {}
+    def _extract_realized_r(s: dict) -> float | None:
+        """Extract canonical realized_r from outcomes, falling back to simulated_pnl approximation."""
+        outcomes = s.get("outcomes") or {}
+        for h in ["15m", "30m", "60m", "close"]:
+            if h in outcomes:
+                rv = outcomes[h].get("realized_r")
+                if rv is not None:
+                    return float(rv)
+        pnl = s.get("simulated_pnl")
+        return float(pnl) / 100.0 if pnl is not None else None
+
+    by_market_regime: dict[str, dict] = {}
     for s in signals:
         regime_name = s.get("market_regime") or "NORMAL"
+        src = s.get("regime_source") or "UNKNOWN"
         if regime_name not in by_market_regime:
             by_market_regime[regime_name] = {
-                "total": 0,
-                "rejected": 0,
-                "accepted": 0,
-                "replayed": 0,
-                "wins": 0,
-                "losses": 0,
-                "total_pnl": 0.0,
-                "total_mfe": 0.0,
-                "total_mae": 0.0,
+                "total": 0, "rejected": 0, "accepted": 0,
+                "replayed": 0, "wins": 0, "losses": 0,
+                "total_pnl": 0.0, "total_mfe": 0.0, "total_mae": 0.0,
+                "total_r": 0.0, "winner_r": 0.0, "loser_r": 0.0,
+                "regime_source_counts": {},
             }
-        
+
         stat = by_market_regime[regime_name]
         stat["total"] += 1
+        stat["regime_source_counts"][src] = stat["regime_source_counts"].get(src, 0) + 1
         dec = s.get("final_decision")
         if dec == "rejected":
             stat["rejected"] += 1
         elif dec in ACCEPTED_DECISIONS:
             stat["accepted"] += 1
-            
+
         if s.get("replayed"):
-            stat["replayed"] += 1
             pnl = s.get("simulated_pnl") or 0.0
+            r_val = _extract_realized_r(s)
+            stat["replayed"] += 1
             stat["total_pnl"] += pnl
             stat["total_mfe"] += s.get("mfe_pct") or 0.0
             stat["total_mae"] += s.get("mae_pct") or 0.0
-            if pnl > 0:
-                stat["wins"] += 1
-            elif pnl < 0:
-                stat["losses"] += 1
+            if r_val is not None:
+                stat["total_r"] += r_val
+                if r_val > 0:
+                    stat["wins"] += 1
+                    stat["winner_r"] += r_val
+                elif r_val < 0:
+                    stat["losses"] += 1
+                    stat["loser_r"] += r_val
+            else:
+                if pnl > 0:
+                    stat["wins"] += 1
+                elif pnl < 0:
+                    stat["losses"] += 1
 
-    market_regime_breakdown = {}
+    market_regime_breakdown: dict = {}
     for regime_name, data in by_market_regime.items():
         rep = data["replayed"]
+        winner_r = data["winner_r"]
+        loser_r = abs(data["loser_r"])
+        profit_factor = round(winner_r / loser_r, 4) if loser_r > 0 else None
+        # Determine dominant source label
+        src_counts = data["regime_source_counts"]
+        total_src = sum(src_counts.values())
+        dominant = max(src_counts, key=src_counts.get) if src_counts else "UNKNOWN"
+        regime_source_label = dominant if len(src_counts) <= 1 else "MIXED"
         market_regime_breakdown[regime_name] = {
             "total_signals": data["total"],
             "rejected_signals": data["rejected"],
             "accepted_signals": data["accepted"],
             "replayed_signals": rep,
-            "win_rate": round(data["wins"] / rep * 100.0, 2) if rep > 0 else 0.0,
-            "avg_simulated_return": round(data["total_pnl"] / rep, 4) if rep > 0 else 0.0,
-            "avg_mfe": round(data["total_mfe"] / rep, 4) if rep > 0 else 0.0,
-            "avg_mae": round(data["total_mae"] / rep, 4) if rep > 0 else 0.0,
+            "win_rate": round(data["wins"] / rep * 100.0, 2) if rep > 0 else None,
+            "avg_simulated_return": round(data["total_pnl"] / rep, 4) if rep > 0 else None,
+            "avg_mfe": round(data["total_mfe"] / rep, 4) if rep > 0 else None,
+            "avg_mae": round(data["total_mae"] / rep, 4) if rep > 0 else None,
+            "avg_r": round(data["total_r"] / rep, 4) if rep > 0 else None,
+            "total_r": round(data["total_r"], 4),
+            "avg_winner_r": round(winner_r / data["wins"], 4) if data["wins"] > 0 else None,
+            "avg_loser_r": round(data["loser_r"] / data["losses"], 4) if data["losses"] > 0 else None,
+            "profit_factor": profit_factor,
+            "regime_source": regime_source_label,
+            "regime_source_counts": src_counts,
         }
+
+    # ── Phase H: by_regime_gate cross-tab ──────────────────────────────────
+    # Cell key: (regime, gate, strategy, direction)
+    # sufficient_sample is based on replayed_count (outcome-bearing), not sample_count
+    _regime_gate_raw: dict[tuple, dict] = {}
+    for s in signals:
+        if s.get("final_decision") != "rejected":
+            continue  # only rejected signals have a gate to attribute
+
+        key = (
+            s.get("market_regime") or "NORMAL",
+            s.get("rejection_stage") or "other",
+            s.get("strategy") or "unknown",
+            s.get("direction") or "unknown",
+        )
+        if key not in _regime_gate_raw:
+            _regime_gate_raw[key] = {
+                "sample_count": 0, "replayed_count": 0,
+                "wins": 0, "losses": 0,
+                "total_r": 0.0, "winner_r": 0.0, "loser_r": 0.0,
+                "total_mfe": 0.0, "total_mae": 0.0,
+            }
+        cell = _regime_gate_raw[key]
+        cell["sample_count"] += 1
+
+        if s.get("replayed"):
+            r_val = _extract_realized_r(s)
+            cell["replayed_count"] += 1
+            cell["total_mfe"] += s.get("mfe_pct") or 0.0
+            cell["total_mae"] += s.get("mae_pct") or 0.0
+            if r_val is not None:
+                cell["total_r"] += r_val
+                if r_val > 0:
+                    cell["wins"] += 1
+                    cell["winner_r"] += r_val
+                elif r_val < 0:
+                    cell["losses"] += 1
+                    cell["loser_r"] += r_val
+
+    by_regime_gate: list[dict] = []
+    for (regime, gate, strategy, direction), cell in _regime_gate_raw.items():
+        rc = cell["replayed_count"]
+        winner_r = cell["winner_r"]
+        loser_r_abs = abs(cell["loser_r"])
+        pf = round(winner_r / loser_r_abs, 4) if loser_r_abs > 0 else None
+        by_regime_gate.append({
+            "regime": regime,
+            "gate": gate,
+            "strategy": strategy,
+            "direction": direction,
+            "sample_count": cell["sample_count"],
+            "replayed_count": rc,
+            "sufficient_sample": rc >= min_sample,
+            "win_rate": round(cell["wins"] / rc * 100.0, 2) if rc > 0 else None,
+            "avg_r": round(cell["total_r"] / rc, 4) if rc > 0 else None,
+            "total_r": round(cell["total_r"], 4) if rc > 0 else None,
+            "avg_winner_r": round(winner_r / cell["wins"], 4) if cell["wins"] > 0 else None,
+            "avg_loser_r": round(cell["loser_r"] / cell["losses"], 4) if cell["losses"] > 0 else None,
+            "profit_factor": pf,
+            "avg_mfe": round(cell["total_mfe"] / rc, 4) if rc > 0 else None,
+            "avg_mae": round(cell["total_mae"] / rc, 4) if rc > 0 else None,
+        })
+    # Sort by total_r descending (nulls last) so top missed opportunities surface first
+    by_regime_gate.sort(key=lambda x: (x["total_r"] is None, -(x["total_r"] or 0.0)))
 
     # Fix A9 (Issue #191): Expose persistence-failure count in analytics response.
     from app.core.shadow_ledger import get_persistence_failure_count
@@ -893,14 +994,17 @@ async def get_shadow_ledger_analytics(
         "by_strategy": strategy_breakdown,
         "by_rejection_stage": rejection_breakdown,
         "by_market_regime": market_regime_breakdown,
+        "by_regime_gate": by_regime_gate,
         "alternative_exits_comparison": alt_exits_comparison,
         # Fix C8 (Issue #199): Expose truncation metadata.
         "population_meta": {
             "limit": limit,
             "total_returned": total_signals,
             "truncated": truncated,
+            "min_sample_threshold": min_sample,
         },
     }
+
 
 
 @router.get("/shadow-ledger/gate-alpha")

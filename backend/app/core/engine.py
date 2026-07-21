@@ -1201,6 +1201,7 @@ class TradingEngine:
                 vix_value=self._last_vix_value,
                 vix_age=(now - self._last_vix_timestamp).total_seconds() if self._last_vix_timestamp else None,
                 vix_feed_status=self._last_vix_status,
+                regime_source="VIX",
             )
 
             # Run and record all active Challengers (CR-146 Phase 3)
@@ -1268,6 +1269,7 @@ class TradingEngine:
                         vix_value=self._last_vix_value,
                         vix_age=(now - self._last_vix_timestamp).total_seconds() if self._last_vix_timestamp else None,
                         vix_feed_status=self._last_vix_status,
+                        regime_source="VIX",
                     )
                 except Exception as exc:
                     applog.error("engine.challenger", f"Challenger {challenger.policy_id} failed for {symbol}: {exc}")
