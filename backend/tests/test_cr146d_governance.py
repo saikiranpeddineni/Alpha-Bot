@@ -1,4 +1,5 @@
 import pytest
+from dataclasses import asdict
 from datetime import datetime, UTC
 from fastapi.testclient import TestClient
 from unittest.mock import MagicMock
