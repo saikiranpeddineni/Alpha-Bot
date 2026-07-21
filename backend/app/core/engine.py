@@ -1444,8 +1444,10 @@ class TradingEngine:
         if event_details:
             self._last_telemetry_event = event_details
 
-        closed_trades = getattr(self.portfolio, "closed_trades", []) if self.portfolio else []
-        open_pos = getattr(self.portfolio, "open_positions", []) if self.portfolio else []
+        closed_trades = getattr(self.portfolio, "trades", []) if self.portfolio else []
+        open_pos = {}
+        if self.portfolio and hasattr(self.portfolio, "open_positions"):
+            open_pos = self.portfolio.open_positions()
         orders_today = len(closed_trades) + len(open_pos)
 
         payload = {

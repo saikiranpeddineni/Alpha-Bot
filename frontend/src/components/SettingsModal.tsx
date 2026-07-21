@@ -103,6 +103,8 @@ const FIELDS: { key: keyof RiskConfig; label: string; hint: string; help: string
 export function SettingsModal(props: { onClose: () => void }) {
   const status = useStore((s) => s.status);
   const showToast = useStore((s) => s.showToast);
+  const heartbeatStyle = useStore((s) => s.heartbeatStyle);
+  const setHeartbeatStyle = useStore((s) => s.setHeartbeatStyle);
   const initial = status?.risk?.config;
   const [draft, setDraft] = useState<Record<string, string>>(() => {
     const d: Record<string, string> = {};
@@ -163,8 +165,8 @@ export function SettingsModal(props: { onClose: () => void }) {
             UI Heartbeat Indicator Style
           </label>
           <select
-            value={useStore.getState().heartbeatStyle}
-            onChange={(e) => useStore.getState().setHeartbeatStyle(e.target.value as any)}
+            value={heartbeatStyle}
+            onChange={(e) => setHeartbeatStyle(e.target.value as any)}
             style={{ width: "100%", padding: "6px 10px" }}
           >
             <option value="ekg">EKG Waveform + Status Dot (Recommended Default)</option>
