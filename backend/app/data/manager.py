@@ -54,10 +54,19 @@ class DataManager:
     # ---- live rolling frames ----
 
     async def warmup(self, symbols: list[str], lookback_bars: int = 800) -> None:
-        for symbol in symbols:
+        extended = list(symbols)
+        if not self.is_synthetic:
+            for v in ["VIX", "^VIX"]:
+                if v not in extended:
+                    extended.append(v)
+        for symbol in extended:
             symbol = symbol.upper()
             try:
-                df = await self.provider.get_bars(symbol, "1Min", limit=lookback_bars)
+                provider = self.provider
+                if symbol in ("VIX", "^VIX") and not self.is_synthetic:
+                    from app.data.yahoo import YahooProvider
+                    provider = YahooProvider()
+                df = await provider.get_bars(symbol, "1Min", limit=lookback_bars)
             except Exception as exc:  # noqa: BLE001
                 applog.error("data", f"{symbol}: warmup failed: {exc}")
                 df = empty_bars()
@@ -65,7 +74,7 @@ class DataManager:
             closed = self._closed_slice(df)
             if not closed.empty:
                 self._last_closed_ts[symbol] = closed.index[-1]
-            applog.info("data", f"{symbol}: warmed up with {len(df)} bars ({self.provider.name})")
+            applog.info("data", f"{symbol}: warmed up with {len(df)} bars ({provider.name})")
 
     def _closed_slice(self, df: pd.DataFrame) -> pd.DataFrame:
         """Bars whose 1-minute window has fully elapsed (synthetic bars are always closed)."""
@@ -76,16 +85,26 @@ class DataManager:
 
     async def poll(self, symbols: list[str]) -> dict[str, pd.DataFrame]:
         """Fetch newest bars; return {symbol: frame_of_newly_closed_bars}."""
+        extended = list(symbols)
+        if not self.is_synthetic:
+            for v in ["VIX", "^VIX"]:
+                if v not in extended:
+                    extended.append(v)
+
         if self.is_synthetic:
-            for symbol in symbols:
+            for symbol in extended:
                 self.provider._ensure(symbol)  # type: ignore[attr-defined]
             self.provider.advance()  # type: ignore[attr-defined]
 
         new_closed: dict[str, pd.DataFrame] = {}
-        for symbol in symbols:
+        for symbol in extended:
             symbol = symbol.upper()
             try:
-                tail = await self.provider.get_bars(symbol, "1Min", limit=30)
+                provider = self.provider
+                if symbol in ("VIX", "^VIX") and not self.is_synthetic:
+                    from app.data.yahoo import YahooProvider
+                    provider = YahooProvider()
+                tail = await provider.get_bars(symbol, "1Min", limit=30)
             except Exception as exc:  # noqa: BLE001
                 applog.warning("data", f"{symbol}: poll failed: {exc}")
                 continue
@@ -239,9 +258,13 @@ class DataManager:
                     return cached
 
         # Cache miss or coverage failure -> live network fetch
-        df = await self.provider.get_bars(symbol, timeframe, start=start, end=end)
+        provider = self.provider
+        if symbol in ("VIX", "^VIX") and not self.is_synthetic:
+            from app.data.yahoo import YahooProvider
+            provider = YahooProvider()
+        df = await provider.get_bars(symbol, timeframe, start=start, end=end)
         source = "network"
-        provider_name = self.provider.name
+        provider_name = provider.name
         if df.empty:
             cached = self.cache.query(symbol, timeframe, start, end)
             if not cached.empty:
