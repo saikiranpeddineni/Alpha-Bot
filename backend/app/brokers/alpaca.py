@@ -84,6 +84,7 @@ class AlpacaBroker(Broker):
         self._processed_fill_qty: dict[str, float] = {}
         self._meta: dict[str, tuple[str, str]] = {}  # order id -> (strategy, reason)
         self._symbol_strategies: dict[str, str] = {}
+        self._shortable_cache: dict[str, bool] = {}
         self.account_id: str | None = None
 
     @property
@@ -449,6 +450,20 @@ class AlpacaBroker(Broker):
 
     async def close_position(self, symbol: str, reason: str = "manual") -> Order | None:
         try:
+            # First, fetch and cancel any outstanding open orders for this symbol to release held quantities
+            try:
+                from alpaca.trading.requests import GetOrdersRequest
+                open_orders = await _call(
+                    self._client.get_orders,
+                    GetOrdersRequest(status="open", symbols=[symbol.upper()]),
+                    label=f"get_orders/close_position/{symbol}"
+                )
+                for o in open_orders:
+                    await _call(self._client.cancel_order_by_id, str(o.id), label=f"cancel_order/{o.id}")
+                    applog.info("broker.alpaca", f"Cancelled outstanding open order {o.id} for {symbol} to release held qty")
+            except Exception as e:
+                applog.warning("broker.alpaca", f"Failed to cancel open orders for {symbol} before close: {e}")
+
             raw = await _call(self._client.close_position, symbol.upper(), label=f"close_position/{symbol}")
             self._meta[str(raw.id)] = ("engine", reason)
             applog.trade("broker.alpaca", f"Closing {symbol} ({reason})")
@@ -458,7 +473,19 @@ class AlpacaBroker(Broker):
             return None
         except Exception as exc:  # noqa: BLE001
             applog.warning("broker.alpaca", f"close {symbol} failed: {exc}")
-            return None
+    async def is_shortable(self, symbol: str) -> bool:
+        sym = symbol.upper()
+        if sym in self._shortable_cache:
+            return self._shortable_cache[sym]
+        try:
+            asset = await _call(self._client.get_asset, sym, label=f"get_asset/{sym}")
+            # Asset is shortable if Alpaca says it is shortable and easy to borrow
+            shortable = bool(asset.shortable and asset.easy_to_borrow)
+            self._shortable_cache[sym] = shortable
+            return shortable
+        except Exception as exc:
+            applog.warning("broker.alpaca", f"Failed to check shortability for {sym}: {exc}")
+            return False
 
     async def flatten_all(self, reason: str = "flatten") -> list[Order]:
         try:

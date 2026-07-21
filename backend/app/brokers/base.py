@@ -86,6 +86,9 @@ class Broker:
     async def flatten_all(self, reason: str = "flatten") -> list[Order]:  # pragma: no cover
         return []
 
+    async def is_shortable(self, symbol: str) -> bool:  # pragma: no cover
+        return True
+
 
 def make_broker(broker_name: str, settings: Settings) -> Broker:
     """Factory — instantiate the correct Broker implementation by name.
