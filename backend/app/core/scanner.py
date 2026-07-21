@@ -527,6 +527,8 @@ class MarketScanner:
         try:
             market_state, confidence, reason_codes = await self._assess_market_risk(as_of=as_of)
 
+            # STRESS/PANIC are capital-preservation regimes. We swap to a small
+            # defensive universe instead of continuing to chase the full pool.
             if market_state in (MarketRiskState.PANIC, MarketRiskState.STRESS):
                 applog.warning(
                     "scanner",
@@ -535,6 +537,8 @@ class MarketScanner:
                 )
                 return ScannerOutcome.SUCCESS_NONEMPTY, DEFENSIVE_WATCHLIST.copy()
 
+            # UNKNOWN means the regime view is not trustworthy enough to
+            # authorize new scanner-driven risk.
             if market_state is MarketRiskState.UNKNOWN:
                 applog.warning(
                     "scanner",
@@ -545,7 +549,8 @@ class MarketScanner:
                 )
                 return ScannerOutcome.SUCCESS_EMPTY, []
 
-            # NORMAL or CAUTION — proceed with normal pipeline
+            # NORMAL or CAUTION keep the normal scan path alive. CAUTION is
+            # handled upstream by tighter thresholds and smaller sizing.
             if market_state is MarketRiskState.CAUTION:
                 applog.warning(
                     "scanner",

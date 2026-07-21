@@ -170,7 +170,13 @@ class ParallelEvidenceEvaluator:
     def calculate_veto_attribution(vetoes: dict, realized_r: float | None) -> dict[str, Any]:
         """Calculate unique, shared, and redundant veto attribution for a given realized R outcome.
         """
-        if realized_r is None:
+        try:
+            realized_r = float(realized_r)
+            if pd.isna(realized_r):
+                realized_r = 0.0
+        except (TypeError, ValueError):
+            # Synthetic/missing stops intentionally have no R-multiple. Their
+            # veto attribution is neutral rather than attempting arithmetic on None.
             realized_r = 0.0
         unique_veto_alpha = {}
         shared_veto_alpha = {}

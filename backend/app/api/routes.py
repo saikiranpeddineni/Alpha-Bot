@@ -624,7 +624,13 @@ async def get_shadow_ledger_analytics(
         if not e.valid or e.realized_r is None:
             continue
             
-        realized_r = e.realized_r
+        try:
+            realized_r = float(e.realized_r)
+            if pd.isna(realized_r):
+                realized_r = 0.0
+        except (TypeError, ValueError):
+            realized_r = 0.0
+
         mfe_r = e.mfe or 0.0
         gave_back_r = max(0.0, mfe_r - realized_r)
         
@@ -674,12 +680,12 @@ async def get_shadow_ledger_analytics(
                 res = alt_data[pid]
                 stat = alt_exits_totals[pid]
                 stat["count"] += 1
-                pnl = res.get("pnl_pct", 0.0)
+                pnl = res.get("pnl_pct") or 0.0
                 stat["total_pnl"] += pnl
                 stat["total_r"] += (res.get("realized_r") or 0.0)
                 stat["total_mfe_r"] += (res.get("mfe_r") or 0.0)
                 stat["total_mae_r"] += (res.get("mae_r") or 0.0)
-                stat["bars_held"] += res.get("bars_held", 0)
+                stat["bars_held"] += res.get("bars_held") or 0
                 # Fix C1 (Issues #178/#193): Breakeven outcomes get their own bucket.
                 if pnl > 0:
                     stat["wins"] += 1
@@ -1662,7 +1668,6 @@ async def promote_policy(request: Request, body: PromoteRequest) -> dict:
         pending_nominee = db.get_pending_nominee_for_policy(policy_id)
         if not pending_nominee:
             raise HTTPException(status_code=400, detail=f"No pending nomination found for Challenger {policy_id!r}.")
-
         # Verify Sandbox / Challenger Staging Check: cannot promote without going through the sandbox staging phase first
         active_spawned = db.get_active_spawned_strategies()
         if not any(x["policy_id"] == policy_id for x in active_spawned):
@@ -1790,7 +1795,7 @@ async def promote_policy(request: Request, body: PromoteRequest) -> dict:
                 "new_snapshot": snapshot,
                 "evidence_package_id": body.evidence_package_id or "legacy_bypass",
                 "evidence_package": evidence_pkg,
-                "mode": engine.mode,
+                "mode": engine.mode if isinstance(getattr(engine, "mode", None), str) else "paper",
                 "evidence_generation_timestamp": datetime.fromisoformat(evidence_pkg.get("timestamp")) if evidence_pkg.get("timestamp") else datetime.now(UTC),
                 "code_commit_sha": code_sha,
                 "dataset_window_id": evidence_pkg.get("dataset_window_id", "default_window")
@@ -1820,6 +1825,25 @@ async def promote_policy(request: Request, body: PromoteRequest) -> dict:
                 "snapshot": snapshot,
             }
         except Exception as exc:
+            # Compensating Rollback - Database State
+            try:
+                if old_snapshot is not None:
+                    db.set_setting("active_policy_snapshot", old_snapshot)
+                else:
+                    db.delete_setting("active_policy_snapshot")
+
+                if old_ml_threshold is not None:
+                    db.set_setting("ml_threshold", old_ml_threshold)
+                else:
+                    db.delete_setting("ml_threshold")
+
+                if old_risk_config is not None:
+                    db.set_setting("risk_config", old_risk_config)
+                else:
+                    db.delete_setting("risk_config")
+            except Exception as rollback_exc:
+                applog.error("engine.promotion", f"Failed DB rollback: {rollback_exc}")
+
             # Compensating Rollback - Engine Runtime State
             engine.risk_config = old_engine_risk_config
             if engine.risk:
@@ -1832,7 +1856,7 @@ async def promote_policy(request: Request, body: PromoteRequest) -> dict:
                 engine.evidence_evaluator.ml_threshold = old_evaluator_ml_threshold
 
             applog.error("engine.promotion", f"FAILED: Rolled back promotion mutation for {policy_id}: {exc}")
-            raise HTTPException(status_code=500, detail=f"Failed to promote policy: {exc}") from exc
+            raise HTTPException(status_code=500, detail=f"Internal Server Error: Failed to promote policy: {exc}") from exc
 
 
 class ProfitAllocatorConfig(BaseModel):
