@@ -104,20 +104,33 @@ class CanonicalOutcomeResolver:
 
         # Check replay validity (#230)
         replayed = bool(row_dict.get("replayed", False) or payload.get("replayed", False))
-        replay_valid = replayed and not bool(row_dict.get("replay_failed", False))
+        replay_failed = bool(row_dict.get("replay_failed", False))
 
         # Calculate Canonical R (#220)
         realized_r = cls.compute_canonical_r(pnl=pnl, entry=entry, stop=stop, mae_pct=mae)
+        valid_r = (realized_r is not None)
+        
+        r_val = row_dict.get("realized_r")
+        if r_val is not None:
+            try:
+                realized_r = float(r_val)
+                valid_r = True
+            except (ValueError, TypeError):
+                pass
 
-        valid = (realized_r is not None) and replay_valid
         invalid_reason = None
-        if not replay_valid:
+        if not replayed:
+            valid_r = False
+            invalid_reason = "NOT_REPLAYED"
+        elif replay_failed:
+            valid_r = False
             invalid_reason = "REPLAY_NOT_VALID"
         elif realized_r is None:
+            valid_r = False
             invalid_reason = "MISSING_CANONICAL_R"
 
         return CanonicalEvidence(
-            valid=valid,
+            valid=valid_r,
             invalid_reason=invalid_reason,
             horizon=horizon,
             realized_r=realized_r,
@@ -125,8 +138,8 @@ class CanonicalOutcomeResolver:
             mae=float(mae) if mae is not None and pd.notna(mae) else None,
             regime=regime,
             regime_source=regime_source,
-            replay_valid=replay_valid,
-            evidence_version="v1"
+            replay_valid=replayed and not replay_failed,
+            evidence_version="v1.0"
         )
 
     @classmethod
@@ -186,6 +199,7 @@ class CanonicalOutcomeResolver:
             valid_filtered.append(ev)
 
         return valid_filtered, {
+            "error": None,
             "sources": list(sources_observed),
             "valid_r_count": len(valid_filtered),
             "total_records": len(records),

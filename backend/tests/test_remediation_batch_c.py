@@ -23,13 +23,14 @@ def test_deterministic_cohort_fingerprint():
 
 def test_atomic_candidate_database_update(tmp_path):
     """Test #242: Targeted SQL update asserts affected_rows == 1."""
+    from datetime import UTC, datetime
     db_file = tmp_path / "test_batch_c.db"
     db = Database(db_file)
 
     # Save a initial shadow record
     db.save_shadow_signal(
         "cand_atomic",
-        None,
+        datetime.now(UTC),
         "NVDA",
         "rsi2",
         "long",

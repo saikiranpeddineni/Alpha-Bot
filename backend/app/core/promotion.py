@@ -105,26 +105,13 @@ class PolicyPromotionGovernor:
 
         # 3. Fail-closed atomic transaction
         try:
-            with self.db.engine.begin() as conn:
-                # Save active policy snapshot setting
+            from app.db.database import SettingRow
+            with self.db._session() as s:
                 snapshot_json = json.dumps(policy_snapshot, default=str)
-                conn.exec_driver_sql(
-                    "INSERT INTO settings (key, value, updated_at) VALUES ('active_policy_snapshot', :val, datetime('now')) "
-                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')",
-                    {"val": snapshot_json}
-                )
-
-                # Save promotion row
-                conn.exec_driver_sql(
-                    "INSERT INTO policy_promotions (policy_id, promoted_at, promoted_by, config_fingerprint, override_used, code_commit_sha, dataset_window_id) "
-                    "VALUES (:policy_id, datetime('now'), 'PolicyPromotionGovernor', :fingerprint, 0, :commit_sha, :window_id)",
-                    {
-                        "policy_id": envelope.policy_id,
-                        "fingerprint": envelope.package_hash,
-                        "commit_sha": envelope.git_commit_sha,
-                        "window_id": envelope.canonical_evidence_metadata.get("dataset_window_id", "default"),
-                    }
-                )
+                s.merge(SettingRow(key="active_policy_snapshot", value=snapshot_json))
+                if "ml_threshold" in policy_snapshot:
+                    s.merge(SettingRow(key="ml_threshold", value=json.dumps(policy_snapshot["ml_threshold"], default=str)))
+                s.commit()
 
             return {
                 "status": "PROMOTED",
