@@ -1040,11 +1040,11 @@ async def get_shadow_ledger_gate_alpha(
         from app.strategies.memory import _canonical_realized_r
         outcomes = s.get("outcomes") or {}
         strategy_name_s = s.get("strategy")
-        realized_r = _canonical_realized_r(strategy_name_s, outcomes) if outcomes else 0.0
-        if not outcomes:
+        realized_r = _canonical_realized_r(strategy_name_s, outcomes) if outcomes else None
+        if realized_r is None:
             sim_pnl = s.get("simulated_pnl")
             if sim_pnl is not None:
-                realized_r = sim_pnl / 100.0
+                realized_r = float(sim_pnl) / 100.0
                 
         for g in gates:
             # Fix C5 (Issue #195): Count unique veto by membership, not non-zero magnitude.
@@ -1053,8 +1053,7 @@ async def get_shadow_ledger_gate_alpha(
                 stats[g]["unique_veto_alpha"] += unique_veto.get(g, 0.0)
                 # Fix C5 (Issue #196): Use forward outcome eligibility, not the replayed flag.
                 # Any signal with a resolved counterfactual outcome qualifies.
-                has_outcome = bool(outcomes) or s.get("simulated_pnl") is not None
-                if has_outcome:
+                if realized_r is not None:
                     if realized_r < 0:
                         stats[g]["avoided_losses"] += 1
                     elif realized_r > 0:

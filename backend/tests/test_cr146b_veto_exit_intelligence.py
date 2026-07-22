@@ -151,3 +151,43 @@ def test_shadow_ledger_endpoints(monkeypatch):
     assert prod_exit["avg_realized_r"] == -1.5
     tight_exit = next(x for x in alt_list if x["policy_id"] == "exit_bracket_tight")
     assert tight_exit["avg_realized_r"] == 1.0
+
+
+def test_gate_alpha_handles_none_realized_r(monkeypatch):
+    """Ensure signals with outcomes that yield None from _canonical_realized_r do not throw TypeError."""
+    client = TestClient(app, raise_server_exceptions=True)
+    
+    mock_signals = [
+        {
+            "candidate_id": "cand_null_r",
+            "timestamp": "2026-07-19T09:30:00",
+            "symbol": "TSLA",
+            "strategy": "OpeningRangeBreakout",
+            "direction": "long",
+            "final_decision": "rejected",
+            "outcomes": {"some_unrecognized_key": 123},  # causes _canonical_realized_r to return None
+            "gate_evidence_json": {
+                "vetoes": ["ml_gate"]
+            },
+            "unique_veto_alpha": {"ml_gate": 0.0},
+        }
+    ]
+
+    class MockDB:
+        def get_shadow_signals(self, mode, limit=5000):
+            return mock_signals
+
+    class MockEngine:
+        mode = "demo"
+
+    monkeypatch.setattr("app.api.routes._db", lambda r: MockDB())
+    monkeypatch.setattr("app.api.routes._engine", lambda r: MockEngine())
+
+    res = client.get("/api/shadow-ledger/gate-alpha")
+    assert res.status_code == 200
+    data = res.json()
+    assert "gates" in data
+    assert data["gates"]["ml_gate"]["unique_vetoes"] == 1
+    assert data["gates"]["ml_gate"]["avoided_losses"] == 0
+    assert data["gates"]["ml_gate"]["missed_profits"] == 0
+
