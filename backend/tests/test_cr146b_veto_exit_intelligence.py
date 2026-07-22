@@ -287,5 +287,23 @@ def test_parse_datetime_to_utc_naive_preserves_utc():
     assert parsed.second == 50
 
 
+def test_parse_datetime_to_utc_candidate_id_shift_correction():
+    """Verify parse_datetime_to_utc auto-corrects +4h timestamp shifts using candidate_id string."""
+    from app.core.shadow_replay_eligibility import parse_datetime_to_utc
+    from datetime import datetime, UTC
+
+    # Database contains shifted timestamp 23:19:50 from prior ET double conversion
+    shifted_dt = datetime(2026, 7, 21, 23, 19, 50, tzinfo=UTC)
+    candidate_id = "NOW_RSI2_REVERSION_20260721_191950_79EECE"
+
+    parsed = parse_datetime_to_utc(shifted_dt, candidate_id=candidate_id)
+
+    assert parsed is not None
+    assert parsed.tzinfo == UTC
+    assert parsed.hour == 19
+    assert parsed.minute == 19
+    assert parsed.second == 50
+
+
 
 

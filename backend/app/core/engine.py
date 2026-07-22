@@ -2023,7 +2023,7 @@ class TradingEngine:
                 candidate_id = s["candidate_id"]
                 symbol = s["symbol"]
                 from app.core.shadow_replay_eligibility import parse_datetime_to_utc
-                ts = parse_datetime_to_utc(s.get("timestamp") or s.get("ts")) or datetime.now(UTC)
+                ts = parse_datetime_to_utc(s.get("timestamp") or s.get("ts"), candidate_id=candidate_id) or datetime.now(UTC)
                 direction = s["direction"]
                 p = s.get("payload") if isinstance(s.get("payload"), dict) else s
                 stop_loss = s.get("stop_loss") if s.get("stop_loss") is not None else p.get("stop_loss")

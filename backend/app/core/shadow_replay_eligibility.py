@@ -24,23 +24,51 @@ class ReplayEligibilityState(StrEnum):
     PENDING_NOT_ELIGIBLE = "pending_not_eligible"
 
 
-def parse_datetime_to_utc(dt_val: Any) -> datetime | None:
-    """Helper to parse datetime values into aware UTC datetime."""
-    if dt_val is None:
-        return None
-    if isinstance(dt_val, str):
-        try:
-            dt = datetime.fromisoformat(dt_val.replace("Z", "+00:00"))
-        except Exception:
-            return None
-    elif isinstance(dt_val, datetime):
-        dt = dt_val
-    else:
-        return None
+import re
 
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=UTC)
-    return dt.astimezone(UTC)
+_CANDIDATE_ID_TS_REGEX = re.compile(r"(\d{8})_(\d{6})")
+
+
+def parse_datetime_to_utc(dt_val: Any, candidate_id: str | None = None) -> datetime | None:
+    """Helper to parse datetime values into aware UTC datetime.
+    
+    If candidate_id is provided, cross-validates against candidate_id timestamp
+    pattern (YYYYMMDD_HHMMSS) to prevent timezone double-conversion +4h shifts (#244).
+    """
+    candidate_dt = None
+    if candidate_id and isinstance(candidate_id, str):
+        m = _CANDIDATE_ID_TS_REGEX.search(candidate_id)
+        if m:
+            date_str, time_str = m.groups()
+            try:
+                candidate_dt = datetime.strptime(f"{date_str}_{time_str}", "%Y%m%d_%H%M%S").replace(tzinfo=UTC)
+            except Exception:
+                pass
+
+    dt = None
+    if dt_val is not None:
+        if isinstance(dt_val, str):
+            try:
+                dt = datetime.fromisoformat(dt_val.replace("Z", "+00:00"))
+            except Exception:
+                dt = None
+        elif isinstance(dt_val, datetime):
+            dt = dt_val
+
+    if dt is not None:
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        else:
+            dt = dt.astimezone(UTC)
+
+    # If candidate_dt exists, check if dt has a +4h or +5h shift relative to candidate_dt
+    if candidate_dt and dt:
+        diff_seconds = abs((dt - candidate_dt).total_seconds())
+        # If timestamp is shifted by ~4 hours (14400s) or 5 hours (18000s) due to double ET conversion
+        if 14000 <= diff_seconds <= 18400:
+            return candidate_dt
+
+    return dt or candidate_dt
 
 
 def classify_shadow_replay_status(
