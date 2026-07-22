@@ -192,7 +192,8 @@ async def test_submit_ack_does_not_mean_protected():
     engine.broker.open_orders = AsyncMock(return_value=[submitted])
     status_c2 = await engine.verify_broker_protective_stops([position])
     assert status_c2["AAPL"] is True
-    assert engine.allow_new_entries is True
+    # Protection verification verifies the stop, but does not own re-enabling entries
+    assert engine.allow_new_entries is False
 
 
 def test_two_partial_fills_create_one_logical_loss():
@@ -331,3 +332,27 @@ async def test_replay_respects_backoff():
     await engine._replay_pending_signals(datetime.now(UTC))
 
     assert engine.data.history.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_protection_verification_cannot_clear_unrelated_entry_block():
+    engine = TradingEngine.__new__(TradingEngine)
+    engine.portfolio = PortfolioTracker()
+    engine.broker = AsyncMock()
+    engine.allow_new_entries = False
+    engine.system_health = "DEGRADED"
+
+    protected_position = Position(symbol="AAPL", qty=100.0, avg_entry_price=200.0, market_price=200.0)
+    valid_stop_order = Order(
+        id="stop-valid", symbol="AAPL", side=OrderSide.SELL, qty=100.0,
+        order_type=OrderType.STOP, stop_price=197.0, status=OrderStatus.SUBMITTED
+    )
+
+    # Broker contains valid protection.
+    engine.broker.open_orders = AsyncMock(return_value=[valid_stop_order])
+
+    result = await engine.verify_broker_protective_stops([protected_position])
+
+    assert result[protected_position.symbol] is True
+    # Protection is healthy, but this function does not own unrelated entry blocks.
+    assert engine.allow_new_entries is False

@@ -157,11 +157,6 @@ class PortfolioTracker:
         ref = self.session_date or (self._day_trade_dates[-1] if self._day_trade_dates else date.today())
         return sum(1 for d in self._day_trade_dates if d == ref)
 
-    @day_trades_today.setter
-    def day_trades_today(self, value: int) -> None:
-        """Backwards-compatible setter (used during checkpoint restoration)."""
-        pass
-
     def roll_session(self, session: date, equity: float) -> RollResult:
         if self.session_date is None:
             self.session_date = session
@@ -237,7 +232,7 @@ class PortfolioTracker:
             "day_realized_pnl": self.day_realized_pnl,
             "session_date": self.session_date.isoformat() if self.session_date else None,
             "session_start_equity": self.session_start_equity,
-            "peak_equity": self.peak_equity,
+            "day_trade_dates": [d.isoformat() for d in self._day_trade_dates],
             "day_trades_today": self.day_trades_today,
             "trades": [t.model_dump(mode="json") for t in self.trades],
             "equity_curve": [[ts.isoformat(), value] for ts, value in self.equity_curve],
@@ -264,7 +259,13 @@ class PortfolioTracker:
         self.session_date = date.fromisoformat(payload["session_date"]) if payload.get("session_date") else None
         self.session_start_equity = payload.get("session_start_equity")
         self.peak_equity = float(payload.get("peak_equity", 0.0))
-        self.day_trades_today = int(payload.get("day_trades_today", 0))
+        if "day_trade_dates" in payload:
+            self._day_trade_dates = [date.fromisoformat(d) for d in payload.get("day_trade_dates", []) if d]
+        elif payload.get("day_trades_today") and self.session_date:
+            cnt = int(payload["day_trades_today"])
+            self._day_trade_dates = [self.session_date] * cnt
+        else:
+            self._day_trade_dates = []
         self.trades = [TradeRecord.model_validate(t) for t in payload.get("trades", [])]
         self.equity_curve = [(datetime.fromisoformat(ts), float(value)) for ts, value in payload.get("equity_curve", [])]
         self._lots = {

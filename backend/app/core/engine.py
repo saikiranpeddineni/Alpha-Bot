@@ -1930,9 +1930,6 @@ class TradingEngine:
             self._protection_state: dict[str, ProtectionState] = {}
 
         if not active_positions:
-            if self.system_health == "DEGRADED":
-                self.system_health = "NORMAL"
-            self.allow_new_entries = True
             return {}
 
         try:
@@ -2192,11 +2189,7 @@ class TradingEngine:
                 except Exception as rec_exc:
                     applog.error("engine.protection", f"#41: Failed to submit recovery protective stop for {p.symbol}: {rec_exc}")
 
-        if all(protection_status.values()):
-            if self.system_health == "DEGRADED":
-                self.system_health = "NORMAL"
-            self.allow_new_entries = True
-        else:
+        if not all(protection_status.values()):
             self.allow_new_entries = False
             if self.system_health not in ("HALTED", "SAFE_MODE"):
                 self.system_health = "DEGRADED"
