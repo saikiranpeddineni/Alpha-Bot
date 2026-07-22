@@ -1928,30 +1928,15 @@ class TradingEngine:
                         if o.status in (OrderStatus.CANCELED, OrderStatus.REJECTED, OrderStatus.FILLED):
                             continue
 
-                        # Discriminate protective stop orders vs limit take-profit exit orders
-                        stop_px = o.stop_loss or o.limit_price
-                        is_stop_order = (
-                            getattr(o, "leg", "") == "stop"
-                            or "stop" in str(getattr(o, "reason", "")).lower()
-                            or (stop_px is not None and stop_px > 0 and (
-                                (p.qty > 0 and stop_px < p.avg_entry_price) or
-                                (p.qty < 0 and stop_px > p.avg_entry_price)
-                            ))
-                        )
-                        if not is_stop_order:
-                            continue
-
-                        # Only cancel if order is under-sized or stale relative to current position
-                        is_undersized = o.qty < required_qty - 1e-6
-                        is_stale = bool(opened_at and o.submitted_at and o.submitted_at < opened_at - timedelta(seconds=10))
-
-                        if is_undersized or is_stale:
-                            try:
-                                await self.broker.cancel(o.id)
-                                applog.info("engine.protection", f"#41: Canceled under-sized/stale protective stop {o.id} for {p.symbol} (qty={o.qty} < required={required_qty:.2f})")
-                            except Exception as cancel_exc:
-                                cancellation_failed = True
-                                applog.warning("engine.protection", f"#41: Could not cancel under-sized stop {o.id} for {p.symbol}: {cancel_exc}. Aborting recovery submit for this cycle.")
+                        # Any unverified active exit order ties up position quantity at the broker,
+                        # causing Alpaca code 40310000 (insufficient qty) during recovery stop submission.
+                        # Cancel it to allow protective stop recovery to execute cleanly.
+                        try:
+                            await self.broker.cancel(o.id)
+                            applog.info("engine.protection", f"#41: Canceled conflicting exit order {o.id} for {p.symbol} to allow protective stop recovery (qty={o.qty})")
+                        except Exception as cancel_exc:
+                            cancellation_failed = True
+                            applog.warning("engine.protection", f"#41: Could not cancel conflicting exit order {o.id} for {p.symbol}: {cancel_exc}. Aborting recovery submit for this cycle.")
 
                     if cancellation_failed:
                         continue
