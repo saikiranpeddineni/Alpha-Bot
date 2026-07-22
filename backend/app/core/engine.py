@@ -662,7 +662,14 @@ class TradingEngine:
             return
 
         # Synchronize ML gate threshold with assessed market risk regime with dynamic scale
-        current_regime = "STRESS" if self.vix_unavailable else str(getattr(getattr(self, "last_safety_decision", None), "market_risk_state", getattr(self.risk_config, "current_regime", "NORMAL"))).upper()
+        raw_regime = getattr(getattr(self, "last_safety_decision", None), "market_risk_state", getattr(self.risk_config, "current_regime", "NORMAL"))
+        if hasattr(raw_regime, "value"):
+            regime_str = str(raw_regime.value)
+        elif hasattr(raw_regime, "name"):
+            regime_str = str(raw_regime.name)
+        else:
+            regime_str = str(raw_regime)
+        current_regime = "STRESS" if self.vix_unavailable else regime_str.split(".")[-1].upper()
         regime_map = getattr(self.risk_config, "regime_ml_thresholds", {})
         raw_threshold = regime_map.get(current_regime)
         if raw_threshold is None:
