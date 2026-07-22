@@ -78,9 +78,35 @@ class ReplayOptimizer:
         winner_captures = []
 
         for s in signals:
-            ml_prob = float(s.get("ml_probability") or s.get("ml_prob") or 0.0)
-            meta_prob = float(s.get("meta_probability") or s.get("meta_prob") or 0.0)
-            trade_score = float(s.get("trade_score") or 0.0)
+            p = s.get("payload") if isinstance(s.get("payload"), dict) else {}
+            if not p and isinstance(s.get("payload"), str):
+                try:
+                    import json
+                    p = json.loads(s["payload"])
+                except Exception:
+                    p = {}
+
+            ml_prob = float(
+                s.get("ml_confidence")
+                or s.get("ml_probability")
+                or s.get("ml_prob")
+                or p.get("ml_confidence")
+                or p.get("ml_probability")
+                or p.get("ml_prob")
+                or 0.0
+            )
+            meta_prob = float(
+                s.get("meta_probability")
+                or s.get("meta_prob")
+                or p.get("meta_probability")
+                or p.get("meta_prob")
+                or 0.0
+            )
+            trade_score = float(
+                s.get("trade_score")
+                or p.get("trade_score")
+                or 0.0
+            )
 
             # Determine entry pass/fail under simulated parameters
             ml_pass = ml_prob >= ml_thresh
@@ -97,7 +123,13 @@ class ReplayOptimizer:
                 entry_passed = ml_pass
 
             # Extract counterfactual outcome for exit_policy
-            alt_outcomes = s.get("alternative_exits") or s.get("outcomes") or {}
+            alt_outcomes = (
+                s.get("alternative_exits")
+                or s.get("outcomes")
+                or p.get("alternative_exits")
+                or p.get("outcomes")
+                or {}
+            )
             policy_data = alt_outcomes.get(exit_policy) or {}
 
             realized_r = policy_data.get("realized_r")
