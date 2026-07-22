@@ -4,7 +4,9 @@ import { fmtDateTime, fmtMoney, fmtPct, fmtQty, fmtSigned, fmtTime, pnlClass } f
 import { useStore } from "../store";
 import { ShadowAnalyticsResponse, GateAlphaResponse, GateAlphaStats, AltExitStats } from "../types";
 
-type Tab = "positions" | "orders" | "trades" | "logs" | "shadow";
+import { TickerFlowVisualizer } from "./TickerFlowVisualizer";
+
+type Tab = "positions" | "orders" | "trades" | "logs" | "shadow" | "flow";
 
 export function BottomTabs() {
   const [tab, setTab] = useState<Tab>("positions");
@@ -24,6 +26,9 @@ export function BottomTabs() {
         <button className={tab === "trades" ? "active" : ""} onClick={() => setTab("trades")}>
           Trades {trades.length > 0 && `(${trades.length})`}
         </button>
+        <button className={tab === "flow" ? "active" : ""} onClick={() => setTab("flow")}>
+          ⚡ Pipeline Flow
+        </button>
         <button className={tab === "logs" ? "active" : ""} onClick={() => setTab("logs")}>
           Logs
         </button>
@@ -37,6 +42,7 @@ export function BottomTabs() {
         {tab === "positions" && <PositionsTable />}
         {tab === "orders" && <OrdersTable />}
         {tab === "trades" && <TradesTable />}
+        {tab === "flow" && <TickerFlowVisualizer />}
         {tab === "shadow" && <ShadowAnalyticsTab />}
         {tab === "logs" && (
           <div>
