@@ -142,28 +142,48 @@ class PaperBroker(Broker):
             else:
                 self._resting.append(order.id)  # fills at next bar open
         elif order.order_type == OrderType.STOP:
-            stop_px = order.stop_price if order.stop_price is not None else order.stop_loss
-            marketable = stop_px is not None and (
-                (order.side == OrderSide.BUY and price >= stop_px) or (order.side == OrderSide.SELL and price <= stop_px)
-            )
+            stop_px = order.stop_price
+            if stop_px is None:
+                raise ValueError("STOP orders require stop_price")
+            marketable = (order.side == OrderSide.BUY and price >= stop_px) or (order.side == OrderSide.SELL and price <= stop_px)
             if marketable and self.fill_market_on == "immediate":
                 fill_price = self._slip(price, order.side)
                 self._fill(order, fill_price)
             else:
                 self._resting.append(order.id)
         elif order.order_type == OrderType.STOP_LIMIT:
-            stop_px = order.stop_price if order.stop_price is not None else order.stop_loss
+            stop_px = order.stop_price
             limit_px = order.limit_price
-            stop_triggered = stop_px is not None and (
-                (order.side == OrderSide.BUY and price >= stop_px) or (order.side == OrderSide.SELL and price <= stop_px)
-            )
-            limit_marketable = limit_px is not None and (
-                (order.side == OrderSide.BUY and price <= limit_px) or (order.side == OrderSide.SELL and price >= limit_px)
-            )
-            if stop_triggered and limit_marketable and self.fill_market_on == "immediate":
-                fill_price = self._slip(price, order.side)
-                fill_price = min(fill_price, limit_px) if order.side == OrderSide.BUY else max(fill_price, limit_px)
-                self._fill(order, fill_price)
+            if stop_px is None or limit_px is None:
+                raise ValueError("STOP_LIMIT requires stop_price and limit_price")
+
+            # Phase 1: detect stop trigger.
+            if not order.stop_triggered:
+                if (
+                    order.side == OrderSide.BUY and price >= stop_px
+                ) or (
+                    order.side == OrderSide.SELL and price <= stop_px
+                ):
+                    order.stop_triggered = True
+
+            # Phase 2: once triggered, behave exactly like a LIMIT.
+            if order.stop_triggered:
+                limit_marketable = (
+                    order.side == OrderSide.BUY and price <= limit_px
+                ) or (
+                    order.side == OrderSide.SELL and price >= limit_px
+                )
+
+                if limit_marketable and self.fill_market_on == "immediate":
+                    fill_price = self._slip(price, order.side)
+                    fill_price = (
+                        min(fill_price, limit_px)
+                        if order.side == OrderSide.BUY
+                        else max(fill_price, limit_px)
+                    )
+                    self._fill(order, fill_price)
+                else:
+                    self._resting.append(order.id)
             else:
                 self._resting.append(order.id)
         else:  # limit
@@ -380,7 +400,7 @@ class PaperBroker(Broker):
                     if oid in self._resting:
                         self._resting.remove(oid)
             elif order.order_type == OrderType.STOP:
-                stop_px = order.stop_price if order.stop_price is not None else order.stop_loss
+                stop_px = order.stop_price
                 if stop_px is not None:
                     if order.side == OrderSide.BUY and h >= stop_px:
                         self._fill(order, self._slip(max(o, stop_px), order.side), fill_qty=fill_qty)
@@ -393,25 +413,68 @@ class PaperBroker(Broker):
                             if oid in self._resting:
                                 self._resting.remove(oid)
             elif order.order_type == OrderType.STOP_LIMIT:
-                stop_px = order.stop_price if order.stop_price is not None else order.stop_loss
+                stop_px = order.stop_price
                 limit_px = order.limit_price
-                if stop_px is not None and limit_px is not None:
-                    if order.side == OrderSide.BUY and h >= stop_px:
-                        if low <= limit_px:
-                            fill_p = self._slip(min(o, limit_px), order.side)
-                            fill_p = min(fill_p, limit_px)
-                            self._fill(order, fill_p, fill_qty=fill_qty)
-                            if order.filled_qty >= order.qty - 1e-6:
-                                if oid in self._resting:
-                                    self._resting.remove(oid)
-                    elif order.side == OrderSide.SELL and low <= stop_px:
-                        if h >= limit_px:
-                            fill_p = self._slip(max(o, limit_px), order.side)
-                            fill_p = max(fill_p, limit_px)
-                            self._fill(order, fill_p, fill_qty=fill_qty)
-                            if order.filled_qty >= order.qty - 1e-6:
-                                if oid in self._resting:
-                                    self._resting.remove(oid)
+
+                if stop_px is None or limit_px is None:
+                    continue
+
+                # --------------------------------------------------
+                # Phase 1 — trigger the STOP.
+                # --------------------------------------------------
+                if not order.stop_triggered:
+                    if (
+                        order.side == OrderSide.BUY
+                        and h >= stop_px
+                    ):
+                        order.stop_triggered = True
+                    elif (
+                        order.side == OrderSide.SELL
+                        and low <= stop_px
+                    ):
+                        order.stop_triggered = True
+
+                # Stop not triggered yet → remain resting.
+                if not order.stop_triggered:
+                    continue
+
+                # --------------------------------------------------
+                # Phase 2 — now this is effectively a LIMIT order.
+                # --------------------------------------------------
+                if (
+                    order.side == OrderSide.BUY
+                    and low <= limit_px
+                ):
+                    fill_p = self._slip(
+                        min(o, limit_px),
+                        order.side,
+                    )
+                    # Never fill BUY above its limit.
+                    fill_p = min(fill_p, limit_px)
+                    self._fill(
+                        order,
+                        fill_p,
+                        fill_qty=fill_qty,
+                    )
+                elif (
+                    order.side == OrderSide.SELL
+                    and h >= limit_px
+                ):
+                    fill_p = self._slip(
+                        max(o, limit_px),
+                        order.side,
+                    )
+                    # Never fill SELL below its limit.
+                    fill_p = max(fill_p, limit_px)
+                    self._fill(
+                        order,
+                        fill_p,
+                        fill_qty=fill_qty,
+                    )
+
+                if order.filled_qty >= order.qty - 1e-6:
+                    if oid in self._resting:
+                        self._resting.remove(oid)
             elif order.side == OrderSide.BUY and order.limit_price is not None and low <= order.limit_price:
                 self._fill(order, min(o, order.limit_price), fill_qty=fill_qty)
                 if order.filled_qty >= order.qty - 1e-6:

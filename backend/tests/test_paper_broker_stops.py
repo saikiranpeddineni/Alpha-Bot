@@ -94,3 +94,69 @@ async def test_paper_broker_stop_limit_trigger_and_limit():
     broker.process_bar("CRDO", bar, datetime.now(UTC))
     assert order.status == OrderStatus.FILLED
     assert order.filled_avg_price >= 224.50
+
+
+@pytest.mark.asyncio
+async def test_paper_broker_stop_limit_trigger_persists_across_bars():
+    broker = PaperBroker(fill_market_on="immediate")
+
+    broker.update_price(
+        "XYZ",
+        101.00,
+        datetime.now(UTC),
+    )
+
+    req = OrderRequest(
+        symbol="XYZ",
+        side=OrderSide.SELL,
+        qty=100.0,
+        order_type=OrderType.STOP_LIMIT,
+        stop_price=100.00,
+        limit_price=99.00,
+    )
+
+    order = await broker.submit(req)
+
+    assert order.status == OrderStatus.SUBMITTED
+    assert order.stop_triggered is False
+
+    # BAR 1: Stop crosses 100 (low=98.00), but price gaps below 99 limit (high=98.80) and never reaches 99.
+    # Result: STOP triggers, LIMIT remains unfilled.
+    trigger_only_bar = pd.Series({
+        "open": 98.50,
+        "high": 98.80,
+        "low": 98.00,
+        "close": 98.50,
+        "volume": 1000,
+    })
+
+    broker.process_bar(
+        "XYZ",
+        trigger_only_bar,
+        datetime.now(UTC),
+    )
+
+    assert order.stop_triggered is True
+    assert order.status == OrderStatus.SUBMITTED
+    assert order.id in broker._resting
+
+    # BAR 2: Price is entirely ABOVE the original stop. The stop does NOT cross again.
+    # But because the order was already triggered, it is now simply a SELL LIMIT @ 99.
+    limit_fill_bar = pd.Series({
+        "open": 100.50,
+        "high": 101.00,
+        "low": 100.25,
+        "close": 100.75,
+        "volume": 1000,
+    })
+
+    broker.process_bar(
+        "XYZ",
+        limit_fill_bar,
+        datetime.now(UTC),
+    )
+
+    assert order.stop_triggered is True
+    assert order.status == OrderStatus.FILLED
+    assert order.filled_avg_price >= 99.00
+    assert order.id not in broker._resting

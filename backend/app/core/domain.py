@@ -132,6 +132,13 @@ class Order(BaseModel):
     order_type: OrderType
     limit_price: float | None = None
     stop_price: float | None = None
+    stop_loss: float | None = None
+    take_profit: float | None = None
+
+    # STOP_LIMIT lifecycle state.
+    # Once triggered, the order behaves as a normal LIMIT order.
+    stop_triggered: bool = False
+
     status: OrderStatus = OrderStatus.PENDING
     filled_qty: float = 0.0
     filled_avg_price: float | None = None
