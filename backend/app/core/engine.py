@@ -1911,22 +1911,50 @@ class TradingEngine:
                     continue
                 try:
                     side = OrderSide.SELL if p.qty > 0 else OrderSide.BUY
+                    required_qty = abs(p.qty)
+                    opened_at = getattr(p, "opened_at", None)
 
-                    # Cancel any stale/under-sized open orders holding shares for this symbol
+                    cancellation_failed = False
                     for o in open_orders:
-                        if o.symbol == p.symbol and o.side == side and o.status not in (OrderStatus.CANCELED, OrderStatus.REJECTED, OrderStatus.FILLED):
+                        if o.symbol != p.symbol or o.side != side:
+                            continue
+                        if o.status in (OrderStatus.CANCELED, OrderStatus.REJECTED, OrderStatus.FILLED):
+                            continue
+
+                        # Discriminate protective stop orders vs limit take-profit exit orders
+                        stop_px = o.stop_loss or o.limit_price
+                        is_stop_order = (
+                            getattr(o, "leg", "") == "stop"
+                            or "stop" in str(getattr(o, "reason", "")).lower()
+                            or (stop_px is not None and stop_px > 0 and (
+                                (p.qty > 0 and stop_px < p.avg_entry_price) or
+                                (p.qty < 0 and stop_px > p.avg_entry_price)
+                            ))
+                        )
+                        if not is_stop_order:
+                            continue
+
+                        # Only cancel if order is under-sized or stale relative to current position
+                        is_undersized = o.qty < required_qty - 1e-6
+                        is_stale = bool(opened_at and o.submitted_at and o.submitted_at < opened_at - timedelta(seconds=10))
+
+                        if is_undersized or is_stale:
                             try:
                                 await self.broker.cancel(o.id)
-                                applog.info("engine.protection", f"#41: Canceled stale/under-sized order {o.id} for {p.symbol} before re-submitting recovery stop")
+                                applog.info("engine.protection", f"#41: Canceled under-sized/stale protective stop {o.id} for {p.symbol} (qty={o.qty} < required={required_qty:.2f})")
                             except Exception as cancel_exc:
-                                applog.warning("engine.protection", f"#41: Could not cancel order {o.id} for {p.symbol}: {cancel_exc}")
+                                cancellation_failed = True
+                                applog.warning("engine.protection", f"#41: Could not cancel under-sized stop {o.id} for {p.symbol}: {cancel_exc}. Aborting recovery submit for this cycle.")
+
+                    if cancellation_failed:
+                        continue
 
                     stop_pct = 0.015
                     stop_px = round(p.avg_entry_price * (1.0 - stop_pct if p.qty > 0 else 1.0 + stop_pct), 4)
                     req = OrderRequest(
                         symbol=p.symbol,
                         side=side,
-                        qty=abs(p.qty),
+                        qty=required_qty,
                         order_type=OrderType.LIMIT,
                         limit_price=stop_px,
                         strategy="emergency_protection",
