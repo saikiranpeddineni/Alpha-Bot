@@ -579,7 +579,7 @@ def _outcome_value(outcome, key: str, default=None):
 
 
 def _is_canonical_replay_evidence(signal: dict, outcome) -> bool:
-    """Return True only for usable, finite canonical replay evidence or vetoed signals."""
+    """Return True only for usable, finite canonical R evidence."""
     if signal.get("replay_failed", False):
         return False
 
@@ -589,20 +589,19 @@ def _is_canonical_replay_evidence(signal: dict, outcome) -> bool:
     if outcome is None:
         return False
 
-    has_vetoes = bool(signal.get("gate_evidence_json") or signal.get("gate_evidence") or signal.get("rejection_reason"))
+    if not bool(_outcome_value(outcome, "valid", False)):
+        return False
 
     realized_r = _outcome_value(outcome, "realized_r")
+
     if realized_r is None:
-        if has_vetoes:
-            return True
         return False
 
     try:
-        if math.isfinite(float(realized_r)):
-            return True
-        return has_vetoes
+        return math.isfinite(float(realized_r))
     except (TypeError, ValueError):
-        return has_vetoes
+        return False
+
 
 
 

@@ -201,3 +201,17 @@ def test_canonical_evidence_accepts_zero_r():
     assert _is_canonical_replay_evidence(signal, outcome) is True
 
 
+def test_canonical_evidence_rejects_null_r_even_with_vetoes():
+    from app.api.routes import _is_canonical_replay_evidence
+    signal = {
+        "replayed": True,
+        "gate_evidence_json": {"vetoes": {"ml_gate": "ML low"}},
+    }
+    outcome = {
+        "valid": True,
+        "realized_r": None,
+    }
+    assert _is_canonical_replay_evidence(signal, outcome) is False
+
+
+

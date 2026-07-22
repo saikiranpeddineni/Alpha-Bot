@@ -187,9 +187,11 @@ def test_gate_alpha_handles_none_realized_r(monkeypatch):
     assert res.status_code == 200
     data = res.json()
     assert "gates" in data
-    assert data["gates"]["ml_gate"]["unique_vetoes"] == 1
+    # Non-canonical null-R evidence signals are strictly excluded from gate-alpha attribution
+    assert data["gates"]["ml_gate"]["unique_vetoes"] == 0
     assert data["gates"]["ml_gate"]["avoided_losses"] == 0
     assert data["gates"]["ml_gate"]["missed_profits"] == 0
+
 
 
 def test_first_decisive_gate_attribution():
