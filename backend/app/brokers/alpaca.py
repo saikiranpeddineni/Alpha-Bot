@@ -267,19 +267,48 @@ class AlpacaBroker(Broker):
         return [self._to_order(o) for o in raw]
 
     def _to_order(self, o) -> Order:  # noqa: ANN001
+        type_map = {
+            "market": OrderType.MARKET,
+            "limit": OrderType.LIMIT,
+            "stop": OrderType.STOP,
+            "stop_limit": OrderType.STOP_LIMIT,
+        }
+        status_map = {
+            "new": OrderStatus.SUBMITTED,
+            "accepted": OrderStatus.SUBMITTED,
+            "pending_new": OrderStatus.SUBMITTED,
+            "partially_filled": OrderStatus.PARTIALLY_FILLED,
+            "filled": OrderStatus.FILLED,
+            "canceled": OrderStatus.CANCELED,
+            "expired": OrderStatus.CANCELED,
+            "rejected": OrderStatus.REJECTED,
+        }
+        raw_type = str(o.type).split(".")[-1].lower() if hasattr(o, "type") else "market"
+        order_type = type_map.get(raw_type)
+        if order_type is None:
+            raise ValueError(f"Unsupported broker order type: {raw_type}")
+
+        raw_status = str(o.status).split(".")[-1].lower() if hasattr(o, "status") else "submitted"
+        order_status = status_map.get(raw_status, OrderStatus.SUBMITTED)
+
         strategy, reason = self._meta.get(str(o.id), ("alpaca", ""))
+        stop_val = float(o.stop_price) if getattr(o, "stop_price", None) is not None else None
+        limit_val = float(o.limit_price) if getattr(o, "limit_price", None) is not None else None
+
         return Order(
             id=str(o.id),
             client_order_id=str(o.client_order_id or ""),
             symbol=o.symbol,
             side=OrderSide.BUY if str(o.side).endswith("BUY") or str(o.side) == "buy" else OrderSide.SELL,
             qty=float(o.qty or 0),
-            order_type=OrderType.LIMIT if str(o.type).endswith("limit") else OrderType.MARKET,
-            limit_price=float(o.limit_price) if getattr(o, "limit_price", None) else None,
-            stop_loss=float(o.stop_price) if getattr(o, "stop_price", None) else None,
-            status=_STATUS_MAP.get(str(o.status).split(".")[-1].lower(), OrderStatus.SUBMITTED),
+            order_type=order_type,
+            limit_price=limit_val,
+            stop_price=stop_val,
+            stop_loss=stop_val,
+            status=order_status,
             filled_qty=float(o.filled_qty or 0),
             filled_avg_price=float(o.filled_avg_price) if getattr(o, "filled_avg_price", None) else None,
+            order_class=str(getattr(o, "order_class", "")).split(".")[-1].lower() if getattr(o, "order_class", None) else None,
             strategy=strategy,
             reason=reason,
             submitted_at=o.submitted_at or datetime.now(UTC),
@@ -293,6 +322,8 @@ class AlpacaBroker(Broker):
         from alpaca.trading.requests import (
             LimitOrderRequest,
             MarketOrderRequest,
+            StopLimitOrderRequest,
+            StopOrderRequest,
             StopLossRequest,
             TakeProfitRequest,
         )
@@ -313,10 +344,24 @@ class AlpacaBroker(Broker):
             kwargs["stop_loss"] = StopLossRequest(stop_price=round(req.stop_loss, 2))
             kwargs["take_profit"] = TakeProfitRequest(limit_price=round(req.take_profit, 2))
 
-        if req.order_type == OrderType.LIMIT:
-            request = LimitOrderRequest(limit_price=round(req.limit_price, 2), **kwargs)
-        else:
+        if req.order_type == OrderType.MARKET:
             request = MarketOrderRequest(**kwargs)
+        elif req.order_type == OrderType.LIMIT:
+            if req.limit_price is None:
+                raise ValueError("LIMIT orders require limit_price")
+            request = LimitOrderRequest(limit_price=round(req.limit_price, 2), **kwargs)
+        elif req.order_type == OrderType.STOP:
+            stop_px = req.stop_price if req.stop_price is not None else req.stop_loss
+            if stop_px is None:
+                raise ValueError("STOP orders require stop_price (or stop_loss)")
+            request = StopOrderRequest(stop_price=round(stop_px, 2), **kwargs)
+        elif req.order_type == OrderType.STOP_LIMIT:
+            stop_px = req.stop_price if req.stop_price is not None else req.stop_loss
+            if stop_px is None or req.limit_price is None:
+                raise ValueError("STOP_LIMIT orders require stop_price and limit_price")
+            request = StopLimitOrderRequest(stop_price=round(stop_px, 2), limit_price=round(req.limit_price, 2), **kwargs)
+        else:
+            raise ValueError(f"Unsupported Alpaca order type: {req.order_type}")
 
         try:
             raw = await _call(self._client.submit_order, request, label=f"submit_order/{req.symbol}")

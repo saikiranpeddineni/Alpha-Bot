@@ -10,7 +10,7 @@ import uuid
 from datetime import UTC, datetime
 from enum import StrEnum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 def utcnow() -> datetime:
@@ -29,6 +29,8 @@ class OrderSide(StrEnum):
 class OrderType(StrEnum):
     MARKET = "market"
     LIMIT = "limit"
+    STOP = "stop"
+    STOP_LIMIT = "stop_limit"
 
 
 class OrderStatus(StrEnum):
@@ -84,15 +86,43 @@ class OrderRequest(BaseModel):
     side: OrderSide
     qty: float = Field(gt=0)
     order_type: OrderType = OrderType.MARKET
+
+    # Price belonging to THIS order
     limit_price: float | None = None
+    stop_price: float | None = None
+
+    # Attached exit contract for an ENTRY bracket order
     stop_loss: float | None = None
     take_profit: float | None = None
+
     client_order_id: str = Field(default_factory=new_id)
     strategy: str = "manual"
     reason: str = ""
     time_in_force: str = "day"
     signal_timestamp_utc: datetime | None = None
     decision_bar_timestamp_utc: datetime | None = None
+
+    @model_validator(mode="after")
+    def validate_order_prices(self) -> OrderRequest:
+        if self.order_type == OrderType.MARKET:
+            if self.limit_price is not None or self.stop_price is not None:
+                raise ValueError("MARKET orders cannot specify limit_price or stop_price")
+        elif self.order_type == OrderType.LIMIT:
+            if self.limit_price is None:
+                raise ValueError("LIMIT orders require limit_price")
+            if self.stop_price is not None:
+                raise ValueError("LIMIT orders cannot specify stop_price")
+        elif self.order_type == OrderType.STOP:
+            effective_stop = self.stop_price if self.stop_price is not None else self.stop_loss
+            if effective_stop is None:
+                raise ValueError("STOP orders require stop_price (or stop_loss)")
+            if self.limit_price is not None:
+                raise ValueError("STOP orders cannot specify limit_price")
+        elif self.order_type == OrderType.STOP_LIMIT:
+            effective_stop = self.stop_price if self.stop_price is not None else self.stop_loss
+            if effective_stop is None or self.limit_price is None:
+                raise ValueError("STOP_LIMIT orders require stop_price (or stop_loss) and limit_price")
+        return self
 
 
 class Order(BaseModel):
@@ -103,11 +133,13 @@ class Order(BaseModel):
     qty: float
     order_type: OrderType
     limit_price: float | None = None
+    stop_price: float | None = None
     status: OrderStatus = OrderStatus.PENDING
     filled_qty: float = 0.0
     filled_avg_price: float | None = None
     stop_loss: float | None = None
     take_profit: float | None = None
+    order_class: str | None = None
     strategy: str = "manual"
     reason: str = ""
     submitted_at: datetime = Field(default_factory=utcnow)
@@ -118,6 +150,9 @@ class Order(BaseModel):
     parent_id: str | None = None
     leg: str = "entry"  # entry | stop | target | exit
 
+    def get_effective_stop_price(self) -> float | None:
+        return self.stop_price if self.stop_price is not None else self.stop_loss
+
 
 class Position(BaseModel):
     symbol: str
@@ -127,7 +162,7 @@ class Position(BaseModel):
     stop_loss: float | None = None
     take_profit: float | None = None
     strategy: str = "manual"
-    opened_at: datetime = Field(default_factory=utcnow)
+    opened_at: datetime | None = None
 
     @property
     def side(self) -> str:
