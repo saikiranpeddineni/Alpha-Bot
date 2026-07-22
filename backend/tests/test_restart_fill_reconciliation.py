@@ -285,3 +285,27 @@ async def test_alpaca_positions_remain_broker_authoritative(tmp_path):
     assert positions[0].qty == 7
     assert positions[0].avg_entry_price == 101.5
     assert positions[0].market_price == 102.25
+
+
+def test_save_portfolio_checkpoint_persists_account_id(tmp_path):
+    """Ensure save_portfolio_checkpoint commits account_id so future restores match."""
+    from app.portfolio.tracker import PortfolioTracker
+    
+    db_path = tmp_path / "test_checkpoint.db"
+    db = Database(db_path)
+    
+    # Save a checkpoint with account_id
+    tracker1 = PortfolioTracker(restore_mode="paper", restore_account_id="PA3E1IKRFOCH")
+    cp = tracker1.checkpoint(account_id="PA3E1IKRFOCH")
+    db.save_portfolio_checkpoint("paper", cp)
+    
+    # Reload from DB into a fresh Database instance and instantiate new tracker
+    db2 = Database(db_path)
+    loaded_cp = db2.get_portfolio_checkpoint("paper")
+    assert loaded_cp is not None
+    assert loaded_cp.get("account_id") == "PA3E1IKRFOCH"
+    
+    # Tracker should restore cleanly without throwing/refusing
+    tracker2 = PortfolioTracker(restore_mode="paper", restore_account_id="PA3E1IKRFOCH")
+    assert tracker2.restore_account_id == "PA3E1IKRFOCH"
+
