@@ -292,6 +292,8 @@ class ShadowLedger:
             "direction": direction,
             "signal_price": round(signal_price, 4),
             "entry_price": round(entry_price, 4),
+            "stop_loss": round(stop_loss, 4) if stop_loss is not None else None,
+            "take_profit": round(take_profit, 4) if take_profit is not None else None,
             "clock_phase": clock_phase,
             "behavior_state": behavior_state,
             "opportunity_class": opp_class,
