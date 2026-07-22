@@ -283,32 +283,62 @@ class AlpacaBroker(Broker):
             "expired": OrderStatus.CANCELED,
             "rejected": OrderStatus.REJECTED,
         }
-        raw_type = str(o.type).split(".")[-1].lower() if hasattr(o, "type") else "market"
+        raw_type = (
+            str(o.type).split(".")[-1].lower()
+            if getattr(o, "type", None)
+            else "market"
+        )
         order_type = type_map.get(raw_type)
         if order_type is None:
             raise ValueError(f"Unsupported broker order type: {raw_type}")
 
-        raw_status = str(o.status).split(".")[-1].lower() if hasattr(o, "status") else "submitted"
+        raw_status = (
+            str(o.status).split(".")[-1].lower()
+            if getattr(o, "status", None)
+            else "submitted"
+        )
         order_status = status_map.get(raw_status, OrderStatus.SUBMITTED)
 
         strategy, reason = self._meta.get(str(o.id), ("alpaca", ""))
-        stop_val = float(o.stop_price) if getattr(o, "stop_price", None) is not None else None
-        limit_val = float(o.limit_price) if getattr(o, "limit_price", None) is not None else None
+        stop_price = (
+            float(o.stop_price)
+            if getattr(o, "stop_price", None) is not None
+            else None
+        )
+        limit_price = (
+            float(o.limit_price)
+            if getattr(o, "limit_price", None) is not None
+            else None
+        )
+        order_class = (
+            str(o.order_class).split(".")[-1].lower()
+            if getattr(o, "order_class", None)
+            else None
+        )
 
         return Order(
             id=str(o.id),
             client_order_id=str(o.client_order_id or ""),
             symbol=o.symbol,
-            side=OrderSide.BUY if str(o.side).endswith("BUY") or str(o.side) == "buy" else OrderSide.SELL,
+            side=(
+                OrderSide.BUY
+                if str(o.side).lower().endswith("buy")
+                else OrderSide.SELL
+            ),
             qty=float(o.qty or 0),
-            order_type=order_type,
-            limit_price=limit_val,
-            stop_price=stop_val,
-            stop_loss=stop_val if getattr(o, "order_class", None) else None,
-            status=order_status,
             filled_qty=float(o.filled_qty or 0),
-            filled_avg_price=float(o.filled_avg_price) if getattr(o, "filled_avg_price", None) else None,
-            order_class=str(getattr(o, "order_class", "")).split(".")[-1].lower() if getattr(o, "order_class", None) else None,
+            order_type=order_type,
+            limit_price=limit_price,
+            stop_price=stop_price,
+            # Do not copy standalone stop trigger here.
+            stop_loss=None,
+            status=order_status,
+            order_class=order_class,
+            parent_id=(
+                str(o.parent_order_id)
+                if getattr(o, "parent_order_id", None)
+                else None
+            ),
             strategy=strategy,
             reason=reason,
             submitted_at=o.submitted_at or datetime.now(UTC),

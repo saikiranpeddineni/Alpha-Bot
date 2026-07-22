@@ -42,10 +42,10 @@ def test_partial_close_keeps_basis():
     p = PortfolioTracker()
     p.on_fill(fill(qty=100, price=100.0))
     trade = p.on_fill(fill(side=OrderSide.SELL, qty=40, price=101.0))
-    assert trade.qty == 40
-    assert trade.pnl == pytest.approx(40.0)
+    assert trade is None
     trade2 = p.on_fill(fill(side=OrderSide.SELL, qty=60, price=99.0))
-    assert trade2.pnl == pytest.approx(-60.0)
+    assert trade2 is not None
+    assert trade2.pnl == pytest.approx(-20.0)
     assert p.realized_pnl == pytest.approx(-20.0)
 
 

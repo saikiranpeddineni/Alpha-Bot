@@ -102,7 +102,7 @@ class TestIssue41ProtectiveExitRecovery:
 
         broker_stop = Order(
             id="stop-1", symbol="AAPL", side=OrderSide.SELL, qty=100.0,
-            order_type=OrderType.LIMIT, stop_loss=190.0, status=OrderStatus.SUBMITTED,
+            order_type=OrderType.STOP, stop_price=190.0, status=OrderStatus.SUBMITTED,
             submitted_at=datetime(2026, 7, 20, 10, 1, tzinfo=UTC)
         )
         engine.broker.open_orders = AsyncMock(return_value=[broker_stop])

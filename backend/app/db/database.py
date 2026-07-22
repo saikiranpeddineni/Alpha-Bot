@@ -593,7 +593,7 @@ class Database:
 
                     results.append(data)
                 except Exception as exc:
-                    print(f"GET SHADOW SIGNALS EXC: {exc}")
+                    applog.error("database", f"Error parsing shadow signal {getattr(r, 'id', 'unknown')}: {exc}")
             return results
 
     def get_pending_shadow_replays(

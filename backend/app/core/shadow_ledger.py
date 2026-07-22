@@ -462,7 +462,6 @@ class ShadowLedger:
                     payload=payload,
                 )
             except Exception as exc:
-                print(f"PERSISTENCE EXC: {exc}")
                 _persistence_failure_count += 1
                 applog.error(
                     "shadow_ledger",

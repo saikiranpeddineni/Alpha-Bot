@@ -42,6 +42,15 @@ class OrderStatus(StrEnum):
     REJECTED = "rejected"
 
 
+class ProtectionState(StrEnum):
+    UNPROTECTED = "unprotected"
+    AWAITING_CANCEL_CONFIRMATION = "awaiting_cancel_confirmation"
+    AWAITING_STOP_CONFIRMATION = "awaiting_stop_confirmation"
+    PROTECTED = "protected"
+    RECOVERY_REJECTED = "recovery_rejected"
+    AMBIGUOUS = "ambiguous"
+
+
 class SignalAction(StrEnum):
     ENTER_LONG = "enter_long"
     ENTER_SHORT = "enter_short"
@@ -84,14 +93,13 @@ class OrderRequest(BaseModel):
 
     symbol: str
     side: OrderSide
-    qty: float = Field(gt=0)
+    qty: float
     order_type: OrderType = OrderType.MARKET
 
-    # Price belonging to THIS order
     limit_price: float | None = None
     stop_price: float | None = None
 
-    # Attached exit contract for an ENTRY bracket order
+    # Only for attached entry protection.
     stop_loss: float | None = None
     take_profit: float | None = None
 
@@ -103,35 +111,40 @@ class OrderRequest(BaseModel):
     decision_bar_timestamp_utc: datetime | None = None
 
     @model_validator(mode="after")
-    def validate_order_prices(self) -> OrderRequest:
-        if self.order_type == OrderType.MARKET:
-            if self.limit_price is not None or self.stop_price is not None:
-                raise ValueError("MARKET orders cannot specify limit_price or stop_price")
-        elif self.order_type == OrderType.LIMIT:
-            if self.limit_price is None:
-                raise ValueError("LIMIT orders require limit_price")
-            if self.stop_price is not None:
-                raise ValueError("LIMIT orders cannot specify stop_price")
+    def validate_execution_prices(self) -> OrderRequest:
+        if self.qty <= 0:
+            raise ValueError("qty must be positive")
+
+        if self.order_type == OrderType.LIMIT:
+            if self.limit_price is None or self.limit_price <= 0:
+                raise ValueError("LIMIT requires positive limit_price")
+
         elif self.order_type == OrderType.STOP:
-            if self.stop_price is None:
-                raise ValueError("STOP orders require stop_price")
-            if self.limit_price is not None:
-                raise ValueError("STOP orders cannot specify limit_price")
+            if self.stop_price is None or self.stop_price <= 0:
+                raise ValueError("STOP requires positive stop_price")
+
         elif self.order_type == OrderType.STOP_LIMIT:
-            if self.stop_price is None or self.limit_price is None:
-                raise ValueError("STOP_LIMIT orders require stop_price and limit_price")
+            if self.stop_price is None or self.stop_price <= 0:
+                raise ValueError("STOP_LIMIT requires positive stop_price")
+            if self.limit_price is None or self.limit_price <= 0:
+                raise ValueError("STOP_LIMIT requires positive limit_price")
+
         return self
 
 
 class Order(BaseModel):
     id: str = Field(default_factory=new_id)
     client_order_id: str = ""
+
     symbol: str
     side: OrderSide
     qty: float
     order_type: OrderType
+
     limit_price: float | None = None
     stop_price: float | None = None
+
+    # Attached bracket metadata only.
     stop_loss: float | None = None
     take_profit: float | None = None
 
@@ -140,25 +153,28 @@ class Order(BaseModel):
     stop_triggered: bool = False
 
     status: OrderStatus = OrderStatus.PENDING
+
     filled_qty: float = 0.0
     filled_avg_price: float | None = None
+
     order_class: str | None = None
+    parent_id: str | None = None
+    leg: str = "entry"
+
     strategy: str = "manual"
     reason: str = ""
-    submitted_at: datetime = Field(default_factory=utcnow)
+
+    submitted_at: datetime | None = Field(default_factory=utcnow)
     filled_at: datetime | None = None
     signal_timestamp_utc: datetime | None = None
     decision_bar_timestamp_utc: datetime | None = None
-    # Distinguishes entries from bracket children in the paper simulator
-    parent_id: str | None = None
-    leg: str = "entry"  # entry | stop | target | exit
 
     @property
     def remaining_qty(self) -> float:
-        return max(0.0, float(self.qty) - float(self.filled_qty or 0.0))
-
-    def get_effective_stop_price(self) -> float | None:
-        return self.stop_price if self.stop_price is not None else self.stop_loss
+        return max(
+            0.0,
+            float(self.qty) - float(self.filled_qty or 0.0),
+        )
 
 
 class Position(BaseModel):

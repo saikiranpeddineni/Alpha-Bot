@@ -76,9 +76,17 @@ class _OpenLot:
 
 @dataclass
 class FillApplicationResult:
-    realized_fragment: float
-    closed_trade: TradeRecord | None
-    position_closed: bool
+    realized_pnl_fragment: float = 0.0
+    closed_trade: TradeRecord | None = None
+    position_closed: bool = False
+
+    @property
+    def pnl(self) -> float:
+        return self.closed_trade.pnl if self.closed_trade is not None else self.realized_pnl_fragment
+
+    @property
+    def qty(self) -> float:
+        return self.closed_trade.qty if self.closed_trade is not None else 0.0
 
 
 @dataclass
@@ -139,23 +147,14 @@ class PortfolioTracker:
         4 prior business days = 5 business days total), matching the SEC PDT
         rolling-window definition.
         """
-        ref = as_of if as_of is not None else date.today()
-        window_start = _business_days_ago(ref, _PDT_WINDOW_BUSINESS_DAYS - 1)
-        return sum(1 for d in self._day_trade_dates if d >= window_start)
+        session = as_of or self.session_date or (self._day_trade_dates[-1] if self._day_trade_dates else date.today())
+        window_start = _business_days_ago(session, _PDT_WINDOW_BUSINESS_DAYS - 1)
+        return sum(1 for d in self._day_trade_dates if window_start <= d <= session)
 
     @property
-    def day_trades_today(self) -> int:  # noqa: D102  (backwards-compat property)
-        """Backwards-compatible property: count for the current session.
-
-        New code should prefer :meth:`day_trades_in_window` with an explicit
-        session date.
-        """
-        ref = self.session_date
-        if ref is None:
-            if self._day_trade_dates:
-                ref = self._day_trade_dates[-1]
-            else:
-                ref = date.today()
+    def day_trades_today(self) -> int:
+        """Backwards-compatible convenience accessor using session date or fallback."""
+        ref = self.session_date or (self._day_trade_dates[-1] if self._day_trade_dates else date.today())
         return sum(1 for d in self._day_trade_dates if d == ref)
 
     @day_trades_today.setter
@@ -164,39 +163,26 @@ class PortfolioTracker:
         pass
 
     def roll_session(self, session: date, equity: float) -> RollResult:
-        """Advance to a new trading session.
-
-        If open lots exist at the session boundary they are logged at WARNING
-        level so operators can see the overnight carry-forward exposure.
-        Intraday P&L counter (``day_realized_pnl``) is reset; the PDT
-        rolling log is *not* cleared — only entries older than the 5-
-        business-day window are pruned to bound memory growth.
-
-        Returns a :class:`RollResult` that is truthy when the session
-        actually advanced (backwards-compatible with the previous ``bool``
-        return contract).
-        """
-        if self.session_date is not None and session <= self.session_date:
+        if self.session_date is None:
+            self.session_date = session
+            self.session_start_equity = equity
+            self.peak_equity = max(self.peak_equity, equity)
+            self.day_realized_pnl = 0.0
             return RollResult(rolled=False)
 
-        # Identify open lots being carried into the new session.
-        carry: list[str] = []
-        for symbol, lot in self._lots.items():
-            if abs(lot.qty) >= 1e-9:
-                carry.append(symbol)
-                direction = "LONG" if lot.qty > 0 else "SHORT"
-                applog.warning(
-                    "portfolio",
-                    f"Session roll {self.session_date} -> {session}: carrying "
-                    f"{direction} {abs(lot.qty):g} {symbol} @ avg "
-                    f"{lot.avg_price:.4f} into new session. "
-                    "New session_start_equity reflects overnight P&L in equity baseline.",
-                )
+        if session <= self.session_date:
+            return RollResult(rolled=False)
+
+        applog.info("portfolio", f"Session roll: {self.session_date} -> {session} (Equity: ${equity:,.2f})")
+        carry = [s for s, lot in self._lots.items() if abs(lot.qty) >= 1e-9]
+        if carry:
+            applog.info("portfolio", f"Overnight position carryover ({len(carry)}): {', '.join(sorted(carry))}")
 
         self.session_date = session
         self.session_start_equity = equity
+        self.peak_equity = max(self.peak_equity, equity)
         self.day_realized_pnl = 0.0
-        # Prune day-trade log: keep only entries within the rolling window.
+
         window_start = _business_days_ago(session, _PDT_WINDOW_BUSINESS_DAYS - 1)
         self._day_trade_dates = [d for d in self._day_trade_dates if d >= window_start]
         return RollResult(rolled=True, open_symbols=tuple(carry))
@@ -316,7 +302,9 @@ class PortfolioTracker:
                 effective.qty = delta
                 before = copy.deepcopy(self.__dict__)
                 try:
-                    trade = self._apply_fill(effective, peak_price, trough_price, initial_stop)
+                    res = self._apply_fill(effective, peak_price, trough_price, initial_stop)
+                    trade = res.closed_trade if isinstance(res, FillApplicationResult) else res
+
                     # fix(#43): invoke risk manager on trade close BEFORE capturing checkpoint
                     # so post-close loss-streak & cooldown state are saved atomically in DB
                     if trade is not None and risk_manager is not None:
@@ -340,14 +328,32 @@ class PortfolioTracker:
                     raise
 
 
-        return self._apply_fill(fill, peak_price, trough_price, initial_stop)
+        res = self._apply_fill(fill, peak_price, trough_price, initial_stop)
+        trade = res.closed_trade if isinstance(res, FillApplicationResult) else res
 
-    def _apply_fill(self, fill: Fill, peak_price: float | None = None, trough_price: float | None = None, initial_stop: float | None = None) -> TradeRecord | None:
+        if trade is not None and risk_manager is not None:
+            risk_manager.on_trade_closed(trade, now=now)
+
+        return trade
+
+    def _apply_fill(
+        self,
+        fill: Fill,
+        peak_price: float | None = None,
+        trough_price: float | None = None,
+        initial_stop: float | None = None,
+    ) -> FillApplicationResult:
         symbol = fill.symbol.upper()
         signed = fill.qty if fill.side == OrderSide.BUY else -fill.qty
         lot = self._lots.get(symbol)
         if lot is None or abs(lot.qty) < 1e-9:
-            self._lots[symbol] = _OpenLot(qty=signed, avg_price=fill.price, entry_ts=fill.ts, strategy=fill.strategy, commission_basis=fill.commission)
+            self._lots[symbol] = _OpenLot(
+                qty=signed,
+                avg_price=fill.price,
+                entry_ts=fill.ts,
+                strategy=fill.strategy,
+                commission_basis=fill.commission,
+            )
             if initial_stop is not None:
                 self._lots[symbol].stop_loss = initial_stop
                 self._lots[symbol].initial_stop_loss = initial_stop
@@ -355,7 +361,7 @@ class PortfolioTracker:
             side_str = "BOUGHT" if signed > 0 else "SOLD SHORT"
             total_amt = abs(signed) * fill.price
             applog.info("portfolio", f"[{fill.ts}] {side_str} {symbol}: {abs(signed):g} shares @ {fill.price:.2f} (Total Amt: ${total_amt:,.2f} | {fill.strategy})")
-            return None
+            return FillApplicationResult(realized_pnl_fragment=0.0, closed_trade=None, position_closed=False)
 
         if (lot.qty > 0) == (signed > 0):
             total = lot.qty + signed
@@ -368,30 +374,52 @@ class PortfolioTracker:
             side_str = "BOUGHT MORE" if signed > 0 else "SOLD MORE SHORT"
             total_amt = abs(signed) * fill.price
             applog.info("portfolio", f"[{fill.ts}] {side_str} {symbol}: {abs(signed):g} shares @ {fill.price:.2f} (Total Amt: ${total_amt:,.2f} | {fill.strategy})")
-            return None
+            return FillApplicationResult(realized_pnl_fragment=0.0, closed_trade=None, position_closed=False)
 
-        closed_qty = min(abs(lot.qty), abs(signed))
-        direction = 1.0 if lot.qty > 0 else -1.0
-        entry_fee = lot.commission_basis * (closed_qty / abs(lot.qty))
-        close_fee = fill.commission * (closed_qty / abs(signed))
-        pnl = (fill.price - lot.avg_price) * closed_qty * direction - entry_fee - close_fee
+        original_direction = 1.0 if lot.qty > 0 else -1.0
+        close_qty = min(abs(float(fill.qty)), abs(float(lot.qty)))
 
-        lot.closing_qty += closed_qty
-        lot.closing_notional += fill.price * closed_qty
-        lot.realized_pnl_accum += pnl
-        self.realized_pnl += pnl
-        self.day_realized_pnl += pnl
+        entry_fee = lot.commission_basis * (close_qty / abs(lot.qty)) if lot.qty != 0 else 0.0
+        close_fee = fill.commission * (close_qty / abs(signed)) if signed != 0 else 0.0
 
-        basis = lot.avg_price * closed_qty
-        r_multiple = None
+        pnl_fragment = (
+            (float(fill.price) - lot.avg_price) * close_qty * original_direction
+            - entry_fee
+            - close_fee
+        )
+
+        lot.closing_qty += close_qty
+        lot.closing_notional += float(fill.price) * close_qty
+        lot.realized_pnl_accum += pnl_fragment
+        self.realized_pnl += pnl_fragment
+        self.day_realized_pnl += pnl_fragment
+
+        remainder = lot.qty + signed
+
+        if (remainder > 0) == (lot.qty > 0) and abs(remainder) >= 1e-9:
+            lot.qty = remainder
+            lot.commission_basis -= entry_fee
+            return FillApplicationResult(
+                realized_pnl_fragment=pnl_fragment,
+                closed_trade=None,
+                position_closed=False,
+            )
+
+        avg_exit = (
+            lot.closing_notional / lot.closing_qty
+            if lot.closing_qty > 0
+            else float(fill.price)
+        )
+        basis = lot.avg_price * lot.closing_qty
+        pnl = lot.realized_pnl_accum
+
         init_risk = lot.initial_risk_per_share
-        if init_risk:
-            r_multiple = round(pnl / (init_risk * closed_qty), 2)
+        r_multiple = round(pnl / (init_risk * lot.closing_qty), 2) if (init_risk and lot.closing_qty > 0) else None
 
         best = peak_price if peak_price is not None else fill.price
         worst = trough_price if trough_price is not None else fill.price
-        mfe_val = (best - lot.avg_price) if direction > 0 else (lot.avg_price - best)
-        mae_val = (lot.avg_price - worst) if direction > 0 else (worst - lot.avg_price)
+        mfe_val = (best - lot.avg_price) if original_direction > 0 else (lot.avg_price - best)
+        mae_val = (lot.avg_price - worst) if original_direction > 0 else (worst - lot.avg_price)
         mfe_pct = (mfe_val / lot.avg_price * 100.0) if lot.avg_price > 0 else 0.0
         mae_pct = (mae_val / lot.avg_price * 100.0) if lot.avg_price > 0 else 0.0
         mfe_r = (mfe_val / init_risk) if init_risk and init_risk > 0 else 0.0
@@ -399,10 +427,10 @@ class PortfolioTracker:
 
         trade = TradeRecord(
             symbol=symbol,
-            side="long" if direction > 0 else "short",
-            qty=closed_qty,
+            side="long" if original_direction > 0 else "short",
+            qty=lot.closing_qty,
             entry_price=round(lot.avg_price, 4),
-            exit_price=round(fill.price, 4),
+            exit_price=round(avg_exit, 4),
             entry_at=lot.entry_ts,
             exit_at=fill.ts,
             pnl=round(pnl, 2),
@@ -416,22 +444,16 @@ class PortfolioTracker:
             mae_pct=round(mae_pct, 4),
             capture_efficiency=round(winner_cap, 4),
         )
+
+        del self._lots[symbol]
         self.trades.append(trade)
 
         if trade.entry_at.date() == trade.exit_at.date():
             self._day_trade_dates.append(trade.exit_at.date())
 
-        remainder = lot.qty + signed
-        remaining_entry_fee = lot.commission_basis - entry_fee
-        remaining_fill_fee = fill.commission - close_fee
-
-        if abs(remainder) < 1e-9:
-            del self._lots[symbol]
-        elif (remainder > 0) == (lot.qty > 0):
-            lot.qty = remainder
-            lot.commission_basis = remaining_entry_fee
-        else:
+        if abs(remainder) >= 1e-9:
             # Position flip: previous lot closed, new lot created for remaining opposite qty
+            remaining_fill_fee = fill.commission - close_fee
             self._lots[symbol] = _OpenLot(
                 qty=remainder,
                 avg_price=fill.price,
@@ -442,8 +464,12 @@ class PortfolioTracker:
 
         action_str = "SOLD" if trade.side == "long" else "BOUGHT TO COVER"
         pct_str = f"{trade.pnl_pct:+.2f}%" if trade.pnl_pct else "0.0%"
-        applog.info("portfolio", f"[{fill.ts}] {action_str} {symbol}: {closed_qty:g} shares @ {fill.price:.2f} -> P&L: {pnl:+.2f} ({pct_str}) ({fill.reason or 'exit'}) | Entered: {trade.entry_at}")
-        return trade
+        applog.info("portfolio", f"[{fill.ts}] {action_str} {symbol}: {lot.closing_qty:g} shares @ {avg_exit:.2f} -> P&L: {pnl:+.2f} ({pct_str}) ({fill.reason or 'exit'}) | Entered: {trade.entry_at}")
+        return FillApplicationResult(
+            realized_pnl_fragment=pnl_fragment,
+            closed_trade=trade,
+            position_closed=True,
+        )
 
     def stats(self) -> dict:
         wins = [t for t in self.trades if t.pnl > 0]

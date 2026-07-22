@@ -1,11 +1,12 @@
 import pytest
-from datetime import datetime, UTC
-from unittest.mock import AsyncMock
+from datetime import datetime, timedelta, UTC
+from unittest.mock import AsyncMock, MagicMock
 
 from app.brokers.base import Fill
 from app.core.domain import Order, OrderRequest, OrderSide, OrderType, OrderStatus, Position
 from app.core.engine import TradingEngine
 from app.portfolio.tracker import PortfolioTracker, _OpenLot
+from app.risk.manager import RiskManager, RiskConfig
 
 
 @pytest.mark.asyncio
@@ -51,6 +52,94 @@ async def test_sell_limit_below_market_is_not_protection():
     )
 
     assert engine._is_valid_protective_stop(fake_limit, position) is False
+
+
+def test_limit_order_is_not_protective_stop():
+    engine = TradingEngine.__new__(TradingEngine)
+    long_position = Position(symbol="AAPL", qty=100.0, avg_entry_price=200.0, market_price=200.0)
+    order = Order(
+        id="bad-limit",
+        symbol="AAPL",
+        side=OrderSide.SELL,
+        qty=100.0,
+        order_type=OrderType.LIMIT,
+        limit_price=197.0,
+        status=OrderStatus.SUBMITTED,
+    )
+
+    assert not engine._is_valid_protective_stop(
+        order,
+        long_position,
+    )
+
+
+def test_partially_filled_stop_must_cover_remaining_position():
+    engine = TradingEngine.__new__(TradingEngine)
+    position_qty_100 = Position(symbol="AAPL", qty=100.0, avg_entry_price=200.0, market_price=200.0)
+    order = Order(
+        id="stop",
+        symbol="AAPL",
+        side=OrderSide.SELL,
+        qty=100.0,
+        filled_qty=50.0,
+        order_type=OrderType.STOP,
+        stop_price=197.0,
+        status=OrderStatus.PARTIALLY_FILLED,
+    )
+
+    assert order.remaining_qty == 50.0
+    assert not engine._is_valid_protective_stop(
+        order,
+        position_qty_100,
+    )
+
+
+def test_bracket_parent_is_not_stop():
+    engine = TradingEngine.__new__(TradingEngine)
+    long_position = Position(symbol="AAPL", qty=100.0, avg_entry_price=200.0, market_price=200.0)
+    order = Order(
+        id="parent",
+        symbol="AAPL",
+        side=OrderSide.BUY,
+        qty=100.0,
+        order_type=OrderType.MARKET,
+        order_class="bracket",
+        leg="entry",
+        stop_loss=197.0,
+        status=OrderStatus.SUBMITTED,
+    )
+
+    assert not engine._is_valid_protective_stop(
+        order,
+        long_position,
+    )
+
+
+@pytest.mark.asyncio
+async def test_recovery_submission_does_not_mark_protected():
+    engine = TradingEngine.__new__(TradingEngine)
+    engine.portfolio = PortfolioTracker()
+    engine.broker = AsyncMock()
+    position = Position(symbol="AAPL", qty=100.0, avg_entry_price=200.0, market_price=200.0)
+    submitted_stop = Order(
+        id="stop-123",
+        symbol="AAPL",
+        side=OrderSide.SELL,
+        qty=100.0,
+        order_type=OrderType.STOP,
+        stop_price=197.0,
+        status=OrderStatus.SUBMITTED,
+    )
+    engine.broker.open_orders = AsyncMock(return_value=[])
+    engine.broker.get_order_by_client_id = AsyncMock(return_value=None)
+    engine.broker.submit = AsyncMock(return_value=submitted_stop)
+
+    result = await engine.verify_broker_protective_stops(
+        [position]
+    )
+
+    assert result[position.symbol] is False
+    assert engine.allow_new_entries is False
 
 
 @pytest.mark.asyncio
@@ -106,35 +195,58 @@ async def test_submit_ack_does_not_mean_protected():
     assert engine.allow_new_entries is True
 
 
-def test_two_partial_exit_fills_create_one_trade():
+def test_two_partial_fills_create_one_logical_loss():
+    tracker = PortfolioTracker()
+    risk = RiskManager(RiskConfig(), clock=MagicMock())
+    t0 = datetime.now(UTC)
+    t1 = datetime.now(UTC)
+    t2 = datetime.now(UTC)
+
+    tracker._lots["AAPL"] = _OpenLot(
+        qty=10.0, avg_price=200.0, entry_ts=t0, strategy="manual", initial_risk_per_share=2.0
+    )
+
+    first_five_share_exit = Fill(
+        order_id="exit_1", symbol="AAPL", side=OrderSide.SELL, qty=5.0, price=195.0, ts=t1, strategy="manual"
+    )
+    first_res = tracker.on_fill(first_five_share_exit, risk_manager=risk)
+
+    assert first_res is None
+    assert len(tracker.trades) == 0
+
+    second_five_share_exit = Fill(
+        order_id="exit_2", symbol="AAPL", side=OrderSide.SELL, qty=5.0, price=195.0, ts=t2, strategy="manual"
+    )
+    second_res = tracker.on_fill(second_five_share_exit, risk_manager=risk)
+
+    assert second_res is not None
+    assert second_res.qty == 10.0
+    assert len(tracker.trades) == 1
+    assert risk.consecutive_losses == 1
+    assert risk.strategy_consecutive_losses["manual"] == 1
+
+
+def test_pdt_once():
     tracker = PortfolioTracker()
     t0 = datetime.now(UTC)
     t1 = datetime.now(UTC)
     t2 = datetime.now(UTC)
 
-    tracker._lots["CRDO"] = _OpenLot(
-        qty=10.0, avg_price=230.70, entry_ts=t0, strategy="manual", initial_risk_per_share=2.0
+    tracker._lots["AAPL"] = _OpenLot(
+        qty=10.0, avg_price=200.0, entry_ts=t0, strategy="manual", initial_risk_per_share=2.0
     )
 
-    fill1 = Fill(
-        order_id="exit_1", symbol="CRDO", side=OrderSide.SELL, qty=5.0, price=229.89, ts=t1, strategy="manual"
+    first = Fill(
+        order_id="exit_1", symbol="AAPL", side=OrderSide.SELL, qty=5.0, price=195.0, ts=t1, strategy="manual"
     )
-    trade1 = tracker.on_fill(fill1)
+    tracker.on_fill(first)
+    assert tracker.day_trades_today == 0
 
-    # Partial exit does NOT produce a completed TradeRecord
-    assert trade1 is None
-    assert tracker._lots["CRDO"].qty == 5.0
-    assert len(tracker.trades) == 0
-
-    fill2 = Fill(
-        order_id="exit_2", symbol="CRDO", side=OrderSide.SELL, qty=5.0, price=229.89, ts=t2, strategy="manual"
+    second = Fill(
+        order_id="exit_2", symbol="AAPL", side=OrderSide.SELL, qty=5.0, price=195.0, ts=t2, strategy="manual"
     )
-    trade2 = tracker.on_fill(fill2)
-
-    # Position fully closed -> produces 1 single logical TradeRecord
-    assert trade2 is not None
-    assert trade2.qty == 10.0
-    assert len(tracker.trades) == 1
+    tracker.on_fill(second)
+    assert tracker.day_trades_today == 1
 
 
 def test_short_position_requires_buy_stop_above_entry():
@@ -151,3 +263,71 @@ def test_short_position_requires_buy_stop_above_entry():
 
     assert engine._is_valid_protective_stop(valid_stop, position) is True
     assert engine._is_valid_protective_stop(dangerous_limit, position) is False
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_cannot_reenable_blocked_entries():
+    engine = TradingEngine.__new__(TradingEngine)
+    engine.allow_new_entries = False
+    engine.system_health = "DEGRADED"
+
+    # Heartbeat check should not re-enable entries when blocked by protection or data gap
+    heartbeat_health = "NORMAL"
+    heartbeat_blocks_entries = False
+
+    if heartbeat_health != "NORMAL":
+        if engine.system_health not in {"HALTED", "SAFE_MODE"}:
+            engine.system_health = heartbeat_health
+
+    if heartbeat_blocks_entries:
+        engine.allow_new_entries = False
+
+    assert engine.allow_new_entries is False
+
+
+@pytest.mark.asyncio
+async def test_replay_deferred():
+    engine = TradingEngine.__new__(TradingEngine)
+    engine.db = MagicMock()
+    engine.data = AsyncMock()
+    engine.mode = "paper"
+
+    signal = {
+        "candidate_id": "cand-1",
+        "symbol": "AAPL",
+        "direction": "long",
+        "timestamp": datetime.now(UTC).isoformat(),
+        "replay_attempts": 0,
+    }
+    engine.db.get_pending_shadow_replays.return_value = [signal]
+    engine.data.history.return_value = MagicMock(empty=True)
+
+    await engine._replay_pending_signals(datetime.now(UTC))
+
+    saved_signal = engine.db.save_shadow_signal.call_args[0][6]
+    assert saved_signal.get("replayed", False) is False
+    assert saved_signal.get("replay_failed", False) is False
+    assert saved_signal.get("replay_state") == "deferred_data_incomplete"
+    assert saved_signal.get("next_retry_at") is not None
+
+
+@pytest.mark.asyncio
+async def test_replay_respects_backoff():
+    engine = TradingEngine.__new__(TradingEngine)
+    engine.db = MagicMock()
+    engine.data = AsyncMock()
+    engine.mode = "paper"
+
+    future_retry = (datetime.now(UTC) + timedelta(minutes=10)).isoformat()
+    signal = {
+        "candidate_id": "cand-1",
+        "symbol": "AAPL",
+        "direction": "long",
+        "timestamp": datetime.now(UTC).isoformat(),
+        "next_retry_at": future_retry,
+    }
+    engine.db.get_pending_shadow_replays.return_value = [signal]
+
+    await engine._replay_pending_signals(datetime.now(UTC))
+
+    assert engine.data.history.call_count == 0

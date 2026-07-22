@@ -42,6 +42,7 @@ from app.core.domain import (
     OrderSide,
     OrderStatus,
     OrderType,
+    ProtectionState,
     Regime,
     SignalAction,
     utcnow,
@@ -1859,39 +1860,53 @@ class TradingEngine:
         return fallback, "EMERGENCY_1_5PCT_FALLBACK"
 
     def _is_valid_protective_stop(self, order: Order, position: Position) -> bool:
-        active_statuses = {OrderStatus.SUBMITTED, OrderStatus.PARTIALLY_FILLED, OrderStatus.PENDING}
+        active_statuses = {
+            OrderStatus.PENDING,
+            OrderStatus.SUBMITTED,
+            OrderStatus.PARTIALLY_FILLED,
+        }
+
         if order.status not in active_statuses:
             return False
 
-        is_stop_type = (
-            order.order_type in (OrderType.STOP, OrderType.STOP_LIMIT)
-            or getattr(order, "leg", "") == "stop"
-            or getattr(order, "order_class", "") in ("bracket", "oco")
-            or getattr(order, "stop_loss", None) is not None
+        is_standalone_stop = order.order_type in {
+            OrderType.STOP,
+            OrderType.STOP_LIMIT,
+        }
+
+        is_stop_leg = (
+            getattr(order, "leg", "") == "stop"
+            and order.stop_price is not None
         )
-        if not is_stop_type:
+
+        if not (is_standalone_stop or is_stop_leg):
             return False
 
-        st_px = order.stop_price or order.stop_loss
-        if st_px is None or st_px <= 0:
+        stop_price = order.stop_price
+
+        if stop_price is None or stop_price <= 0:
             return False
 
         required_qty = abs(float(position.qty))
+
         if order.remaining_qty + 1e-9 < required_qty:
             return False
 
         if position.qty > 0:
             if order.side != OrderSide.SELL:
                 return False
-            if st_px >= position.avg_entry_price:
+
+            if stop_price >= position.avg_entry_price:
                 return False
         else:
             if order.side != OrderSide.BUY:
                 return False
-            if st_px <= position.avg_entry_price:
+
+            if stop_price <= position.avg_entry_price:
                 return False
 
         opened_at = getattr(position, "opened_at", None)
+
         if (
             opened_at is not None
             and order.submitted_at is not None
@@ -1900,7 +1915,6 @@ class TradingEngine:
             return False
 
         return True
-
 
     async def verify_broker_protective_stops(
         self,
@@ -1912,6 +1926,9 @@ class TradingEngine:
         Exits and entries remain disabled until open_orders() independently confirms
         an active OrderType.STOP with valid directional geometry and sufficient quantity.
         """
+        if not hasattr(self, "_protection_state"):
+            self._protection_state: dict[str, ProtectionState] = {}
+
         if not active_positions:
             if self.system_health == "DEGRADED":
                 self.system_health = "NORMAL"
@@ -1944,8 +1961,9 @@ class TradingEngine:
             matching_stop = valid_stops[0] if valid_stops else None
 
             if matching_stop is not None:
-                verified_stop_price = matching_stop.stop_price or matching_stop.stop_loss or 0.0
+                verified_stop_price = matching_stop.stop_price or 0.0
                 protection_status[sym] = True
+                self._protection_state[sym] = ProtectionState.PROTECTED
                 if self.portfolio and sym in self.portfolio._lots:
                     self.portfolio._lots[sym].stop_loss = verified_stop_price
                 stop_str = f"{verified_stop_price:.4f}" if verified_stop_price else "N/A"
@@ -1957,6 +1975,8 @@ class TradingEngine:
             else:
                 protection_status[sym] = False
                 unprotected.append(p)
+                if self._protection_state.get(sym) != ProtectionState.AWAITING_STOP_CONFIRMATION:
+                    self._protection_state[sym] = ProtectionState.UNPROTECTED
                 applog.warning(
                     "engine.protection",
                     f"#41 CRITICAL: Position {sym} (qty={p.qty}, avg_price={p.avg_entry_price}) "
@@ -1972,6 +1992,20 @@ class TradingEngine:
             for p in unprotected:
                 if p.symbol in getattr(self, "_pending_close_symbols", set()) or p.symbol in getattr(self, "_flattening_symbols", set()):
                     continue
+
+                state = self._protection_state.get(p.symbol)
+                if state in {
+                    ProtectionState.AWAITING_CANCEL_CONFIRMATION,
+                    ProtectionState.AWAITING_STOP_CONFIRMATION,
+                    ProtectionState.AMBIGUOUS,
+                }:
+                    applog.info(
+                        "engine.protection",
+                        f"#41: Recovery already pending for {p.symbol}; "
+                        "waiting for broker reconciliation.",
+                    )
+                    continue
+
                 try:
                     side = OrderSide.SELL if p.qty > 0 else OrderSide.BUY
                     required_qty = abs(p.qty)
@@ -1987,7 +2021,7 @@ class TradingEngine:
                         if o.status in (OrderStatus.CANCELED, OrderStatus.REJECTED, OrderStatus.FILLED):
                             continue
 
-                        st_px = getattr(o, "stop_price", None) or getattr(o, "stop_loss", None)
+                        st_px = getattr(o, "stop_price", None)
                         limit_px = getattr(o, "limit_price", None)
                         leg = str(getattr(o, "leg", "") or "").lower()
                         order_class = str(getattr(o, "order_class", "") or "").lower()
@@ -1996,7 +2030,6 @@ class TradingEngine:
                             o.order_type in (OrderType.STOP, OrderType.STOP_LIMIT)
                             or leg == "stop"
                             or order_class in {"bracket", "oco", "oto"}
-                            or (st_px is not None and st_px > 0 and ((p.qty > 0 and st_px < p.avg_entry_price) or (p.qty < 0 and st_px > p.avg_entry_price)))
                         )
 
                         is_take_profit = (
@@ -2018,7 +2051,7 @@ class TradingEngine:
                         )
 
                         if is_stop_order:
-                            remaining_qty = max(0.0, o.qty - o.filled_qty)
+                            remaining_qty = o.remaining_qty
                             is_undersized = remaining_qty < required_qty - 1e-6
                             is_stale = bool(
                                 opened_at
@@ -2030,6 +2063,7 @@ class TradingEngine:
                                     c_res = self.broker.cancel(o.id)
                                     if inspect.isawaitable(c_res):
                                         await c_res
+                                    self._protection_state[p.symbol] = ProtectionState.AWAITING_CANCEL_CONFIRMATION
                                     applog.warning(
                                         "engine.protection",
                                         f"#41: Requested cancellation of under-sized/stale protective stop {o.id} "
@@ -2058,6 +2092,7 @@ class TradingEngine:
                                 c_res = self.broker.cancel(o.id)
                                 if inspect.isawaitable(c_res):
                                     await c_res
+                                self._protection_state[p.symbol] = ProtectionState.AWAITING_CANCEL_CONFIRMATION
                                 applog.warning(
                                     "engine.protection",
                                     f"#41: Requested cancellation of standalone TP {o.id} "
@@ -2138,14 +2173,22 @@ class TradingEngine:
                     )
                     s_res = self.broker.submit(req)
                     rec_order = await s_res if inspect.isawaitable(s_res) else s_res
-                    # Verification asynchrony: submission does NOT immediately set protection_status[p.symbol] = True.
-                    # It remains False until open_orders() independently returns the active STOP on the next cycle.
+
                     protection_status[p.symbol] = False
-                    applog.info(
-                        "engine.protection",
-                        f"#41: RECOVERY_SUBMITTED symbol={p.symbol} order_id={getattr(rec_order, 'id', 'N/A')} "
-                        f"stop={stop_px:.4f} source={stop_source} awaiting_broker_verification=true",
-                    )
+                    if rec_order is None or getattr(rec_order, "status", None) == OrderStatus.REJECTED:
+                        self._protection_state[p.symbol] = ProtectionState.RECOVERY_REJECTED
+                        applog.error(
+                            "engine.protection",
+                            f"#41: Recovery STOP rejected for {p.symbol}",
+                        )
+                        continue
+                    else:
+                        self._protection_state[p.symbol] = ProtectionState.AWAITING_STOP_CONFIRMATION
+                        applog.info(
+                            "engine.protection",
+                            f"#41: RECOVERY_SUBMITTED symbol={p.symbol} order_id={getattr(rec_order, 'id', 'N/A')} "
+                            f"stop={stop_px:.4f} source={stop_source} awaiting_broker_verification=true",
+                        )
                 except Exception as rec_exc:
                     applog.error("engine.protection", f"#41: Failed to submit recovery protective stop for {p.symbol}: {rec_exc}")
 
@@ -2255,13 +2298,27 @@ class TradingEngine:
                 strategy_name = s.get("strategy") or p.get("strategy")
                 strategy_params = s.get("strategy_params") or p.get("strategy_params")
 
+                retry_raw = s.get("next_retry_at")
+                if retry_raw:
+                    try:
+                        retry_at = datetime.fromisoformat(retry_raw.replace("Z", "+00:00"))
+                        if retry_at.tzinfo is None:
+                            retry_at = retry_at.replace(tzinfo=UTC)
+                        if datetime.now(UTC) < retry_at:
+                            continue
+                    except (TypeError, ValueError):
+                        applog.warning(
+                            "engine.replay",
+                            f"Invalid next_retry_at for {candidate_id}: {retry_raw}",
+                        )
+
                 s["replay_attempts"] = s.get("replay_attempts", 0) + 1
 
                 start_time = ts - timedelta(minutes=15)
                 end_time = ts + timedelta(minutes=90)
-                
+
                 applog.info("engine", f"Replaying signal {candidate_id} ({symbol} {direction}) at {ts.isoformat()}...")
-                
+
                 try:
                     df = await self.data.history(symbol, "1Min", start=start_time, end=end_time)
                 except Exception as df_exc:
@@ -2270,8 +2327,18 @@ class TradingEngine:
                     continue
 
                 if df.empty:
-                    applog.warning("engine", f"History empty for replay of {candidate_id}. Skipping.")
+                    now_utc = datetime.now(UTC)
+                    attempts = int(s.get("replay_attempts", 0) or 0)
+                    delay_minutes = min(30, max(2, 2 ** min(attempts, 4)))
+                    s["replay_state"] = "deferred_data_incomplete"
+                    s["last_replay_attempt_at"] = now_utc.isoformat()
+                    s["last_defer_reason"] = "entry_or_following_bar_unavailable"
+                    s["next_retry_at"] = (now_utc + timedelta(minutes=delay_minutes)).isoformat()
                     self.db.save_shadow_signal(candidate_id, ts, symbol, strategy_name, direction, self.mode, s)
+                    applog.info(
+                        "engine.replay",
+                        f"Replay deferred for {candidate_id}: historical data incomplete; retry in {delay_minutes}m",
+                    )
                     continue
 
                 ts_pd = pd.Timestamp(ts)
@@ -2292,8 +2359,18 @@ class TradingEngine:
                         i = min_diff_idx
 
                 if i == -1 or i + 1 >= len(df):
-                    applog.warning("engine", f"Cannot locate entry bar index for replay of {candidate_id} (i={i}). Skipping.")
+                    now_utc = datetime.now(UTC)
+                    attempts = int(s.get("replay_attempts", 0) or 0)
+                    delay_minutes = min(30, max(2, 2 ** min(attempts, 4)))
+                    s["replay_state"] = "deferred_data_incomplete"
+                    s["last_replay_attempt_at"] = now_utc.isoformat()
+                    s["last_defer_reason"] = "entry_or_following_bar_unavailable"
+                    s["next_retry_at"] = (now_utc + timedelta(minutes=delay_minutes)).isoformat()
                     self.db.save_shadow_signal(candidate_id, ts, symbol, strategy_name, direction, self.mode, s)
+                    applog.info(
+                        "engine.replay",
+                        f"Replay deferred for {candidate_id}: historical data incomplete; retry in {delay_minutes}m",
+                    )
                     continue
 
                 # Derive entry price from entry bar close if missing from signal payload (#233)
@@ -2332,6 +2409,9 @@ class TradingEngine:
 
                 s["replayed"] = True
                 s["replay_failed"] = bool(replay_res.get("replay_failed", False))
+                s["replay_state"] = "successfully_replayed"
+                s.pop("next_retry_at", None)
+                s.pop("last_defer_reason", None)
                 s["replay_failure_reason"] = replay_res.get("replay_failure_reason")
                 s["replay_timestamp"] = utcnow().isoformat()
                 s["simulated_pnl"] = replay_res["pnl_pct"]

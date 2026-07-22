@@ -35,8 +35,8 @@ def test_partial_closes_allocate_entry_fee_basis_once_pro_rata():
     tracker.on_fill(_fill("entry", OrderSide.BUY, 10, 100, 10.0))
     first = tracker.on_fill(_fill("exit-1", OrderSide.SELL, 4, 100, 4.0, minutes=5))
     second = tracker.on_fill(_fill("exit-2", OrderSide.SELL, 6, 100, 6.0, minutes=10))
-    assert first is not None and first.pnl == -8.0
-    assert second is not None and second.pnl == -12.0
+    assert first is None
+    assert second is not None and second.pnl == -20.0
     assert tracker.realized_pnl == -20.0
 
 
