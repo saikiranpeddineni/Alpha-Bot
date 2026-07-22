@@ -331,6 +331,8 @@ export interface GateAlphaResponse {
 export interface AltExitStats {
   policy_id: string;
   count: number;
+  common_r_count?: number;
+  common_r_coverage_pct?: number;
   win_rate_pct: number;
   avg_simulated_return_pct: number;
   avg_realized_r: number;
@@ -343,6 +345,9 @@ export interface AltExitStats {
 
 export interface HybridResearchStats {
   signals: number;
+  eligible_signals?: number;
+  comparable_signals?: number;
+  coverage_pct?: number;
   activated: number;
   saved_losses: number;
   saved_loss_r: number;
@@ -361,11 +366,15 @@ export interface ShadowAnalyticsResponse {
     rejected_signals: number;
     accepted_signals: number;
     replayed_signals: number;
+    canonical_rejected_signals?: number;
+    valid_r_count?: number;
     win_rate_pct: number;
     avg_simulated_return_pct: number;
     avg_mfe_r?: number | null;
-    avg_mfe_pct?: number | null;
-    avg_mae_pct: number;
+    mfe_valid_count?: number;
+    mfe_coverage_pct?: number;
+    avg_mae_r?: number | null;
+    avg_mae_pct?: number | null;
     avg_winner_capture_ratio: number;
     avg_give_back_r: number;
     avg_mfe_before_loss_r: number;
@@ -374,6 +383,7 @@ export interface ShadowAnalyticsResponse {
     missed_profit_count: number;
     missed_profit_r: number;
   };
+
   evidence_cohort?: {
     total_signals: number;
     replayed_signals: number;

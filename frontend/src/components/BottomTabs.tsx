@@ -299,9 +299,9 @@ export function ShadowAnalyticsTab() {
       {/* 1. KPI Cards */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: "12px" }}>
         <div className="card-kpi" style={{ background: "var(--panel-2)", padding: "15px", borderRadius: "8px", border: "1px solid var(--border)" }}>
-          <div style={{ fontSize: "12px", color: "var(--faint)", textTransform: "uppercase" }}>Total Replayed Signals</div>
-          <div style={{ fontSize: "24px", fontWeight: "bold", margin: "5px 0" }} className="num">{s.replayed_signals}</div>
-          <div style={{ fontSize: "11px", color: "var(--faint)" }}>From {s.total_signals} total signals</div>
+          <div style={{ fontSize: "12px", color: "var(--faint)", textTransform: "uppercase" }}>Canonical Rejected Signals</div>
+          <div style={{ fontSize: "24px", fontWeight: "bold", margin: "5px 0" }} className="num">{s.canonical_rejected_signals ?? (s.avoided_loss_count + s.missed_profit_count)}</div>
+          <div style={{ fontSize: "11px", color: "var(--faint)" }}>From {s.valid_r_count ?? s.replayed_signals} canonical R outcomes ({s.replayed_signals} replayed)</div>
         </div>
         <div className="card-kpi" style={{ background: "var(--panel-2)", padding: "15px", borderRadius: "8px", border: "1px solid var(--border)" }}>
           <div style={{ fontSize: "12px", color: "var(--faint)", textTransform: "uppercase" }}>Avoided Losses R</div>
@@ -355,8 +355,8 @@ export function ShadowAnalyticsTab() {
                   <td className={`r num ${pnlClass(info.marginal_alpha)}`}>
                     {info.marginal_alpha >= 0 ? "+" : ""}{info.marginal_alpha.toFixed(2)}R
                   </td>
-                  <td className="r num success">{info.avoided_losses}</td>
-                  <td className="r num danger">{info.missed_profits}</td>
+                  <td className="r num text-success">{info.avoided_losses}</td>
+                  <td className="r num text-danger">{info.missed_profits}</td>
                 </tr>
               );
             })}
@@ -364,35 +364,37 @@ export function ShadowAnalyticsTab() {
         </table>
       </div>
 
-      {/* 3. Exit Capture KPIs */}
+      {/* 3. Exit Telemetry Efficiency */}
       <div>
         <h4 style={{ margin: "0 0 10px", color: "var(--accent)" }}>Exit Capture Efficiency (Realized Trades)</h4>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "10px" }}>
-          <div style={{ background: "var(--panel-2)", padding: "12px", borderRadius: "6px", border: "1px solid var(--border)" }}>
-            <div style={{ fontSize: "11px", color: "var(--faint)" }}>Winner Capture Ratio</div>
-            <div style={{ fontSize: "18px", fontWeight: "bold", marginTop: "4px" }} className="num">
-              {(s.avg_winner_capture_ratio * 100.0).toFixed(1)}%
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "12px" }}>
+          <div className="card-kpi" style={{ background: "var(--panel-2)", padding: "12px", borderRadius: "6px", border: "1px solid var(--border)" }}>
+            <div style={{ fontSize: "11px", color: "var(--faint)", textTransform: "uppercase" }}>Winner Capture Ratio</div>
+            <div style={{ fontSize: "20px", fontWeight: "bold", margin: "4px 0", color: "var(--accent)" }} className="num">
+              {(s.avg_winner_capture_ratio * 100).toFixed(1)}%
             </div>
             <div style={{ fontSize: "10px", color: "var(--faint)" }}>Realized R / MFE R</div>
           </div>
-          <div style={{ background: "var(--panel-2)", padding: "12px", borderRadius: "6px", border: "1px solid var(--border)" }}>
-            <div style={{ fontSize: "11px", color: "var(--faint)" }}>Average Give-Back R</div>
-            <div style={{ fontSize: "18px", fontWeight: "bold", marginTop: "4px", color: "var(--danger)" }} className="num">
-              {s.avg_give_back_r?.toFixed(2) ?? "0.00"}R
+          <div className="card-kpi" style={{ background: "var(--panel-2)", padding: "12px", borderRadius: "6px", border: "1px solid var(--border)" }}>
+            <div style={{ fontSize: "11px", color: "var(--faint)", textTransform: "uppercase" }}>Average Give-Back R</div>
+            <div style={{ fontSize: "20px", fontWeight: "bold", margin: "4px 0", color: "var(--warning)" }} className="num">
+              {s.avg_give_back_r.toFixed(2)}R
             </div>
             <div style={{ fontSize: "10px", color: "var(--faint)" }}>MFE R - Realized R</div>
           </div>
-          <div style={{ background: "var(--panel-2)", padding: "12px", borderRadius: "6px", border: "1px solid var(--border)" }}>
-            <div style={{ fontSize: "11px", color: "var(--faint)" }}>Average MFE R</div>
-            <div style={{ fontSize: "18px", fontWeight: "bold", marginTop: "4px" }} className="num">
-              {s.avg_mfe_r != null ? `${s.avg_mfe_r.toFixed(2)}R` : (s.avg_mfe_pct != null ? `${(s.avg_mfe_pct / 100.0).toFixed(2)}R` : "—")}
+          <div className="card-kpi" style={{ background: "var(--panel-2)", padding: "12px", borderRadius: "6px", border: "1px solid var(--border)" }}>
+            <div style={{ fontSize: "11px", color: "var(--faint)", textTransform: "uppercase" }}>Average MFE R</div>
+            <div style={{ fontSize: "20px", fontWeight: "bold", margin: "4px 0" }} className="num">
+              {s.avg_mfe_r != null ? `${s.avg_mfe_r.toFixed(2)}R` : "—"}
             </div>
-            <div style={{ fontSize: "10px", color: "var(--faint)" }}>Max Favorable Excursion</div>
+            <div style={{ fontSize: "10px", color: "var(--faint)" }}>
+              {s.mfe_coverage_pct != null ? `${s.mfe_coverage_pct}% coverage (${s.mfe_valid_count}/${s.valid_r_count ?? s.replayed_signals})` : "Max Favorable Excursion"}
+            </div>
           </div>
-          <div style={{ background: "var(--panel-2)", padding: "12px", borderRadius: "6px", border: "1px solid var(--border)" }}>
-            <div style={{ fontSize: "11px", color: "var(--faint)" }}>MFE-Before-Loss R</div>
-            <div style={{ fontSize: "18px", fontWeight: "bold", marginTop: "4px", color: "var(--warning)" }} className="num">
-              {s.avg_mfe_before_loss_r?.toFixed(2) ?? "0.00"}R
+          <div className="card-kpi" style={{ background: "var(--panel-2)", padding: "12px", borderRadius: "6px", border: "1px solid var(--border)" }}>
+            <div style={{ fontSize: "11px", color: "var(--faint)", textTransform: "uppercase" }}>MFE-Before-Loss R</div>
+            <div style={{ fontSize: "20px", fontWeight: "bold", margin: "4px 0", color: "var(--danger)" }} className="num">
+              {s.avg_mfe_before_loss_r.toFixed(2)}R
             </div>
             <div style={{ fontSize: "10px", color: "var(--faint)" }}>Peak R of losing trades</div>
           </div>
@@ -409,7 +411,9 @@ export function ShadowAnalyticsTab() {
               <th className="r">Simulated Trades</th>
               <th className="r">Win Rate %</th>
               <th className="r">Avg Return %</th>
-              <th className="r">Avg Realized R</th>
+              <th className="r">Native Realized R</th>
+              <th className="r">Common Realized R</th>
+              <th className="r">Common-R Coverage</th>
               <th className="r">Avg MFE R</th>
               <th className="r">Avg MAE R</th>
               <th className="r">Avg Bars Held</th>
@@ -440,8 +444,14 @@ export function ShadowAnalyticsTab() {
                   <td className={`r num ${pnlClass(p.avg_realized_r)}`}>
                     {p.avg_realized_r >= 0 ? "+" : ""}{p.avg_realized_r.toFixed(2)}R
                   </td>
-                  <td className="r num">{p.avg_mfe_r.toFixed(2)}R</td>
-                  <td className="r num faint">{p.avg_mae_r.toFixed(2)}R</td>
+                  <td className={`r num ${p.avg_common_realized_r != null ? pnlClass(p.avg_common_realized_r) : "faint"}`}>
+                    {p.avg_common_realized_r != null ? `${p.avg_common_realized_r >= 0 ? "+" : ""}${p.avg_common_realized_r.toFixed(2)}R` : "—"}
+                  </td>
+                  <td className="r num faint">
+                    {p.common_r_coverage_pct != null ? `${p.common_r_coverage_pct}% (${p.common_r_count ?? 0}/${p.count})` : "—"}
+                  </td>
+                  <td className="r num">{p.avg_mfe_r != null ? `${p.avg_mfe_r.toFixed(2)}R` : "—"}</td>
+                  <td className="r num faint">{p.avg_mae_r != null ? `${p.avg_mae_r.toFixed(2)}R` : "—"}</td>
                   <td className="r num faint">{p.avg_bars_held}m</td>
                   <td>
                     {isProduction ? (

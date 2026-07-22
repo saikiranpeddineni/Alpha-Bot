@@ -746,8 +746,7 @@ async def get_shadow_ledger_analytics(
     avg_pnl = (sum(float(e.realized_r) for e in valid_evidences) / valid_r_count) if valid_r_count > 0 else 0.0
     avg_mfe = (sum(mfe_values) / len(mfe_values)) if mfe_values else 0.0
     avg_mae = (sum(mae_values) / len(mae_values)) if mae_values else 0.0
-    
-    # Exit capture and avoided loss vs missed profit analytics
+        # Exit capture and avoided loss vs missed profit analytics
     winner_capture_ratios = []
     give_backs = []
     mfe_before_losses = []
@@ -760,7 +759,7 @@ async def get_shadow_ledger_analytics(
     for s, e in canonical_pairs:
         realized_r = float(e.realized_r)
 
-        mfe_r = 0.0
+        mfe_r = None
         if e.mfe is not None:
             try:
                 candidate_mfe = float(e.mfe)
@@ -769,16 +768,27 @@ async def get_shadow_ledger_analytics(
             except (TypeError, ValueError):
                 pass
 
-        gave_back_r = max(0.0, mfe_r - realized_r)
-        
-        if realized_r > 0:
-            wcr = realized_r / mfe_r if mfe_r > 0 else 0.0
-            winner_capture_ratios.append(wcr)
+        if mfe_r is None:
+            alt_data = s.get("alternative_exits") or {}
+            prod_res = alt_data.get("exit_production") or {}
+            if prod_res.get("mfe_r") is not None:
+                try:
+                    cand = float(prod_res["mfe_r"])
+                    if math.isfinite(cand):
+                        mfe_r = cand
+                except (TypeError, ValueError):
+                    pass
 
-        give_backs.append(gave_back_r)
+        if mfe_r is not None:
+            gave_back_r = max(0.0, mfe_r - realized_r)
+            if realized_r > 0 and mfe_r > 0:
+                wcr = realized_r / mfe_r
+                winner_capture_ratios.append(wcr)
 
-        if realized_r <= 0:
-            mfe_before_losses.append(mfe_r)
+            give_backs.append(gave_back_r)
+
+            if realized_r <= 0:
+                mfe_before_losses.append(mfe_r)
 
         # Avoided Loss vs Missed Profit (Rejected Counterfactuals)
         if s.get("final_decision") == "rejected":
@@ -836,55 +846,11 @@ async def get_shadow_ledger_analytics(
         "avg_delta_r": 0.0,
     }
     hybrid_cohorts_raw: dict[tuple, dict] = {}
-
     for s in replayed_signals:
         alt_data = s.get("alternative_exits") or {}
         prod_res = alt_data.get("exit_production") or {}
-        prod_r = prod_res.get("common_realized_r") if prod_res.get("common_realized_r") is not None else prod_res.get("realized_r")
 
-        hybrid_res = alt_data.get("exit_hybrid_breakeven_atr")
-        if hybrid_res and prod_r is not None:
-            h_r = hybrid_res.get("common_realized_r") if hybrid_res.get("common_realized_r") is not None else hybrid_res.get("realized_r")
-            if h_r is not None:
-                delta = float(h_r) - float(prod_r)
-                hybrid_stats["signals"] += 1
-                hybrid_stats["comparable_signals"] += 1
-                hybrid_stats["net_delta_r"] += delta
-
-                from app.core.shadow_ledger import _classify_hybrid_effect
-                effect = hybrid_res.get("effect") or _classify_hybrid_effect(float(prod_r), float(h_r))
-
-                if effect == "HYBRID_SAVED_LOSS":
-                    hybrid_stats["saved_losses"] += 1
-                    hybrid_stats["saved_loss_r"] += delta
-                    hybrid_stats["activated"] += 1
-                elif effect == "HYBRID_IMPROVED_WINNER":
-                    hybrid_stats["improved_winners"] += 1
-                    hybrid_stats["improved_winner_r"] += delta
-                    hybrid_stats["activated"] += 1
-                elif effect == "HYBRID_REDUCED_WINNER":
-                    hybrid_stats["reduced_winners"] += 1
-                    hybrid_stats["reduced_winner_r"] += -delta
-                    hybrid_stats["activated"] += 1
-                elif effect == "HYBRID_WORSENED_LOSS":
-                    hybrid_stats["worsened_losses"] += 1
-                    hybrid_stats["worsened_loss_r"] += -delta
-                    hybrid_stats["activated"] += 1
-                elif effect == "HYBRID_NO_EFFECT":
-                    hybrid_stats["no_effect"] += 1
-
-
-                ckey = (
-                    s.get("strategy", "unknown"),
-                    s.get("direction", "unknown"),
-                    s.get("market_regime", "unknown"),
-                )
-                c_row = hybrid_cohorts_raw.setdefault(ckey, {"signals": 0, "production_r": 0.0, "hybrid_r": 0.0, "delta_r": 0.0})
-                c_row["signals"] += 1
-                c_row["production_r"] += float(prod_r)
-                c_row["hybrid_r"] += float(h_r)
-                c_row["delta_r"] += delta
-
+        # 1. Update alternative exit policy comparison totals
         for pid in policy_ids:
             if pid in alt_data:
                 res = alt_data[pid]
@@ -927,7 +893,6 @@ async def get_shadow_ledger_analytics(
                     except (TypeError, ValueError):
                         pass
 
-
                 stat["total_mfe_r"] += (res.get("mfe_r") or 0.0)
                 stat["total_mae_r"] += (res.get("mae_r") or 0.0)
                 stat["bars_held"] += res.get("bars_held") or 0
@@ -939,7 +904,78 @@ async def get_shadow_ledger_analytics(
                     stat.setdefault("breakevens", 0)
                     stat["breakevens"] += 1
 
+        # 2. Update hybrid strategy stats (only when exit_hybrid_breakeven_atr is present)
+        hybrid_res = alt_data.get("exit_hybrid_breakeven_atr") or {}
+        if not hybrid_res:
+            continue
+
+        prod_common_r = prod_res.get("common_realized_r")
+        hybrid_common_r = hybrid_res.get("common_realized_r")
+        prod_risk_pct = _production_risk_pct(s, prod_res)
+
+        if prod_common_r is None and prod_risk_pct is not None and prod_res.get("pnl_pct") is not None:
+            try:
+                prod_common_r = float(prod_res["pnl_pct"]) / prod_risk_pct
+            except (TypeError, ValueError):
+                prod_common_r = None
+
+        if hybrid_common_r is None and prod_risk_pct is not None and hybrid_res.get("pnl_pct") is not None:
+            try:
+                hybrid_common_r = float(hybrid_res["pnl_pct"]) / prod_risk_pct
+            except (TypeError, ValueError):
+                hybrid_common_r = None
+
+        if prod_common_r is None or hybrid_common_r is None:
+            continue
+
+        try:
+            prod_r = float(prod_common_r)
+            h_r = float(hybrid_common_r)
+            if not (math.isfinite(prod_r) and math.isfinite(h_r)):
+                continue
+        except (TypeError, ValueError):
+            continue
+
+        delta = h_r - prod_r
+        hybrid_stats["signals"] += 1
+        hybrid_stats["comparable_signals"] += 1
+        hybrid_stats["net_delta_r"] += delta
+
+        from app.core.shadow_ledger import _classify_hybrid_effect
+        effect = hybrid_res.get("effect") or _classify_hybrid_effect(prod_r, h_r)
+
+        if effect == "HYBRID_SAVED_LOSS":
+            hybrid_stats["saved_losses"] += 1
+            hybrid_stats["saved_loss_r"] += delta
+            hybrid_stats["activated"] += 1
+        elif effect == "HYBRID_IMPROVED_WINNER":
+            hybrid_stats["improved_winners"] += 1
+            hybrid_stats["improved_winner_r"] += delta
+            hybrid_stats["activated"] += 1
+        elif effect == "HYBRID_REDUCED_WINNER":
+            hybrid_stats["reduced_winners"] += 1
+            hybrid_stats["reduced_winner_r"] += -delta
+            hybrid_stats["activated"] += 1
+        elif effect == "HYBRID_WORSENED_LOSS":
+            hybrid_stats["worsened_losses"] += 1
+            hybrid_stats["worsened_loss_r"] += -delta
+            hybrid_stats["activated"] += 1
+        elif effect == "HYBRID_NO_EFFECT":
+            hybrid_stats["no_effect"] += 1
+
+        ckey = (
+            s.get("strategy", "unknown"),
+            s.get("direction", "unknown"),
+            s.get("market_regime", "unknown"),
+        )
+        c_row = hybrid_cohorts_raw.setdefault(ckey, {"signals": 0, "production_r": 0.0, "hybrid_r": 0.0, "delta_r": 0.0})
+        c_row["signals"] += 1
+        c_row["production_r"] += prod_r
+        c_row["hybrid_r"] += h_r
+        c_row["delta_r"] += delta
+
     alt_exits_comparison = []
+
     for pid, data in alt_exits_totals.items():
         cnt = data["count"]
         win_rate = (data["wins"] / cnt * 100.0) if cnt > 0 else 0.0
@@ -1083,12 +1119,15 @@ async def get_shadow_ledger_analytics(
             "total_signals": total_signals,
             "rejected_signals": len(rejected_signals),
             "accepted_signals": len(accepted_signals),
-            "replayed_signals": total_replayed,
+            "replayed_signals": len(replayed_signals),
+            "canonical_rejected_signals": (avoided_loss_count + missed_profit_count),
             "valid_r_count": valid_r_count,
             "win_rate_pct": round(win_rate, 2),
             "avg_simulated_return_pct": round(avg_pnl, 4),
-            "avg_mfe_r": round(avg_mfe, 4),
-            "avg_mae_pct": round(avg_mae, 4),
+            "avg_mfe_r": round(avg_mfe, 4) if mfe_values else None,
+            "mfe_valid_count": len(mfe_values),
+            "mfe_coverage_pct": round(len(mfe_values) / valid_r_count * 100.0, 2) if valid_r_count > 0 else 0.0,
+            "avg_mae_r": round(avg_mae, 4) if mae_values else None,
             "avg_winner_capture_ratio": round(avg_winner_capture, 4),
             "avg_give_back_r": round(avg_give_back, 4),
             "avg_mfe_before_loss_r": round(avg_mfe_before_loss, 4),
