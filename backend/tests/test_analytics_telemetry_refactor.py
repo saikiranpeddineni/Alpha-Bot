@@ -73,6 +73,20 @@ def test_alternative_exit_common_r_uses_production_risk():
     assert common_r == pytest.approx(0.50)
 
 
+def test_alternative_exit_common_r_uses_production_risk_per_signal_invariant():
+    entry = 100.0
+    production_stop = 98.50   # Production risk = $1.50 (1.5%)
+    tight_stop = 99.50        # Tight risk = $0.50 (0.5%)
+    tight_exit = 100.30
+
+    tight_native_r = (tight_exit - entry) / (entry - tight_stop)
+    tight_common_r = (tight_exit - entry) / (entry - production_stop)
+
+    assert tight_native_r == pytest.approx(0.60)
+    assert tight_common_r == pytest.approx(0.20)
+
+
+
 def test_hybrid_reduced_winner_classification():
     assert _classify_hybrid_effect(
         production_r=1.50,

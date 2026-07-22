@@ -783,14 +783,24 @@ async def get_shadow_ledger_analytics(
                 stat["total_r"] += (res.get("realized_r") or 0.0)
 
                 common_r = res.get("common_realized_r")
+                prod_risk_pct = prod_res.get("initial_risk_pct") if prod_res.get("initial_risk_pct") is not None else 1.50
+
+                if common_r is None and prod_risk_pct is not None and float(prod_risk_pct) > 0:
+                    common_r = pnl / float(prod_risk_pct)
                 if common_r is not None:
                     stat["total_common_r"] += float(common_r)
                     stat["common_r_count"] += 1
 
+
                 risk_pct = res.get("initial_risk_pct")
+                if risk_pct is None and pid == "exit_bracket_tight":
+                    risk_pct = 0.50
+                elif risk_pct is None and (pid == "exit_production" or pid == "exit_bracket_wide" or pid == "exit_atr_trailing"):
+                    risk_pct = 1.50
                 if risk_pct is not None:
                     stat["total_risk_pct"] += float(risk_pct)
                     stat["risk_pct_count"] += 1
+
 
                 stat["total_mfe_r"] += (res.get("mfe_r") or 0.0)
                 stat["total_mae_r"] += (res.get("mae_r") or 0.0)
