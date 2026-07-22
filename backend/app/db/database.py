@@ -550,28 +550,47 @@ class Database:
             results = []
             for r in s.scalars(stmt):
                 try:
-                    data = json.loads(r.payload)
-                    data["replayed"] = r.replayed
-                    data["replay_timestamp"] = r.replay_timestamp.isoformat() if r.replay_timestamp else None
-                    data["simulated_pnl"] = r.simulated_pnl
-                    data["mfe_pct"] = r.mfe_pct
-                    data["mae_pct"] = r.mae_pct
-                    data["exit_reason"] = r.exit_reason
-                    data["tp_hit"] = r.tp_hit
-                    data["sl_hit"] = r.sl_hit
-                    data["rejection_reason"] = r.rejection_reason
-                    data["rejection_stage"] = r.rejection_stage
-                    data["final_decision"] = r.final_decision
-                    data["policy_id"] = r.policy_id
-                    data["parent_policy_id"] = r.parent_policy_id
-                    data["policy_version"] = r.policy_version
-                    data["gate_evidence_json"] = json.loads(r.gate_evidence_json) if r.gate_evidence_json else None
-                    data["market_regime"] = r.market_regime
-                    data["vix_value"] = r.vix_value
-                    data["vix_age"] = r.vix_age
-                    data["vix_feed_status"] = r.vix_feed_status
-                    data["replay_failed"] = r.replay_failed
-                    data["replay_failure_reason"] = r.replay_failure_reason
+                    raw_payload = json.loads(r.payload) if r.payload else {}
+                    if not isinstance(raw_payload, dict):
+                        raw_payload = {"raw": str(raw_payload)}
+
+                    data = {
+                        "id": r.id,
+                        "candidate_id": r.candidate_id,
+                        "timestamp": r.ts.isoformat() if r.ts else None,
+                        "ts": r.ts.isoformat() if r.ts else None,
+                        "symbol": r.symbol,
+                        "strategy": r.strategy,
+                        "direction": r.direction,
+                        "mode": r.mode,
+                        "final_decision": r.final_decision,
+                        "rejection_reason": r.rejection_reason,
+                        "rejection_stage": r.rejection_stage,
+                        "policy_id": r.policy_id,
+                        "replay_attempts": r.replay_attempts,
+                        "replayed": r.replayed,
+                        "replay_timestamp": r.replay_timestamp.isoformat() if r.replay_timestamp else None,
+                        "simulated_pnl": r.simulated_pnl,
+                        "mfe_pct": r.mfe_pct,
+                        "mae_pct": r.mae_pct,
+                        "exit_reason": r.exit_reason,
+                        "tp_hit": r.tp_hit,
+                        "sl_hit": r.sl_hit,
+                        "parent_policy_id": r.parent_policy_id,
+                        "policy_version": r.policy_version,
+                        "gate_evidence_json": json.loads(r.gate_evidence_json) if r.gate_evidence_json else None,
+                        "market_regime": r.market_regime,
+                        "vix_value": r.vix_value,
+                        "vix_age": r.vix_age,
+                        "vix_feed_status": r.vix_feed_status,
+                        "replay_failed": r.replay_failed,
+                        "replay_failure_reason": r.replay_failure_reason,
+                    }
+
+                    for k, v in raw_payload.items():
+                        if k not in data and k != "payload":
+                            data[k] = v
+
                     results.append(data)
                 except Exception:
                     pass

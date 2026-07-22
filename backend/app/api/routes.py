@@ -570,11 +570,16 @@ async def run_scanner(request: Request) -> dict:
 ACCEPTED_DECISIONS: frozenset[str] = frozenset({"accepted", "pipeline_approved"})
 
 
+import json
+from fastapi.responses import JSONResponse
+
 @router.get("/shadow-ledger")
 @router.get("/shadow-ledger/candidates")
-async def get_shadow_ledger(request: Request, limit: int = 200) -> list[dict]:
+async def get_shadow_ledger(request: Request, limit: int = 200) -> JSONResponse:
     engine = _engine(request)
-    return _db(request).get_shadow_signals(mode=engine.mode, limit=limit)
+    signals = _db(request).get_shadow_signals(mode=engine.mode, limit=limit)
+    safe_json = json.dumps(signals, default=str)
+    return JSONResponse(content=json.loads(safe_json))
 
 
 @router.get("/shadow-ledger/analytics")
