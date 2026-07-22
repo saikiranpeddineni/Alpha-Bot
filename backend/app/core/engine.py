@@ -2025,8 +2025,7 @@ class TradingEngine:
                 else:
                     ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
                 if ts.tzinfo is None:
-                    from zoneinfo import ZoneInfo
-                    ts = ts.replace(tzinfo=ZoneInfo("America/New_York")).astimezone(UTC)
+                    ts = ts.replace(tzinfo=UTC)
                 direction = s["direction"]
                 p = s.get("payload") if isinstance(s.get("payload"), dict) else s
                 stop_loss = s.get("stop_loss") if s.get("stop_loss") is not None else p.get("stop_loss")
