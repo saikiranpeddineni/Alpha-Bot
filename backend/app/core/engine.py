@@ -2022,13 +2022,8 @@ class TradingEngine:
             for s in batch:
                 candidate_id = s["candidate_id"]
                 symbol = s["symbol"]
-                ts_raw = s.get("timestamp") or s.get("ts")
-                if isinstance(ts_raw, datetime):
-                    ts = ts_raw
-                else:
-                    ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
-                if ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=UTC)
+                from app.core.shadow_replay_eligibility import parse_datetime_to_utc
+                ts = parse_datetime_to_utc(s.get("timestamp") or s.get("ts")) or datetime.now(UTC)
                 direction = s["direction"]
                 p = s.get("payload") if isinstance(s.get("payload"), dict) else s
                 stop_loss = s.get("stop_loss") if s.get("stop_loss") is not None else p.get("stop_loss")

@@ -39,7 +39,7 @@ def parse_datetime_to_utc(dt_val: Any) -> datetime | None:
         return None
 
     if dt.tzinfo is None:
-        return dt.replace(tzinfo=ET_ZONE).astimezone(UTC)
+        return dt.replace(tzinfo=UTC)
     return dt.astimezone(UTC)
 
 

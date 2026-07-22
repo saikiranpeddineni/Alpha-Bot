@@ -272,4 +272,20 @@ def test_replay_optimizer_grid_search():
     assert best["total_realized_r"] == 2.3
 
 
+def test_parse_datetime_to_utc_naive_preserves_utc():
+    """Verify parse_datetime_to_utc treats naive datetimes as UTC and does not apply ET offsets."""
+    from app.core.shadow_replay_eligibility import parse_datetime_to_utc
+    from datetime import datetime, UTC
+
+    naive_dt = datetime(2026, 7, 21, 19, 19, 50)
+    parsed = parse_datetime_to_utc(naive_dt)
+
+    assert parsed is not None
+    assert parsed.tzinfo == UTC
+    assert parsed.hour == 19
+    assert parsed.minute == 19
+    assert parsed.second == 50
+
+
+
 
