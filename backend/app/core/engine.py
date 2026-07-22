@@ -777,7 +777,7 @@ class TradingEngine:
             if getattr(self, "reconciliation_failed", False):
                 applog.info("engine", "Reconciliation state was uncertain. Re-attempting position reconciliation...")
                 self._reconcile_positions(positions)
-            if positions:
+            if positions and not getattr(self, "reconciliation_failed", False):
                 await self.verify_broker_protective_stops(positions)
 
         except Exception as exc:
@@ -2019,7 +2019,14 @@ class TradingEngine:
             for s in batch:
                 candidate_id = s["candidate_id"]
                 symbol = s["symbol"]
-                ts = datetime.fromisoformat(s["timestamp"])
+                ts_raw = s.get("timestamp") or s.get("ts")
+                if isinstance(ts_raw, datetime):
+                    ts = ts_raw
+                else:
+                    ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+                if ts.tzinfo is None:
+                    from zoneinfo import ZoneInfo
+                    ts = ts.replace(tzinfo=ZoneInfo("America/New_York")).astimezone(UTC)
                 direction = s["direction"]
                 p = s.get("payload") if isinstance(s.get("payload"), dict) else s
                 stop_loss = s.get("stop_loss") if s.get("stop_loss") is not None else p.get("stop_loss")

@@ -205,6 +205,26 @@ class CanonicalOutcomeResolver:
             "total_records": len(records),
         }
 
+    @staticmethod
+    def get_composite_observation_id(record: dict | pd.Series) -> tuple | None:
+        """Extract composite observation identity tuple (#237 Hardening).
+
+        Identity components: (candidate_id, signal_timestamp, strategy, direction).
+        """
+        r_dict = record.to_dict() if isinstance(record, pd.Series) else dict(record)
+        payload_raw = r_dict.get("payload")
+        payload = json.loads(payload_raw) if isinstance(payload_raw, str) and payload_raw.startswith("{") else (payload_raw if isinstance(payload_raw, dict) else {})
+
+        cid = str(r_dict.get("candidate_id") or payload.get("candidate_id") or r_dict.get("id") or "").strip()
+        if not cid:
+            return None
+
+        ts = str(r_dict.get("timestamp") or r_dict.get("ts") or payload.get("timestamp") or payload.get("ts") or "").strip()
+        strategy = str(r_dict.get("strategy") or payload.get("strategy") or "").strip().lower()
+        direction = str(r_dict.get("direction") or payload.get("direction") or "").strip().lower()
+
+        return (cid, ts, strategy, direction)
+
     @classmethod
     def calculate_matched_nomination_evidence(
         cls,
@@ -213,31 +233,42 @@ class CanonicalOutcomeResolver:
         min_promotion_sample: int = 30,
     ) -> dict:
         """Calculate nomination denominator using matched valid observation pairs (#237).
-        
-        Requires matched valid evidence count >= min_promotion_sample.
+
+        Requires composite observation identity matching and matched valid count N >= min_promotion_sample.
+        Calculates expectancy gain E = (1/N) * sum(R_challenger,i - R_champion,i).
         """
         champ_map = {}
         for r in champion_records:
-            cid = r.get("candidate_id") or r.get("id")
+            obs_id = cls.get_composite_observation_id(r)
             ev = cls.resolve(r)
-            if ev.valid and ev.realized_r is not None and cid:
-                champ_map[cid] = ev
+            if ev.valid and ev.realized_r is not None and obs_id:
+                champ_map[obs_id] = ev
 
         cand_map = {}
         for r in candidate_records:
-            cid = r.get("candidate_id") or r.get("id")
+            obs_id = cls.get_composite_observation_id(r)
             ev = cls.resolve(r)
-            if ev.valid and ev.realized_r is not None and cid:
-                cand_map[cid] = ev
+            if ev.valid and ev.realized_r is not None and obs_id:
+                cand_map[obs_id] = ev
 
         matched_keys = set(champ_map.keys()) & set(cand_map.keys())
         matched_valid_count = len(matched_keys)
         eligible = matched_valid_count >= min_promotion_sample
 
+        r_diffs = []
+        for key in matched_keys:
+            r_champ = champ_map[key].realized_r
+            r_cand = cand_map[key].realized_r
+            if r_champ is not None and r_cand is not None:
+                r_diffs.append(r_cand - r_champ)
+
+        expectancy_gain_r = float(np.mean(r_diffs)) if r_diffs else 0.0
+
         return {
             "matched_valid_count": matched_valid_count,
             "min_promotion_sample": min_promotion_sample,
             "nomination_eligible": eligible,
+            "expectancy_gain_r": expectancy_gain_r,
             "reason": "VALID_MATCHED_SAMPLES" if eligible else "INSUFFICIENT_MATCHED_SAMPLES",
-            "matched_keys": list(matched_keys),
+            "matched_keys": [f"{k[0]}:{k[1]}:{k[2]}:{k[3]}" for k in matched_keys],
         }

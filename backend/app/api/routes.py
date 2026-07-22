@@ -7,6 +7,7 @@ Everything the dashboard does goes through these routes; the WebSocket at
 from __future__ import annotations
 
 import asyncio
+import math
 from datetime import datetime, timedelta, UTC
 
 from fastapi import APIRouter, HTTPException, Request
@@ -626,7 +627,7 @@ async def get_shadow_ledger_analytics(
             
         try:
             realized_r = float(e.realized_r)
-            if pd.isna(realized_r):
+            if math.isnan(realized_r):
                 realized_r = 0.0
         except (TypeError, ValueError):
             realized_r = 0.0
@@ -657,7 +658,9 @@ async def get_shadow_ledger_analytics(
     # Alternative exits comparison
     alt_exits_totals = {}
     alt_policies = getattr(engine.risk_config, "alternative_exits", [])
-    policy_ids = ["exit_production"] + [alt["policy_id"] for alt in alt_policies if alt.get("policy_id")]
+    if not isinstance(alt_policies, list):
+        alt_policies = []
+    policy_ids = ["exit_production"] + [alt["policy_id"] for alt in alt_policies if isinstance(alt, dict) and alt.get("policy_id")]
     
     for pid in policy_ids:
         alt_exits_totals[pid] = {

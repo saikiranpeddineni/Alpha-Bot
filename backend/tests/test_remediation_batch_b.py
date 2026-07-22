@@ -20,8 +20,8 @@ def test_market_session_calendar_helper():
     assert close_std.hour == 16
     assert close_std.minute == 0
 
-    # Early close day: July 3, 2026 at 10:00 AM ET
-    dt_early = datetime(2026, 7, 3, 10, 0, tzinfo=ET)
+    # Early close day: November 27, 2026 (Black Friday) at 10:00 AM ET
+    dt_early = datetime(2026, 11, 27, 10, 0, tzinfo=ET)
     close_early = get_session_close(dt_early)
     assert close_early.hour == 13
     assert close_early.minute == 0

@@ -13,9 +13,8 @@ def test_regular_session_closes_at_1600_et():
 
 
 def test_independence_day_early_close_is_calendar_derived():
-    # 2026-07-03 is the observed Independence Day holiday, so July 2 is the
-    # XNYS early-close session for that year.
-    entry = datetime(2026, 7, 2, 15, 0, tzinfo=timezone.utc)
+    # July 3, 2025 is the XNYS early-close session (13:00 ET close).
+    entry = datetime(2025, 7, 3, 15, 0, tzinfo=timezone.utc)
     close = get_session_close(entry)
     assert close.astimezone(ET).hour == 13
 

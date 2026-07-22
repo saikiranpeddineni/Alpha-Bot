@@ -575,21 +575,32 @@ class Database:
         self,
         mode: str = "demo",
         now: datetime | None = None,
-        limit: int = 100
+        limit: int = 100,
+        min_delay_seconds: float = 0.0,
+        max_age_seconds: float = 86400.0 * 7.0,
     ) -> list[dict]:
-        """Get pending shadow replays from database ordered by timestamp ASC (oldest first) (#233).
-        
-        Filters: final_decision == 'rejected' AND (replayed is None or replayed == False)
-        AND (replay_failed is None or replay_failed == False).
+        """Get pending shadow replays from database ordered by timestamp ASC (oldest first) (#233, #244).
+
+        Uses authoritative shared replay eligibility SQL filter contract.
         """
-        from sqlalchemy import or_
+        from app.core.shadow_replay_eligibility import get_replay_eligibility_sql_filter, ReplayEligibilityState
+        if now is None:
+            from datetime import UTC
+            now = datetime.now(UTC)
+
+        filter_cond = get_replay_eligibility_sql_filter(
+            ShadowLedgerRow,
+            now=now,
+            min_delay_seconds=min_delay_seconds,
+            max_age_seconds=max_age_seconds,
+            mode=mode,
+            state=ReplayEligibilityState.ELIGIBLE,
+        )
+
         with self._session() as s:
             stmt = (
                 select(ShadowLedgerRow)
-                .where(ShadowLedgerRow.mode == mode)
-                .where(ShadowLedgerRow.final_decision == "rejected")
-                .where(or_(ShadowLedgerRow.replayed == None, ShadowLedgerRow.replayed == False))  # noqa: E711
-                .where(or_(ShadowLedgerRow.replay_failed == None, ShadowLedgerRow.replay_failed == False))  # noqa: E711
+                .where(filter_cond)
                 .order_by(ShadowLedgerRow.ts.asc())
                 .limit(limit)
             )
@@ -617,31 +628,55 @@ class Database:
                 results.append(row_dict)
             return results
 
-    def get_replay_queue_telemetry(self, mode: str = "demo", now: datetime | None = None) -> dict:
-        """Derive replay queue telemetry directly from database state (#244)."""
-        from sqlalchemy import or_, func
+    def get_replay_queue_telemetry(
+        self,
+        mode: str = "demo",
+        now: datetime | None = None,
+        min_delay_seconds: float = 0.0,
+        max_age_seconds: float = 86400.0 * 7.0,
+    ) -> dict:
+        """Derive replay queue telemetry directly from database state (#244).
+
+        Uses authoritative shared replay eligibility SQL filter contract for all 5 states:
+        - pending but not yet eligible
+        - eligible
+        - failed
+        - expired/unreplayed
+        - successfully replayed
+        """
+        from sqlalchemy import func
+        from app.core.shadow_replay_eligibility import get_replay_eligibility_sql_filter, ReplayEligibilityState
+
         if now is None:
             from datetime import UTC
             now = datetime.now(UTC)
 
         with self._session() as s:
-            total_stmt = (
-                select(func.count(ShadowLedgerRow.id))
-                .where(ShadowLedgerRow.mode == mode)
-                .where(ShadowLedgerRow.final_decision == "rejected")
-                .where(or_(ShadowLedgerRow.replayed == None, ShadowLedgerRow.replayed == False))  # noqa: E711
-                .where(or_(ShadowLedgerRow.replay_failed == None, ShadowLedgerRow.replay_failed == False))  # noqa: E711
+            eligible_cond = get_replay_eligibility_sql_filter(
+                ShadowLedgerRow, now=now, min_delay_seconds=min_delay_seconds, max_age_seconds=max_age_seconds, mode=mode, state=ReplayEligibilityState.ELIGIBLE
             )
-            pending_total = s.scalar(total_stmt) or 0
+            pending_not_eligible_cond = get_replay_eligibility_sql_filter(
+                ShadowLedgerRow, now=now, min_delay_seconds=min_delay_seconds, max_age_seconds=max_age_seconds, mode=mode, state=ReplayEligibilityState.PENDING_NOT_ELIGIBLE
+            )
+            expired_cond = get_replay_eligibility_sql_filter(
+                ShadowLedgerRow, now=now, min_delay_seconds=min_delay_seconds, max_age_seconds=max_age_seconds, mode=mode, state=ReplayEligibilityState.EXPIRED_UNREPLAYED
+            )
+            failed_cond = get_replay_eligibility_sql_filter(
+                ShadowLedgerRow, now=now, min_delay_seconds=min_delay_seconds, max_age_seconds=max_age_seconds, mode=mode, state=ReplayEligibilityState.FAILED
+            )
+            success_cond = get_replay_eligibility_sql_filter(
+                ShadowLedgerRow, now=now, min_delay_seconds=min_delay_seconds, max_age_seconds=max_age_seconds, mode=mode, state=ReplayEligibilityState.SUCCESSFULLY_REPLAYED
+            )
 
-            oldest_stmt = (
-                select(func.min(ShadowLedgerRow.ts))
-                .where(ShadowLedgerRow.mode == mode)
-                .where(ShadowLedgerRow.final_decision == "rejected")
-                .where(or_(ShadowLedgerRow.replayed == None, ShadowLedgerRow.replayed == False))  # noqa: E711
-                .where(or_(ShadowLedgerRow.replay_failed == None, ShadowLedgerRow.replay_failed == False))  # noqa: E711
-            )
-            oldest_ts = s.scalar(oldest_stmt)
+            eligible_cnt = s.scalar(select(func.count(ShadowLedgerRow.id)).where(eligible_cond)) or 0
+            pending_not_eligible_cnt = s.scalar(select(func.count(ShadowLedgerRow.id)).where(pending_not_eligible_cond)) or 0
+            expired_cnt = s.scalar(select(func.count(ShadowLedgerRow.id)).where(expired_cond)) or 0
+            failed_cnt = s.scalar(select(func.count(ShadowLedgerRow.id)).where(failed_cond)) or 0
+            success_cnt = s.scalar(select(func.count(ShadowLedgerRow.id)).where(success_cond)) or 0
+
+            pending_total = eligible_cnt + pending_not_eligible_cnt
+
+            oldest_ts = s.scalar(select(func.min(ShadowLedgerRow.ts)).where(eligible_cond))
             oldest_age_sec = 0.0
             if oldest_ts:
                 from zoneinfo import ZoneInfo
@@ -653,19 +688,16 @@ class Database:
                 now_et = now.astimezone(ET_ZONE) if now.tzinfo is not None else now.replace(tzinfo=ET_ZONE)
                 oldest_age_sec = max(0.0, (now_et - oldest_ts).total_seconds())
 
-            last_success_stmt = (
-                select(func.max(ShadowLedgerRow.replay_timestamp))
-                .where(ShadowLedgerRow.mode == mode)
-                .where(ShadowLedgerRow.replayed == True)  # noqa: E712
-                .where(or_(ShadowLedgerRow.replay_failed == None, ShadowLedgerRow.replay_failed == False))  # noqa: E711
-            )
-            last_success_ts = s.scalar(last_success_stmt)
+            last_success_ts = s.scalar(select(func.max(ShadowLedgerRow.replay_timestamp)).where(success_cond))
             last_success_iso = last_success_ts.isoformat() if last_success_ts else None
 
             return {
                 "replay_pending_total": pending_total,
-                "replay_pending_eligible": pending_total,
-                "replay_expired_unreplayed": 0,
+                "replay_pending_eligible": eligible_cnt,
+                "replay_pending_not_eligible": pending_not_eligible_cnt,
+                "replay_failed": failed_cnt,
+                "replay_expired_unreplayed": expired_cnt,
+                "replay_successfully_replayed": success_cnt,
                 "replay_oldest_pending_age_seconds": round(oldest_age_sec, 1),
                 "last_replay_success_at": last_success_iso,
             }

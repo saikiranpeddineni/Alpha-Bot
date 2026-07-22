@@ -429,7 +429,7 @@ def test_allow_new_entries_cannot_override_hard_halt(client):
     # Call manual override to ALLOW entries
     r = client.post("/api/system/allow-new-entries", json={"allow": True})
     assert r.status_code == 200
-    assert r.json()["allow_new_entries"] is True  # Force gate is set to False (allowed)
+    assert r.json()["allow_new_entries"] is False  # Manual override to allow entries cannot override hard halt!
     
     # Perform heartbeat check
     loop = asyncio.new_event_loop()

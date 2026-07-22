@@ -2,6 +2,7 @@ import pytest
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 from fastapi.testclient import TestClient
 
@@ -69,7 +70,7 @@ def test_chronological_replay_exit_intelligence():
     assert res["time_to_mfe"] > 0
 
 def test_shadow_ledger_endpoints(monkeypatch):
-    client = TestClient(app, raise_server_exceptions=False)
+    client = TestClient(app, raise_server_exceptions=True)
     
     # Mock get_shadow_signals database call to return a list containing mock payloads
     mock_signals = [
@@ -119,10 +120,11 @@ def test_shadow_ledger_endpoints(monkeypatch):
 
     class MockEngine:
         mode = "demo"
-        risk_config = MagicMock()
-        risk_config.alternative_exits = [
-            {"policy_id": "exit_bracket_tight", "take_profit_pct": 1.0, "stop_loss_pct": 0.5}
-        ]
+        risk_config = SimpleNamespace(
+            alternative_exits=[
+                {"policy_id": "exit_bracket_tight", "take_profit_pct": 1.0, "stop_loss_pct": 0.5}
+            ]
+        )
 
     monkeypatch.setattr("app.api.routes._db", lambda r: MockDB())
     monkeypatch.setattr("app.api.routes._engine", lambda r: MockEngine())
