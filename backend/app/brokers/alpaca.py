@@ -195,6 +195,7 @@ class AlpacaBroker(Broker):
                     "initial_risk_per_share": risk_per_share,
                 }
             checkpoint = {
+                "account_id": self.account_id,
                 "realized_pnl": 0.0,
                 "day_realized_pnl": 0.0,
                 "session_date": None,

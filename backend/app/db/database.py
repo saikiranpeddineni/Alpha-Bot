@@ -377,6 +377,7 @@ class Database:
         with self._session() as s:
             s.merge(PortfolioCheckpointRow(mode=mode, updated_at=datetime.now(UTC),
                                            payload=json.dumps(checkpoint, default=str)))
+            s.commit()
 
     def commit_fill_processing(
         self, *, fill_key: str, cumulative_qty: float, mode: str, account_id: str,
