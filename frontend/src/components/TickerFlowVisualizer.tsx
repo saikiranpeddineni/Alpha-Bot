@@ -9,7 +9,7 @@ interface LiveTickerFlowItem {
   strategy: string;
   direction: string;
   timestamp: string;
-  tsMs: number;
+  tsMs: number | null;
   final_decision: string;
   rejection_stage: string | null;
   rejection_reason: string | null;
@@ -18,7 +18,7 @@ interface LiveTickerFlowItem {
   trade_score: number | null;
   market_regime: string | null;
   ml_threshold: number | null;
-  step_reached: number; // 1 to 7
+  step_reached: number | null; // 1 to 7 or null for unknown
 }
 
 const STAGES = [
@@ -48,11 +48,9 @@ export function TickerFlowVisualizer() {
           const stage = s.rejection_stage || payload.rejection_stage || gateEv.first_decisive_gate || null;
           const regime = s.market_regime || payload.market_regime || gateEv.market_regime || null;
 
-          // Extract actual applied threshold from backend evidence (never hardcode fallback maps)
           const rawThresh = s.ml_threshold ?? payload.ml_threshold ?? gateEv.applied_ml_threshold ?? gateEv.ml_threshold ?? null;
           const mlThresh = rawThresh !== null ? Number(rawThresh) : null;
 
-          // Extract probabilities cleanly without synthetic fallbacks
           const rawMlP = s.ml_confidence ?? s.ml_probability ?? payload.ml_confidence ?? payload.ml_probability ?? gateEv.ml_probability ?? null;
           const mlP = rawMlP !== null ? Number(rawMlP) : null;
 
@@ -62,20 +60,24 @@ export function TickerFlowVisualizer() {
           const rawTScore = s.trade_score ?? payload.trade_score ?? gateEv.trade_score ?? null;
           const tScore = rawTScore !== null ? Number(rawTScore) : null;
 
-          // Calculate step reached based strictly on decision & stage
-          let step = 7;
+          let step: number | null = 7;
           if (decision === "rejected") {
             if (stage === "ml_gate") step = 3;
             else if (stage === "meta_label_gate") step = 4;
             else if (stage === "trade_score_gate") step = 5;
-            else if (stage === "portfolio_gate" || stage === "risk_gate" || stage === "behavioral_safety_gate") step = 6;
-            else step = 3;
+            else if (
+              stage === "portfolio_gate" ||
+              stage === "risk_gate" ||
+              stage === "behavioral_safety_gate"
+            ) step = 6;
+            else step = null; // Don't default unknown rejection stage to ML Gate (step 3)
           } else if (decision === "pending") {
             step = 2;
           }
 
           const rawTs = s.timestamp || s.ts || payload.timestamp || "";
-          const tsMs = rawTs ? new Date(rawTs).getTime() : Date.now() - idx * 1000;
+          const parsedTs = rawTs ? new Date(rawTs).getTime() : NaN;
+          const tsMs = Number.isNaN(parsedTs) ? null : parsedTs;
 
           return {
             id: s.candidate_id || s.id || `flow-${idx}`,
@@ -83,7 +85,7 @@ export function TickerFlowVisualizer() {
             strategy: s.strategy || payload.strategy || "Unknown Strategy",
             direction: (s.direction || payload.direction || "N/A").toUpperCase(),
             timestamp: rawTs,
-            tsMs: isNaN(tsMs) ? Date.now() - idx * 1000 : tsMs,
+            tsMs,
             final_decision: decision,
             rejection_stage: stage,
             rejection_reason: s.rejection_reason || payload.rejection_reason || null,
@@ -96,7 +98,12 @@ export function TickerFlowVisualizer() {
           };
         });
 
-        parsed.sort((a, b) => b.tsMs - a.tsMs);
+        parsed.sort((a, b) => {
+          if (a.tsMs === null && b.tsMs === null) return 0;
+          if (a.tsMs === null) return 1;
+          if (b.tsMs === null) return -1;
+          return b.tsMs - a.tsMs;
+        });
         setStream(parsed);
         setLastTickTime(new Date());
       }
@@ -177,6 +184,7 @@ export function TickerFlowVisualizer() {
       <div style={{ display: "flex", gap: "10px", overflowX: "auto", minHeight: "420px", paddingBottom: "10px" }}>
         {STAGES.map((stage) => {
           const stageTickers = stream.filter((item) => {
+            if (item.step_reached === null) return false;
             if (stage.id < item.step_reached) return true;
             if (stage.id === item.step_reached) return true;
             return false;
@@ -218,7 +226,7 @@ export function TickerFlowVisualizer() {
                   stageTickers.slice(0, 15).map((item) => {
                     const isAccepted = item.final_decision === "accepted" || item.final_decision === "pipeline_approved";
                     const isTerminatedHere = item.step_reached === stage.id && item.final_decision === "rejected";
-                    const isPassedHere = stage.id < item.step_reached || (stage.id === 7 && isAccepted);
+                    const isPassedHere = (item.step_reached !== null && stage.id < item.step_reached) || (stage.id === 7 && isAccepted);
 
                     let cardColor = "#0284c7";
                     let borderColor = "#0284c744";
@@ -256,7 +264,7 @@ export function TickerFlowVisualizer() {
                           {item.strategy}
                         </div>
 
-                        {/* Telemetry Pills — Display exact backend values or N/A */}
+                        {/* Telemetry Pills */}
                         {stage.id === 3 && (
                           <div style={{ fontSize: "0.68rem", color: item.ml_prob !== null && item.ml_threshold !== null && item.ml_prob >= item.ml_threshold ? "#38bdf8" : "#f87171" }}>
                             ML: {item.ml_prob !== null ? `${(item.ml_prob * 100).toFixed(1)}%` : "N/A"}
@@ -314,14 +322,14 @@ export function TickerFlowVisualizer() {
             const isAccepted = item.final_decision === "accepted" || item.final_decision === "pipeline_approved";
             return (
               <div key={`log-${item.id}`} style={{ fontSize: "0.75rem", fontFamily: "monospace", display: "flex", gap: "10px" }}>
-                <span style={{ color: "#64748b" }}>{item.timestamp ? fmtTime(item.timestamp) : "--:--:--"}</span>
+                <span style={{ color: "#64748b" }}>{item.timestamp ? fmtTime(item.timestamp) : "N/A"}</span>
                 <span style={{ fontWeight: "bold", color: "#38bdf8" }}>{item.symbol}</span>
                 <span style={{ color: "#94a3b8" }}>{item.strategy} ({item.direction})</span>
                 <span style={{ color: isAccepted ? "#4ade80" : item.final_decision === "rejected" ? "#f87171" : "#facc15" }}>
                   {isAccepted
                     ? "→ EXECUTED TO BROKER"
                     : item.final_decision === "rejected"
-                    ? `→ VETOED at ${item.rejection_stage || "UNKNOWN_GATE"} (${item.rejection_reason || "Threshold not met"})`
+                    ? `→ VETOED at ${item.rejection_stage || "UNKNOWN"} (${item.rejection_reason || "Threshold not met"})`
                     : "→ EVALUATING IN PIPELINE"}
                 </span>
               </div>

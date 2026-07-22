@@ -5,7 +5,6 @@ and exit policies against historical replayed signals to discover empirical opti
 """
 
 from typing import Any
-import pandas as pd
 
 
 class ReplayOptimizer:
@@ -64,6 +63,8 @@ class ReplayOptimizer:
     ) -> dict[str, Any]:
         total_signals = len(signals)
         executed_trades = 0
+        resolved_trades = 0
+        insufficient_evidence = 0
         avoided_losses_r = 0.0
         missed_winners_r = 0.0
 
@@ -85,6 +86,8 @@ class ReplayOptimizer:
                     p = json.loads(s["payload"])
                 except Exception:
                     p = {}
+
+            gate_ev = s.get("gate_evidence_json") or p.get("gate_evidence_json") or {}
 
             ml_prob = float(
                 s.get("ml_confidence")
@@ -108,16 +111,33 @@ class ReplayOptimizer:
                 or 0.0
             )
 
+            portfolio_alignment = (
+                s.get("portfolio_alignment")
+                or p.get("portfolio_alignment")
+                or gate_ev.get("portfolio_alignment")
+            )
+
+            risk_factor = (
+                s.get("risk_factor")
+                or p.get("risk_factor")
+                or gate_ev.get("risk_factor")
+            )
+
             # Determine entry pass/fail under simulated parameters
             ml_pass = ml_prob >= ml_thresh
             if comp_thresh is not None:
-                # Soft composite score check
+                if portfolio_alignment is None or risk_factor is None:
+                    insufficient_evidence += 1
+                    continue
+
                 comp_score = (
-                    (min(100.0, max(0.0, ml_prob * 100.0)) * 0.30)
-                    + (min(100.0, max(0.0, meta_prob * 100.0)) * 0.25)
-                    + (min(100.0, max(0.0, trade_score)) * 0.20)
-                    + 25.0  # default baseline for portfolio alignment & risk
+                    min(100.0, max(0.0, ml_prob * 100.0)) * 0.30
+                    + min(100.0, max(0.0, meta_prob * 100.0)) * 0.25
+                    + min(100.0, max(0.0, trade_score)) * 0.20
+                    + min(100.0, max(0.0, float(portfolio_alignment) * 100.0)) * 0.15
+                    + min(100.0, max(0.0, float(risk_factor) * 100.0)) * 0.10
                 )
+
                 entry_passed = comp_score >= comp_thresh
             else:
                 entry_passed = ml_pass
@@ -146,6 +166,7 @@ class ReplayOptimizer:
             if entry_passed:
                 executed_trades += 1
                 if realized_r is not None:
+                    resolved_trades += 1
                     realized_r = float(realized_r)
                     total_realized_r += realized_r
                     total_mfe_r += mfe_r
@@ -169,11 +190,11 @@ class ReplayOptimizer:
                     elif realized_r > 0:
                         missed_winners_r += realized_r
 
-        win_rate_pct = (total_wins / executed_trades * 100.0) if executed_trades > 0 else 0.0
+        win_rate_pct = (total_wins / resolved_trades * 100.0) if resolved_trades > 0 else 0.0
         profit_factor = (gross_profit_r / gross_loss_r) if gross_loss_r > 0 else (gross_profit_r if gross_profit_r > 0 else 1.0)
         net_gate_alpha_r = avoided_losses_r - missed_winners_r
-        avg_realized_r = (total_realized_r / executed_trades) if executed_trades > 0 else 0.0
-        avg_give_back_r = (total_give_back_r / executed_trades) if executed_trades > 0 else 0.0
+        avg_realized_r = (total_realized_r / resolved_trades) if resolved_trades > 0 else 0.0
+        avg_give_back_r = (total_give_back_r / resolved_trades) if resolved_trades > 0 else 0.0
         avg_winner_capture = (sum(winner_captures) / len(winner_captures)) if winner_captures else 0.0
 
         return {
@@ -182,6 +203,8 @@ class ReplayOptimizer:
             "exit_policy": exit_policy,
             "total_signals": total_signals,
             "executed_trades": executed_trades,
+            "resolved_trades": resolved_trades,
+            "insufficient_evidence": insufficient_evidence,
             "win_rate_pct": round(win_rate_pct, 2),
             "profit_factor": round(profit_factor, 2),
             "total_realized_r": round(total_realized_r, 4),
