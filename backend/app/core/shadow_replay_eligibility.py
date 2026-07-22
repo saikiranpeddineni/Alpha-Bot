@@ -61,11 +61,12 @@ def parse_datetime_to_utc(dt_val: Any, candidate_id: str | None = None) -> datet
         else:
             dt = dt.astimezone(UTC)
 
-    # If candidate_dt exists, check if dt has a +4h or +5h shift relative to candidate_dt
+    # If candidate_dt exists, check if stored dt has a positive +4h or +5h shift relative to candidate_dt
     if candidate_dt and dt:
-        diff_seconds = abs((dt - candidate_dt).total_seconds())
-        # If timestamp is shifted by ~4 hours (14400s) or 5 hours (18000s) due to double ET conversion
-        if 14000 <= diff_seconds <= 18400:
+        signed_diff = (dt - candidate_dt).total_seconds()
+        # Stored timestamp dt was shifted ahead of candidate_dt by +4h (14400s, EDT) or +5h (18000s, EST)
+        # due to legacy double ET timezone conversion. Tight ±60s tolerance window.
+        if abs(signed_diff - 14400) <= 60 or abs(signed_diff - 18000) <= 60:
             return candidate_dt
 
     return dt or candidate_dt

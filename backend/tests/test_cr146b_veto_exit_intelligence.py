@@ -305,5 +305,101 @@ def test_parse_datetime_to_utc_candidate_id_shift_correction():
     assert parsed.second == 50
 
 
+def test_parse_datetime_to_utc_plus_5h_shift_correction():
+    """Verify parse_datetime_to_utc auto-corrects +5h (EST) timestamp shifts crossing date boundary."""
+    from app.core.shadow_replay_eligibility import parse_datetime_to_utc
+    from datetime import datetime, UTC
+
+    # Database contains +5h shifted timestamp 00:19:50 next day from EST double conversion
+    shifted_dt = datetime(2026, 1, 21, 0, 19, 50, tzinfo=UTC)
+    candidate_id = "NOW_RSI2_REVERSION_20260120_191950_79EECE"
+
+    parsed = parse_datetime_to_utc(shifted_dt, candidate_id=candidate_id)
+
+    assert parsed is not None
+    assert parsed == datetime(2026, 1, 20, 19, 19, 50, tzinfo=UTC)
+
+
+def test_parse_datetime_to_utc_negative_shift_not_corrected():
+    """Verify parse_datetime_to_utc does NOT correct negative shifts (-4h / -5h)."""
+    from app.core.shadow_replay_eligibility import parse_datetime_to_utc
+    from datetime import datetime, UTC
+
+    # Stored timestamp is 15:19:50 (4 hours earlier than candidate 19:19:50)
+    neg_shifted_dt = datetime(2026, 7, 21, 15, 19, 50, tzinfo=UTC)
+    candidate_id = "NOW_RSI2_REVERSION_20260721_191950_79EECE"
+
+    parsed = parse_datetime_to_utc(neg_shifted_dt, candidate_id=candidate_id)
+
+    assert parsed is not None
+    assert parsed == neg_shifted_dt  # Kept unchanged, NOT shifted to 19:19:50
+
+
+def test_parse_datetime_to_utc_normal_timestamps_unchanged():
+    """Verify normal timestamps (matching or uncorrupted differences) remain unchanged."""
+    from app.core.shadow_replay_eligibility import parse_datetime_to_utc
+    from datetime import datetime, UTC
+
+    candidate_id = "NOW_RSI2_REVERSION_20260721_191950_79EECE"
+    
+    # Exact match
+    matching_dt = datetime(2026, 7, 21, 19, 19, 50, tzinfo=UTC)
+    assert parse_datetime_to_utc(matching_dt, candidate_id=candidate_id) == matching_dt
+
+    # Unrelated offset (+3h shift, not legacy +4h/+5h)
+    unrelated_dt = datetime(2026, 7, 21, 22, 19, 50, tzinfo=UTC)
+    assert parse_datetime_to_utc(unrelated_dt, candidate_id=candidate_id) == unrelated_dt
+
+
+def test_parse_datetime_to_utc_malformed_and_missing_candidate_ids():
+    """Verify parse_datetime_to_utc handles malformed candidate IDs and IDs without timestamps gracefully."""
+    from app.core.shadow_replay_eligibility import parse_datetime_to_utc
+    from datetime import datetime, UTC
+
+    dt = datetime(2026, 7, 21, 19, 19, 50, tzinfo=UTC)
+
+    # Missing timestamp in ID
+    assert parse_datetime_to_utc(dt, candidate_id="CANDIDATE_NO_TIMESTAMP") == dt
+
+    # Malformed timestamp in ID (invalid date)
+    assert parse_datetime_to_utc(dt, candidate_id="CANDIDATE_20269999_999999_79EECE") == dt
+
+    # Non-string candidate_id
+    assert parse_datetime_to_utc(dt, candidate_id=12345) == dt
+
+
+def test_parse_datetime_to_utc_iso_z_and_et_tz():
+    """Verify parse_datetime_to_utc handles ISO 'Z' strings and timezone-aware ET datetimes."""
+    from app.core.shadow_replay_eligibility import parse_datetime_to_utc
+    from datetime import datetime, UTC
+    from zoneinfo import ZoneInfo
+
+    candidate_id = "NOW_RSI2_REVERSION_20260721_191950_79EECE"
+
+    # ISO Z string
+    iso_z_str = "2026-07-21T19:19:50Z"
+    parsed_z = parse_datetime_to_utc(iso_z_str, candidate_id=candidate_id)
+    assert parsed_z == datetime(2026, 7, 21, 19, 19, 50, tzinfo=UTC)
+
+    # Timezone-aware ET datetime (15:19:50 EDT = 19:19:50 UTC)
+    et_dt = datetime(2026, 7, 21, 15, 19, 50, tzinfo=ZoneInfo("America/New_York"))
+    parsed_et = parse_datetime_to_utc(et_dt, candidate_id=candidate_id)
+    assert parsed_et == datetime(2026, 7, 21, 19, 19, 50, tzinfo=UTC)
+
+
+def test_parse_datetime_to_utc_midnight_date_boundary():
+    """Verify parse_datetime_to_utc handles +4h/+5h shifts that roll over midnight across calendar dates."""
+    from app.core.shadow_replay_eligibility import parse_datetime_to_utc
+    from datetime import datetime, UTC
+
+    candidate_id = "STRAT_20260721_213000_123456"
+    # Corrupted +4h shift moves 21:30:00 UTC on July 21 to 01:30:00 UTC on July 22
+    corrupted_midnight_dt = datetime(2026, 7, 22, 1, 30, 0, tzinfo=UTC)
+
+    parsed = parse_datetime_to_utc(corrupted_midnight_dt, candidate_id=candidate_id)
+    assert parsed == datetime(2026, 7, 21, 21, 30, 0, tzinfo=UTC)
+
+
+
 
 
