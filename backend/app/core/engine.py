@@ -1908,7 +1908,6 @@ class TradingEngine:
                     o.order_type in (OrderType.STOP, OrderType.STOP_LIMIT)
                     or getattr(o, "leg", "") == "stop"
                     or getattr(o, "order_class", "") in ("bracket", "oco")
-                    or (getattr(o, "stop_loss", None) is not None and getattr(o, "stop_loss", 0) > 0)
                 )
                 if not is_stop_type:
                     continue

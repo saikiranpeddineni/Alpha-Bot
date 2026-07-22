@@ -113,15 +113,13 @@ class OrderRequest(BaseModel):
             if self.stop_price is not None:
                 raise ValueError("LIMIT orders cannot specify stop_price")
         elif self.order_type == OrderType.STOP:
-            effective_stop = self.stop_price if self.stop_price is not None else self.stop_loss
-            if effective_stop is None:
-                raise ValueError("STOP orders require stop_price (or stop_loss)")
+            if self.stop_price is None:
+                raise ValueError("STOP orders require stop_price")
             if self.limit_price is not None:
                 raise ValueError("STOP orders cannot specify limit_price")
         elif self.order_type == OrderType.STOP_LIMIT:
-            effective_stop = self.stop_price if self.stop_price is not None else self.stop_loss
-            if effective_stop is None or self.limit_price is None:
-                raise ValueError("STOP_LIMIT orders require stop_price (or stop_loss) and limit_price")
+            if self.stop_price is None or self.limit_price is None:
+                raise ValueError("STOP_LIMIT orders require stop_price and limit_price")
         return self
 
 

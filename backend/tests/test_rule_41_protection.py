@@ -67,7 +67,7 @@ def test_order_request_validation_stop_limit():
     assert req.stop_price == 140.0
     assert req.limit_price == 139.5
 
-    with pytest.raises(ValueError, match="STOP_LIMIT orders require stop_price .* and limit_price"):
+    with pytest.raises(ValueError, match="STOP_LIMIT orders require stop_price and limit_price"):
         OrderRequest(symbol="AAPL", side=OrderSide.SELL, qty=10, order_type=OrderType.STOP_LIMIT, stop_price=140.0)
 
 

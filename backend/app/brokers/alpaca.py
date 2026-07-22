@@ -351,15 +351,13 @@ class AlpacaBroker(Broker):
                 raise ValueError("LIMIT orders require limit_price")
             request = LimitOrderRequest(limit_price=round(req.limit_price, 2), **kwargs)
         elif req.order_type == OrderType.STOP:
-            stop_px = req.stop_price if req.stop_price is not None else req.stop_loss
-            if stop_px is None:
-                raise ValueError("STOP orders require stop_price (or stop_loss)")
-            request = StopOrderRequest(stop_price=round(stop_px, 2), **kwargs)
+            if req.stop_price is None:
+                raise ValueError("STOP orders require stop_price")
+            request = StopOrderRequest(stop_price=round(req.stop_price, 2), **kwargs)
         elif req.order_type == OrderType.STOP_LIMIT:
-            stop_px = req.stop_price if req.stop_price is not None else req.stop_loss
-            if stop_px is None or req.limit_price is None:
+            if req.stop_price is None or req.limit_price is None:
                 raise ValueError("STOP_LIMIT orders require stop_price and limit_price")
-            request = StopLimitOrderRequest(stop_price=round(stop_px, 2), limit_price=round(req.limit_price, 2), **kwargs)
+            request = StopLimitOrderRequest(stop_price=round(req.stop_price, 2), limit_price=round(req.limit_price, 2), **kwargs)
         else:
             raise ValueError(f"Unsupported Alpaca order type: {req.order_type}")
 
