@@ -105,6 +105,7 @@ class PortfolioTracker:
                     f"#61 CRITICAL: Refusing to restore {self.restore_mode} checkpoint: "
                     f"stored account_id={stored_account_id!r} does not match required account_id={self.restore_account_id!r}."
                 )
+                db.save_portfolio_checkpoint(self.restore_mode, self.checkpoint(account_id=self.restore_account_id))
                 return
 
             self.restore_checkpoint(checkpoint)
