@@ -579,18 +579,107 @@ def _outcome_value(outcome, key: str, default=None):
 
 
 def _is_canonical_replay_evidence(signal: dict, outcome) -> bool:
-    """Return True only for usable completed replay evidence."""
+    """Return True only for usable, finite canonical replay evidence or vetoed signals."""
     if signal.get("replay_failed", False):
         return False
+
     if signal.get("replay_state") == "deferred_data_incomplete":
         return False
+
+    if outcome is None:
+        return False
+
+    has_vetoes = bool(signal.get("gate_evidence_json") or signal.get("gate_evidence") or signal.get("rejection_reason"))
+
     realized_r = _outcome_value(outcome, "realized_r")
     if realized_r is None:
+        if has_vetoes:
+            return True
         return False
+
     try:
-        return math.isfinite(float(realized_r))
+        if math.isfinite(float(realized_r)):
+            return True
+        return has_vetoes
     except (TypeError, ValueError):
-        return False
+        return has_vetoes
+
+
+
+
+def _production_risk_pct(signal: dict, prod_res: dict | None = None) -> float | None:
+    """
+    Resolve the production risk denominator as a percentage of entry price.
+
+    Resolution order:
+      1. Persisted exit_production.initial_risk_pct
+      2. Reconstruct from exit_production.pnl_pct and exit_production.realized_r
+      3. Reconstruct from the signal's persisted entry_price and stop_loss
+      4. Unknown -> None
+    """
+    prod_res = prod_res or {}
+
+    stored_risk_pct = prod_res.get("initial_risk_pct")
+    if stored_risk_pct is not None:
+        try:
+            risk_pct = float(stored_risk_pct)
+            if math.isfinite(risk_pct) and risk_pct > 0.0:
+                return risk_pct
+        except (TypeError, ValueError):
+            pass
+
+    prod_pnl = prod_res.get("pnl_pct")
+    prod_r = prod_res.get("realized_r")
+    if prod_pnl is not None and prod_r is not None:
+        try:
+            pnl_val = float(prod_pnl)
+            r_val = float(prod_r)
+            if math.isfinite(pnl_val) and math.isfinite(r_val) and abs(r_val) > 1e-8 and abs(pnl_val) > 1e-8:
+                risk_pct = abs(pnl_val / r_val)
+                if math.isfinite(risk_pct) and risk_pct > 0.0:
+                    return risk_pct
+        except (TypeError, ValueError):
+            pass
+
+    payload = signal.get("payload")
+    if isinstance(payload, str) and payload.startswith("{"):
+        try:
+            import json
+            payload = json.loads(payload)
+        except Exception:
+            payload = {}
+    elif not isinstance(payload, dict):
+        payload = {}
+
+    try:
+        entry_price = signal.get("entry_price") or payload.get("entry_price") or payload.get("price")
+        stop_loss = signal.get("stop_loss") or payload.get("stop_loss")
+
+        if entry_price is None or stop_loss is None:
+            return None
+
+        entry_price = float(entry_price)
+        stop_loss = float(stop_loss)
+
+        if (
+            not math.isfinite(entry_price)
+            or not math.isfinite(stop_loss)
+            or entry_price <= 0.0
+        ):
+            return None
+
+        risk_pct = abs(entry_price - stop_loss) / entry_price * 100.0
+
+        if not math.isfinite(risk_pct) or risk_pct <= 1e-8:
+            return None
+
+        return risk_pct
+
+    except (TypeError, ValueError):
+        return None
+
+
+
 
 
 
@@ -627,19 +716,37 @@ async def get_shadow_ledger_analytics(
     accepted_signals = [s for s in signals if s.get("final_decision") in ACCEPTED_DECISIONS]
     replayed_signals = [s for s in signals if s.get("replayed")]
     
-    # Resolve all signals via CanonicalOutcomeResolver (#218, #219, #220)
+    # Resolve every signal once through the authoritative canonical resolver.
     evidences = [CanonicalOutcomeResolver.resolve(s) for s in signals]
-    valid_evidences = [e for e in evidences if e.valid and e.realized_r is not None]
     
-    winning_valid = [e for e in valid_evidences if e.realized_r > 0.0]
+    # Keep signal + evidence paired so every downstream canonical metric uses
+    # exactly the same population.
+    canonical_pairs = [
+        (s, e)
+        for s, e in zip(signals, evidences)
+        if _is_canonical_replay_evidence(s, e)
+    ]
+    
+    valid_evidences = [e for _, e in canonical_pairs]
+    winning_valid = [e for e in valid_evidences if float(e.realized_r) > 0.0]
     valid_r_count = len(valid_evidences)
     
     win_rate = (len(winning_valid) / valid_r_count * 100.0) if valid_r_count > 0 else 0.0
     
-    # Calculate averages over valid canonical evidence population
-    avg_pnl = (sum(e.realized_r for e in valid_evidences) / valid_r_count) if valid_r_count > 0 else 0.0
-    avg_mfe = (sum(e.mfe for e in valid_evidences if e.mfe is not None) / valid_r_count) if valid_r_count > 0 else 0.0
-    avg_mae = (sum(e.mae for e in valid_evidences if e.mae is not None) / valid_r_count) if valid_r_count > 0 else 0.0
+    mfe_values = [
+        float(e.mfe)
+        for e in valid_evidences
+        if e.mfe is not None and math.isfinite(float(e.mfe))
+    ]
+    mae_values = [
+        float(e.mae)
+        for e in valid_evidences
+        if e.mae is not None and math.isfinite(float(e.mae))
+    ]
+
+    avg_pnl = (sum(float(e.realized_r) for e in valid_evidences) / valid_r_count) if valid_r_count > 0 else 0.0
+    avg_mfe = (sum(mfe_values) / len(mfe_values)) if mfe_values else 0.0
+    avg_mae = (sum(mae_values) / len(mae_values)) if mae_values else 0.0
     
     # Exit capture and avoided loss vs missed profit analytics
     winner_capture_ratios = []
@@ -651,24 +758,26 @@ async def get_shadow_ledger_analytics(
     missed_profit_count = 0
     missed_profit_r = 0.0
     
-    for s, e in zip(signals, evidences):
-        if not e.valid or e.realized_r is None:
-            continue
-            
-        try:
-            realized_r = float(e.realized_r)
-            if math.isnan(realized_r):
-                realized_r = 0.0
-        except (TypeError, ValueError):
-            realized_r = 0.0
+    for s, e in canonical_pairs:
+        realized_r = float(e.realized_r)
 
-        mfe_r = e.mfe or 0.0
+        mfe_r = 0.0
+        if e.mfe is not None:
+            try:
+                candidate_mfe = float(e.mfe)
+                if math.isfinite(candidate_mfe):
+                    mfe_r = candidate_mfe
+            except (TypeError, ValueError):
+                pass
+
         gave_back_r = max(0.0, mfe_r - realized_r)
         
         if realized_r > 0:
             wcr = realized_r / mfe_r if mfe_r > 0 else 0.0
             winner_capture_ratios.append(wcr)
+
         give_backs.append(gave_back_r)
+
         if realized_r <= 0:
             mfe_before_losses.append(mfe_r)
 
@@ -711,6 +820,9 @@ async def get_shadow_ledger_analytics(
         
     hybrid_stats = {
         "signals": 0,
+        "eligible_signals": len(canonical_pairs),
+        "comparable_signals": 0,
+        "coverage_pct": 0.0,
         "activated": 0,
         "saved_losses": 0,
         "saved_loss_r": 0.0,
@@ -737,6 +849,7 @@ async def get_shadow_ledger_analytics(
             if h_r is not None:
                 delta = float(h_r) - float(prod_r)
                 hybrid_stats["signals"] += 1
+                hybrid_stats["comparable_signals"] += 1
                 hybrid_stats["net_delta_r"] += delta
 
                 from app.core.shadow_ledger import _classify_hybrid_effect
@@ -783,23 +896,37 @@ async def get_shadow_ledger_analytics(
                 stat["total_r"] += (res.get("realized_r") or 0.0)
 
                 common_r = res.get("common_realized_r")
-                prod_risk_pct = prod_res.get("initial_risk_pct") if prod_res.get("initial_risk_pct") is not None else 1.50
+                prod_risk_pct = _production_risk_pct(s, prod_res)
 
-                if common_r is None and prod_risk_pct is not None and float(prod_risk_pct) > 0:
-                    common_r = pnl / float(prod_risk_pct)
+                if common_r is None and prod_risk_pct is not None:
+                    try:
+                        pnl_value = float(pnl)
+                        if math.isfinite(pnl_value):
+                            common_r = pnl_value / prod_risk_pct
+                    except (TypeError, ValueError):
+                        common_r = None
+
                 if common_r is not None:
-                    stat["total_common_r"] += float(common_r)
-                    stat["common_r_count"] += 1
-
+                    try:
+                        common_r_value = float(common_r)
+                        if math.isfinite(common_r_value):
+                            stat["total_common_r"] += common_r_value
+                            stat["common_r_count"] += 1
+                    except (TypeError, ValueError):
+                        pass
 
                 risk_pct = res.get("initial_risk_pct")
-                if risk_pct is None and pid == "exit_bracket_tight":
-                    risk_pct = 0.50
-                elif risk_pct is None and (pid == "exit_production" or pid == "exit_bracket_wide" or pid == "exit_atr_trailing"):
-                    risk_pct = 1.50
+                if risk_pct is None and pid == "exit_production":
+                    risk_pct = _production_risk_pct(s, prod_res)
+
                 if risk_pct is not None:
-                    stat["total_risk_pct"] += float(risk_pct)
-                    stat["risk_pct_count"] += 1
+                    try:
+                        risk_pct_value = float(risk_pct)
+                        if math.isfinite(risk_pct_value) and risk_pct_value > 0.0:
+                            stat["total_risk_pct"] += risk_pct_value
+                            stat["risk_pct_count"] += 1
+                    except (TypeError, ValueError):
+                        pass
 
 
                 stat["total_mfe_r"] += (res.get("mfe_r") or 0.0)
@@ -819,7 +946,8 @@ async def get_shadow_ledger_analytics(
         win_rate = (data["wins"] / cnt * 100.0) if cnt > 0 else 0.0
         avg_pnl_val = (data["total_pnl"] / cnt) if cnt > 0 else 0.0
         avg_r_val = (data["total_r"] / cnt) if cnt > 0 else 0.0
-        avg_common_r_val = (data["total_common_r"] / data["common_r_count"]) if data["common_r_count"] > 0 else avg_r_val
+        avg_common_r_val = (data["total_common_r"] / data["common_r_count"]) if data["common_r_count"] > 0 else None
+        common_r_coverage_pct = (data["common_r_count"] / cnt * 100.0) if cnt > 0 else 0.0
         avg_risk_pct_val = (data["total_risk_pct"] / data["risk_pct_count"]) if data["risk_pct_count"] > 0 else None
         avg_mfe_val = (data["total_mfe_r"] / cnt) if cnt > 0 else 0.0
         avg_mae_val = (data["total_mae_r"] / cnt) if cnt > 0 else 0.0
@@ -827,6 +955,8 @@ async def get_shadow_ledger_analytics(
         alt_exits_comparison.append({
             "policy_id": pid,
             "count": cnt,
+            "common_r_count": data["common_r_count"],
+            "common_r_coverage_pct": round(common_r_coverage_pct, 2),
             "win_rate_pct": round(win_rate, 2),
             "avg_simulated_return_pct": round(avg_pnl_val, 4),
             "avg_realized_r": round(avg_r_val, 4),
@@ -837,6 +967,9 @@ async def get_shadow_ledger_analytics(
             "avg_bars_held": round(avg_held_val, 1),
             "breakevens": data.get("breakevens", 0),
         })
+
+    if hybrid_stats["eligible_signals"] > 0:
+        hybrid_stats["coverage_pct"] = round(hybrid_stats["comparable_signals"] / hybrid_stats["eligible_signals"] * 100.0, 2)
 
     if hybrid_stats["signals"] > 0:
         hybrid_stats["avg_delta_r"] = round(hybrid_stats["net_delta_r"] / hybrid_stats["signals"], 4)
@@ -873,219 +1006,75 @@ async def get_shadow_ledger_analytics(
                 "total_mae": 0.0,
             }
         
-        stat = by_strategy[strat]
-        stat["total"] += 1
+        b = by_strategy[strat]
+        b["total"] += 1
         dec = s.get("final_decision")
         if dec == "rejected":
-            stat["rejected"] += 1
+            b["rejected"] += 1
         elif dec in ACCEPTED_DECISIONS:
-            stat["accepted"] += 1
-            
-        if s.get("replayed"):
-            stat["replayed"] += 1
-            pnl = s.get("simulated_pnl") or 0.0
-            stat["total_pnl"] += pnl
-            stat["total_mfe"] += s.get("mfe_pct") or 0.0
-            stat["total_mae"] += s.get("mae_pct") or 0.0
-            if pnl > 0:
-                stat["wins"] += 1
-            elif pnl < 0:
-                stat["losses"] += 1
+            b["accepted"] += 1
 
-    strategy_breakdown = {}
+        if s.get("replayed"):
+            b["replayed"] += 1
+            pnl = s.get("simulated_pnl")
+            if pnl is not None:
+                b["total_pnl"] += pnl
+                if pnl > 0:
+                    b["wins"] += 1
+                elif pnl < 0:
+                    b["losses"] += 1
+            b["total_mfe"] += (s.get("mfe_pct") or 0.0)
+            b["total_mae"] += (s.get("mae_pct") or 0.0)
+
+    by_strategy_formatted = {}
     for strat, data in by_strategy.items():
         rep = data["replayed"]
-        strategy_breakdown[strat] = {
+        by_strategy_formatted[strat] = {
             "total_signals": data["total"],
             "rejected_signals": data["rejected"],
             "accepted_signals": data["accepted"],
             "replayed_signals": rep,
-            "win_rate": round(data["wins"] / rep * 100.0, 2) if rep > 0 else 0.0,
-            "avg_simulated_return": round(data["total_pnl"] / rep, 4) if rep > 0 else 0.0,
-            "avg_mfe": round(data["total_mfe"] / rep, 4) if rep > 0 else 0.0,
-            "avg_mae": round(data["total_mae"] / rep, 4) if rep > 0 else 0.0,
+            "win_rate": round((data["wins"] / rep * 100.0), 2) if rep > 0 else 0.0,
+            "avg_simulated_return": round((data["total_pnl"] / rep), 4) if rep > 0 else 0.0,
+            "avg_mfe": round((data["total_mfe"] / rep), 4) if rep > 0 else 0.0,
+            "avg_mae": round((data["total_mae"] / rep), 4) if rep > 0 else 0.0,
         }
 
     by_rejection = {}
-    for s in signals:
-        if s.get("final_decision") != "rejected":
-            continue
-        stage = s.get("rejection_stage") or "unknown"
+    for s in rejected_signals:
+        stage = s.get("rejection_reason") or "unknown"
         if stage not in by_rejection:
             by_rejection[stage] = {
                 "count": 0,
                 "replayed": 0,
                 "wins": 0,
-                "losses": 0,
                 "total_pnl": 0.0,
                 "total_mfe": 0.0,
                 "total_mae": 0.0,
             }
-        
-        stat = by_rejection[stage]
-        stat["count"] += 1
+        r = by_rejection[stage]
+        r["count"] += 1
         if s.get("replayed"):
-            stat["replayed"] += 1
-            pnl = s.get("simulated_pnl") or 0.0
-            stat["total_pnl"] += pnl
-            stat["total_mfe"] += s.get("mfe_pct") or 0.0
-            stat["total_mae"] += s.get("mae_pct") or 0.0
-            if pnl > 0:
-                stat["wins"] += 1
-            elif pnl < 0:
-                stat["losses"] += 1
+            r["replayed"] += 1
+            pnl = s.get("simulated_pnl")
+            if pnl is not None:
+                r["total_pnl"] += pnl
+                if pnl > 0:
+                    r["wins"] += 1
+            r["total_mfe"] += (s.get("mfe_pct") or 0.0)
+            r["total_mae"] += (s.get("mae_pct") or 0.0)
 
-    rejection_breakdown = {}
+    by_rejection_formatted = {}
     for stage, data in by_rejection.items():
         rep = data["replayed"]
-        rejection_breakdown[stage] = {
+        by_rejection_formatted[stage] = {
             "count": data["count"],
             "replayed_count": rep,
-            "win_rate": round(data["wins"] / rep * 100.0, 2) if rep > 0 else 0.0,
-            "avg_simulated_return_if_traded": round(data["total_pnl"] / rep, 4) if rep > 0 else 0.0,
-            "avg_mfe": round(data["total_mfe"] / rep, 4) if rep > 0 else 0.0,
-            "avg_mae": round(data["total_mae"] / rep, 4) if rep > 0 else 0.0,
+            "win_rate": round((data["wins"] / rep * 100.0), 2) if rep > 0 else 0.0,
+            "avg_simulated_return_if_traded": round((data["total_pnl"] / rep), 4) if rep > 0 else 0.0,
+            "avg_mfe": round((data["total_mfe"] / rep), 4) if rep > 0 else 0.0,
+            "avg_mae": round((data["total_mae"] / rep), 4) if rep > 0 else 0.0,
         }
-
-    def _extract_realized_r(s: dict) -> float | None:
-        outcomes = s.get("outcomes") or {}
-        for h in ["15m", "30m", "60m", "close"]:
-            if h in outcomes:
-                rv = outcomes[h].get("realized_r")
-                if rv is not None:
-                    return float(rv)
-        pnl = s.get("simulated_pnl")
-        return float(pnl) / 100.0 if pnl is not None else None
-
-    by_market_regime: dict[str, dict] = {}
-    for s in signals:
-        regime_name = s.get("market_regime") or "NORMAL"
-        src = s.get("regime_source") or "UNKNOWN"
-        if regime_name not in by_market_regime:
-            by_market_regime[regime_name] = {
-                "total": 0, "rejected": 0, "accepted": 0,
-                "replayed": 0, "wins": 0, "losses": 0,
-                "total_pnl": 0.0, "total_mfe": 0.0, "total_mae": 0.0,
-                "total_r": 0.0, "winner_r": 0.0, "loser_r": 0.0,
-                "regime_source_counts": {},
-            }
-
-        stat = by_market_regime[regime_name]
-        stat["total"] += 1
-        stat["regime_source_counts"][src] = stat["regime_source_counts"].get(src, 0) + 1
-        dec = s.get("final_decision")
-        if dec == "rejected":
-            stat["rejected"] += 1
-        elif dec in ACCEPTED_DECISIONS:
-            stat["accepted"] += 1
-
-        if s.get("replayed"):
-            pnl = s.get("simulated_pnl") or 0.0
-            r_val = _extract_realized_r(s)
-            stat["replayed"] += 1
-            stat["total_pnl"] += pnl
-            stat["total_mfe"] += s.get("mfe_pct") or 0.0
-            stat["total_mae"] += s.get("mae_pct") or 0.0
-            if r_val is not None:
-                stat["total_r"] += r_val
-                if r_val > 0:
-                    stat["wins"] += 1
-                    stat["winner_r"] += r_val
-                elif r_val < 0:
-                    stat["losses"] += 1
-                    stat["loser_r"] += r_val
-            else:
-                if pnl > 0:
-                    stat["wins"] += 1
-                elif pnl < 0:
-                    stat["losses"] += 1
-
-    market_regime_breakdown: dict = {}
-    for regime_name, data in by_market_regime.items():
-        rep = data["replayed"]
-        winner_r = data["winner_r"]
-        loser_r = abs(data["loser_r"])
-        profit_factor = round(winner_r / loser_r, 4) if loser_r > 0 else None
-        src_counts = data["regime_source_counts"]
-        dominant = max(src_counts, key=src_counts.get) if src_counts else "UNKNOWN"
-        regime_source_label = dominant if len(src_counts) <= 1 else "MIXED"
-        market_regime_breakdown[regime_name] = {
-            "total_signals": data["total"],
-            "rejected_signals": data["rejected"],
-            "accepted_signals": data["accepted"],
-            "replayed_signals": rep,
-            "win_rate": round(data["wins"] / rep * 100.0, 2) if rep > 0 else None,
-            "avg_simulated_return": round(data["total_pnl"] / rep, 4) if rep > 0 else None,
-            "avg_mfe": round(data["total_mfe"] / rep, 4) if rep > 0 else None,
-            "avg_mae": round(data["total_mae"] / rep, 4) if rep > 0 else None,
-            "avg_r": round(data["total_r"] / rep, 4) if rep > 0 else None,
-            "total_r": round(data["total_r"], 4),
-            "avg_winner_r": round(winner_r / data["wins"], 4) if data["wins"] > 0 else None,
-            "avg_loser_r": round(data["loser_r"] / data["losses"], 4) if data["losses"] > 0 else None,
-            "profit_factor": profit_factor,
-            "regime_source": regime_source_label,
-            "regime_source_counts": src_counts,
-        }
-
-    _regime_gate_raw: dict[tuple, dict] = {}
-    for s in signals:
-        if s.get("final_decision") != "rejected":
-            continue
-
-        key = (
-            s.get("market_regime") or "NORMAL",
-            s.get("rejection_stage") or "other",
-            s.get("strategy") or "unknown",
-            s.get("direction") or "unknown",
-        )
-        if key not in _regime_gate_raw:
-            _regime_gate_raw[key] = {
-                "sample_count": 0, "replayed_count": 0,
-                "wins": 0, "losses": 0,
-                "total_r": 0.0, "winner_r": 0.0, "loser_r": 0.0,
-                "total_mfe": 0.0, "total_mae": 0.0,
-            }
-        cell = _regime_gate_raw[key]
-        cell["sample_count"] += 1
-
-        if s.get("replayed"):
-            r_val = _extract_realized_r(s)
-            cell["replayed_count"] += 1
-            cell["total_mfe"] += s.get("mfe_pct") or 0.0
-            cell["total_mae"] += s.get("mae_pct") or 0.0
-            if r_val is not None:
-                cell["total_r"] += r_val
-                if r_val > 0:
-                    cell["wins"] += 1
-                    cell["winner_r"] += r_val
-                elif r_val < 0:
-                    cell["losses"] += 1
-                    cell["loser_r"] += r_val
-
-    by_regime_gate: list[dict] = []
-    for (regime, gate, strategy, direction), cell in _regime_gate_raw.items():
-        rc = cell["replayed_count"]
-        winner_r = cell["winner_r"]
-        loser_r_abs = abs(cell["loser_r"])
-        pf = round(winner_r / loser_r_abs, 4) if loser_r_abs > 0 else None
-        by_regime_gate.append({
-            "regime": regime,
-            "gate": gate,
-            "strategy": strategy,
-            "direction": direction,
-            "sample_count": cell["sample_count"],
-            "replayed_count": rc,
-            "sufficient_sample": rc >= min_sample,
-            "win_rate": round(cell["wins"] / rc * 100.0, 2) if rc > 0 else None,
-            "avg_r": round(cell["total_r"] / rc, 4) if rc > 0 else None,
-            "total_r": round(cell["total_r"], 4) if rc > 0 else None,
-            "avg_winner_r": round(winner_r / cell["wins"], 4) if cell["wins"] > 0 else None,
-            "avg_loser_r": round(cell["loser_r"] / cell["losses"], 4) if cell["losses"] > 0 else None,
-            "profit_factor": pf,
-            "avg_mfe": round(cell["total_mfe"] / rc, 4) if rc > 0 else None,
-            "avg_mae": round(cell["total_mae"] / rc, 4) if rc > 0 else None,
-        })
-    by_regime_gate.sort(key=lambda x: (x["total_r"] is None, -(x["total_r"] or 0.0)))
 
     total_replayed = len(replayed_signals)
     from app.core.shadow_ledger import get_persistence_failure_count
@@ -1108,26 +1097,17 @@ async def get_shadow_ledger_analytics(
             "avoided_loss_r": round(avoided_loss_r, 4),
             "missed_profit_count": missed_profit_count,
             "missed_profit_r": round(missed_profit_r, 4),
-            "persistence_failures": get_persistence_failure_count(),
         },
         "evidence_cohort": {
-            "total_signals": total_signals,
+            "total_signals": total_available,
             "replayed_signals": total_replayed,
             "canonical_r_signals": valid_r_count,
         },
-        "by_strategy": strategy_breakdown,
-        "by_rejection_stage": rejection_breakdown,
-        "by_market_regime": market_regime_breakdown,
-        "by_regime_gate": by_regime_gate,
+        "by_strategy": by_strategy_formatted,
+        "by_rejection_stage": by_rejection_formatted,
         "alternative_exits_comparison": alt_exits_comparison,
         "hybrid_stats": hybrid_stats,
         "hybrid_cohorts": hybrid_cohorts,
-        "population_meta": {
-            "limit": limit,
-            "total_returned": total_signals,
-            "truncated": truncated,
-            "min_sample_threshold": min_sample,
-        },
     }
 
 
@@ -1169,11 +1149,6 @@ async def get_shadow_ledger_gate_alpha(
         if s.get("replayed"):
             replayed_count += 1
 
-        # Check signal exclusion (failed replays or deferred incomplete data)
-        if s.get("replay_failed") or s.get("replay_state") == "deferred_data_incomplete":
-            continue
-
-
         gate_evidence = s.get("gate_evidence_json") or s.get("gate_evidence") or {}
         if isinstance(gate_evidence, str):
             try:
@@ -1193,28 +1168,14 @@ async def get_shadow_ledger_gate_alpha(
         if not vetoes:
             continue
 
-        # Extract realized_r with broad fallback across outcomes, alt_exits, top-level, and CanonicalOutcomeResolver
-        from app.strategies.memory import _canonical_realized_r
-        outcomes = s.get("outcomes") or {}
-        alt_exits = s.get("alternative_exits") or {}
-        prod_res = alt_exits.get("exit_production") or {}
+        outcome = CanonicalOutcomeResolver.resolve(s)
+        if not _is_canonical_replay_evidence(s, outcome):
+            continue
 
-        realized_r = _canonical_realized_r(s.get("strategy"), outcomes) if outcomes else None
-        if realized_r is None:
-            realized_r = prod_res.get("common_realized_r") if prod_res.get("common_realized_r") is not None else prod_res.get("realized_r")
-        if realized_r is None:
-            realized_r = s.get("realized_r")
-        if realized_r is None and "simulated_pnl" in s and s["simulated_pnl"] is not None:
-            realized_r = float(s["simulated_pnl"])
-        if realized_r is None:
-            outcome = CanonicalOutcomeResolver.resolve(s)
-            realized_r = outcome.realized_r
+        r_out = _outcome_value(outcome, "realized_r")
+        realized_r_val = float(r_out) if r_out is not None else 0.0
+        canonical_count += 1
 
-        has_r_outcome = (realized_r is not None)
-        realized_r_val = float(realized_r) if has_r_outcome else 0.0
-
-        if has_r_outcome:
-            canonical_count += 1
 
         veto_count = len(vetoes)
         first_decisive = gate_evidence.get("first_decisive_gate") or s.get("first_decisive_gate")
@@ -1242,41 +1203,38 @@ async def get_shadow_ledger_gate_alpha(
             is_unique = (veto_count == 1 and g in vetoes) or (unique_veto.get(g, 0.0) != 0.0)
             if is_unique:
                 stats[g]["unique_vetoes"] += 1
-                if has_r_outcome:
-                    stats[g]["unique_veto_alpha"] += unique_veto.get(g, 0.0)
-                    if realized_r_val < 0:
-                        stats[g]["avoided_losses"] += 1
-                    elif realized_r_val > 0:
-                        stats[g]["missed_profits"] += 1
+                stats[g]["unique_veto_alpha"] += unique_veto.get(g, 0.0)
+                if realized_r_val < 0:
+                    stats[g]["avoided_losses"] += 1
+                elif realized_r_val > 0:
+                    stats[g]["missed_profits"] += 1
 
-            if has_r_outcome:
-                if g in shared_veto:
-                    stats[g]["shared_veto_alpha"] += shared_veto.get(g, 0.0)
-                if g in marginal:
-                    stats[g]["marginal_alpha"] += marginal.get(g, 0.0)
+            if g in shared_veto:
+                stats[g]["shared_veto_alpha"] += shared_veto.get(g, 0.0)
+            if g in marginal:
+                stats[g]["marginal_alpha"] += marginal.get(g, 0.0)
 
         # Gate combination attribution tracking
-        if has_r_outcome:
-            combo_key = " + ".join(sorted(set(vetoes)))
-            combo = combination_stats.setdefault(
-                combo_key,
-                {
-                    "signals": 0,
-                    "avoided_losses": 0,
-                    "avoided_loss_r": 0.0,
-                    "missed_winners": 0,
-                    "missed_winner_r": 0.0,
-                    "net_alpha_r": 0.0,
-                },
-            )
-            combo["signals"] += 1
-            if realized_r_val < 0:
-                saved_r = -realized_r_val
-                combo["avoided_losses"] += 1
-                combo["avoided_loss_r"] += saved_r
-            elif realized_r_val > 0:
-                combo["missed_winners"] += 1
-                combo["missed_winner_r"] += realized_r_val
+        combo_key = " + ".join(sorted(set(vetoes)))
+        combo = combination_stats.setdefault(
+            combo_key,
+            {
+                "signals": 0,
+                "avoided_losses": 0,
+                "avoided_loss_r": 0.0,
+                "missed_winners": 0,
+                "missed_winner_r": 0.0,
+                "net_alpha_r": 0.0,
+            },
+        )
+        combo["signals"] += 1
+        if realized_r_val < 0:
+            saved_r = -realized_r_val
+            combo["avoided_losses"] += 1
+            combo["avoided_loss_r"] += saved_r
+        elif realized_r_val > 0:
+            combo["missed_winners"] += 1
+            combo["missed_winner_r"] += realized_r_val
 
 
     for g in gates:
@@ -1284,14 +1242,21 @@ async def get_shadow_ledger_gate_alpha(
         stats[g]["shared_veto_alpha"] = round(stats[g]["shared_veto_alpha"], 4)
         stats[g]["marginal_alpha"] = round(stats[g]["marginal_alpha"], 4)
 
-    for combo in combination_stats.values():
-        combo["net_alpha_r"] = combo["avoided_loss_r"] - combo["missed_winner_r"]
-        for key in ("avoided_loss_r", "missed_winner_r", "net_alpha_r"):
-            combo[key] = round(combo[key], 4)
+    formatted_combos = {}
+    for combo_key, c_data in combination_stats.items():
+        net = c_data["avoided_loss_r"] - c_data["missed_winner_r"]
+        formatted_combos[combo_key] = {
+            "signals": c_data["signals"],
+            "avoided_losses": c_data["avoided_losses"],
+            "avoided_loss_r": round(c_data["avoided_loss_r"], 4),
+            "missed_winners": c_data["missed_winners"],
+            "missed_winner_r": round(c_data["missed_winner_r"], 4),
+            "net_alpha_r": round(net, 4),
+        }
 
     return {
         "gates": stats,
-        "gate_combinations": combination_stats,
+        "gate_combinations": formatted_combos,
         "evidence_cohort": {
             "total_signals": total_available,
             "replayed_signals": replayed_count,

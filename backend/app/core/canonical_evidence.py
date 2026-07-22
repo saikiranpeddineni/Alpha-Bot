@@ -114,17 +114,27 @@ class CanonicalOutcomeResolver:
         replayed = bool(row_dict.get("replayed", False) or payload.get("replayed", False))
         replay_failed = bool(row_dict.get("replay_failed", False))
 
-        # Calculate Canonical R (#220)
-        realized_r = cls.compute_canonical_r(pnl=pnl, entry=entry, stop=stop, mae_pct=mae)
-        valid_r = (realized_r is not None)
-        
-        r_val = row_dict.get("realized_r")
+        r_val = row_dict.get("realized_r") or payload.get("realized_r")
+        if r_val is None:
+            alt_exits = row_dict.get("alternative_exits") or payload.get("alternative_exits")
+            if isinstance(alt_exits, str) and alt_exits.startswith("{"):
+                try:
+                    alt_exits = json.loads(alt_exits)
+                except Exception:
+                    alt_exits = {}
+            if isinstance(alt_exits, dict) and "exit_production" in alt_exits:
+                r_val = alt_exits["exit_production"].get("realized_r")
+
         if r_val is not None:
             try:
                 realized_r = float(r_val)
-                valid_r = True
+                valid_r = math.isfinite(realized_r)
             except (ValueError, TypeError):
                 pass
+        else:
+            realized_r = cls.compute_canonical_r(pnl=pnl, entry=entry, stop=stop, mae_pct=mae)
+            valid_r = (realized_r is not None)
+
 
         invalid_reason = None
         if not replayed:

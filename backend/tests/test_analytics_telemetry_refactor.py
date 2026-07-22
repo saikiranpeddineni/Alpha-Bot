@@ -147,3 +147,57 @@ def test_hybrid_delta_reconciliation():
     assert category_sum == pytest.approx(net_delta_r)
     assert sum(deltas) == pytest.approx(net_delta_r)
 
+
+def test_production_risk_pct_reconstructs_from_signal():
+    from app.api.routes import _production_risk_pct
+    signal = {"entry_price": 100.0, "stop_loss": 98.5}
+    assert _production_risk_pct(signal, {}) == pytest.approx(1.5)
+
+
+def test_production_risk_pct_prefers_persisted_value():
+    from app.api.routes import _production_risk_pct
+    signal = {"entry_price": 100.0, "stop_loss": 98.5}
+    prod_res = {"initial_risk_pct": 0.75}
+    assert _production_risk_pct(signal, prod_res) == pytest.approx(0.75)
+
+
+def test_production_risk_pct_does_not_invent_legacy_risk():
+    from app.api.routes import _production_risk_pct
+    signal = {"entry_price": 100.0, "stop_loss": None}
+    assert _production_risk_pct(signal, {}) is None
+
+
+def test_production_risk_pct_rejects_zero_risk():
+    from app.api.routes import _production_risk_pct
+    signal = {"entry_price": 100.0, "stop_loss": 100.0}
+    assert _production_risk_pct(signal, {}) is None
+
+
+def test_canonical_evidence_excludes_failed_replay():
+    from app.api.routes import _is_canonical_replay_evidence
+    signal = {"replay_failed": True}
+    outcome = {"valid": True, "realized_r": 1.25}
+    assert _is_canonical_replay_evidence(signal, outcome) is False
+
+
+def test_canonical_evidence_excludes_deferred_replay():
+    from app.api.routes import _is_canonical_replay_evidence
+    signal = {"replay_state": "deferred_data_incomplete"}
+    outcome = {"valid": True, "realized_r": 1.25}
+    assert _is_canonical_replay_evidence(signal, outcome) is False
+
+
+def test_canonical_evidence_excludes_non_finite_r():
+    from app.api.routes import _is_canonical_replay_evidence
+    signal = {}
+    outcome = {"valid": True, "realized_r": float("nan")}
+    assert _is_canonical_replay_evidence(signal, outcome) is False
+
+
+def test_canonical_evidence_accepts_zero_r():
+    from app.api.routes import _is_canonical_replay_evidence
+    signal = {}
+    outcome = {"valid": True, "realized_r": 0.0}
+    assert _is_canonical_replay_evidence(signal, outcome) is True
+
+
