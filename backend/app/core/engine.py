@@ -65,6 +65,7 @@ ET = ZoneInfo("America/New_York")
 MAX_CONSECUTIVE_TICK_ERRORS = 30
 EQUITY_PERSIST_EVERY_TICKS = 12
 METRICS_BROADCAST_EVERY_TICKS = 6
+_DATA_GAP_THRESHOLD_SECS = 120.0
 
 # DB key template for durable kill-switch state.  Namespaced by mode so
 # paper and live halt states are fully independent.
