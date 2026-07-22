@@ -309,7 +309,24 @@ export interface GateAlphaStats {
   missed_profits: number;
 }
 
-export type GateAlphaResponse = Record<string, GateAlphaStats>;
+export interface GateCombinationStats {
+  signals: number;
+  avoided_losses: number;
+  avoided_loss_r: number;
+  missed_winners: number;
+  missed_winner_r: number;
+  net_alpha_r: number;
+}
+
+export interface GateAlphaResponse {
+  gates: Record<string, GateAlphaStats>;
+  gate_combinations?: Record<string, GateCombinationStats>;
+  evidence_cohort?: {
+    total_signals: number;
+    replayed_signals: number;
+    canonical_r_signals: number;
+  };
+}
 
 export interface AltExitStats {
   policy_id: string;
@@ -317,9 +334,25 @@ export interface AltExitStats {
   win_rate_pct: number;
   avg_simulated_return_pct: number;
   avg_realized_r: number;
+  avg_common_realized_r?: number | null;
+  avg_initial_risk_pct?: number | null;
   avg_mfe_r: number;
   avg_mae_r: number;
   avg_bars_held: number;
+}
+
+export interface HybridResearchStats {
+  signals: number;
+  activated: number;
+  saved_losses: number;
+  saved_loss_r: number;
+  improved_winners: number;
+  improved_winner_r: number;
+  reduced_winners: number;
+  reduced_winner_r: number;
+  no_effect: number;
+  net_delta_r: number;
+  avg_delta_r: number;
 }
 
 export interface ShadowAnalyticsResponse {
@@ -330,7 +363,8 @@ export interface ShadowAnalyticsResponse {
     replayed_signals: number;
     win_rate_pct: number;
     avg_simulated_return_pct: number;
-    avg_mfe_pct: number;
+    avg_mfe_r?: number | null;
+    avg_mfe_pct?: number | null;
     avg_mae_pct: number;
     avg_winner_capture_ratio: number;
     avg_give_back_r: number;
@@ -339,6 +373,11 @@ export interface ShadowAnalyticsResponse {
     avoided_loss_r: number;
     missed_profit_count: number;
     missed_profit_r: number;
+  };
+  evidence_cohort?: {
+    total_signals: number;
+    replayed_signals: number;
+    canonical_r_signals: number;
   };
   by_strategy: Record<string, {
     total_signals: number;
@@ -359,4 +398,15 @@ export interface ShadowAnalyticsResponse {
     avg_mae: number;
   }>;
   alternative_exits_comparison: AltExitStats[];
+  hybrid_stats?: HybridResearchStats;
+  hybrid_cohorts?: Array<{
+    strategy: string;
+    direction: string;
+    market_regime: string;
+    signals: number;
+    production_r: number;
+    hybrid_r: number;
+    delta_r: number;
+  }>;
 }
+

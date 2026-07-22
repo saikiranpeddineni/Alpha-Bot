@@ -567,7 +567,31 @@ async def run_scanner(request: Request) -> dict:
 
 # Fix C3 (Issue #192): Canonical accepted-decision values used consistently across all endpoints.
 # Both "accepted" and "pipeline_approved" are treated as accepted states to handle legacy records.
-ACCEPTED_DECISIONS: frozenset[str] = frozenset({"accepted", "pipeline_approved"})
+ACCEPTED_DECISIONS = {"pipeline_approved", "accepted", "approved"}
+
+
+def _outcome_value(outcome, key: str, default=None):
+    if outcome is None:
+        return default
+    if isinstance(outcome, dict):
+        return outcome.get(key, default)
+    return getattr(outcome, key, default)
+
+
+def _is_canonical_replay_evidence(signal: dict, outcome) -> bool:
+    """Return True only for usable completed replay evidence."""
+    if signal.get("replay_failed", False):
+        return False
+    if signal.get("replay_state") == "deferred_data_incomplete":
+        return False
+    realized_r = _outcome_value(outcome, "realized_r")
+    if realized_r is None:
+        return False
+    try:
+        return math.isfinite(float(realized_r))
+    except (TypeError, ValueError):
+        return False
+
 
 
 import json
@@ -674,6 +698,10 @@ async def get_shadow_ledger_analytics(
             "count": 0,
             "total_pnl": 0.0,
             "total_r": 0.0,
+            "total_common_r": 0.0,
+            "common_r_count": 0,
+            "total_risk_pct": 0.0,
+            "risk_pct_count": 0,
             "wins": 0,
             "losses": 0,
             "total_mfe_r": 0.0,
@@ -681,9 +709,70 @@ async def get_shadow_ledger_analytics(
             "bars_held": 0,
         }
         
-    # Fix C7 (Issue #198): Alt-exit comparison uses same replayed_signals population.
+    hybrid_stats = {
+        "signals": 0,
+        "activated": 0,
+        "saved_losses": 0,
+        "saved_loss_r": 0.0,
+        "improved_winners": 0,
+        "improved_winner_r": 0.0,
+        "reduced_winners": 0,
+        "reduced_winner_r": 0.0,
+        "worsened_losses": 0,
+        "worsened_loss_r": 0.0,
+        "no_effect": 0,
+        "net_delta_r": 0.0,
+        "avg_delta_r": 0.0,
+    }
+    hybrid_cohorts_raw: dict[tuple, dict] = {}
+
     for s in replayed_signals:
         alt_data = s.get("alternative_exits") or {}
+        prod_res = alt_data.get("exit_production") or {}
+        prod_r = prod_res.get("common_realized_r") if prod_res.get("common_realized_r") is not None else prod_res.get("realized_r")
+
+        hybrid_res = alt_data.get("exit_hybrid_breakeven_atr")
+        if hybrid_res and prod_r is not None:
+            h_r = hybrid_res.get("common_realized_r") if hybrid_res.get("common_realized_r") is not None else hybrid_res.get("realized_r")
+            if h_r is not None:
+                delta = float(h_r) - float(prod_r)
+                hybrid_stats["signals"] += 1
+                hybrid_stats["net_delta_r"] += delta
+
+                from app.core.shadow_ledger import _classify_hybrid_effect
+                effect = hybrid_res.get("effect") or _classify_hybrid_effect(float(prod_r), float(h_r))
+
+                if effect == "HYBRID_SAVED_LOSS":
+                    hybrid_stats["saved_losses"] += 1
+                    hybrid_stats["saved_loss_r"] += delta
+                    hybrid_stats["activated"] += 1
+                elif effect == "HYBRID_IMPROVED_WINNER":
+                    hybrid_stats["improved_winners"] += 1
+                    hybrid_stats["improved_winner_r"] += delta
+                    hybrid_stats["activated"] += 1
+                elif effect == "HYBRID_REDUCED_WINNER":
+                    hybrid_stats["reduced_winners"] += 1
+                    hybrid_stats["reduced_winner_r"] += -delta
+                    hybrid_stats["activated"] += 1
+                elif effect == "HYBRID_WORSENED_LOSS":
+                    hybrid_stats["worsened_losses"] += 1
+                    hybrid_stats["worsened_loss_r"] += -delta
+                    hybrid_stats["activated"] += 1
+                elif effect == "HYBRID_NO_EFFECT":
+                    hybrid_stats["no_effect"] += 1
+
+
+                ckey = (
+                    s.get("strategy", "unknown"),
+                    s.get("direction", "unknown"),
+                    s.get("market_regime", "unknown"),
+                )
+                c_row = hybrid_cohorts_raw.setdefault(ckey, {"signals": 0, "production_r": 0.0, "hybrid_r": 0.0, "delta_r": 0.0})
+                c_row["signals"] += 1
+                c_row["production_r"] += float(prod_r)
+                c_row["hybrid_r"] += float(h_r)
+                c_row["delta_r"] += delta
+
         for pid in policy_ids:
             if pid in alt_data:
                 res = alt_data[pid]
@@ -692,10 +781,20 @@ async def get_shadow_ledger_analytics(
                 pnl = res.get("pnl_pct") or 0.0
                 stat["total_pnl"] += pnl
                 stat["total_r"] += (res.get("realized_r") or 0.0)
+
+                common_r = res.get("common_realized_r")
+                if common_r is not None:
+                    stat["total_common_r"] += float(common_r)
+                    stat["common_r_count"] += 1
+
+                risk_pct = res.get("initial_risk_pct")
+                if risk_pct is not None:
+                    stat["total_risk_pct"] += float(risk_pct)
+                    stat["risk_pct_count"] += 1
+
                 stat["total_mfe_r"] += (res.get("mfe_r") or 0.0)
                 stat["total_mae_r"] += (res.get("mae_r") or 0.0)
                 stat["bars_held"] += res.get("bars_held") or 0
-                # Fix C1 (Issues #178/#193): Breakeven outcomes get their own bucket.
                 if pnl > 0:
                     stat["wins"] += 1
                 elif pnl < 0:
@@ -710,6 +809,8 @@ async def get_shadow_ledger_analytics(
         win_rate = (data["wins"] / cnt * 100.0) if cnt > 0 else 0.0
         avg_pnl_val = (data["total_pnl"] / cnt) if cnt > 0 else 0.0
         avg_r_val = (data["total_r"] / cnt) if cnt > 0 else 0.0
+        avg_common_r_val = (data["total_common_r"] / data["common_r_count"]) if data["common_r_count"] > 0 else avg_r_val
+        avg_risk_pct_val = (data["total_risk_pct"] / data["risk_pct_count"]) if data["risk_pct_count"] > 0 else None
         avg_mfe_val = (data["total_mfe_r"] / cnt) if cnt > 0 else 0.0
         avg_mae_val = (data["total_mae_r"] / cnt) if cnt > 0 else 0.0
         avg_held_val = (data["bars_held"] / cnt) if cnt > 0 else 0.0
@@ -719,11 +820,32 @@ async def get_shadow_ledger_analytics(
             "win_rate_pct": round(win_rate, 2),
             "avg_simulated_return_pct": round(avg_pnl_val, 4),
             "avg_realized_r": round(avg_r_val, 4),
+            "avg_common_realized_r": round(avg_common_r_val, 4) if avg_common_r_val is not None else None,
+            "avg_initial_risk_pct": round(avg_risk_pct_val, 4) if avg_risk_pct_val is not None else None,
             "avg_mfe_r": round(avg_mfe_val, 4),
             "avg_mae_r": round(avg_mae_val, 4),
             "avg_bars_held": round(avg_held_val, 1),
             "breakevens": data.get("breakevens", 0),
         })
+
+    if hybrid_stats["signals"] > 0:
+        hybrid_stats["avg_delta_r"] = round(hybrid_stats["net_delta_r"] / hybrid_stats["signals"], 4)
+        for k in ("saved_loss_r", "improved_winner_r", "reduced_winner_r", "worsened_loss_r", "net_delta_r"):
+            hybrid_stats[k] = round(hybrid_stats[k], 4)
+
+
+    hybrid_cohorts = []
+    for (strat, dirn, reg), c_data in hybrid_cohorts_raw.items():
+        if c_data["signals"] >= 10:
+            hybrid_cohorts.append({
+                "strategy": strat,
+                "direction": dirn,
+                "market_regime": reg,
+                "signals": c_data["signals"],
+                "production_r": round(c_data["production_r"], 4),
+                "hybrid_r": round(c_data["hybrid_r"], 4),
+                "delta_r": round(c_data["delta_r"], 4),
+            })
 
     by_strategy = {}
     for s in signals:
@@ -746,7 +868,6 @@ async def get_shadow_ledger_analytics(
         dec = s.get("final_decision")
         if dec == "rejected":
             stat["rejected"] += 1
-        # Fix C3 (Issue #192): Use canonical ACCEPTED_DECISIONS for strategy breakdown.
         elif dec in ACCEPTED_DECISIONS:
             stat["accepted"] += 1
             
@@ -760,7 +881,6 @@ async def get_shadow_ledger_analytics(
                 stat["wins"] += 1
             elif pnl < 0:
                 stat["losses"] += 1
-            # breakeven counts not tracked per-strategy to keep breakdown lean
 
     strategy_breakdown = {}
     for strat, data in by_strategy.items():
@@ -818,7 +938,6 @@ async def get_shadow_ledger_analytics(
         }
 
     def _extract_realized_r(s: dict) -> float | None:
-        """Extract canonical realized_r from outcomes, falling back to simulated_pnl approximation."""
         outcomes = s.get("outcomes") or {}
         for h in ["15m", "30m", "60m", "close"]:
             if h in outcomes:
@@ -877,9 +996,7 @@ async def get_shadow_ledger_analytics(
         winner_r = data["winner_r"]
         loser_r = abs(data["loser_r"])
         profit_factor = round(winner_r / loser_r, 4) if loser_r > 0 else None
-        # Determine dominant source label
         src_counts = data["regime_source_counts"]
-        total_src = sum(src_counts.values())
         dominant = max(src_counts, key=src_counts.get) if src_counts else "UNKNOWN"
         regime_source_label = dominant if len(src_counts) <= 1 else "MIXED"
         market_regime_breakdown[regime_name] = {
@@ -900,13 +1017,10 @@ async def get_shadow_ledger_analytics(
             "regime_source_counts": src_counts,
         }
 
-    # ── Phase H: by_regime_gate cross-tab ──────────────────────────────────
-    # Cell key: (regime, gate, strategy, direction)
-    # sufficient_sample is based on replayed_count (outcome-bearing), not sample_count
     _regime_gate_raw: dict[tuple, dict] = {}
     for s in signals:
         if s.get("final_decision") != "rejected":
-            continue  # only rejected signals have a gate to attribute
+            continue
 
         key = (
             s.get("market_regime") or "NORMAL",
@@ -961,7 +1075,6 @@ async def get_shadow_ledger_analytics(
             "avg_mfe": round(cell["total_mfe"] / rc, 4) if rc > 0 else None,
             "avg_mae": round(cell["total_mae"] / rc, 4) if rc > 0 else None,
         })
-    # Sort by total_r descending (nulls last) so top missed opportunities surface first
     by_regime_gate.sort(key=lambda x: (x["total_r"] is None, -(x["total_r"] or 0.0)))
 
     total_replayed = len(replayed_signals)
@@ -976,7 +1089,7 @@ async def get_shadow_ledger_analytics(
             "valid_r_count": valid_r_count,
             "win_rate_pct": round(win_rate, 2),
             "avg_simulated_return_pct": round(avg_pnl, 4),
-            "avg_mfe_pct": round(avg_mfe, 4),
+            "avg_mfe_r": round(avg_mfe, 4),
             "avg_mae_pct": round(avg_mae, 4),
             "avg_winner_capture_ratio": round(avg_winner_capture, 4),
             "avg_give_back_r": round(avg_give_back, 4),
@@ -987,12 +1100,18 @@ async def get_shadow_ledger_analytics(
             "missed_profit_r": round(missed_profit_r, 4),
             "persistence_failures": get_persistence_failure_count(),
         },
+        "evidence_cohort": {
+            "total_signals": total_signals,
+            "replayed_signals": total_replayed,
+            "canonical_r_signals": valid_r_count,
+        },
         "by_strategy": strategy_breakdown,
         "by_rejection_stage": rejection_breakdown,
         "by_market_regime": market_regime_breakdown,
         "by_regime_gate": by_regime_gate,
         "alternative_exits_comparison": alt_exits_comparison,
-        # Fix C8 (Issue #199): Expose truncation metadata.
+        "hybrid_stats": hybrid_stats,
+        "hybrid_cohorts": hybrid_cohorts,
         "population_meta": {
             "limit": limit,
             "total_returned": total_signals,
@@ -1014,8 +1133,8 @@ async def get_shadow_ledger_gate_alpha(
     truncated = total_available >= limit
     
     gates = ["ml_gate", "meta_label_gate", "trade_score_gate"]
-    stats = {
-        g: {
+    def _new_gate_stats():
+        return {
             "total_vetoes": 0,
             "unique_vetoes": 0,
             "first_decisive_vetoes": 0,
@@ -1025,15 +1144,68 @@ async def get_shadow_ledger_gate_alpha(
             "avoided_losses": 0,
             "missed_profits": 0,
         }
-        for g in gates
-    }
+
+    stats = {g: _new_gate_stats() for g in gates}
+    combination_stats: dict[str, dict] = {}
     
+    replayed_count = 0
+    canonical_count = 0
+
+    from app.core.canonical_evidence import CanonicalOutcomeResolver
+    from app.strategies.evaluator import ParallelEvidenceEvaluator
+
+
     for s in signals:
-        gate_evidence = s.get("gate_evidence_json")
-        if not gate_evidence or "vetoes" not in gate_evidence:
+        if s.get("replayed"):
+            replayed_count += 1
+
+        # Check signal exclusion (failed replays or deferred incomplete data)
+        if s.get("replay_failed") or s.get("replay_state") == "deferred_data_incomplete":
             continue
-            
-        vetoes = gate_evidence["vetoes"]
+
+
+        gate_evidence = s.get("gate_evidence_json") or s.get("gate_evidence") or {}
+        if isinstance(gate_evidence, str):
+            try:
+                import json
+                gate_evidence = json.loads(gate_evidence)
+            except Exception:
+                gate_evidence = {}
+
+        vetoes_raw = gate_evidence.get("vetoes", {})
+        if isinstance(vetoes_raw, dict):
+            vetoes = [str(v).strip() for v in vetoes_raw.keys() if str(v).strip()]
+        elif isinstance(vetoes_raw, list):
+            vetoes = [str(v).strip() for v in vetoes_raw if str(v).strip()]
+        else:
+            vetoes = []
+
+        if not vetoes:
+            continue
+
+        # Extract realized_r with broad fallback across outcomes, alt_exits, top-level, and CanonicalOutcomeResolver
+        from app.strategies.memory import _canonical_realized_r
+        outcomes = s.get("outcomes") or {}
+        alt_exits = s.get("alternative_exits") or {}
+        prod_res = alt_exits.get("exit_production") or {}
+
+        realized_r = _canonical_realized_r(s.get("strategy"), outcomes) if outcomes else None
+        if realized_r is None:
+            realized_r = prod_res.get("common_realized_r") if prod_res.get("common_realized_r") is not None else prod_res.get("realized_r")
+        if realized_r is None:
+            realized_r = s.get("realized_r")
+        if realized_r is None and "simulated_pnl" in s and s["simulated_pnl"] is not None:
+            realized_r = float(s["simulated_pnl"])
+        if realized_r is None:
+            outcome = CanonicalOutcomeResolver.resolve(s)
+            realized_r = outcome.realized_r
+
+        has_r_outcome = (realized_r is not None)
+        realized_r_val = float(realized_r) if has_r_outcome else 0.0
+
+        if has_r_outcome:
+            canonical_count += 1
+
         veto_count = len(vetoes)
         first_decisive = gate_evidence.get("first_decisive_gate") or s.get("first_decisive_gate")
         if not first_decisive and veto_count > 0:
@@ -1047,49 +1219,74 @@ async def get_shadow_ledger_gate_alpha(
                 stats[g]["total_vetoes"] += 1
             if first_decisive == g:
                 stats[g]["first_decisive_vetoes"] += 1
-                
-        # Read attribution fields from payload
-        unique_veto = s.get("unique_veto_alpha") or {}
-        shared_veto = s.get("shared_veto_alpha") or {}
-        marginal = s.get("marginal_alpha") or {}
-        
-        # Fix C6 (Issue #173): Use strategy-canonical horizon for realized R.
-        from app.strategies.memory import _canonical_realized_r
-        outcomes = s.get("outcomes") or {}
-        strategy_name_s = s.get("strategy")
-        realized_r = _canonical_realized_r(strategy_name_s, outcomes) if outcomes else None
-        if realized_r is None:
-            sim_pnl = s.get("simulated_pnl")
-            if sim_pnl is not None:
-                realized_r = float(sim_pnl) / 100.0
-                
+
+        attrib = ParallelEvidenceEvaluator.calculate_veto_attribution(
+            vetoes_raw if isinstance(vetoes_raw, dict) else {v: "vetoed" for v in vetoes},
+            realized_r_val
+        )
+        unique_veto = attrib.get("unique_veto_alpha", {})
+        shared_veto = attrib.get("shared_veto_alpha", {})
+        marginal = attrib.get("marginal_alpha", {})
+
         for g in gates:
-            # Fix C5 (Issue #195): Count unique veto only when gate g is the sole veto or has non-zero unique alpha
             is_unique = (veto_count == 1 and g in vetoes) or (unique_veto.get(g, 0.0) != 0.0)
             if is_unique:
                 stats[g]["unique_vetoes"] += 1
-                stats[g]["unique_veto_alpha"] += unique_veto.get(g, 0.0)
-                # Fix C5 (Issue #196): Use forward outcome eligibility, not the replayed flag.
-                # Any signal with a resolved counterfactual outcome qualifies.
-                if realized_r is not None:
-                    if realized_r < 0:
+                if has_r_outcome:
+                    stats[g]["unique_veto_alpha"] += unique_veto.get(g, 0.0)
+                    if realized_r_val < 0:
                         stats[g]["avoided_losses"] += 1
-                    elif realized_r > 0:
+                    elif realized_r_val > 0:
                         stats[g]["missed_profits"] += 1
-                        
-            if g in shared_veto:
-                stats[g]["shared_veto_alpha"] += shared_veto.get(g, 0.0)
-            if g in marginal:
-                stats[g]["marginal_alpha"] += marginal.get(g, 0.0)
-                
+
+            if has_r_outcome:
+                if g in shared_veto:
+                    stats[g]["shared_veto_alpha"] += shared_veto.get(g, 0.0)
+                if g in marginal:
+                    stats[g]["marginal_alpha"] += marginal.get(g, 0.0)
+
+        # Gate combination attribution tracking
+        if has_r_outcome:
+            combo_key = " + ".join(sorted(set(vetoes)))
+            combo = combination_stats.setdefault(
+                combo_key,
+                {
+                    "signals": 0,
+                    "avoided_losses": 0,
+                    "avoided_loss_r": 0.0,
+                    "missed_winners": 0,
+                    "missed_winner_r": 0.0,
+                    "net_alpha_r": 0.0,
+                },
+            )
+            combo["signals"] += 1
+            if realized_r_val < 0:
+                saved_r = -realized_r_val
+                combo["avoided_losses"] += 1
+                combo["avoided_loss_r"] += saved_r
+            elif realized_r_val > 0:
+                combo["missed_winners"] += 1
+                combo["missed_winner_r"] += realized_r_val
+
+
     for g in gates:
         stats[g]["unique_veto_alpha"] = round(stats[g]["unique_veto_alpha"], 4)
         stats[g]["shared_veto_alpha"] = round(stats[g]["shared_veto_alpha"], 4)
         stats[g]["marginal_alpha"] = round(stats[g]["marginal_alpha"], 4)
 
-    # Fix C8 (Issue #199): Expose truncation metadata.
+    for combo in combination_stats.values():
+        combo["net_alpha_r"] = combo["avoided_loss_r"] - combo["missed_winner_r"]
+        for key in ("avoided_loss_r", "missed_winner_r", "net_alpha_r"):
+            combo[key] = round(combo[key], 4)
+
     return {
         "gates": stats,
+        "gate_combinations": combination_stats,
+        "evidence_cohort": {
+            "total_signals": total_available,
+            "replayed_signals": replayed_count,
+            "canonical_r_signals": canonical_count,
+        },
         "population_meta": {
             "limit": limit,
             "total_returned": total_available,

@@ -290,6 +290,12 @@ export function ShadowAnalyticsTab() {
   return (
     <div className="shadow-analytics" style={{ display: "flex", flexDirection: "column", gap: "20px", padding: "10px 0" }}>
       
+      {analytics.evidence_cohort && (
+        <div style={{ fontSize: "12px", color: "var(--faint)", background: "var(--panel-2)", padding: "8px 12px", borderRadius: "6px", border: "1px solid var(--border)" }}>
+          📊 Evidence Cohort: <b>{analytics.evidence_cohort.canonical_r_signals}</b> canonical R outcomes from <b>{analytics.evidence_cohort.replayed_signals}</b> replayed signals ({analytics.evidence_cohort.total_signals} total evaluated)
+        </div>
+      )}
+
       {/* 1. KPI Cards */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: "12px" }}>
         <div className="card-kpi" style={{ background: "var(--panel-2)", padding: "15px", borderRadius: "8px", border: "1px solid var(--border)" }}>
@@ -379,7 +385,7 @@ export function ShadowAnalyticsTab() {
           <div style={{ background: "var(--panel-2)", padding: "12px", borderRadius: "6px", border: "1px solid var(--border)" }}>
             <div style={{ fontSize: "11px", color: "var(--faint)" }}>Average MFE R</div>
             <div style={{ fontSize: "18px", fontWeight: "bold", marginTop: "4px" }} className="num">
-              {s.avg_mfe_pct != null ? `${(s.avg_mfe_pct / 100.0).toFixed(2)}R` : "—"}
+              {s.avg_mfe_r != null ? `${s.avg_mfe_r.toFixed(2)}R` : (s.avg_mfe_pct != null ? `${(s.avg_mfe_pct / 100.0).toFixed(2)}R` : "—")}
             </div>
             <div style={{ fontSize: "10px", color: "var(--faint)" }}>Max Favorable Excursion</div>
           </div>

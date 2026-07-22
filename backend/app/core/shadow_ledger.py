@@ -21,6 +21,28 @@ def get_persistence_failure_count() -> int:
     return _persistence_failure_count
 
 
+def _classify_hybrid_effect(
+    production_r: float,
+    hybrid_r: float,
+    epsilon: float = 1e-6,
+) -> str:
+    """Classify the research outcome of Hybrid BE relative to production."""
+    delta = hybrid_r - production_r
+    if abs(delta) <= epsilon:
+        return "HYBRID_NO_EFFECT"
+    if production_r < 0 and hybrid_r > production_r:
+        return "HYBRID_SAVED_LOSS"
+    if production_r > 0 and hybrid_r > production_r:
+        return "HYBRID_IMPROVED_WINNER"
+    if production_r > 0 and hybrid_r < production_r:
+        return "HYBRID_REDUCED_WINNER"
+    if production_r < 0 and hybrid_r < production_r:
+        return "HYBRID_WORSENED_LOSS"
+    return "HYBRID_OTHER"
+
+
+
+
 class ShadowLedger:
     @staticmethod
     def calculate_forward_outcomes(
@@ -356,6 +378,14 @@ class ShadowLedger:
 
         # Run alternative exits if future data is present (backtest mode)
         if df is not None and not df.empty and i != -1 and outcomes:
+            # Preserve production risk denominator for common-R metric
+            production_stop = float(stop_loss) if stop_loss is not None else None
+            production_initial_risk = None
+            if production_stop is not None:
+                production_initial_risk = abs(float(entry_price) - production_stop)
+                if production_initial_risk <= 1e-8:
+                    production_initial_risk = None
+
             # Fix A5 (Issue #176): Use runtime-tuned exits when provided by the engine.
             if alternative_exits is not None:
                 alt_policies = alternative_exits
@@ -369,6 +399,7 @@ class ShadowLedger:
                         {"policy_id": "exit_bracket_tight", "take_profit_pct": 1.0, "stop_loss_pct": 0.5},
                         {"policy_id": "exit_bracket_wide", "take_profit_pct": 3.0, "stop_loss_pct": 1.5},
                         {"policy_id": "exit_atr_trailing", "trailing_stop_atr_mult": 2.0},
+                        {"policy_id": "exit_hybrid_breakeven_atr", "breakeven_r_trigger": 0.30, "trail_r_trigger": 0.75, "tight_trail_r_trigger": 1.50},
                     ]
 
             alt_outcomes = {}
@@ -384,9 +415,19 @@ class ShadowLedger:
                 strategy_params=strategy_params,
             )
             if prod_res:
+                prod_exit_p = prod_res.get("exit_price")
+                prod_common_r = prod_res.get("realized_r")
+                if production_initial_risk is not None and prod_exit_p is not None:
+                    if direction == "long":
+                        prod_common_r = (float(prod_exit_p) - float(entry_price)) / production_initial_risk
+                    else:
+                        prod_common_r = (float(entry_price) - float(prod_exit_p)) / production_initial_risk
+
                 alt_outcomes["exit_production"] = {
                     "pnl_pct": prod_res["pnl_pct"],
                     "realized_r": prod_res.get("realized_r"),
+                    "common_realized_r": round(prod_common_r, 6) if prod_common_r is not None else None,
+                    "initial_risk_pct": round((production_initial_risk / float(entry_price) * 100.0), 4) if (entry_price and production_initial_risk) else None,
                     "exit_reason": prod_res["exit_reason"],
                     "tp_hit": prod_res["tp_hit"],
                     "sl_hit": prod_res["sl_hit"],
@@ -434,9 +475,23 @@ class ShadowLedger:
                     strategy_params=alt_params,
                 )
                 if alt_res:
+                    alt_exit_p = alt_res.get("exit_price")
+                    common_realized_r = None
+                    if production_initial_risk is not None and alt_exit_p is not None:
+                        if direction == "long":
+                            common_realized_r = (float(alt_exit_p) - float(entry_price)) / production_initial_risk
+                        else:
+                            common_realized_r = (float(entry_price) - float(alt_exit_p)) / production_initial_risk
+
+                    eff_stop = alt_sl_val or stop_loss
+                    alt_risk = abs(entry_price - eff_stop) if eff_stop is not None else None
+                    alt_risk_pct = (alt_risk / float(entry_price) * 100.0) if (entry_price and alt_risk) else None
+
                     alt_outcomes[alt_policy_id] = {
                         "pnl_pct": alt_res["pnl_pct"],
                         "realized_r": alt_res.get("realized_r"),
+                        "common_realized_r": round(common_realized_r, 6) if common_realized_r is not None else None,
+                        "initial_risk_pct": round(alt_risk_pct, 4) if alt_risk_pct is not None else None,
                         "exit_reason": alt_res["exit_reason"],
                         "tp_hit": alt_res["tp_hit"],
                         "sl_hit": alt_res["sl_hit"],
@@ -446,6 +501,15 @@ class ShadowLedger:
                         "stop_is_synthetic": alt_res.get("stop_is_synthetic", False),
                         "replay_valid": alt_res.get("replay_valid", True),
                     }
+
+            prod_common_r = alt_outcomes.get("exit_production", {}).get("common_realized_r")
+            hybrid_outcome = alt_outcomes.get("exit_hybrid_breakeven_atr")
+            if hybrid_outcome and prod_common_r is not None and hybrid_outcome.get("common_realized_r") is not None:
+                h_r = hybrid_outcome["common_realized_r"]
+                hybrid_delta_r = h_r - prod_common_r
+                hybrid_outcome["delta_vs_production_r"] = round(hybrid_delta_r, 6)
+                hybrid_outcome["effect"] = _classify_hybrid_effect(prod_common_r, h_r)
+
             payload["alternative_exits"] = alt_outcomes
 
         # Fix A9 (Issue #191): Surface persistence failures instead of silently swallowing.
