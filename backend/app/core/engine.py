@@ -1842,18 +1842,14 @@ class TradingEngine:
             self.allow_new_entries = False
             if self.system_health not in ("HALTED", "SAFE_MODE"):
                 self.system_health = "DEGRADED"
-            return {p.symbol: False for p in active_positions}
-
-        protection_status: dict[str, bool] = {}
-        unprotected: list[Position] = []
-
     def _resolve_recovery_stop(self, position: Position) -> tuple[float, str]:
         sym = position.symbol
         if self.portfolio and sym in self.portfolio._lots:
             lot = self.portfolio._lots[sym]
-            orig_stop = getattr(lot, "initial_stop_loss", None) or getattr(lot, "stop_loss", None)
-            if orig_stop is not None and orig_stop > 0:
-                return round(float(orig_stop), 4), "ORIGINAL_STRATEGY_STOP"
+            if getattr(lot, "initial_stop_loss", None) is not None and lot.initial_stop_loss > 0:
+                return round(float(lot.initial_stop_loss), 4), "ORIGINAL_STRATEGY_STOP"
+            if getattr(lot, "stop_loss", None) is not None and lot.stop_loss > 0:
+                return round(float(lot.stop_loss), 4), "PORTFOLIO_CURRENT_STOP"
         stop_pct = 0.015
         fallback = round(
             position.avg_entry_price * (1.0 - stop_pct if position.qty > 0 else 1.0 + stop_pct),
@@ -2101,7 +2097,6 @@ class TradingEngine:
                         qty=required_qty,
                         order_type=OrderType.STOP,
                         stop_price=stop_px,
-                        stop_loss=stop_px,
                         client_order_id=client_order_id,
                         strategy="emergency_protection",
                         reason=f"fix(#41) protective stop recovery source={stop_source}",

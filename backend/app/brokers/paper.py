@@ -111,6 +111,7 @@ class PaperBroker(Broker):
             qty=float(req.qty),
             order_type=req.order_type,
             limit_price=req.limit_price,
+            stop_price=req.stop_price,
             stop_loss=req.stop_loss,
             take_profit=req.take_profit,
             strategy=req.strategy,
@@ -141,18 +142,35 @@ class PaperBroker(Broker):
             else:
                 self._resting.append(order.id)  # fills at next bar open
         elif order.order_type == OrderType.STOP:
-            stop_px = order.stop_loss if order.stop_loss is not None else order.limit_price
-            marketable = (order.side == OrderSide.BUY and price >= stop_px) or (
-                order.side == OrderSide.SELL and price <= stop_px
+            stop_px = order.stop_price if order.stop_price is not None else order.stop_loss
+            marketable = stop_px is not None and (
+                (order.side == OrderSide.BUY and price >= stop_px) or (order.side == OrderSide.SELL and price <= stop_px)
             )
             if marketable and self.fill_market_on == "immediate":
                 fill_price = self._slip(price, order.side)
                 self._fill(order, fill_price)
             else:
                 self._resting.append(order.id)
+        elif order.order_type == OrderType.STOP_LIMIT:
+            stop_px = order.stop_price if order.stop_price is not None else order.stop_loss
+            limit_px = order.limit_price
+            stop_triggered = stop_px is not None and (
+                (order.side == OrderSide.BUY and price >= stop_px) or (order.side == OrderSide.SELL and price <= stop_px)
+            )
+            limit_marketable = limit_px is not None and (
+                (order.side == OrderSide.BUY and price <= limit_px) or (order.side == OrderSide.SELL and price >= limit_px)
+            )
+            if stop_triggered and limit_marketable and self.fill_market_on == "immediate":
+                fill_price = self._slip(price, order.side)
+                fill_price = min(fill_price, limit_px) if order.side == OrderSide.BUY else max(fill_price, limit_px)
+                self._fill(order, fill_price)
+            else:
+                self._resting.append(order.id)
         else:  # limit
-            marketable = (order.side == OrderSide.BUY and price <= order.limit_price) or (
-                order.side == OrderSide.SELL and price >= order.limit_price
+            marketable = order.limit_price is not None and (
+                (order.side == OrderSide.BUY and price <= order.limit_price) or (
+                    order.side == OrderSide.SELL and price >= order.limit_price
+                )
             )
             if marketable and self.fill_market_on == "immediate":
                 fill_price = self._slip(price, order.side)
@@ -362,7 +380,7 @@ class PaperBroker(Broker):
                     if oid in self._resting:
                         self._resting.remove(oid)
             elif order.order_type == OrderType.STOP:
-                stop_px = order.stop_loss if order.stop_loss is not None else order.limit_price
+                stop_px = order.stop_price if order.stop_price is not None else order.stop_loss
                 if stop_px is not None:
                     if order.side == OrderSide.BUY and h >= stop_px:
                         self._fill(order, self._slip(max(o, stop_px), order.side), fill_qty=fill_qty)
@@ -374,6 +392,26 @@ class PaperBroker(Broker):
                         if order.filled_qty >= order.qty - 1e-6:
                             if oid in self._resting:
                                 self._resting.remove(oid)
+            elif order.order_type == OrderType.STOP_LIMIT:
+                stop_px = order.stop_price if order.stop_price is not None else order.stop_loss
+                limit_px = order.limit_price
+                if stop_px is not None and limit_px is not None:
+                    if order.side == OrderSide.BUY and h >= stop_px:
+                        if low <= limit_px:
+                            fill_p = self._slip(min(o, limit_px), order.side)
+                            fill_p = min(fill_p, limit_px)
+                            self._fill(order, fill_p, fill_qty=fill_qty)
+                            if order.filled_qty >= order.qty - 1e-6:
+                                if oid in self._resting:
+                                    self._resting.remove(oid)
+                    elif order.side == OrderSide.SELL and low <= stop_px:
+                        if h >= limit_px:
+                            fill_p = self._slip(max(o, limit_px), order.side)
+                            fill_p = max(fill_p, limit_px)
+                            self._fill(order, fill_p, fill_qty=fill_qty)
+                            if order.filled_qty >= order.qty - 1e-6:
+                                if oid in self._resting:
+                                    self._resting.remove(oid)
             elif order.side == OrderSide.BUY and order.limit_price is not None and low <= order.limit_price:
                 self._fill(order, min(o, order.limit_price), fill_qty=fill_qty)
                 if order.filled_qty >= order.qty - 1e-6:
