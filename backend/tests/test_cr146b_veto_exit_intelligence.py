@@ -233,3 +233,43 @@ def test_hybrid_breakeven_atr_replay():
     assert res["exit_price"] >= 100.0
 
 
+def test_replay_optimizer_grid_search():
+    """Verify ReplayOptimizer ranks parameter grids and finds best config."""
+    from app.analytics.replay_optimizer import ReplayOptimizer
+    mock_signals = [
+        {
+            "ml_probability": 0.52,
+            "meta_probability": 0.55,
+            "trade_score": 65.0,
+            "outcomes": {
+                "exit_hybrid_breakeven_atr": {"realized_r": 1.5, "mfe_r": 1.8, "gave_back_r": 0.3, "winner_capture_ratio": 0.83},
+                "exit_production": {"realized_r": 0.1, "mfe_r": 1.8, "gave_back_r": 1.7, "winner_capture_ratio": 0.05},
+            }
+        },
+        {
+            "ml_probability": 0.49,
+            "meta_probability": 0.51,
+            "trade_score": 58.0,
+            "outcomes": {
+                "exit_hybrid_breakeven_atr": {"realized_r": 0.8, "mfe_r": 1.0, "gave_back_r": 0.2, "winner_capture_ratio": 0.80},
+                "exit_production": {"realized_r": -1.0, "mfe_r": 0.2, "gave_back_r": 0.2, "winner_capture_ratio": 0.0},
+            }
+        }
+    ]
+
+    optimizer = ReplayOptimizer(
+        ml_thresholds=[0.48, 0.55],
+        exit_policies=["exit_production", "exit_hybrid_breakeven_atr"],
+        composite_thresholds=[None],
+    )
+    res = optimizer.optimize(mock_signals)
+
+    assert res["total_signals_evaluated"] == 2
+    assert len(res["results"]) == 4  # 2 thresholds * 2 policies
+    best = res["best_config"]
+    assert best["exit_policy"] == "exit_hybrid_breakeven_atr"
+    assert best["ml_threshold"] == 0.48
+    assert best["total_realized_r"] == 2.3
+
+
+

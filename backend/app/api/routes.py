@@ -1092,6 +1092,15 @@ async def get_shadow_ledger_gate_alpha(
     }
 
 
+@router.get("/shadow-ledger/optimize-grid")
+def optimize_shadow_ledger_grid(request: Request, limit: int = 2000):
+    """Run parameter grid search over replayed signals to discover empirical optimal operating point."""
+    signals = _db(request).get_shadow_signals(mode=_engine(request).mode, limit=limit)
+    from app.analytics.replay_optimizer import ReplayOptimizer
+    optimizer = ReplayOptimizer()
+    return optimizer.optimize(signals)
+
+
 class RejectNomineeRequest(BaseModel):
     operator_id: str
     reason: str
