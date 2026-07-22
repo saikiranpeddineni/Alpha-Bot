@@ -1,505 +1,321 @@
 import { useState, useEffect } from "react";
 import { api } from "../api";
-import { fmtDateTime } from "../format";
+import { fmtTime } from "../format";
 import { useStore } from "../store";
 
-interface SignalFlowRecord {
-  id?: string;
-  candidate_id?: string;
+interface LiveTickerFlowItem {
+  id: string;
   symbol: string;
   strategy: string;
   direction: string;
-  timestamp?: string;
-  ts?: string;
-  final_decision?: string;
-  rejection_reason?: string;
-  rejection_stage?: string;
-  first_decisive_gate?: string;
-  ml_confidence?: number;
-  ml_probability?: number;
-  meta_probability?: number;
-  trade_score?: number;
-  market_regime?: string;
-  simulated_pnl?: number;
-  payload?: any;
-  gate_evidence_json?: any;
+  timestamp: string;
+  tsMs: number;
+  final_decision: string;
+  rejection_stage: string;
+  rejection_reason: string;
+  ml_prob: number;
+  meta_prob: number;
+  trade_score: number;
+  market_regime: string;
+  ml_threshold: number;
+  step_reached: number; // 1 to 7
 }
 
-export function TickerFlowVisualizer() {
-  const [signals, setSignals] = useState<SignalFlowRecord[]>([]);
-  const [selectedCandidateId, setSelectedCandidateId] = useState<string>("");
-  const [autoFollow, setAutoFollow] = useState<boolean>(true);
-  const [lastUpdated, setLastUpdated] = useState<Date>(new Date());
-  const [loading, setLoading] = useState<boolean>(true);
+const STAGES = [
+  { id: 1, key: "scanner", title: "1. Market Scanner", sub: "Universe Discovery" },
+  { id: 2, key: "strategy", title: "2. Strategy Trigger", sub: "Pattern Generation" },
+  { id: 3, key: "ml_gate", title: "3. ML Gate", sub: "Regime-Adaptive Scale" },
+  { id: 4, key: "meta_label", title: "4. Meta-Label", sub: "Profitability Filter" },
+  { id: 5, key: "trade_score", title: "5. Trade Score", sub: "Setup Quality" },
+  { id: 6, key: "risk_gate", title: "6. Portfolio & Risk", sub: "Capital Allocation" },
+  { id: 7, key: "execution", title: "7. Execution / Replay", sub: "Broker / Shadow" },
+];
 
-  // Subscribe to store logs to trigger immediate updates on new engine signals
+export function TickerFlowVisualizer() {
+  const [stream, setStream] = useState<LiveTickerFlowItem[]>([]);
+  const [lastTickTime, setLastTickTime] = useState<Date>(new Date());
   const logs = useStore((s) => s.logs);
 
-  const fetchSignals = async () => {
+  const fetchLiveStream = async () => {
     try {
-      const data = await api.shadowLedgerCandidates(100);
-      if (data && data.length > 0) {
-        setSignals(data);
-        setLastUpdated(new Date());
+      const data = await api.shadowLedgerCandidates(60);
+      if (data && Array.isArray(data)) {
+        const parsed: LiveTickerFlowItem[] = data.map((s, idx) => {
+          const payload = s.payload && typeof s.payload === "object" ? s.payload : {};
+          const gateEv = s.gate_evidence_json || payload.gate_evidence_json || {};
 
-        // If auto-follow is active, automatically snap to the latest signal
-        if (autoFollow) {
-          const newestId = data[0].candidate_id || data[0].id || "";
-          setSelectedCandidateId(newestId);
-        } else if (!selectedCandidateId) {
-          setSelectedCandidateId(data[0].candidate_id || data[0].id || "");
-        }
+          const decision = (s.final_decision || payload.final_decision || "rejected").toLowerCase();
+          const stage = s.rejection_stage || payload.rejection_stage || gateEv.first_decisive_gate || "ml_gate";
+          const regime = (s.market_regime || payload.market_regime || "NORMAL").toUpperCase();
+          const regimeThresholds: Record<string, number> = { NORMAL: 0.48, CAUTION: 0.52, STRESS: 0.60, PANIC: 0.65 };
+          const mlThresh = regimeThresholds[regime] || 0.48;
+
+          const mlP = Number(s.ml_confidence ?? s.ml_probability ?? payload.ml_confidence ?? payload.ml_probability ?? 0.52);
+          const metaP = Number(s.meta_probability ?? payload.meta_probability ?? 0.54);
+          const tScore = Number(s.trade_score ?? payload.trade_score ?? 62.5);
+
+          // Calculate how far the ticker progressed through the 7 stages
+          let step = 7;
+          if (decision !== "accepted") {
+            if (stage === "ml_gate") step = 3;
+            else if (stage === "meta_label_gate") step = 4;
+            else if (stage === "trade_score_gate") step = 5;
+            else if (stage === "portfolio_gate" || stage === "risk_gate" || stage === "behavioral_safety_gate") step = 6;
+            else step = 3;
+          }
+
+          const rawTs = s.timestamp || s.ts || payload.timestamp || "";
+          const tsMs = rawTs ? new Date(rawTs).getTime() : Date.now() - idx * 1000;
+
+          return {
+            id: s.candidate_id || s.id || `flow-${idx}`,
+            symbol: s.symbol || "UNKNOWN",
+            strategy: s.strategy || payload.strategy || "Strategy",
+            direction: (s.direction || payload.direction || "long").toUpperCase(),
+            timestamp: rawTs,
+            tsMs: isNaN(tsMs) ? Date.now() - idx * 1000 : tsMs,
+            final_decision: decision,
+            rejection_stage: stage,
+            rejection_reason: s.rejection_reason || payload.rejection_reason || "Threshold not met",
+            ml_prob: mlP,
+            meta_prob: metaP,
+            trade_score: tScore,
+            market_regime: regime,
+            ml_threshold: mlThresh,
+            step_reached: step,
+          };
+        });
+
+        // Sort stream chronologically descending (newest at top)
+        parsed.sort((a, b) => b.tsMs - a.tsMs);
+        setStream(parsed);
+        setLastTickTime(new Date());
       }
     } catch (err) {
-      console.error("Failed to load signals for live workflow visualizer", err);
-    } finally {
-      setLoading(false);
+      console.error("Failed to load live flow stream", err);
     }
   };
 
-  // Initial load + 3-second live polling interval
+  // Poll live candidate stream every 2 seconds
   useEffect(() => {
-    fetchSignals();
-    const interval = setInterval(fetchSignals, 3000);
-    return () => clearInterval(interval);
-  }, [autoFollow]);
+    fetchLiveStream();
+    const timer = setInterval(fetchLiveStream, 2000);
+    return () => clearInterval(timer);
+  }, []);
 
-  // Live trigger when engine logs a signal broadcast
+  // Instant trigger when engine emits new log or tick
   useEffect(() => {
     if (logs.length > 0) {
-      const latestLog = logs[0];
-      if (latestLog.source === "engine" || latestLog.message.includes("signal") || latestLog.message.includes("veto")) {
-        fetchSignals();
-      }
+      fetchLiveStream();
     }
   }, [logs.length]);
 
-  const currentSignal = signals.find(
-    (s) => (s.candidate_id || s.id) === selectedCandidateId
-  ) || signals[0];
-
-  const payload = currentSignal?.payload && typeof currentSignal.payload === "object" ? currentSignal.payload : {};
-  const gateEvidence = currentSignal?.gate_evidence_json || payload.gate_evidence_json || {};
-
-  const symbol = currentSignal?.symbol || "N/A";
-  const strategy = currentSignal?.strategy || payload.strategy || "Unknown Strategy";
-  const direction = (currentSignal?.direction || payload.direction || "long").toUpperCase();
-  const decision = (currentSignal?.final_decision || payload.final_decision || "pending").toLowerCase();
-  const rejectionStage = currentSignal?.rejection_stage || payload.rejection_stage || gateEvidence.first_decisive_gate || "ml_gate";
-  const rejectionReason = currentSignal?.rejection_reason || payload.rejection_reason || "Filter threshold not met";
-  const timestamp = currentSignal?.timestamp || currentSignal?.ts || payload.timestamp || "";
-
-  const mlProb = Number(currentSignal?.ml_confidence ?? currentSignal?.ml_probability ?? payload.ml_confidence ?? payload.ml_probability ?? 0.52);
-  const metaProb = Number(currentSignal?.meta_probability ?? payload.meta_probability ?? 0.54);
-  const tradeScore = Number(currentSignal?.trade_score ?? payload.trade_score ?? 62.5);
-  const regime = (currentSignal?.market_regime || payload.market_regime || "NORMAL").toUpperCase();
-
-  const regimeThresholds: Record<string, number> = {
-    NORMAL: 0.48,
-    CAUTION: 0.52,
-    STRESS: 0.60,
-    PANIC: 0.65,
-  };
-  const activeMlThreshold = regimeThresholds[regime] || 0.48;
-
-  const mlPassed = mlProb >= activeMlThreshold;
-  const metaPassed = metaProb >= 0.50;
-  const scorePassed = tradeScore >= 50.0;
-  const riskPassed = decision === "accepted" || (rejectionStage !== "risk_gate" && rejectionStage !== "behavioral_safety_gate");
-  const isAccepted = decision === "accepted";
+  const passedCount = stream.filter((x) => x.final_decision === "accepted").length;
+  const passRate = stream.length > 0 ? ((passedCount / stream.length) * 100).toFixed(1) : "0.0";
 
   return (
-    <div className="flow-visualizer-container" style={{ padding: "16px", color: "#e2e8f0" }}>
-      {/* Top Header & Selector */}
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "20px" }}>
-        <div>
-          <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-            <h3 style={{ margin: 0, fontSize: "1.2rem", fontWeight: "600", color: "#f8fafc" }}>
-              ⚡ Live Ticker Pipeline Flow Visualizer
-            </h3>
-            {/* Live Indicator Badge */}
+    <div style={{ padding: "16px", color: "#e2e8f0", background: "#0b1329", borderRadius: "8px" }}>
+      {/* Live Stream Status Bar */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+          <span
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: "6px",
+              padding: "4px 10px",
+              borderRadius: "16px",
+              background: "#0284c722",
+              border: "1px solid #0284c766",
+              color: "#38bdf8",
+              fontSize: "0.8rem",
+              fontWeight: "bold",
+            }}
+          >
             <span
               style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: "6px",
-                padding: "3px 8px",
-                borderRadius: "12px",
-                background: "#0284c722",
-                border: "1px solid #0284c766",
-                color: "#38bdf8",
-                fontSize: "0.75rem",
-                fontWeight: "600",
+                width: "8px",
+                height: "8px",
+                borderRadius: "50%",
+                background: "#38bdf8",
+                boxShadow: "0 0 10px #38bdf8",
+                animation: "pulse 1.2s infinite",
               }}
-            >
-              <span
-                style={{
-                  width: "8px",
-                  height: "8px",
-                  borderRadius: "50%",
-                  background: "#38bdf8",
-                  boxShadow: "0 0 8px #38bdf8",
-                  animation: "pulse 1.5s infinite",
-                }}
-              />
-              LIVE UPDATING
-            </span>
-          </div>
-          <p style={{ margin: "4px 0 0", fontSize: "0.85rem", color: "#94a3b8" }}>
-            Real-time pipeline tracing for tickers picked by Market Scanner (Updated {lastUpdated.toLocaleTimeString()})
-          </p>
+            />
+            LIVE STREAMING PIPELINE
+          </span>
+          <span style={{ fontSize: "0.8rem", color: "#94a3b8" }}>
+            Updated: {lastTickTime.toLocaleTimeString()}
+          </span>
         </div>
 
-        {/* Controls: Auto-Follow Toggle & Candidate Dropdown */}
-        <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-          <button
-            onClick={() => setAutoFollow(!autoFollow)}
-            style={{
-              background: autoFollow ? "#0284c7" : "#334155",
-              color: "#ffffff",
-              border: "none",
-              borderRadius: "6px",
-              padding: "6px 12px",
-              fontSize: "0.8rem",
-              fontWeight: "600",
-              cursor: "pointer",
-              transition: "all 0.2s ease",
-            }}
-          >
-            {autoFollow ? "✓ Auto-Follow Newest" : "Manual Select"}
-          </button>
-
-          <select
-            value={selectedCandidateId}
-            onChange={(e) => {
-              setAutoFollow(false);
-              setSelectedCandidateId(e.target.value);
-            }}
-            style={{
-              background: "#1e293b",
-              color: "#f8fafc",
-              border: "1px solid #334155",
-              borderRadius: "6px",
-              padding: "6px 12px",
-              fontSize: "0.85rem",
-              outline: "none",
-              cursor: "pointer",
-            }}
-          >
-            {signals.map((s, idx) => {
-              const id = s.candidate_id || s.id || `signal-${idx}`;
-              const sym = s.symbol || "UNKNOWN";
-              const dir = (s.direction || "long").toUpperCase();
-              const dec = (s.final_decision || "rejected").toUpperCase();
-              return (
-                <option key={id} value={id}>
-                  {sym} ({dir}) — {s.strategy} [{dec}]
-                </option>
-              );
-            })}
-          </select>
+        {/* Live Summary Metrics */}
+        <div style={{ display: "flex", gap: "20px", fontSize: "0.85rem" }}>
+          <div>
+            <span style={{ color: "#64748b" }}>Recent Candidates: </span>
+            <span style={{ fontWeight: "bold", color: "#f8fafc" }}>{stream.length}</span>
+          </div>
+          <div>
+            <span style={{ color: "#64748b" }}>Pass Rate: </span>
+            <span style={{ fontWeight: "bold", color: "#4ade80" }}>{passRate}%</span>
+          </div>
+          <div>
+            <span style={{ color: "#64748b" }}>Veto Rate: </span>
+            <span style={{ fontWeight: "bold", color: "#f87171" }}>{(100 - Number(passRate)).toFixed(1)}%</span>
+          </div>
         </div>
       </div>
 
-      {loading ? (
-        <div style={{ padding: "40px", textAlign: "center", color: "#94a3b8" }}>Connecting to live signal stream...</div>
-      ) : (
-        <>
-          {/* Signal Summary Banner */}
-          <div
-            style={{
-              background: "linear-gradient(135deg, #1e293b 0%, #0f172a 100%)",
-              borderRadius: "10px",
-              border: "1px solid #334155",
-              padding: "14px 20px",
-              marginBottom: "24px",
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-            }}
-          >
-            <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
-              <div
-                style={{
-                  fontSize: "1.4rem",
-                  fontWeight: "bold",
-                  color: "#38bdf8",
-                  padding: "6px 14px",
-                  background: "#0369a122",
-                  borderRadius: "8px",
-                  border: "1px solid #0284c744",
-                }}
-              >
-                {symbol}
-              </div>
-              <div>
-                <div style={{ fontWeight: "600", fontSize: "1rem" }}>
-                  {strategy} <span style={{ color: direction === "LONG" ? "#4ade80" : "#f87171" }}>({direction})</span>
-                </div>
-                <div style={{ fontSize: "0.8rem", color: "#94a3b8" }}>
-                  Candidate ID: {selectedCandidateId} | Time: {fmtDateTime(timestamp)}
-                </div>
-              </div>
-            </div>
+      {/* 7-Stage Matrix Live Stream */}
+      <div style={{ display: "flex", gap: "10px", overflowX: "auto", minHeight: "420px", paddingBottom: "10px" }}>
+        {STAGES.map((stage) => {
+          // Tickers currently active or terminated at this stage
+          const stageTickers = stream.filter((item) => {
+            if (stage.id < item.step_reached) return true; // Passed through this stage
+            if (stage.id === item.step_reached) return true; // Stopped or active at this stage
+            return false;
+          });
 
-            <div style={{ display: "flex", alignItems: "center", gap: "20px" }}>
-              <div style={{ textAlign: "right" }}>
-                <div style={{ fontSize: "0.75rem", color: "#94a3b8" }}>Active Market Regime</div>
-                <div style={{ fontWeight: "bold", color: "#facc15" }}>{regime} (ML Scale: {activeMlThreshold})</div>
-              </div>
-              <div style={{ textAlign: "right" }}>
-                <div style={{ fontSize: "0.75rem", color: "#94a3b8" }}>Pipeline Outcome</div>
-                <div
-                  style={{
-                    fontWeight: "bold",
-                    color: isAccepted ? "#4ade80" : "#f87171",
-                    textTransform: "uppercase",
-                  }}
-                >
-                  {isAccepted ? "✓ EXECUTED TO BROKER" : `✕ VETOED AT ${rejectionStage}`}
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Live Flow Diagram */}
-          <div style={{ display: "flex", gap: "12px", overflowX: "auto", paddingBottom: "12px" }}>
-            <PipelineNode
-              stepNum={1}
-              title="Market Scanner"
-              subtitle="Universe Discovery"
-              status="passed"
-              metrics={[
-                { label: "Scan Criteria", val: "RVOL & Momentum" },
-                { label: "Scanner Watchlist", val: "ACTIVE" },
-                { label: "Discovery State", val: "ELIGIBLE" },
-              ]}
-            />
-
-            <FlowArrow passed={true} />
-
-            <PipelineNode
-              stepNum={2}
-              title="Strategy Signal"
-              subtitle={strategy}
-              status="passed"
-              metrics={[
-                { label: "Direction", val: direction },
-                { label: "Pattern Signal", val: "TRIGGERED" },
-                { label: "Bar Confirmation", val: "CLOSED" },
-              ]}
-            />
-
-            <FlowArrow passed={true} />
-
-            <PipelineNode
-              stepNum={3}
-              title="ML Confidence Gate"
-              subtitle={`Regime Scale: ${activeMlThreshold}`}
-              status={mlPassed ? "passed" : "rejected"}
-              metrics={[
-                { label: "Model Score", val: `${(mlProb * 100).toFixed(1)}%` },
-                { label: "Regime Target", val: `${(activeMlThreshold * 100).toFixed(1)}%` },
-                { label: "Decision", val: mlPassed ? "PASS" : "VETO" },
-              ]}
-              progressPct={mlProb * 100}
-              targetPct={activeMlThreshold * 100}
-            />
-
-            <FlowArrow passed={mlPassed} />
-
-            <PipelineNode
-              stepNum={4}
-              title="Meta-Label Gate"
-              subtitle="Profitability Filter"
-              status={!mlPassed ? "bypassed" : metaPassed ? "passed" : "rejected"}
-              metrics={[
-                { label: "Meta Score", val: `${(metaProb * 100).toFixed(1)}%` },
-                { label: "Meta Target", val: "50.0%" },
-                { label: "Decision", val: !mlPassed ? "BYPASSED" : metaPassed ? "PASS" : "VETO" },
-              ]}
-              progressPct={metaProb * 100}
-              targetPct={50}
-            />
-
-            <FlowArrow passed={mlPassed && metaPassed} />
-
-            <PipelineNode
-              stepNum={5}
-              title="Trade Score Engine"
-              subtitle="Excursion & Setup Score"
-              status={!(mlPassed && metaPassed) ? "bypassed" : scorePassed ? "passed" : "rejected"}
-              metrics={[
-                { label: "Trade Score", val: `${tradeScore.toFixed(1)} / 100` },
-                { label: "Score Target", val: "50.0 / 100" },
-                { label: "Decision", val: !(mlPassed && metaPassed) ? "BYPASSED" : scorePassed ? "PASS" : "VETO" },
-              ]}
-              progressPct={tradeScore}
-              targetPct={50}
-            />
-
-            <FlowArrow passed={mlPassed && metaPassed && scorePassed} />
-
-            <PipelineNode
-              stepNum={6}
-              title="Portfolio & Risk AI"
-              subtitle="Capital Allocation"
-              status={!(mlPassed && metaPassed && scorePassed) ? "bypassed" : riskPassed ? "passed" : "rejected"}
-              metrics={[
-                { label: "Sector Concentration", val: "CLEAR" },
-                { label: "Max Drawdown", val: "PASS" },
-                { label: "Decision", val: !(mlPassed && metaPassed && scorePassed) ? "BYPASSED" : riskPassed ? "PASS" : "VETO" },
-              ]}
-            />
-
-            <FlowArrow passed={isAccepted} />
-
-            <PipelineNode
-              stepNum={7}
-              title={isAccepted ? "Broker Order" : "Shadow Ledger Replay"}
-              subtitle={isAccepted ? "Active Position" : "Counterfactual Intelligence"}
-              status={isAccepted ? "passed" : "shadow"}
-              metrics={[
-                { label: "Execution Mode", val: isAccepted ? "LIVE FILL" : "SHADOW REPLAY" },
-                { label: "Exit Intelligence", val: "Hybrid Breakeven ATR" },
-                { label: "Breakeven Lock", val: "+0.30R MFE" },
-              ]}
-            />
-          </div>
-
-          {!isAccepted && (
+          return (
             <div
+              key={stage.id}
               style={{
-                marginTop: "16px",
-                padding: "12px 16px",
-                background: "#7f1d1d22",
-                border: "1px solid #b91c1c44",
+                flex: "1 0 180px",
+                minWidth: "180px",
+                background: "#111c35",
+                border: "1px solid #1e293b",
                 borderRadius: "8px",
                 display: "flex",
-                alignItems: "center",
-                gap: "12px",
+                flexDirection: "column",
               }}
             >
-              <div style={{ color: "#f87171", fontSize: "1.2rem" }}>🛑</div>
-              <div>
-                <div style={{ fontWeight: "600", color: "#fca5a5", fontSize: "0.9rem" }}>
-                  Primary Rejection Stage: <span style={{ textTransform: "uppercase" }}>{rejectionStage}</span>
-                </div>
-                <div style={{ fontSize: "0.8rem", color: "#f87171" }}>
-                  {rejectionReason} (Continuously replayed in Shadow Ledger for A/B testing)
-                </div>
-              </div>
-            </div>
-          )}
-        </>
-      )}
-    </div>
-  );
-}
-
-function PipelineNode({
-  stepNum,
-  title,
-  subtitle,
-  status,
-  metrics,
-  progressPct,
-  targetPct,
-}: {
-  stepNum: number;
-  title: string;
-  subtitle: string;
-  status: "passed" | "rejected" | "bypassed" | "shadow";
-  metrics: { label: string; val: string }[];
-  progressPct?: number;
-  targetPct?: number;
-}) {
-  const statusColors = {
-    passed: { bg: "#0284c715", border: "#0284c766", text: "#38bdf8", badgeBg: "#0369a133", label: "PASSED" },
-    rejected: { bg: "#991b1b15", border: "#991b1b66", text: "#f87171", badgeBg: "#991b1b33", label: "REJECTED" },
-    bypassed: { bg: "#33415515", border: "#33415544", text: "#64748b", badgeBg: "#33415533", label: "BYPASSED" },
-    shadow: { bg: "#a855f715", border: "#a855f766", text: "#c084fc", badgeBg: "#a855f733", label: "SHADOW" },
-  };
-
-  const style = statusColors[status];
-
-  return (
-    <div
-      style={{
-        flex: "1 0 200px",
-        minWidth: "200px",
-        background: "linear-gradient(180deg, #1e293b 0%, #0f172a 100%)",
-        border: `1px solid ${style.border}`,
-        borderRadius: "10px",
-        padding: "14px",
-        position: "relative",
-      }}
-    >
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
-        <span style={{ fontSize: "0.7rem", fontWeight: "bold", color: "#64748b" }}>STEP 0{stepNum}</span>
-        <span
-          style={{
-            fontSize: "0.65rem",
-            fontWeight: "bold",
-            color: style.text,
-            background: style.badgeBg,
-            padding: "2px 8px",
-            borderRadius: "4px",
-            border: `1px solid ${style.border}`,
-          }}
-        >
-          {style.label}
-        </span>
-      </div>
-
-      <div style={{ fontWeight: "600", fontSize: "0.9rem", color: "#f8fafc", marginBottom: "2px" }}>{title}</div>
-      <div style={{ fontSize: "0.75rem", color: "#94a3b8", marginBottom: "12px" }}>{subtitle}</div>
-
-      {progressPct !== undefined && (
-        <div style={{ marginBottom: "12px" }}>
-          <div style={{ height: "6px", background: "#334155", borderRadius: "3px", overflow: "hidden", position: "relative" }}>
-            <div
-              style={{
-                height: "100%",
-                width: `${Math.min(100, Math.max(0, progressPct))}%`,
-                background: progressPct >= (targetPct || 0) ? "#38bdf8" : "#f87171",
-                transition: "width 0.4s ease",
-              }}
-            />
-            {targetPct !== undefined && (
+              {/* Stage Header */}
               <div
                 style={{
-                  position: "absolute",
-                  top: 0,
-                  bottom: 0,
-                  left: `${targetPct}%`,
-                  width: "2px",
-                  background: "#facc15",
+                  padding: "10px 12px",
+                  background: "#1e293b",
+                  borderBottom: "1px solid #334155",
+                  borderRadius: "8px 8px 0 0",
                 }}
-              />
-            )}
-          </div>
-        </div>
-      )}
+              >
+                <div style={{ fontWeight: "bold", fontSize: "0.85rem", color: "#f8fafc" }}>{stage.title}</div>
+                <div style={{ fontSize: "0.7rem", color: "#94a3b8" }}>{stage.sub}</div>
+              </div>
 
-      <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-        {metrics.map((m, i) => (
-          <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: "0.75rem" }}>
-            <span style={{ color: "#64748b" }}>{m.label}:</span>
-            <span style={{ color: "#cbd5e1", fontWeight: "500" }}>{m.val}</span>
-          </div>
-        ))}
+              {/* Ticker Stream Column */}
+              <div style={{ padding: "8px", display: "flex", flexDirection: "column", gap: "8px", flex: 1, overflowY: "auto" }}>
+                {stageTickers.length === 0 ? (
+                  <div style={{ fontSize: "0.75rem", color: "#475569", textAlign: "center", padding: "20px 0" }}>
+                    No active tickers
+                  </div>
+                ) : (
+                  stageTickers.slice(0, 15).map((item) => {
+                    const isTerminatedHere = item.step_reached === stage.id && item.final_decision !== "accepted";
+                    const isPassedHere = stage.id < item.step_reached || (stage.id === 7 && item.final_decision === "accepted");
+
+                    let cardColor = "#0284c7"; // Blue passed
+                    let borderColor = "#0284c744";
+                    let bg = "#0369a115";
+
+                    if (isTerminatedHere) {
+                      cardColor = "#f87171"; // Red veto
+                      borderColor = "#ef444466";
+                      bg = "#7f1d1d25";
+                    } else if (stage.id === 7 && item.final_decision === "accepted") {
+                      cardColor = "#4ade80"; // Green execute
+                      borderColor = "#22c55e66";
+                      bg = "#15803d25";
+                    }
+
+                    return (
+                      <div
+                        key={`${item.id}-${stage.id}`}
+                        style={{
+                          background: bg,
+                          border: `1px solid ${borderColor}`,
+                          borderRadius: "6px",
+                          padding: "8px 10px",
+                          transition: "all 0.3s ease",
+                        }}
+                      >
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                          <span style={{ fontWeight: "bold", fontSize: "0.9rem", color: "#f8fafc" }}>{item.symbol}</span>
+                          <span style={{ fontSize: "0.65rem", color: item.direction === "LONG" ? "#4ade80" : "#f87171", fontWeight: "bold" }}>
+                            {item.direction}
+                          </span>
+                        </div>
+
+                        <div style={{ fontSize: "0.7rem", color: "#94a3b8", margin: "2px 0 4px" }}>
+                          {item.strategy}
+                        </div>
+
+                        {/* Stage Specific Telemetry Pill */}
+                        {stage.id === 3 && (
+                          <div style={{ fontSize: "0.68rem", color: item.ml_prob >= item.ml_threshold ? "#38bdf8" : "#f87171" }}>
+                            ML: {(item.ml_prob * 100).toFixed(1)}% (Thresh: {(item.ml_threshold * 100).toFixed(0)}%)
+                          </div>
+                        )}
+                        {stage.id === 4 && (
+                          <div style={{ fontSize: "0.68rem", color: item.meta_prob >= 0.5 ? "#38bdf8" : "#f87171" }}>
+                            Meta: {(item.meta_prob * 100).toFixed(1)}%
+                          </div>
+                        )}
+                        {stage.id === 5 && (
+                          <div style={{ fontSize: "0.68rem", color: item.trade_score >= 50 ? "#38bdf8" : "#f87171" }}>
+                            Score: {item.trade_score.toFixed(1)} / 100
+                          </div>
+                        )}
+                        {stage.id === 7 && (
+                          <div style={{ fontSize: "0.68rem", color: item.final_decision === "accepted" ? "#4ade80" : "#c084fc" }}>
+                            {item.final_decision === "accepted" ? "✓ BROKER FILL" : "SHADOW A/B REPLAY"}
+                          </div>
+                        )}
+
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "4px" }}>
+                          <span style={{ fontSize: "0.65rem", color: "#64748b" }}>
+                            {fmtTime(item.timestamp)}
+                          </span>
+                          <span
+                            style={{
+                              fontSize: "0.6rem",
+                              fontWeight: "bold",
+                              color: cardColor,
+                              textTransform: "uppercase",
+                            }}
+                          >
+                            {isTerminatedHere ? `VETO: ${item.rejection_stage}` : isPassedHere ? "PASS →" : "HOLD"}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+          );
+        })}
       </div>
-    </div>
-  );
-}
 
-function FlowArrow({ passed }: { passed: boolean }) {
-  return (
-    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", color: passed ? "#38bdf8" : "#475569" }}>
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-        <path d="M5 12h14M12 5l7 7-7 7" />
-      </svg>
+      {/* Real-time Ticker Activity Event Log Feed */}
+      <div style={{ marginTop: "16px", background: "#0f172a", border: "1px solid #1e293b", borderRadius: "8px", padding: "12px" }}>
+        <div style={{ fontSize: "0.8rem", fontWeight: "bold", color: "#94a3b8", marginBottom: "8px" }}>
+          📡 REAL-TIME TICKER PIPELINE EVENT STREAM
+        </div>
+        <div style={{ maxHeight: "120px", overflowY: "auto", display: "flex", flexDirection: "column", gap: "4px" }}>
+          {stream.slice(0, 10).map((item) => (
+            <div key={`log-${item.id}`} style={{ fontSize: "0.75rem", fontFamily: "monospace", display: "flex", gap: "10px" }}>
+              <span style={{ color: "#64748b" }}>{fmtTime(item.timestamp)}</span>
+              <span style={{ fontWeight: "bold", color: "#38bdf8" }}>{item.symbol}</span>
+              <span style={{ color: "#94a3b8" }}>{item.strategy} ({item.direction})</span>
+              <span style={{ color: item.final_decision === "accepted" ? "#4ade80" : "#f87171" }}>
+                {item.final_decision === "accepted"
+                  ? "→ EXECUTED TO BROKER"
+                  : `→ VETOED at ${item.rejection_stage} (${item.rejection_reason})`}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
