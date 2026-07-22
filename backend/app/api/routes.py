@@ -1312,6 +1312,17 @@ async def get_shadow_performance(
     return res
 
 
+@router.get("/shadow-ledger")
+@router.get("/shadow-ledger/candidates")
+async def get_shadow_ledger_candidates(
+    request: Request,
+    limit: int = 100,
+) -> list[dict]:
+    engine = _engine(request)
+    db = _db(request)
+    return db.get_shadow_signals(mode=engine.mode, limit=limit)
+
+
 @router.get("/strategies/portfolio-comparison")
 async def get_portfolio_comparison(
     request: Request,
