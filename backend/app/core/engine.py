@@ -1910,9 +1910,19 @@ class TradingEngine:
                 if p.symbol in getattr(self, "_pending_close_symbols", set()) or p.symbol in getattr(self, "_flattening_symbols", set()):
                     continue
                 try:
+                    side = OrderSide.SELL if p.qty > 0 else OrderSide.BUY
+
+                    # Cancel any stale/under-sized open orders holding shares for this symbol
+                    for o in open_orders:
+                        if o.symbol == p.symbol and o.side == side and o.status not in (OrderStatus.CANCELED, OrderStatus.REJECTED, OrderStatus.FILLED):
+                            try:
+                                await self.broker.cancel(o.id)
+                                applog.info("engine.protection", f"#41: Canceled stale/under-sized order {o.id} for {p.symbol} before re-submitting recovery stop")
+                            except Exception as cancel_exc:
+                                applog.warning("engine.protection", f"#41: Could not cancel order {o.id} for {p.symbol}: {cancel_exc}")
+
                     stop_pct = 0.015
                     stop_px = round(p.avg_entry_price * (1.0 - stop_pct if p.qty > 0 else 1.0 + stop_pct), 4)
-                    side = OrderSide.SELL if p.qty > 0 else OrderSide.BUY
                     req = OrderRequest(
                         symbol=p.symbol,
                         side=side,
