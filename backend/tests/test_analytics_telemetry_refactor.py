@@ -214,4 +214,16 @@ def test_canonical_evidence_rejects_null_r_even_with_vetoes():
     assert _is_canonical_replay_evidence(signal, outcome) is False
 
 
+def test_mfe_fallback_rejects_incompatible_historical_denominator():
+    from app.api.routes import _production_mfe_common_r
+    signal = {}
+    prod_res_unverified = {"mfe_r": 1.5}  # Missing initial_risk_pct or mfe_pct
+    assert _production_mfe_common_r(signal, prod_res_unverified) is None
+
+    prod_res_verified = {"mfe_pct": 1.5, "initial_risk_pct": 1.0}
+    assert _production_mfe_common_r(signal, prod_res_verified) == pytest.approx(1.5)
+
+
+
+
 

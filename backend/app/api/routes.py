@@ -678,6 +678,36 @@ def _production_risk_pct(signal: dict, prod_res: dict | None = None) -> float | 
         return None
 
 
+def _production_mfe_common_r(signal: dict, prod_res: dict) -> float | None:
+    """
+    Resolve production MFE in R using the verified production risk denominator.
+
+    Prevents combining canonical realized_r with an incompatible historical mfe_r.
+    """
+    risk_pct = _production_risk_pct(signal, prod_res)
+
+    if risk_pct is None:
+        return None
+
+    mfe_pct = prod_res.get("mfe_pct")
+    if mfe_pct is not None:
+        try:
+            val = float(mfe_pct) / risk_pct
+            return val if math.isfinite(val) else None
+        except (TypeError, ValueError):
+            return None
+
+    if prod_res.get("mfe_r") is not None and prod_res.get("initial_risk_pct") is not None:
+        try:
+            val = float(prod_res["mfe_r"])
+            return val if math.isfinite(val) else None
+        except (TypeError, ValueError):
+            return None
+
+    return None
+
+
+
 
 
 
@@ -771,13 +801,8 @@ async def get_shadow_ledger_analytics(
         if mfe_r is None:
             alt_data = s.get("alternative_exits") or {}
             prod_res = alt_data.get("exit_production") or {}
-            if prod_res.get("mfe_r") is not None:
-                try:
-                    cand = float(prod_res["mfe_r"])
-                    if math.isfinite(cand):
-                        mfe_r = cand
-                except (TypeError, ValueError):
-                    pass
+            mfe_r = _production_mfe_common_r(s, prod_res)
+
 
         if mfe_r is not None:
             gave_back_r = max(0.0, mfe_r - realized_r)
