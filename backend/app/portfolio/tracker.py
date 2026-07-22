@@ -157,13 +157,23 @@ class PortfolioTracker:
         ref = self.session_date or (self._day_trade_dates[-1] if self._day_trade_dates else date.today())
         return sum(1 for d in self._day_trade_dates if d == ref)
 
+    @day_trades_today.setter
+    def day_trades_today(self, value: int) -> None:
+        """Backwards-compatible setter for tests and checkpoint restore."""
+        ref = self.session_date or (self._day_trade_dates[-1] if self._day_trade_dates else date.today())
+        other_dates = [d for d in self._day_trade_dates if d != ref]
+        self._day_trade_dates = other_dates + [ref] * max(0, int(value))
+
     def roll_session(self, session: date, equity: float) -> RollResult:
         if self.session_date is None:
             self.session_date = session
             self.session_start_equity = equity
             self.peak_equity = max(self.peak_equity, equity)
             self.day_realized_pnl = 0.0
-            return RollResult(rolled=False)
+            window_start = _business_days_ago(session, _PDT_WINDOW_BUSINESS_DAYS)
+            self._day_trade_dates = [d for d in self._day_trade_dates if d > window_start]
+            carry = [s for s, lot in self._lots.items() if abs(lot.qty) >= 1e-9]
+            return RollResult(rolled=True, open_symbols=tuple(carry))
 
         if session <= self.session_date:
             return RollResult(rolled=False)
@@ -171,7 +181,7 @@ class PortfolioTracker:
         applog.info("portfolio", f"Session roll: {self.session_date} -> {session} (Equity: ${equity:,.2f})")
         carry = [s for s, lot in self._lots.items() if abs(lot.qty) >= 1e-9]
         if carry:
-            applog.info("portfolio", f"Overnight position carryover ({len(carry)}): {', '.join(sorted(carry))}")
+            applog.warning("portfolio", f"Overnight position carryover ({len(carry)}): carrying {', '.join(sorted(carry))}")
 
         self.session_date = session
         self.session_start_equity = equity

@@ -115,14 +115,19 @@ class OrderRequest(BaseModel):
         if self.qty <= 0:
             raise ValueError("qty must be positive")
 
-        if self.order_type == OrderType.LIMIT:
+        if self.order_type == OrderType.MARKET:
+            if self.limit_price is not None or self.stop_price is not None:
+                raise ValueError("MARKET orders cannot specify limit_price or stop_price")
+        elif self.order_type == OrderType.LIMIT:
             if self.limit_price is None or self.limit_price <= 0:
                 raise ValueError("LIMIT requires positive limit_price")
-
+            if self.stop_price is not None:
+                raise ValueError("LIMIT orders cannot specify stop_price")
         elif self.order_type == OrderType.STOP:
             if self.stop_price is None or self.stop_price <= 0:
                 raise ValueError("STOP requires positive stop_price")
-
+            if self.limit_price is not None:
+                raise ValueError("STOP orders cannot specify limit_price")
         elif self.order_type == OrderType.STOP_LIMIT:
             if self.stop_price is None or self.stop_price <= 0:
                 raise ValueError("STOP_LIMIT requires positive stop_price")

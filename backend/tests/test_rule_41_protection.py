@@ -45,7 +45,7 @@ def test_order_request_validation_limit():
     req = OrderRequest(symbol="AAPL", side=OrderSide.BUY, qty=10, order_type=OrderType.LIMIT, limit_price=150.0)
     assert req.limit_price == 150.0
 
-    with pytest.raises(ValueError, match="LIMIT orders require limit_price"):
+    with pytest.raises(ValueError, match="LIMIT requires positive limit_price"):
         OrderRequest(symbol="AAPL", side=OrderSide.BUY, qty=10, order_type=OrderType.LIMIT)
 
     with pytest.raises(ValueError, match="LIMIT orders cannot specify stop_price"):
@@ -56,7 +56,7 @@ def test_order_request_validation_stop():
     req = OrderRequest(symbol="AAPL", side=OrderSide.SELL, qty=10, order_type=OrderType.STOP, stop_price=140.0)
     assert req.stop_price == 140.0
 
-    with pytest.raises(ValueError, match="STOP orders require stop_price"):
+    with pytest.raises(ValueError, match="STOP requires positive stop_price"):
         OrderRequest(symbol="AAPL", side=OrderSide.SELL, qty=10, order_type=OrderType.STOP)
 
     with pytest.raises(ValueError, match="STOP orders cannot specify limit_price"):
@@ -68,7 +68,7 @@ def test_order_request_validation_stop_limit():
     assert req.stop_price == 140.0
     assert req.limit_price == 139.5
 
-    with pytest.raises(ValueError, match="STOP_LIMIT orders require stop_price and limit_price"):
+    with pytest.raises(ValueError, match="STOP_LIMIT requires positive limit_price"):
         OrderRequest(symbol="AAPL", side=OrderSide.SELL, qty=10, order_type=OrderType.STOP_LIMIT, stop_price=140.0)
 
 
@@ -173,8 +173,9 @@ async def test_41_crdo_recovery_is_resting_stop_not_marketable_limit(mock_engine
 
     # Assertions for Cycle 2:
     assert status_c2["CRDO"] is True
-    assert mock_engine.system_health == "NORMAL"
-    assert mock_engine.allow_new_entries is True
+    # Protection verification verifies stop, but does not clear system health or re-enable entries
+    assert mock_engine.system_health == "DEGRADED"
+    assert mock_engine.allow_new_entries is False
 
 
 @pytest.mark.asyncio
