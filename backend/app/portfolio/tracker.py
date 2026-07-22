@@ -232,6 +232,7 @@ class PortfolioTracker:
             "day_realized_pnl": self.day_realized_pnl,
             "session_date": self.session_date.isoformat() if self.session_date else None,
             "session_start_equity": self.session_start_equity,
+            "peak_equity": self.peak_equity,
             "day_trade_dates": [d.isoformat() for d in self._day_trade_dates],
             "day_trades_today": self.day_trades_today,
             "trades": [t.model_dump(mode="json") for t in self.trades],

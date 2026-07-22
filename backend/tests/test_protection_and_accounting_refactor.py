@@ -1,5 +1,5 @@
 import pytest
-from datetime import datetime, timedelta, UTC
+from datetime import date, datetime, timedelta, UTC
 from unittest.mock import AsyncMock, MagicMock
 
 from app.brokers.base import Fill
@@ -356,3 +356,31 @@ async def test_protection_verification_cannot_clear_unrelated_entry_block():
     assert result[protected_position.symbol] is True
     # Protection is healthy, but this function does not own unrelated entry blocks.
     assert engine.allow_new_entries is False
+
+
+def test_checkpoint_preserves_peak_equity_and_day_trade_dates():
+    tracker = PortfolioTracker()
+    tracker.session_date = date(2026, 7, 22)
+    tracker.session_start_equity = 100_000.0
+    tracker.peak_equity = 105_500.0
+    tracker._day_trade_dates = [
+        date(2026, 7, 20),
+        date(2026, 7, 22),
+    ]
+
+    payload = tracker.checkpoint()
+
+    assert payload["peak_equity"] == 105_500.0
+    assert payload["day_trade_dates"] == [
+        "2026-07-20",
+        "2026-07-22",
+    ]
+
+    restored = PortfolioTracker()
+    restored.restore_checkpoint(payload)
+
+    assert restored.peak_equity == 105_500.0
+    assert restored._day_trade_dates == [
+        date(2026, 7, 20),
+        date(2026, 7, 22),
+    ]
