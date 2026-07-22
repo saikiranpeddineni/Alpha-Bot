@@ -452,37 +452,43 @@ def test_verify_broker_protective_stops_undersized_and_take_profit_preservation(
     # 1. Under-sized stop order (19 shares @ 98.0)
     undersized_stop = Order(
         id="stop_19", client_order_id="stop_19", symbol="MU",
-        side=OrderSide.SELL, qty=19.0, order_type=OrderType.LIMIT,
-        limit_price=98.0, stop_loss=98.0, status=OrderStatus.PENDING
+        side=OrderSide.SELL, qty=19.0, order_type=OrderType.STOP,
+        stop_price=98.0, stop_loss=98.0, status=OrderStatus.SUBMITTED
     )
-    # 2. Take-profit LIMIT order above entry (21 shares @ 105.0)
+    # 2. Take-profit BRACKET LIMIT order above entry (21 shares @ 105.0)
     take_profit_limit = Order(
         id="tp_21", client_order_id="tp_21", symbol="MU",
         side=OrderSide.SELL, qty=21.0, order_type=OrderType.LIMIT,
-        limit_price=105.0, status=OrderStatus.PENDING
+        limit_price=105.0, status=OrderStatus.SUBMITTED, leg="tp", order_class="bracket"
     )
 
+    # Cycle 1: Undersized stop cancelled, submit suppressed until cancel confirmed
     engine.broker.open_orders = AsyncMock(return_value=[undersized_stop, take_profit_limit])
     engine.broker.cancel = AsyncMock(return_value=True)
     engine.broker.submit = AsyncMock(return_value=Order(
         id="new_stop_21", client_order_id="new_stop_21", symbol="MU",
-        side=OrderSide.SELL, qty=21.0, order_type=OrderType.LIMIT,
-        limit_price=98.5, status=OrderStatus.PENDING
+        side=OrderSide.SELL, qty=21.0, order_type=OrderType.STOP,
+        stop_price=98.5, status=OrderStatus.SUBMITTED
     ))
 
     loop = asyncio.new_event_loop()
     try:
-        status = loop.run_until_complete(engine.verify_broker_protective_stops([pos_long]))
+        status_c1 = loop.run_until_complete(engine.verify_broker_protective_stops([pos_long]))
         # 1. Undersized stop MUST be canceled
         engine.broker.cancel.assert_called_once_with("stop_19")
-        # 2. Take-profit limit MUST NOT be canceled (only 1 cancel call total)
+        # 2. Take-profit bracket limit MUST NOT be canceled (only 1 cancel call total)
         assert engine.broker.cancel.call_count == 1
-        # 3. New correctly-sized stop for 21 shares MUST be submitted
+        # 3. On cycle 1 while cancellation is pending, submit MUST NOT be called immediately
+        engine.broker.submit.assert_not_called()
+        assert status_c1["MU"] is False
+
+        # Cycle 2: Cancellation confirmed (open_orders only has tp_21)
+        engine.broker.open_orders = AsyncMock(return_value=[take_profit_limit])
+        status_c2 = loop.run_until_complete(engine.verify_broker_protective_stops([pos_long]))
         engine.broker.submit.assert_called_once()
         req = engine.broker.submit.call_args[0][0]
         assert req.qty == 21.0
         assert req.symbol == "MU"
-        assert status["MU"] is True
     finally:
         loop.close()
 
@@ -496,8 +502,8 @@ def test_verify_broker_protective_stops_cancellation_failure_aborts_submit(clien
     pos_long = Position(symbol="MU", qty=21.0, avg_entry_price=100.0, market_price=100.0)
     undersized_stop = Order(
         id="stop_19", client_order_id="stop_19", symbol="MU",
-        side=OrderSide.SELL, qty=19.0, order_type=OrderType.LIMIT,
-        limit_price=98.0, stop_loss=98.0, status=OrderStatus.PENDING
+        side=OrderSide.SELL, qty=19.0, order_type=OrderType.STOP,
+        stop_price=98.0, stop_loss=98.0, status=OrderStatus.SUBMITTED
     )
 
     engine.broker.open_orders = AsyncMock(return_value=[undersized_stop])
@@ -525,27 +531,33 @@ def test_verify_broker_protective_stops_short_position_symmetry(client):
     pos_short = Position(symbol="AAPL", qty=-15.0, avg_entry_price=150.0, market_price=150.0)
     undersized_short_stop = Order(
         id="stop_short_10", client_order_id="stop_short_10", symbol="AAPL",
-        side=OrderSide.BUY, qty=10.0, order_type=OrderType.LIMIT,
-        limit_price=152.0, stop_loss=152.0, status=OrderStatus.PENDING
+        side=OrderSide.BUY, qty=10.0, order_type=OrderType.STOP,
+        stop_price=152.0, stop_loss=152.0, status=OrderStatus.SUBMITTED
     )
 
     engine.broker.open_orders = AsyncMock(return_value=[undersized_short_stop])
     engine.broker.cancel = AsyncMock(return_value=True)
     engine.broker.submit = AsyncMock(return_value=Order(
         id="new_short_stop_15", client_order_id="new_short_stop_15", symbol="AAPL",
-        side=OrderSide.BUY, qty=15.0, order_type=OrderType.LIMIT,
-        limit_price=152.25, status=OrderStatus.PENDING
+        side=OrderSide.BUY, qty=15.0, order_type=OrderType.STOP,
+        stop_price=152.25, status=OrderStatus.SUBMITTED
     ))
 
     loop = asyncio.new_event_loop()
     try:
-        status = loop.run_until_complete(engine.verify_broker_protective_stops([pos_short]))
+        # Cycle 1: Cancel requested, submit suppressed
+        status_c1 = loop.run_until_complete(engine.verify_broker_protective_stops([pos_short]))
         engine.broker.cancel.assert_called_once_with("stop_short_10")
+        engine.broker.submit.assert_not_called()
+        assert status_c1["AAPL"] is False
+
+        # Cycle 2: Cancellation confirmed
+        engine.broker.open_orders = AsyncMock(return_value=[])
+        status_c2 = loop.run_until_complete(engine.verify_broker_protective_stops([pos_short]))
         engine.broker.submit.assert_called_once()
         req = engine.broker.submit.call_args[0][0]
         assert req.qty == 15.0
         assert req.side == OrderSide.BUY
         assert req.symbol == "AAPL"
-        assert status["AAPL"] is True
     finally:
         loop.close()

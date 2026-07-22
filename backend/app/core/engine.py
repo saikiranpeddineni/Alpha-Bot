@@ -1908,6 +1908,7 @@ class TradingEngine:
                     o.order_type in (OrderType.STOP, OrderType.STOP_LIMIT)
                     or getattr(o, "leg", "") == "stop"
                     or getattr(o, "order_class", "") in ("bracket", "oco")
+                    or (getattr(o, "stop_loss", None) is not None and getattr(o, "stop_loss", 0) > 0)
                 )
                 if not is_stop_type:
                     continue
@@ -1981,6 +1982,7 @@ class TradingEngine:
                             o.order_type in (OrderType.STOP, OrderType.STOP_LIMIT)
                             or leg == "stop"
                             or order_class in {"bracket", "oco", "oto"}
+                            or (st_px is not None and st_px > 0 and ((p.qty > 0 and st_px < p.avg_entry_price) or (p.qty < 0 and st_px > p.avg_entry_price)))
                         )
 
                         is_take_profit = (
@@ -2054,7 +2056,7 @@ class TradingEngine:
                             continue
 
                         if not is_take_profit and not is_stop_order:
-                            applog.critical(
+                            applog.error(
                                 "engine.protection",
                                 f"#41: Unknown active exit order {o.id} for {p.symbol}. "
                                 "Automatic cancellation suppressed; broker reconciliation required.",
@@ -2074,14 +2076,14 @@ class TradingEngine:
 
                     # Pre-submission geometry validation
                     if p.qty > 0 and stop_px >= p.market_price:
-                        applog.critical(
+                        applog.error(
                             "engine.protection",
                             f"#41: Pre-submission geometry failure for LONG {p.symbol}: "
                             f"stop={stop_px} >= market={p.market_price}. Submission aborted.",
                         )
                         continue
                     elif p.qty < 0 and stop_px <= p.market_price:
-                        applog.critical(
+                        applog.error(
                             "engine.protection",
                             f"#41: Pre-submission geometry failure for SHORT {p.symbol}: "
                             f"stop={stop_px} <= market={p.market_price}. Submission aborted.",
