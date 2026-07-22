@@ -83,8 +83,11 @@ def bollinger(series: pd.Series, period: int = 20, num_std: float = 2.0) -> pd.D
 def session_vwap(df: pd.DataFrame) -> pd.Series:
     """Volume-weighted average price anchored to each U.S. trading session (ET date)."""
     typical = (df["high"] + df["low"] + df["close"]) / 3.0
-    vol = df["volume"].astype(float)
-    session = df.index.tz_convert(ET).date
+    vol = df["volume"].astype(float) if "volume" in df.columns else pd.Series(1.0, index=df.index)
+    if getattr(df.index, "tz", None) is not None:
+        session = df.index.tz_convert(ET).date
+    else:
+        session = df.index.date
     pv_cum = (typical * vol).groupby(session).cumsum()
     v_cum = vol.groupby(session).cumsum().replace(0.0, np.nan)
     return pv_cum / v_cum

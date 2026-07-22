@@ -103,7 +103,7 @@ def refresh_contextual_memory(db: Database) -> None:
 
         strategy = r.get("strategy")
         direction = r.get("direction")
-        regime = r.get("regime") or "RANGE"
+        regime = r.get("regime") or r.get("market_regime") or "RANGE"
         clock_phase = r.get("clock_phase") or "midday"
         
         # Extract RVOL and Volatility from payload to bucket

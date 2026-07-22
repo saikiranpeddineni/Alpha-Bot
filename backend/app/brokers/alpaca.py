@@ -304,7 +304,7 @@ class AlpacaBroker(Broker):
             order_type=order_type,
             limit_price=limit_val,
             stop_price=stop_val,
-            stop_loss=stop_val,
+            stop_loss=stop_val if getattr(o, "order_class", None) else None,
             status=order_status,
             filled_qty=float(o.filled_qty or 0),
             filled_avg_price=float(o.filled_avg_price) if getattr(o, "filled_avg_price", None) else None,

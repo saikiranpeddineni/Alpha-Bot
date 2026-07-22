@@ -556,7 +556,7 @@ class Database:
 
                     data = {
                         "id": r.id,
-                        "candidate_id": r.candidate_id,
+                        "candidate_id": raw_payload.get("candidate_id") or (r.id.rsplit("_", 1)[0] if "_" in r.id else r.id),
                         "timestamp": r.ts.isoformat() if r.ts else None,
                         "ts": r.ts.isoformat() if r.ts else None,
                         "symbol": r.symbol,
@@ -567,7 +567,7 @@ class Database:
                         "rejection_reason": r.rejection_reason,
                         "rejection_stage": r.rejection_stage,
                         "policy_id": r.policy_id,
-                        "replay_attempts": r.replay_attempts,
+                        "replay_attempts": getattr(r, "replay_attempts", None),
                         "replayed": r.replayed,
                         "replay_timestamp": r.replay_timestamp.isoformat() if r.replay_timestamp else None,
                         "simulated_pnl": r.simulated_pnl,
@@ -592,8 +592,8 @@ class Database:
                             data[k] = v
 
                     results.append(data)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    print(f"GET SHADOW SIGNALS EXC: {exc}")
             return results
 
     def get_pending_shadow_replays(

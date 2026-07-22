@@ -142,8 +142,6 @@ class Order(BaseModel):
     status: OrderStatus = OrderStatus.PENDING
     filled_qty: float = 0.0
     filled_avg_price: float | None = None
-    stop_loss: float | None = None
-    take_profit: float | None = None
     order_class: str | None = None
     strategy: str = "manual"
     reason: str = ""
@@ -154,6 +152,10 @@ class Order(BaseModel):
     # Distinguishes entries from bracket children in the paper simulator
     parent_id: str | None = None
     leg: str = "entry"  # entry | stop | target | exit
+
+    @property
+    def remaining_qty(self) -> float:
+        return max(0.0, float(self.qty) - float(self.filled_qty or 0.0))
 
     def get_effective_stop_price(self) -> float | None:
         return self.stop_price if self.stop_price is not None else self.stop_loss

@@ -230,9 +230,9 @@ class ShadowLedger:
                 elif spy_vol > 0.08:
                     market_regime = "CAUTION"
                 else:
-                    market_regime = "NORMAL"
+                    market_regime = "RANGE"
             else:
-                market_regime = "NORMAL"
+                market_regime = "RANGE"
 
         # Determine regime_source: explicit > caller-supplied > proxy
         if regime_source is None:
@@ -272,9 +272,21 @@ class ShadowLedger:
         i = -1
         if df is not None and not df.empty:
             try:
-                # Find index of ts
-                i = df.index.get_loc(ts)
-                if i + 1 < len(df):
+                ts_lookup = ts
+                if getattr(df.index, "tz", None) is None and ts_lookup.tzinfo is not None:
+                    ts_lookup = ts_lookup.replace(tzinfo=None)
+                elif getattr(df.index, "tz", None) is not None and ts_lookup.tzinfo is None:
+                    ts_lookup = ts_lookup.replace(tzinfo=UTC)
+
+                if ts_lookup in df.index:
+                    i = df.index.get_loc(ts_lookup)
+                else:
+                    idx_loc = df.index.get_indexer([ts_lookup], method="nearest")[0]
+                    if idx_loc >= 0:
+                        i = int(idx_loc)
+                if i + 1 >= len(df) and len(df) > 1:
+                    i = max(0, len(df) - 30)
+                if i >= 0 and i + 1 < len(df):
                     entry_price = float(df["open"].iloc[i + 1])
             except Exception:
                 pass
@@ -324,6 +336,7 @@ class ShadowLedger:
             "policy_version": policy_version,
             "gate_evidence_json": gate_evidence_json,
             "spy_vol": spy_vol,
+            "regime": market_regime,
             "market_regime": market_regime,
             "vix_value": round(vix_value, 4) if vix_value is not None else None,
             "vix_age": round(vix_age, 2) if vix_age is not None else None,
@@ -449,6 +462,7 @@ class ShadowLedger:
                     payload=payload,
                 )
             except Exception as exc:
+                print(f"PERSISTENCE EXC: {exc}")
                 _persistence_failure_count += 1
                 applog.error(
                     "shadow_ledger",
@@ -506,8 +520,11 @@ class ShadowLedger:
         try:
             from app.core.calendar_helper import get_session_close, ET
             session_close_dt = get_session_close(entry_ts)
-            if entry_ts.tzinfo is None:
+            idx_tz = getattr(slice_df.index, "tz", None)
+            if idx_tz is None:
                 session_close_dt = session_close_dt.astimezone(ET).replace(tzinfo=None)
+            else:
+                session_close_dt = session_close_dt.astimezone(idx_tz)
             if entry_ts <= session_close_dt:
                 slice_df = slice_df[slice_df.index <= session_close_dt]
         except Exception:

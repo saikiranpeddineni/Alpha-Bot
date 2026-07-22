@@ -19,7 +19,8 @@ def mock_engine():
     engine._pending_close_symbols = set()
     engine._flattening_symbols = set()
     
-    # Bind real verify_broker_protective_stops and _resolve_recovery_stop methods
+    # Bind real verify_broker_protective_stops, _is_valid_protective_stop, and _resolve_recovery_stop methods
+    engine._is_valid_protective_stop = TradingEngine._is_valid_protective_stop.__get__(engine, TradingEngine)
     engine._resolve_recovery_stop = TradingEngine._resolve_recovery_stop.__get__(engine, TradingEngine)
     engine._reconcile_protection = TradingEngine.verify_broker_protective_stops.__get__(engine, TradingEngine)
     return engine

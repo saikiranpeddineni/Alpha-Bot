@@ -137,7 +137,10 @@ class TestIssue41ProtectiveExitRecovery:
         assert recovery_req.symbol == "AAPL"
         assert recovery_req.side == OrderSide.SELL
         assert recovery_req.qty == 100.0
-        assert recovery_req.limit_price == 197.0
+        assert recovery_req.order_type == OrderType.STOP
+        assert recovery_req.stop_price == 197.0
+        assert recovery_req.limit_price is None
+
 
     @pytest.mark.asyncio
     async def test_broker_protection_rejects_stale_children_and_insufficient_qty(self):
@@ -171,8 +174,13 @@ class TestIssue41ProtectiveExitRecovery:
         engine.broker.open_orders = AsyncMock(return_value=[stale_order, partial_order])
         engine.broker.submit = AsyncMock(return_value=MagicMock())
 
+        # Cycle 1: stale/undersized orders are cancelled, recovery submission deferred until cancellation ACK
         status = await TradingEngine.verify_broker_protective_stops(engine, [position])
+        engine.broker.submit.assert_not_called()
 
+        # Cycle 2: broker open_orders is now empty
+        engine.broker.open_orders = AsyncMock(return_value=[])
+        await TradingEngine.verify_broker_protective_stops(engine, [position])
         engine.broker.submit.assert_called_once()
 
 

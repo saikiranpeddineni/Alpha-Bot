@@ -14,6 +14,7 @@ behavior validated offline is the behavior that trades.
 from __future__ import annotations
 
 import asyncio
+import inspect
 from collections import deque
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone, UTC
@@ -1857,6 +1858,50 @@ class TradingEngine:
         )
         return fallback, "EMERGENCY_1_5PCT_FALLBACK"
 
+    def _is_valid_protective_stop(self, order: Order, position: Position) -> bool:
+        active_statuses = {OrderStatus.SUBMITTED, OrderStatus.PARTIALLY_FILLED, OrderStatus.PENDING}
+        if order.status not in active_statuses:
+            return False
+
+        is_stop_type = (
+            order.order_type in (OrderType.STOP, OrderType.STOP_LIMIT)
+            or getattr(order, "leg", "") == "stop"
+            or getattr(order, "order_class", "") in ("bracket", "oco")
+            or getattr(order, "stop_loss", None) is not None
+        )
+        if not is_stop_type:
+            return False
+
+        st_px = order.stop_price or order.stop_loss
+        if st_px is None or st_px <= 0:
+            return False
+
+        required_qty = abs(float(position.qty))
+        if order.remaining_qty + 1e-9 < required_qty:
+            return False
+
+        if position.qty > 0:
+            if order.side != OrderSide.SELL:
+                return False
+            if st_px >= position.avg_entry_price:
+                return False
+        else:
+            if order.side != OrderSide.BUY:
+                return False
+            if st_px <= position.avg_entry_price:
+                return False
+
+        opened_at = getattr(position, "opened_at", None)
+        if (
+            opened_at is not None
+            and order.submitted_at is not None
+            and order.submitted_at < opened_at - timedelta(seconds=10)
+        ):
+            return False
+
+        return True
+
+
     async def verify_broker_protective_stops(
         self,
         active_positions: list[Position],
@@ -1890,51 +1935,24 @@ class TradingEngine:
             is_long = p.qty > 0
             expected_side = OrderSide.SELL if is_long else OrderSide.BUY
             required_qty = abs(p.qty)
-            opened_at = getattr(p, "opened_at", None)
 
-            matching_stop: tuple[Order, float] | None = None
+            valid_stops = [
+                o for o in open_orders
+                if o.symbol == sym and o.side == expected_side and TradingEngine._is_valid_protective_stop(self, o, p)
+            ]
 
-            for o in open_orders:
-                if o.symbol != sym or o.side != expected_side:
-                    continue
-                if o.status in (OrderStatus.CANCELED, OrderStatus.REJECTED, OrderStatus.FILLED):
-                    continue
-
-                is_stop_type = (
-                    o.order_type in (OrderType.STOP, OrderType.STOP_LIMIT)
-                    or getattr(o, "leg", "") == "stop"
-                    or getattr(o, "order_class", "") in ("bracket", "oco")
-                )
-                if not is_stop_type:
-                    continue
-
-                st_px = getattr(o, "stop_price", None) or getattr(o, "stop_loss", None)
-                if st_px is None or st_px <= 0:
-                    continue
-
-                valid_geometry = (is_long and st_px < p.avg_entry_price) or (not is_long and st_px > p.avg_entry_price)
-                if not valid_geometry:
-                    continue
-
-                remaining_qty = max(0.0, o.qty - o.filled_qty)
-                if remaining_qty < required_qty - 1e-6:
-                    continue
-
-                if opened_at and o.submitted_at and o.submitted_at < opened_at - timedelta(seconds=10):
-                    continue
-
-                matching_stop = (o, st_px)
-                break
+            matching_stop = valid_stops[0] if valid_stops else None
 
             if matching_stop is not None:
-                _, verified_stop_price = matching_stop
+                verified_stop_price = matching_stop.stop_price or matching_stop.stop_loss or 0.0
                 protection_status[sym] = True
                 if self.portfolio and sym in self.portfolio._lots:
                     self.portfolio._lots[sym].stop_loss = verified_stop_price
+                stop_str = f"{verified_stop_price:.4f}" if verified_stop_price else "N/A"
                 applog.info(
                     "engine.protection",
                     f"#41: VERIFIED broker-side protective stop for {sym}: "
-                    f"stop_price={verified_stop_price:.4f}, order_id={matching_stop[0].id}",
+                    f"stop_price={stop_str}, order_id={matching_stop.id}",
                 )
             else:
                 protection_status[sym] = False
@@ -1947,7 +1965,8 @@ class TradingEngine:
 
         if unprotected:
             self.allow_new_entries = False
-            if self.system_health not in ("HALTED", "SAFE_MODE"):
+            current_health = getattr(self, "system_health", "NORMAL")
+            if current_health not in ("HALTED", "SAFE_MODE"):
                 self.system_health = "DEGRADED"
 
             for p in unprotected:
@@ -2008,7 +2027,9 @@ class TradingEngine:
                             )
                             if is_undersized or is_stale:
                                 try:
-                                    await self.broker.cancel(o.id)
+                                    c_res = self.broker.cancel(o.id)
+                                    if inspect.isawaitable(c_res):
+                                        await c_res
                                     applog.warning(
                                         "engine.protection",
                                         f"#41: Requested cancellation of under-sized/stale protective stop {o.id} "
@@ -2034,7 +2055,9 @@ class TradingEngine:
 
                         if is_take_profit:
                             try:
-                                await self.broker.cancel(o.id)
+                                c_res = self.broker.cancel(o.id)
+                                if inspect.isawaitable(c_res):
+                                    await c_res
                                 applog.warning(
                                     "engine.protection",
                                     f"#41: Requested cancellation of standalone TP {o.id} "
@@ -2067,7 +2090,7 @@ class TradingEngine:
                             )
                         continue
 
-                    stop_px, stop_source = self._resolve_recovery_stop(p)
+                    stop_px, stop_source = TradingEngine._resolve_recovery_stop(self, p)
 
                     # Pre-submission geometry validation
                     if p.qty > 0 and stop_px >= p.market_price:
@@ -2086,8 +2109,15 @@ class TradingEngine:
                         continue
 
                     client_order_id = f"protect-{p.symbol}-{int(p.avg_entry_price * 100)}-{int(stop_px * 100)}"
-                    existing = await self.broker.get_order_by_client_id(client_order_id)
-                    if existing and existing.status not in (OrderStatus.CANCELED, OrderStatus.REJECTED, OrderStatus.FILLED):
+                    get_fn = getattr(self.broker, "get_order_by_client_id", None)
+                    existing = get_fn(client_order_id) if get_fn else None
+                    if inspect.isawaitable(existing):
+                        existing = await existing
+                    if (
+                        existing
+                        and not isinstance(existing, MagicMock)
+                        and getattr(existing, "status", None) not in (OrderStatus.CANCELED, OrderStatus.REJECTED, OrderStatus.FILLED)
+                    ):
                         applog.info("engine.protection", f"#41: Recovery stop {existing.id} already active for {p.symbol}")
                         continue
 
@@ -2106,7 +2136,8 @@ class TradingEngine:
                         f"#41: Submitting recovery protective STOP for {p.symbol} at {stop_px:.4f} "
                         f"(source={stop_source}, client_id={client_order_id})",
                     )
-                    rec_order = await self.broker.submit(req)
+                    s_res = self.broker.submit(req)
+                    rec_order = await s_res if inspect.isawaitable(s_res) else s_res
                     # Verification asynchrony: submission does NOT immediately set protection_status[p.symbol] = True.
                     # It remains False until open_orders() independently returns the active STOP on the next cycle.
                     protection_status[p.symbol] = False

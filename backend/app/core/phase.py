@@ -71,8 +71,14 @@ def classify_market_behavior(spy_df: pd.DataFrame, ts: datetime) -> MarketBehavi
     if spy_df is None or spy_df.empty:
         return MarketBehaviorState.PRICE_DISCOVERY
 
+    ts_cmp = ts
+    if getattr(spy_df.index, "tz", None) is None and ts_cmp.tzinfo is not None:
+        ts_cmp = ts_cmp.replace(tzinfo=None)
+    elif getattr(spy_df.index, "tz", None) is not None and ts_cmp.tzinfo is None:
+        ts_cmp = ts_cmp.replace(tzinfo=UTC)
+
     # Filter to look back up to current timestamp ts
-    sub = spy_df[spy_df.index <= ts]
+    sub = spy_df[spy_df.index <= ts_cmp]
     if len(sub) < 30:
         return MarketBehaviorState.PRICE_DISCOVERY
 
