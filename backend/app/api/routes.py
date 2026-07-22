@@ -1012,6 +1012,7 @@ async def get_shadow_ledger_gate_alpha(
         g: {
             "total_vetoes": 0,
             "unique_vetoes": 0,
+            "first_decisive_vetoes": 0,
             "unique_veto_alpha": 0.0,
             "shared_veto_alpha": 0.0,
             "marginal_alpha": 0.0,
@@ -1027,9 +1028,19 @@ async def get_shadow_ledger_gate_alpha(
             continue
             
         vetoes = gate_evidence["vetoes"]
+        veto_count = len(vetoes)
+        first_decisive = gate_evidence.get("first_decisive_gate") or s.get("first_decisive_gate")
+        if not first_decisive and veto_count > 0:
+            for g in gates:
+                if g in vetoes:
+                    first_decisive = g
+                    break
+
         for g in gates:
             if g in vetoes:
                 stats[g]["total_vetoes"] += 1
+            if first_decisive == g:
+                stats[g]["first_decisive_vetoes"] += 1
                 
         # Read attribution fields from payload
         unique_veto = s.get("unique_veto_alpha") or {}
@@ -1047,8 +1058,9 @@ async def get_shadow_ledger_gate_alpha(
                 realized_r = float(sim_pnl) / 100.0
                 
         for g in gates:
-            # Fix C5 (Issue #195): Count unique veto by membership, not non-zero magnitude.
-            if g in unique_veto:
+            # Fix C5 (Issue #195): Count unique veto only when gate g is the sole veto or has non-zero unique alpha
+            is_unique = (veto_count == 1 and g in vetoes) or (unique_veto.get(g, 0.0) != 0.0)
+            if is_unique:
                 stats[g]["unique_vetoes"] += 1
                 stats[g]["unique_veto_alpha"] += unique_veto.get(g, 0.0)
                 # Fix C5 (Issue #196): Use forward outcome eligibility, not the replayed flag.

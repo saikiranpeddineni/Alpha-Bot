@@ -64,10 +64,12 @@ class SignalPipeline:
         risk_config: RiskConfig | None = None,
         settings: Settings | None = None,
         regime_weights: dict[str, dict[Regime, float]] | None = None,
+        soft_composite_gating: bool = False,
     ) -> None:
         self.model = model
         self.ml_threshold = ml_threshold
         self.regime_weights = regime_weights or REGIME_WEIGHTS
+        self.soft_composite_gating = soft_composite_gating
 
         # Trade Score Engine — built from settings if provided
         _settings = settings or get_settings()
@@ -85,6 +87,30 @@ class SignalPipeline:
 
         self._is_event_day: bool = False  # set externally by engine on CPI/FOMC days
         self._midday_active: bool = False  # set externally by engine during low-edge hours
+
+    def compute_composite_score(
+        self,
+        ml_prob: float,
+        meta_prob: float,
+        trade_score: float,
+        portfolio_alignment: float = 1.0,
+        risk_factor: float = 1.0,
+    ) -> float:
+        """Compute a weighted composite score (0-100) across all 5 evaluation gates.
+        
+        Weights:
+          ML Probability: 30%
+          Meta-Label Probability: 25%
+          Trade Score: 20%
+          Portfolio Alignment: 15%
+          Risk Factor: 10%
+        """
+        ml_pts = min(100.0, max(0.0, ml_prob * 100.0)) * 0.30
+        meta_pts = min(100.0, max(0.0, meta_prob * 100.0)) * 0.25
+        score_pts = min(100.0, max(0.0, trade_score)) * 0.20
+        port_pts = min(100.0, max(0.0, portfolio_alignment * 100.0)) * 0.15
+        risk_pts = min(100.0, max(0.0, risk_factor * 100.0)) * 0.10
+        return round(ml_pts + meta_pts + score_pts + port_pts + risk_pts, 2)
 
 
     def set_event_day(self, is_event: bool) -> None:

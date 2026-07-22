@@ -37,6 +37,14 @@ class RiskConfig(BaseModel):
     min_price: float = Field(5.0, ge=0.0)
     min_avg_dollar_volume: float = Field(100_000.0, ge=0.0)
     ml_confidence_threshold: float = Field(0.55, ge=0.0, le=1.0)
+    regime_ml_thresholds: dict[str, float] = Field(
+        default={
+            "NORMAL": 0.48,
+            "CAUTION": 0.52,
+            "STRESS": 0.60,
+            "PANIC": 0.65,
+        }
+    )
     min_specialist_auc: float = Field(0.53, ge=0.50, le=1.0)
     min_stop_pct: float = Field(0.5, ge=0.0, le=5.0)
     score_threshold_trend: float = Field(55.0, ge=0.0, le=100.0)
@@ -64,6 +72,7 @@ class RiskConfig(BaseModel):
             {"policy_id": "exit_bracket_tight", "take_profit_pct": 1.0, "stop_loss_pct": 0.5},
             {"policy_id": "exit_bracket_wide", "take_profit_pct": 3.0, "stop_loss_pct": 1.5},
             {"policy_id": "exit_atr_trailing", "trailing_stop_atr_mult": 2.0},
+            {"policy_id": "exit_hybrid_breakeven_atr", "breakeven_r_trigger": 0.30, "trail_r_trigger": 0.75, "tight_trail_r_trigger": 1.50},
         ]
     )
 

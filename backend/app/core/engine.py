@@ -660,13 +660,16 @@ class TradingEngine:
         if self.state == EngineState.HALTED:
             return
 
-        # Synchronize ML gate threshold with assessed market risk regime with default fallback validation
-        is_stress = self.vix_unavailable or (getattr(self.risk_config, "current_regime", "normal") in ("stress", "panic"))
-        raw_threshold = (
-            getattr(self.risk_config, "stress_ml_confidence_threshold", 0.55)
-            if is_stress
-            else getattr(self.risk_config, "ml_confidence_threshold", 0.55)
-        )
+        # Synchronize ML gate threshold with assessed market risk regime with dynamic scale
+        current_regime = "STRESS" if self.vix_unavailable else str(getattr(getattr(self, "last_safety_decision", None), "market_risk_state", getattr(self.risk_config, "current_regime", "NORMAL"))).upper()
+        regime_map = getattr(self.risk_config, "regime_ml_thresholds", {})
+        raw_threshold = regime_map.get(current_regime)
+        if raw_threshold is None:
+            raw_threshold = (
+                getattr(self.risk_config, "stress_ml_confidence_threshold", 0.60)
+                if current_regime in ("STRESS", "PANIC")
+                else getattr(self.risk_config, "ml_confidence_threshold", 0.55)
+            )
         try:
             import math
             val = float(raw_threshold)

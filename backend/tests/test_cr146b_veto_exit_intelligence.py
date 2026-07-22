@@ -191,3 +191,45 @@ def test_gate_alpha_handles_none_realized_r(monkeypatch):
     assert data["gates"]["ml_gate"]["avoided_losses"] == 0
     assert data["gates"]["ml_gate"]["missed_profits"] == 0
 
+
+def test_first_decisive_gate_attribution():
+    """Verify first_decisive_gate is populated and recorded in veto attribution."""
+    vetoes = {"ml_gate": "ML low", "meta_label_gate": "Meta low"}
+    res = ParallelEvidenceEvaluator.calculate_veto_attribution(vetoes, -1.0)
+    assert res["first_decisive_gate"] == "ml_gate"
+    assert res["coalition_veto_count"] == 2
+
+
+def test_hybrid_breakeven_atr_replay():
+    """Verify exit_hybrid_breakeven_atr moves stop to breakeven after +0.30R MFE."""
+    times = [datetime(2026, 7, 19, 9, 30) + timedelta(minutes=i) for i in range(20)]
+    # Prices: 100 -> 100.4 (MFE +0.4R on 1.0 risk) -> 99.8 (pullback)
+    prices = [100.0, 100.2, 100.4, 100.2, 99.8] + [99.8] * 15
+    df = pd.DataFrame({
+        "open": prices,
+        "high": [p + 0.05 for p in prices],
+        "low": [p - 0.05 for p in prices],
+        "close": prices,
+        "volume": [1000] * 20,
+        "atr14": [0.2] * 20,
+    }, index=pd.to_datetime(times))
+
+    res = ShadowLedger.replay_signal_60m(
+        df=df,
+        entry_idx=0,
+        direction="long",
+        stop_loss=99.0,  # 1.0 initial risk
+        take_profit=None,
+        entry_price=100.0,
+        strategy_params={
+            "breakeven_r_trigger": 0.30,
+            "trail_r_trigger": 0.75,
+            "tight_trail_r_trigger": 1.50,
+        }
+    )
+
+    assert res["exit_reason"] in ("trailing_stop", "sl", "hybrid_breakeven_stop")
+    # Because breakeven triggered at +0.30R MFE (100.3+), exit_price should be breakeven (>= 100.0), not initial stop (99.0)
+    assert res["exit_price"] >= 100.0
+
+

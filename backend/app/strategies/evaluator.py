@@ -139,14 +139,21 @@ class ParallelEvidenceEvaluator:
             )
             score_rejection_reason = None if score_passed else f"Trade Score {trade_score:.1f} < {score_threshold:.1f}"
 
-            # Build veto list
+            # Build veto list and track first decisive gate
             vetoes = {}
+            first_decisive_gate = None
             if not ml_passed:
                 vetoes["ml_gate"] = ml_rejection_reason
+                if first_decisive_gate is None:
+                    first_decisive_gate = "ml_gate"
             if not meta_passed:
                 vetoes["meta_label_gate"] = meta_rejection_reason
+                if first_decisive_gate is None:
+                    first_decisive_gate = "meta_label_gate"
             if not score_passed:
                 vetoes["trade_score_gate"] = score_rejection_reason
+                if first_decisive_gate is None:
+                    first_decisive_gate = "trade_score_gate"
 
             return {
                 "ml_probability": ml,
@@ -161,10 +168,11 @@ class ParallelEvidenceEvaluator:
                 "trade_score_rejection_reason": score_rejection_reason,
                 "vetoes": vetoes,
                 "veto_count": len(vetoes),
+                "first_decisive_gate": first_decisive_gate,
             }
         except Exception as exc:
             applog.error("evaluator", f"ParallelEvidenceEvaluator failed on {symbol}: {exc}")
-            return {"error": str(exc), "veto_count": 0, "vetoes": {}}
+            return {"error": str(exc), "veto_count": 0, "vetoes": {}, "first_decisive_gate": None}
 
     @staticmethod
     def calculate_veto_attribution(vetoes: dict, realized_r: float | None) -> dict[str, Any]:
@@ -189,6 +197,13 @@ class ParallelEvidenceEvaluator:
             marginal_alpha[g] = 0.0
 
         veto_count = len(vetoes)
+        first_decisive_gate = None
+        if veto_count > 0:
+            for g in gates:
+                if g in vetoes:
+                    first_decisive_gate = g
+                    break
+
         if veto_count == 1:
             vetoed_gate = list(vetoes.keys())[0]
             if vetoed_gate in unique_veto_alpha:
@@ -210,4 +225,5 @@ class ParallelEvidenceEvaluator:
             "shared_veto_alpha": shared_veto_alpha,
             "marginal_alpha": marginal_alpha,
             "coalition_veto_count": veto_count,
+            "first_decisive_gate": first_decisive_gate,
         }

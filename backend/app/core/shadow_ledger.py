@@ -396,12 +396,17 @@ class ShadowLedger:
 
                 alt_params = {**strategy_params} if strategy_params else {}
                 is_atr_trailing = "trailing_stop_atr_mult" in alt
+                is_hybrid_exit = "breakeven_r_trigger" in alt
                 if is_atr_trailing:
                     alt_params["trailing_stop_atr_mult"] = alt["trailing_stop_atr_mult"]
+                if is_hybrid_exit:
+                    alt_params["breakeven_r_trigger"] = alt.get("breakeven_r_trigger", 0.30)
+                    alt_params["trail_r_trigger"] = alt.get("trail_r_trigger", 0.75)
+                    alt_params["tight_trail_r_trigger"] = alt.get("tight_trail_r_trigger", 1.50)
 
-                # Fix A4 (Issue #179): ATR trailing policies must NOT inherit the
+                # Fix A4 (Issue #179): ATR trailing & hybrid policies must NOT inherit the
                 # production take-profit — they manage exits via the trailing mechanism.
-                effective_tp = None if is_atr_trailing else (alt_tp_val or take_profit)
+                effective_tp = None if (is_atr_trailing or is_hybrid_exit) else (alt_tp_val or take_profit)
 
                 alt_res = ShadowLedger.replay_signal_60m(
                     df=df,
@@ -559,7 +564,12 @@ class ShadowLedger:
         # Fix A3 (#180): position_peak starts at entry_price (prior-bar state at bar 0).
         # We evaluate trailing-stop triggers BEFORE updating peak with the current bar.
         position_peak = entry_price
+        initial_risk = max(abs(entry_price - initial_stop), 1e-8)
         ts_mult = strategy_params.get("trailing_stop_atr_mult", 0) if strategy_params else 0
+        is_hybrid = ("breakeven_r_trigger" in strategy_params) if strategy_params else False
+        be_trig = strategy_params.get("breakeven_r_trigger", 0.30) if strategy_params else 0.30
+        trail_trig = strategy_params.get("trail_r_trigger", 0.75) if strategy_params else 0.75
+        tight_trig = strategy_params.get("tight_trail_r_trigger", 1.50) if strategy_params else 1.50
 
         entry_ts = slice_df.index[0] if not slice_df.empty else None
 
@@ -570,8 +580,7 @@ class ShadowLedger:
             close_val = float(bar["close"])
             bar_open = float(bar["open"])
 
-            # Fix A3 (#180): Compute trailing stop trigger level from the PRIOR-bar peak
-            # before updating position_peak with the current bar's extreme.
+            # Compute trailing stop or hybrid breakeven-ATR stop from prior-bar peak
             trailing_stop_price: float | None = None
             if ts_mult > 0:
                 atr = float(bar["atr14"]) if "atr14" in bar and pd.notna(bar["atr14"]) else 0.0
@@ -580,6 +589,20 @@ class ShadowLedger:
                         trailing_stop_price = position_peak - ts_mult * atr
                     else:
                         trailing_stop_price = position_peak + ts_mult * atr
+            elif is_hybrid and initial_risk > 0:
+                curr_mfe = (position_peak - entry_price) if direction == "long" else (entry_price - position_peak)
+                curr_mfe_r = curr_mfe / initial_risk
+                atr = float(bar["atr14"]) if "atr14" in bar and pd.notna(bar["atr14"]) else (entry_price * 0.01)
+                eff_stop = initial_stop
+                if curr_mfe_r >= be_trig:
+                    be_price = entry_price * (1.0005 if direction == "long" else 0.9995)
+                    eff_stop = max(eff_stop, be_price) if direction == "long" else min(eff_stop, be_price)
+                if curr_mfe_r >= trail_trig:
+                    mult = 1.0 if curr_mfe_r >= tight_trig else 1.5
+                    t_price = (position_peak - mult * atr) if direction == "long" else (position_peak + mult * atr)
+                    eff_stop = max(eff_stop, t_price) if direction == "long" else min(eff_stop, t_price)
+                if eff_stop != initial_stop:
+                    trailing_stop_price = eff_stop
 
             # Fix A2 (#184): Bracket TP/SL evaluated FIRST (resting broker orders fill intrabar).
             sl_hit = False
