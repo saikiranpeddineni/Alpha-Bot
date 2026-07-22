@@ -62,9 +62,9 @@ class CanonicalOutcomeResolver:
         return None
 
     @classmethod
-    def resolve(cls, record: dict | pd.Series, horizon: str = "60m") -> CanonicalEvidence:
+    def resolve(cls, record: dict | pd.Series, horizon: str | None = None) -> CanonicalEvidence:
         """Resolve authoritative outcome from a Shadow Ledger record or payload dict.
-        
+
         Resolves tickets #218, #219, #220, #224, #234, #238.
         """
         if isinstance(record, pd.Series):
@@ -82,6 +82,14 @@ class CanonicalOutcomeResolver:
             payload = payload_raw
         else:
             payload = {}
+
+        strategy_name = str(row_dict.get("strategy") or payload.get("strategy") or "").lower()
+        if horizon is None or horizon == "60m":
+            from app.strategies.memory import STRATEGY_HORIZON, _DEFAULT_HORIZON
+            horizons = STRATEGY_HORIZON.get(strategy_name, _DEFAULT_HORIZON)
+            target_horizon = horizons[0] if horizons else "60m"
+        else:
+            target_horizon = horizon
 
         # Extract entry, stop, PnL, MAE, MFE
         entry = float(payload.get("price") or payload.get("entry_price") or row_dict.get("entry_price") or 0.0) or None
@@ -132,7 +140,7 @@ class CanonicalOutcomeResolver:
         return CanonicalEvidence(
             valid=valid_r,
             invalid_reason=invalid_reason,
-            horizon=horizon,
+            horizon=target_horizon,
             realized_r=realized_r,
             mfe=float(mfe) if mfe is not None and pd.notna(mfe) else None,
             mae=float(mae) if mae is not None and pd.notna(mae) else None,
