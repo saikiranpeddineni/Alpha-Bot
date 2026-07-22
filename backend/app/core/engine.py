@@ -1922,23 +1922,119 @@ class TradingEngine:
                     opened_at = getattr(p, "opened_at", None)
 
                     cancellation_failed = False
+                    cancellation_pending = False
+                    recovery_blocked = False
+
                     for o in open_orders:
                         if o.symbol != p.symbol or o.side != side:
                             continue
                         if o.status in (OrderStatus.CANCELED, OrderStatus.REJECTED, OrderStatus.FILLED):
                             continue
 
-                        # Any unverified active exit order ties up position quantity at the broker,
-                        # causing Alpaca code 40310000 (insufficient qty) during recovery stop submission.
-                        # Cancel it to allow protective stop recovery to execute cleanly.
-                        try:
-                            await self.broker.cancel(o.id)
-                            applog.info("engine.protection", f"#41: Canceled conflicting exit order {o.id} for {p.symbol} to allow protective stop recovery (qty={o.qty})")
-                        except Exception as cancel_exc:
-                            cancellation_failed = True
-                            applog.warning("engine.protection", f"#41: Could not cancel conflicting exit order {o.id} for {p.symbol}: {cancel_exc}. Aborting recovery submit for this cycle.")
+                        stop_px = getattr(o, "stop_loss", None)
+                        limit_px = getattr(o, "limit_price", None)
+                        leg = str(getattr(o, "leg", "") or "").lower()
+                        reason = str(getattr(o, "reason", "") or "").lower()
+                        order_class = str(getattr(o, "order_class", "") or "").lower()
 
-                    if cancellation_failed:
+                        is_stop_order = (
+                            leg == "stop"
+                            or "stop" in reason
+                            or (
+                                stop_px is not None
+                                and stop_px > 0
+                                and (
+                                    (p.qty > 0 and stop_px < p.avg_entry_price)
+                                    or (p.qty < 0 and stop_px > p.avg_entry_price)
+                                )
+                            )
+                        )
+
+                        is_take_profit = (
+                            limit_px is not None
+                            and limit_px > 0
+                            and not is_stop_order
+                            and (
+                                (p.qty > 0 and limit_px > p.avg_entry_price)
+                                or (p.qty < 0 and limit_px < p.avg_entry_price)
+                            )
+                        )
+
+                        is_bracket_or_oco = (
+                            order_class in {"bracket", "oco", "oto"}
+                            or leg in {"stop", "take_profit", "tp"}
+                            or bool(getattr(o, "parent_order_id", None))
+                            or bool(getattr(o, "parent_id", None))
+                        )
+
+                        if is_stop_order:
+                            is_undersized = o.qty < required_qty - 1e-6
+                            is_stale = bool(
+                                opened_at
+                                and o.submitted_at
+                                and o.submitted_at < opened_at - timedelta(seconds=10)
+                            )
+                            if is_undersized or is_stale:
+                                try:
+                                    await self.broker.cancel(o.id)
+                                    applog.warning(
+                                        "engine.protection",
+                                        f"#41: Requested cancellation of under-sized/stale protective stop {o.id} "
+                                        f"for {p.symbol} (qty={o.qty} < required={required_qty:.2f}).",
+                                    )
+                                    cancellation_pending = True
+                                except Exception as cancel_exc:
+                                    cancellation_failed = True
+                                    applog.error(
+                                        "engine.protection",
+                                        f"#41: Failed to cancel under-sized/stale stop {o.id} for {p.symbol}: {cancel_exc}",
+                                    )
+                            continue
+
+                        if is_bracket_or_oco:
+                            applog.warning(
+                                "engine.protection",
+                                f"#41: Broker-managed exit {o.id} detected for {p.symbol}; "
+                                "not cancelling automatically.",
+                            )
+                            recovery_blocked = True
+                            continue
+
+                        if is_take_profit:
+                            try:
+                                await self.broker.cancel(o.id)
+                                applog.warning(
+                                    "engine.protection",
+                                    f"#41: Requested cancellation of standalone TP {o.id} "
+                                    f"for {p.symbol} because it blocks emergency stop recovery "
+                                    f"(qty={o.qty}, limit={limit_px}).",
+                                )
+                                cancellation_pending = True
+                            except Exception as cancel_exc:
+                                cancellation_failed = True
+                                applog.error(
+                                    "engine.protection",
+                                    f"#41: Failed to cancel blocking TP {o.id} for {p.symbol}: {cancel_exc}",
+                                )
+                            continue
+
+                        if not is_take_profit and not is_stop_order:
+                            applog.critical(
+                                "engine.protection",
+                                f"#41: Unknown active exit order {o.id} for {p.symbol}. "
+                                "Automatic cancellation suppressed; broker reconciliation required.",
+                            )
+                            recovery_blocked = True
+
+                    if cancellation_failed or recovery_blocked:
+                        continue
+
+                    if cancellation_pending:
+                        applog.info(
+                            "engine.protection",
+                            f"#41: Waiting for broker cancellation confirmation for {p.symbol} "
+                            "before submitting recovery stop.",
+                        )
                         continue
 
                     stop_pct = 0.015
