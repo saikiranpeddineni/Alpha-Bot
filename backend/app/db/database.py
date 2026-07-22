@@ -373,6 +373,11 @@ class Database:
         with self._session() as s:
             return s.get(PortfolioCheckpointRow, mode) is not None
 
+    def save_portfolio_checkpoint(self, mode: str, checkpoint: dict) -> None:
+        with self._session() as s:
+            s.merge(PortfolioCheckpointRow(mode=mode, updated_at=datetime.now(UTC),
+                                           payload=json.dumps(checkpoint, default=str)))
+
     def commit_fill_processing(
         self, *, fill_key: str, cumulative_qty: float, mode: str, account_id: str,
         checkpoint: dict, trade: TradeRecord | None,
