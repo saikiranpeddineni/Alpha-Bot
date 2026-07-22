@@ -571,6 +571,7 @@ ACCEPTED_DECISIONS: frozenset[str] = frozenset({"accepted", "pipeline_approved"}
 
 
 @router.get("/shadow-ledger")
+@router.get("/shadow-ledger/candidates")
 async def get_shadow_ledger(request: Request, limit: int = 200) -> list[dict]:
     engine = _engine(request)
     return _db(request).get_shadow_signals(mode=engine.mode, limit=limit)

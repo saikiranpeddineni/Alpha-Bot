@@ -111,5 +111,5 @@ export const api = {
   shadowLedgerGateAlpha: () =>
     request<{ gates: GateAlphaResponse; population_meta: unknown }>("/api/shadow-ledger/gate-alpha")
       .then((r) => r.gates),
-  shadowLedgerCandidates: (limit = 100) => request<any[]>(`/api/shadow-ledger/candidates?limit=${limit}`),
+  shadowLedgerCandidates: (limit = 100) => request<any[]>(`/api/shadow-ledger?limit=${limit}`),
 };
