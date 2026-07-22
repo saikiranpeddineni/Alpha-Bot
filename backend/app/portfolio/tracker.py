@@ -66,6 +66,7 @@ class _OpenLot:
     entry_ts: datetime
     strategy: str
     stop_loss: float | None = None
+    initial_stop_loss: float | None = None
     initial_risk_per_share: float | None = None
     commission_basis: float = 0.0
 
@@ -338,6 +339,7 @@ class PortfolioTracker:
             self._lots[symbol] = _OpenLot(qty=signed, avg_price=fill.price, entry_ts=fill.ts, strategy=fill.strategy, commission_basis=fill.commission)
             if initial_stop is not None:
                 self._lots[symbol].stop_loss = initial_stop
+                self._lots[symbol].initial_stop_loss = initial_stop
                 self._lots[symbol].initial_risk_per_share = abs(fill.price - initial_stop)
             side_str = "BOUGHT" if signed > 0 else "SOLD SHORT"
             total_amt = abs(signed) * fill.price

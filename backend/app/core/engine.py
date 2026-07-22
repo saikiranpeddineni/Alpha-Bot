@@ -1847,6 +1847,48 @@ class TradingEngine:
         protection_status: dict[str, bool] = {}
         unprotected: list[Position] = []
 
+    def _resolve_recovery_stop(self, position: Position) -> tuple[float, str]:
+        sym = position.symbol
+        if self.portfolio and sym in self.portfolio._lots:
+            lot = self.portfolio._lots[sym]
+            orig_stop = getattr(lot, "initial_stop_loss", None) or getattr(lot, "stop_loss", None)
+            if orig_stop is not None and orig_stop > 0:
+                return round(float(orig_stop), 4), "ORIGINAL_STRATEGY_STOP"
+        stop_pct = 0.015
+        fallback = round(
+            position.avg_entry_price * (1.0 - stop_pct if position.qty > 0 else 1.0 + stop_pct),
+            4,
+        )
+        return fallback, "EMERGENCY_1_5PCT_FALLBACK"
+
+    async def verify_broker_protective_stops(
+        self,
+        active_positions: list[Position],
+    ) -> dict[str, bool]:
+        """Audit active positions against broker open_orders for protective stops.
+
+        Fix(#41): Enforces authoritative broker-side protective stops.
+        Exits and entries remain disabled until open_orders() independently confirms
+        an active OrderType.STOP with valid directional geometry and sufficient quantity.
+        """
+        if not active_positions:
+            if self.system_health == "DEGRADED":
+                self.system_health = "NORMAL"
+            self.allow_new_entries = True
+            return {}
+
+        try:
+            open_orders = await self.broker.open_orders()
+        except Exception as exc:
+            applog.error("engine.protection", f"#41: Failed to fetch open orders from broker: {exc}")
+            self.allow_new_entries = False
+            if self.system_health not in ("HALTED", "SAFE_MODE"):
+                self.system_health = "DEGRADED"
+            return {p.symbol: False for p in active_positions}
+
+        protection_status: dict[str, bool] = {}
+        unprotected: list[Position] = []
+
         for p in active_positions:
             sym = p.symbol
             is_long = p.qty > 0
@@ -1857,41 +1899,42 @@ class TradingEngine:
             matching_stop: tuple[Order, float] | None = None
 
             for o in open_orders:
-                if o.symbol != sym:
+                if o.symbol != sym or o.side != expected_side:
                     continue
-                # Geometry: side check
-                if o.side != expected_side:
-                    continue
-                # Active status check: reject canceled/rejected/filled/expired
                 if o.status in (OrderStatus.CANCELED, OrderStatus.REJECTED, OrderStatus.FILLED):
                     continue
-                # Quantity check: must cover position
-                if o.qty < required_qty - 1e-6:
+
+                is_stop_type = (
+                    o.order_type in (OrderType.STOP, OrderType.STOP_LIMIT)
+                    or getattr(o, "leg", "") == "stop"
+                    or getattr(o, "order_class", "") in ("bracket", "oco")
+                )
+                if not is_stop_type:
                     continue
-                # Stale child check: submitted_at must not precede position opened_at
+
+                st_px = getattr(o, "stop_price", None) or getattr(o, "stop_loss", None)
+                if st_px is None or st_px <= 0:
+                    continue
+
+                valid_geometry = (is_long and st_px < p.avg_entry_price) or (not is_long and st_px > p.avg_entry_price)
+                if not valid_geometry:
+                    continue
+
+                remaining_qty = max(0.0, o.qty - o.filled_qty)
+                if remaining_qty < required_qty - 1e-6:
+                    continue
+
                 if opened_at and o.submitted_at and o.submitted_at < opened_at - timedelta(seconds=10):
                     continue
 
-                # Stop price directional geometry check
-                stop_px = o.stop_loss or o.limit_price
-                if stop_px is not None and stop_px > 0:
-                    if is_long and stop_px < p.avg_entry_price:
-                        matching_stop = (o, stop_px)
-                        break
-                    elif not is_long and stop_px > p.avg_entry_price:
-                        matching_stop = (o, stop_px)
-                        break
-                elif getattr(o, "leg", "") == "stop" or "stop" in getattr(o, "reason", "").lower():
-                    fallback_px = round(p.avg_entry_price * (0.985 if is_long else 1.015), 4)
-                    matching_stop = (o, fallback_px)
-                    break
+                matching_stop = (o, st_px)
+                break
 
             if matching_stop is not None:
                 _, verified_stop_price = matching_stop
                 protection_status[sym] = True
                 if self.portfolio and sym in self.portfolio._lots:
                     self.portfolio._lots[sym].stop_loss = verified_stop_price
-                    self.portfolio._lots[sym].initial_risk_per_share = abs(p.avg_entry_price - verified_stop_price)
                 applog.info(
                     "engine.protection",
                     f"#41: VERIFIED broker-side protective stop for {sym}: "
@@ -1906,13 +1949,11 @@ class TradingEngine:
                     "LACKS verified broker-side protective stop order! Local/DB metadata rejected as proof.",
                 )
 
-        # Missing broker protection MUST fail closed for new entries
         if unprotected:
             self.allow_new_entries = False
             if self.system_health not in ("HALTED", "SAFE_MODE"):
                 self.system_health = "DEGRADED"
 
-            # Idempotent recovery: submit protective stop order to broker
             for p in unprotected:
                 if p.symbol in getattr(self, "_pending_close_symbols", set()) or p.symbol in getattr(self, "_flattening_symbols", set()):
                     continue
@@ -1931,27 +1972,20 @@ class TradingEngine:
                         if o.status in (OrderStatus.CANCELED, OrderStatus.REJECTED, OrderStatus.FILLED):
                             continue
 
-                        stop_px = getattr(o, "stop_loss", None)
+                        st_px = getattr(o, "stop_price", None) or getattr(o, "stop_loss", None)
                         limit_px = getattr(o, "limit_price", None)
                         leg = str(getattr(o, "leg", "") or "").lower()
-                        reason = str(getattr(o, "reason", "") or "").lower()
                         order_class = str(getattr(o, "order_class", "") or "").lower()
 
                         is_stop_order = (
-                            leg == "stop"
-                            or "stop" in reason
-                            or (
-                                stop_px is not None
-                                and stop_px > 0
-                                and (
-                                    (p.qty > 0 and stop_px < p.avg_entry_price)
-                                    or (p.qty < 0 and stop_px > p.avg_entry_price)
-                                )
-                            )
+                            o.order_type in (OrderType.STOP, OrderType.STOP_LIMIT)
+                            or leg == "stop"
+                            or order_class in {"bracket", "oco", "oto"}
                         )
 
                         is_take_profit = (
-                            limit_px is not None
+                            o.order_type == OrderType.LIMIT
+                            and limit_px is not None
                             and limit_px > 0
                             and not is_stop_order
                             and (
@@ -1968,7 +2002,8 @@ class TradingEngine:
                         )
 
                         if is_stop_order:
-                            is_undersized = o.qty < required_qty - 1e-6
+                            remaining_qty = max(0.0, o.qty - o.filled_qty)
+                            is_undersized = remaining_qty < required_qty - 1e-6
                             is_stale = bool(
                                 opened_at
                                 and o.submitted_at
@@ -2026,42 +2061,75 @@ class TradingEngine:
                             )
                             recovery_blocked = True
 
-                    if cancellation_failed or recovery_blocked:
+                    if cancellation_failed or recovery_blocked or cancellation_pending:
+                        if cancellation_pending:
+                            applog.info(
+                                "engine.protection",
+                                f"#41: Waiting for broker cancellation confirmation for {p.symbol} "
+                                "before submitting recovery stop.",
+                            )
                         continue
 
-                    if cancellation_pending:
-                        applog.info(
+                    stop_px, stop_source = self._resolve_recovery_stop(p)
+
+                    # Pre-submission geometry validation
+                    if p.qty > 0 and stop_px >= p.market_price:
+                        applog.critical(
                             "engine.protection",
-                            f"#41: Waiting for broker cancellation confirmation for {p.symbol} "
-                            "before submitting recovery stop.",
+                            f"#41: Pre-submission geometry failure for LONG {p.symbol}: "
+                            f"stop={stop_px} >= market={p.market_price}. Submission aborted.",
+                        )
+                        continue
+                    elif p.qty < 0 and stop_px <= p.market_price:
+                        applog.critical(
+                            "engine.protection",
+                            f"#41: Pre-submission geometry failure for SHORT {p.symbol}: "
+                            f"stop={stop_px} <= market={p.market_price}. Submission aborted.",
                         )
                         continue
 
-                    stop_pct = 0.015
-                    stop_px = round(p.avg_entry_price * (1.0 - stop_pct if p.qty > 0 else 1.0 + stop_pct), 4)
+                    client_order_id = f"protect-{p.symbol}-{int(p.avg_entry_price * 100)}-{int(stop_px * 100)}"
+                    existing = await self.broker.get_order_by_client_id(client_order_id)
+                    if existing and existing.status not in (OrderStatus.CANCELED, OrderStatus.REJECTED, OrderStatus.FILLED):
+                        applog.info("engine.protection", f"#41: Recovery stop {existing.id} already active for {p.symbol}")
+                        continue
+
                     req = OrderRequest(
                         symbol=p.symbol,
                         side=side,
                         qty=required_qty,
-                        order_type=OrderType.LIMIT,
-                        limit_price=stop_px,
+                        order_type=OrderType.STOP,
+                        stop_price=stop_px,
+                        stop_loss=stop_px,
+                        client_order_id=client_order_id,
                         strategy="emergency_protection",
-                        reason="fix(#41) protective stop recovery",
+                        reason=f"fix(#41) protective stop recovery source={stop_source}",
                     )
-                    applog.info("engine.protection", f"#41: Submitting idempotent recovery protective stop for {p.symbol} at {stop_px:.4f}")
+                    applog.info(
+                        "engine.protection",
+                        f"#41: Submitting recovery protective STOP for {p.symbol} at {stop_px:.4f} "
+                        f"(source={stop_source}, client_id={client_order_id})",
+                    )
                     rec_order = await self.broker.submit(req)
-                    if rec_order:
-                        protection_status[p.symbol] = True
-                        if self.portfolio and p.symbol in self.portfolio._lots:
-                            self.portfolio._lots[p.symbol].stop_loss = stop_px
+                    # Verification asynchrony: submission does NOT immediately set protection_status[p.symbol] = True.
+                    # It remains False until open_orders() independently returns the active STOP on the next cycle.
+                    protection_status[p.symbol] = False
+                    applog.info(
+                        "engine.protection",
+                        f"#41: RECOVERY_SUBMITTED symbol={p.symbol} order_id={getattr(rec_order, 'id', 'N/A')} "
+                        f"stop={stop_px:.4f} source={stop_source} awaiting_broker_verification=true",
+                    )
                 except Exception as rec_exc:
                     applog.error("engine.protection", f"#41: Failed to submit recovery protective stop for {p.symbol}: {rec_exc}")
 
-            # If all unprotected positions were recovered, restore health
-            if all(protection_status.values()):
-                if self.system_health == "DEGRADED":
-                    self.system_health = "NORMAL"
-                self.allow_new_entries = True
+        if all(protection_status.values()):
+            if self.system_health == "DEGRADED":
+                self.system_health = "NORMAL"
+            self.allow_new_entries = True
+        else:
+            self.allow_new_entries = False
+            if self.system_health not in ("HALTED", "SAFE_MODE"):
+                self.system_health = "DEGRADED"
 
         return protection_status
 
