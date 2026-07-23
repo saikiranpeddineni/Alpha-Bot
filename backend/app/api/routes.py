@@ -565,7 +565,6 @@ async def run_scanner(request: Request) -> dict:
         applog.error(
             "routes",
             f"Scanner endpoint error: {exc}",
-            exc_info=True,
         )
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 

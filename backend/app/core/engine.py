@@ -1557,7 +1557,6 @@ class TradingEngine:
                     applog.warning(
                         "counterfactual",
                         f"Live exit counterfactual replay failed for {symbol}: {exc}",
-                        exc_info=True,
                     )
 
                 # Cleanup peak/trough/stop
