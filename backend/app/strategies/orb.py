@@ -8,6 +8,8 @@ targets at a fixed reward:risk. One attempt per symbol per session.
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pandas as pd
 from zoneinfo import ZoneInfo
 
