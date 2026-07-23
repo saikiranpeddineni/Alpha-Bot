@@ -225,4 +225,52 @@ def _make_broker(monkeypatch) -> AlpacaBroker:
     broker._processed_fill_qty = {}
     broker._meta = {}
     broker._symbol_strategies = {}
+    broker._shortable_cache = {}
+    broker._shorting_enabled = None
     return broker
+
+
+@pytest.mark.asyncio
+async def test_is_shortable_account_shorting_disabled(monkeypatch):
+    broker = _make_broker(monkeypatch)
+    acct = MagicMock(shorting_enabled=False)
+    broker._client.get_account = MagicMock(return_value=acct)
+
+    res = await broker.is_shortable("AMZN")
+    assert res is False
+    assert broker._shorting_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_submit_shorting_rejection_caches_disabled(monkeypatch):
+    from app.core.domain import OrderRequest, OrderSide, OrderStatus, OrderType
+
+    broker = _make_broker(monkeypatch)
+    exc = Exception('Order rejected AMZN sell 86: {"code":40310000,"message":"account is not allowed to short"}')
+    monkeypatch.setattr(broker, "_is_definitive_rejection", lambda e: True)
+    broker._client.submit_order = MagicMock(side_effect=exc)
+
+    req = OrderRequest(
+        symbol="AMZN",
+        side=OrderSide.SELL,
+        qty=10,
+        order_type=OrderType.MARKET,
+        strategy="momentum",
+        reason="test_short",
+    )
+
+    order = await broker.submit(req)
+    assert order.status == OrderStatus.REJECTED
+    assert broker._shorting_enabled is False
+    assert await broker.is_shortable("AMZN") is False
+
+
+@pytest.mark.asyncio
+async def test_is_shortable_account_check_failure_returns_false(monkeypatch):
+    broker = _make_broker(monkeypatch)
+    broker._client.get_account = MagicMock(side_effect=RuntimeError("API Network Error"))
+
+    res = await broker.is_shortable("AMZN")
+    assert res is False
+    assert broker._shorting_enabled is None
+
