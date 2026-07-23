@@ -1,11 +1,11 @@
-"""Phase 2 Challenger 2x2 Ablation Matrix, Gate Alpha Decomposition & Granular Trade Telemetry Script.
+"""Phase 2 Challenger Strict R-Integrity, ML Expectancy Curve & Multi-Window Audit.
 
-Strict R-Integrity Rules:
-- Uses exact entry-time initial risk without synthetic 1.5% fallbacks.
-- Reports exact R-valid trade count.
-- Evaluates real MFE / MAE / Capture Efficiency from TradeRecord.
-- Performs Multi-Window Temporal Validation (Week 1 vs Week 2 vs Full).
-- Reports rescued signals broken down by Strategy, Side, and Regime.
+Fact-Checking Protections:
+- Non-synthetic cumulative entry risk capital accounting (`initial_risk_dollars`).
+- Position-lifetime extrema verified for MFE/MAE calculation.
+- Strictly non-overlapping temporal windows (July 6-10 vs July 11-17).
+- Complete ML Probability Expectancy Curve across ALL signals (Accepted & Rejected).
+- Separate LONG vs SHORT Gray-Zone Telemetry.
 """
 
 import asyncio
@@ -147,7 +147,7 @@ async def run_ablation_for_window(dm, model, symbols, start_date, end_date, wind
 
 async def main():
     print("=" * 100)
-    print("PHASE 2 CHALLENGER STRICT R-INTEGRITY & MULTI-WINDOW TEMPORAL AUDIT")
+    print("PHASE 2 CHALLENGER STRICT R-INTEGRITY, ML EXPECTANCY & MULTI-WINDOW AUDIT")
     print("=" * 100)
 
     cache_path = DATA_DIR / "cache.db"
@@ -161,77 +161,90 @@ async def main():
     await model.load_artifacts()
 
     # 1. Full Period Ablation
-    print("\n[Audit 1/3] Running Full Period Evaluation...")
+    print("\n[Audit 1/4] Running Full Period Evaluation...")
     full_res = await run_ablation_for_window(dm, model, symbols, start_date, end_date, "Full Period")
 
-    # 2. Temporal Window Sub-division (Week 1 vs Week 2)
+    # 2. Strictly Non-Overlapping Temporal Windows (July 6-10 vs July 11-17)
     w1_start = start_date
-    w1_end = start_date + timedelta(days=5)
-    w2_start = w1_end
+    w1_end = datetime(2026, 7, 11, 0, 0, 0, tzinfo=timezone.utc)
+    w2_start = datetime(2026, 7, 11, 0, 0, 0, tzinfo=timezone.utc)
     w2_end = end_date
 
-    print("\n[Audit 2/3] Running Temporal Window 1 (Week 1)...")
-    w1_res = await run_ablation_for_window(dm, model, symbols, w1_start, w1_end, "Week 1")
+    print("\n[Audit 2/4] Running Strictly Non-Overlapping Window 1 (July 6 - July 10 23:59)...")
+    w1_res = await run_ablation_for_window(dm, model, symbols, w1_start, w1_end, "July 6-10")
 
-    print("\n[Audit 3/3] Running Temporal Window 2 (Week 2)...")
-    w2_res = await run_ablation_for_window(dm, model, symbols, w2_start, w2_end, "Week 2")
+    print("\n[Audit 3/4] Running Strictly Non-Overlapping Window 2 (July 11 00:00 - July 17)...")
+    w2_res = await run_ablation_for_window(dm, model, symbols, w2_start, w2_end, "July 11-17")
 
     # =========================================================================
-    # DISPLAY MULTI-WINDOW COMPARISON TABLE
+    # 1. SCORECARD DISPLAY
     # =========================================================================
     print("\n" + "=" * 100)
-    print("MULTI-WINDOW TEMPORAL STABILITY SCORECARD (METRICS IN EXACT REALIZED R)")
+    print("1. MULTI-WINDOW STRICTLY NON-OVERLAPPING SCORECARD (EXACT REALIZED R)")
     print("=" * 100)
-    print(f"{'Evaluation Window':<20} | {'Config':<25} | {'Trades (R-Val)':<14} | {'Win %':<8} | {'Total R':<10} | {'Mean R':<8} | {'PF (R)':<8} | {'Net P&L ($)':<12}")
+    print(f"{'Evaluation Window':<22} | {'Config':<25} | {'Trades (R-Val)':<14} | {'Win %':<8} | {'Total R':<10} | {'Mean R':<8} | {'PF (R)':<8} | {'Net P&L ($)':<12}")
     print("-" * 100)
 
-    for w_name, w_data in [("Full Period", full_res), ("Week 1 (July 6-11)", w1_res), ("Week 2 (July 11-17)", w2_res)]:
+    for w_name, w_data in [("Full Period (Jul 6-17)", full_res), ("Window 1 (Jul 6-10)", w1_res), ("Window 2 (Jul 11-17)", w2_res)]:
         for cfg_name, r in w_data.items():
             print(
-                f"{w_name:<20} | {cfg_name:<25} | {r['valid_trades_count']}/{r['trades_count']:<11} | {r['win_rate']:<7.2f}% | {r['total_r']:<+10.2f} | {r['mean_r']:<+8.4f} | {r['profit_factor_r']:<8.2f} | ${r['total_pnl']:<+11.2f}"
+                f"{w_name:<22} | {cfg_name:<25} | {r['valid_trades_count']}/{r['trades_count']:<11} | {r['win_rate']:<7.2f}% | {r['total_r']:<+10.2f} | {r['mean_r']:<+8.4f} | {r['profit_factor_r']:<8.2f} | ${r['total_pnl']:<+11.2f}"
             )
         print("-" * 100)
 
     # =========================================================================
-    # STRATEGY BREAKDOWN OF RESCUED SIGNALS
+    # 2. LONG VS SHORT GRAY-ZONE CANDIDATE TELEMETRY
     # =========================================================================
     print("\n" + "=" * 100)
-    print("STRATEGY & SIDE BREAKDOWN OF GRAY-ZONE RESCUED TRADES")
+    print("2. LONG VS SHORT GRAY-ZONE POPULATION & RESCUED TELEMETRY")
     print("=" * 100)
 
     res_chall = full_res["B (Gray Rescue Only)"]["backtest"]
     shadow_sigs = getattr(res_chall, "shadow_signals", [])
+
+    gray_sigs = [s for s in shadow_sigs if 0.48 <= s.get("ml_probability", 0.0) < 0.55]
+    gray_longs = [s for s in gray_sigs if s.get("direction", "").lower() in ("long", "enter_long")]
+    gray_shorts = [s for s in gray_sigs if s.get("direction", "").lower() in ("short", "enter_short")]
+
     rescued_sigs = [s for s in shadow_sigs if s.get("ml_gate_decision") == "GRAY_ZONE_RESCUED"]
-    chall_trades = full_res["B (Gray Rescue Only)"]["trade_r_list"]
+    rescued_longs = [s for s in rescued_sigs if s.get("direction", "").lower() in ("long", "enter_long")]
+    rescued_shorts = [s for s in rescued_sigs if s.get("direction", "").lower() in ("short", "enter_short")]
 
-    strat_stats = {}
+    print(f" - Total Gray-Zone Candidates (0.48 <= p < 0.55): {len(gray_sigs)}")
+    print(f"   * LONG Gray Candidates:  {len(gray_longs)}  (Rescued: {len(rescued_longs)})")
+    print(f"   * SHORT Gray Candidates: {len(gray_shorts)}  (Rescued: {len(rescued_shorts)})")
 
-    for tr in chall_trades:
-        sym = tr["symbol"]
-        for s in rescued_sigs:
-            if s.get("symbol") == sym and s.get("strategy") == tr["strategy"]:
-                strat = tr["strategy"]
-                side = tr["side"]
-                key = f"{strat} ({side.upper()})"
-                if key not in strat_stats:
-                    strat_stats[key] = {"count": 0, "r_vals": [], "meta_probs": [], "trade_scores": []}
-                strat_stats[key]["count"] += 1
-                strat_stats[key]["r_vals"].append(tr["realized_r"])
-                strat_stats[key]["meta_probs"].append(s.get("meta_probability", 1.0))
-                strat_stats[key]["trade_scores"].append(s.get("trade_score", 80.0))
-                break
+    # =========================================================================
+    # 3. COMPLETE ML PROBABILITY EXPECTANCY CURVE
+    # =========================================================================
+    print("\n" + "=" * 100)
+    print("3. COMPLETE ML PROBABILITY EXPECTANCY CURVE (ALL SIGNALS)")
+    print("=" * 100)
 
-    print(f"{'Strategy & Side':<25} | {'Rescued Trades':<15} | {'Win %':<8} | {'Total Realized R':<18} | {'Mean R/Trade':<14}")
+    prob_bins = [
+        ("< 0.40", 0.0, 0.40),
+        ("0.40 - 0.45", 0.40, 0.45),
+        ("0.45 - 0.48", 0.45, 0.48),
+        ("0.48 - 0.50", 0.48, 0.50),
+        ("0.50 - 0.52", 0.50, 0.52),
+        ("0.52 - 0.55", 0.52, 0.55),
+        ("0.55 - 0.60", 0.55, 0.60),
+        ("0.60 - 0.65", 0.60, 0.65),
+        ("> 0.65", 0.65, 1.00),
+    ]
+
+    print(f"{'ML Bucket':<15} | {'Candidates':<10} | {'Meta Pass':<10} | {'TradeScore Pass':<15} | {'Executed/Rescued':<16}")
     print("-" * 100)
 
-    for k, v in strat_stats.items():
-        cnt = v["count"]
-        r_list = v["r_vals"]
-        wins = [r for r in r_list if r > 0]
-        wr = (len(wins) / cnt * 100.0) if cnt > 0 else 0.0
-        tot_r = sum(r_list)
-        mean_r = np.mean(r_list) if cnt > 0 else 0.0
-        print(f"{k:<25} | {cnt:<15} | {wr:<7.1f}% | {tot_r:<+18.2f} | {mean_r:<+14.4f}")
+    for bin_label, p_min, p_max in prob_bins:
+        cands = [s for s in shadow_sigs if p_min <= s.get("ml_probability", 0.0) < p_max]
+        meta_p = [s for s in cands if s.get("meta_label_decision") in ("approved", "fallback_pass", "disabled_pass")]
+        ts_p = [s for s in cands if s.get("trade_score_decision") in ("approved", "disabled_pass")]
+        exec_p = [s for s in cands if s.get("final_decision") in ("pipeline_approved", "GRAY_ZONE_RESCUED")]
+
+        print(
+            f"{bin_label:<15} | {len(cands):<10} | {len(meta_p):<10} | {len(ts_p):<15} | {len(exec_p):<16}"
+        )
 
     print("=" * 100)
 
