@@ -26,6 +26,7 @@ class VwapReversion(Strategy):
         "rsi2_overbought": 90.0,
         "atr_stop_mult": 2.0,
         "min_target_atr": 0.5,   # skip when VWAP is too close to matter
+        "min_reward_risk": 1.0,  # economic filter: reward/risk must be >= 1.0
         "max_vwap_drift_pct": 0.15,
         "use_ema_filter": True,
         "min_minutes_since_open": 30,
@@ -89,6 +90,10 @@ class VwapReversion(Strategy):
         if z <= -p["z_entry"] and rsi2 <= p["rsi2_oversold"] and close < vwap:
             if (vwap - close) < p["min_target_atr"] * atr:
                 return None
+            risk = p["atr_stop_mult"] * atr
+            reward = vwap - close
+            if risk > 0 and (reward / risk) < p.get("min_reward_risk", 1.0):
+                return None
             return Signal(
                 symbol=symbol,
                 action=SignalAction.ENTER_LONG,
@@ -96,11 +101,15 @@ class VwapReversion(Strategy):
                 strategy=self.name,
                 reason=f"Stretched {z:.1f} sigma below VWAP with RSI(2) {rsi2:.0f}",
                 price=close,
-                stop_loss=close - p["atr_stop_mult"] * atr,
+                stop_loss=close - risk,
                 take_profit=vwap,
             )
         if z >= p["z_entry"] and rsi2 >= p["rsi2_overbought"] and close > vwap:
             if (close - vwap) < p["min_target_atr"] * atr:
+                return None
+            risk = p["atr_stop_mult"] * atr
+            reward = close - vwap
+            if risk > 0 and (reward / risk) < p.get("min_reward_risk", 1.0):
                 return None
             return Signal(
                 symbol=symbol,
@@ -109,7 +118,7 @@ class VwapReversion(Strategy):
                 strategy=self.name,
                 reason=f"Stretched {z:.1f} sigma above VWAP with RSI(2) {rsi2:.0f}",
                 price=close,
-                stop_loss=close + p["atr_stop_mult"] * atr,
+                stop_loss=close + risk,
                 take_profit=vwap,
             )
         return None
