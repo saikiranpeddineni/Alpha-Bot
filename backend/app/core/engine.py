@@ -3519,7 +3519,7 @@ class TradingEngine:
                         continue
                     exit_reason = trade_data.get("exit_reason", "")
                     sl_hit = trade_data.get("sl_hit", False)
-                    trade_strategy = trade_data.get("strategy", r.strategy or "")
+                    trade_strategy = trade_data.get("strategy", getattr(r, "strategy", ""))
                     trade_side = _norm_side(trade_data.get("side", ""))
 
                     same_thesis = (trade_strategy == sig.strategy) and (trade_side == sig_side)
@@ -3545,7 +3545,7 @@ class TradingEngine:
                         trade_data = json.loads(r.payload)
                     except Exception:
                         continue
-                    trade_strategy = trade_data.get("strategy", r.strategy or "")
+                    trade_strategy = trade_data.get("strategy", getattr(r, "strategy", ""))
                     trade_side = _norm_side(trade_data.get("side", ""))
                     if trade_strategy == sig.strategy and trade_side == sig_side:
                         pnl = trade_data.get("pnl", r.pnl)
