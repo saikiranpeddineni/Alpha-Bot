@@ -440,3 +440,110 @@ async def test_046_regression_normal_atr_returns_safe():
     scanner = MarketScanner(dm, [])
     result = await scanner.check_spy_volatility()
     assert result is SpyVolatilityState.SAFE
+
+
+# ---------------------------------------------------------------------------
+# Confirmation-based aggregation regression tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_isolated_breadth_stress_becomes_caution():
+    """Isolated breadth STRESS (with SPY/QQQ/universe NORMAL) escalates to CAUTION, not STRESS."""
+    async def _history(symbol, timeframe, start, end, prefer_cache=True):
+        if timeframe == "1Min":
+            return _make_normal_1min()
+        if symbol in ("AAPL", "MSFT", "NVDA", "AMZN", "META", "JPM", "BAC", "XLK", "XLF"):
+            return _make_daily(advancing=False)
+        return _make_daily(advancing=True)
+
+    dm = SimpleNamespace(
+        history=_history,
+        provider=SimpleNamespace(supports_asset_discovery=False),
+    )
+    agg = MarketRiskAggregator(dm, ["AAPL", "MSFT", "NVDA", "AMZN", "META", "JPM", "BAC", "XLK", "XLF", "QQQ", "SPY"])
+    state, conf, cov, reasons, healths = await agg.assess()
+    assert state is MarketRiskState.CAUTION
+    assert any("breadth:STRESS" in r for r in reasons)
+    assert any("stress_confirmations=1" in r for r in reasons)
+
+
+@pytest.mark.asyncio
+async def test_two_independent_stress_votes_confirm_stress():
+    """Two independent STRESS votes (e.g. breadth + universe_stress) confirm MarketRiskState.STRESS."""
+    agg = MarketRiskAggregator(SimpleNamespace())
+    healthy_votes = [
+        SignalVote("broad_market", MarketRiskState.NORMAL, SignalHealth(True, "OK", confidence=0.9), "OK"),
+        SignalVote("qqq", MarketRiskState.NORMAL, SignalHealth(True, "OK", confidence=0.9), "OK"),
+        SignalVote("breadth", MarketRiskState.STRESS, SignalHealth(True, "declining", confidence=0.85), "declining"),
+        SignalVote("universe_stress", MarketRiskState.STRESS, SignalHealth(True, "high vol", confidence=0.85), "high vol"),
+        SignalVote("data_health", MarketRiskState.NORMAL, SignalHealth(True, "OK", confidence=1.0), "OK"),
+    ]
+    agg._family_broad_market = AsyncMock(side_effect=[healthy_votes[0], healthy_votes[1]])
+    agg._family_breadth = AsyncMock(return_value=healthy_votes[2])
+    agg._family_universe_stress = AsyncMock(return_value=healthy_votes[3])
+    agg._family_data_health = MagicMock(return_value=healthy_votes[4])
+
+    state, conf, cov, reasons, healths = await agg.assess()
+    assert state is MarketRiskState.STRESS
+    assert any("stress_confirmations=2" in r for r in reasons)
+
+
+@pytest.mark.asyncio
+async def test_broad_market_panic_remains_panic():
+    """Isolated broad market PANIC immediately escalates to MarketRiskState.PANIC."""
+    agg = MarketRiskAggregator(SimpleNamespace())
+    healthy_votes = [
+        SignalVote("broad_market", MarketRiskState.PANIC, SignalHealth(True, "extreme vol", confidence=0.9), "extreme vol"),
+        SignalVote("qqq", MarketRiskState.NORMAL, SignalHealth(True, "OK", confidence=0.9), "OK"),
+        SignalVote("breadth", MarketRiskState.NORMAL, SignalHealth(True, "OK", confidence=0.85), "OK"),
+        SignalVote("universe_stress", MarketRiskState.NORMAL, SignalHealth(True, "OK", confidence=0.85), "OK"),
+        SignalVote("data_health", MarketRiskState.NORMAL, SignalHealth(True, "OK", confidence=1.0), "OK"),
+    ]
+    agg._family_broad_market = AsyncMock(side_effect=[healthy_votes[0], healthy_votes[1]])
+    agg._family_breadth = AsyncMock(return_value=healthy_votes[2])
+    agg._family_universe_stress = AsyncMock(return_value=healthy_votes[3])
+    agg._family_data_health = MagicMock(return_value=healthy_votes[4])
+
+    state, conf, cov, reasons, healths = await agg.assess()
+    assert state is MarketRiskState.PANIC
+
+
+@pytest.mark.asyncio
+async def test_data_health_does_not_vote_market_direction():
+    """data_health=NORMAL does not count towards market direction or reduce stress confirmations."""
+    agg = MarketRiskAggregator(SimpleNamespace())
+    healthy_votes = [
+        SignalVote("broad_market", MarketRiskState.NORMAL, SignalHealth(True, "OK", confidence=0.9), "OK"),
+        SignalVote("qqq", MarketRiskState.NORMAL, SignalHealth(True, "OK", confidence=0.9), "OK"),
+        SignalVote("breadth", MarketRiskState.STRESS, SignalHealth(True, "declining", confidence=0.85), "declining"),
+        SignalVote("universe_stress", MarketRiskState.NORMAL, SignalHealth(True, "OK", confidence=0.85), "OK"),
+        SignalVote("data_health", MarketRiskState.NORMAL, SignalHealth(True, "OK", confidence=1.0), "OK"),
+    ]
+    agg._family_broad_market = AsyncMock(side_effect=[healthy_votes[0], healthy_votes[1]])
+    agg._family_breadth = AsyncMock(return_value=healthy_votes[2])
+    agg._family_universe_stress = AsyncMock(return_value=healthy_votes[3])
+    agg._family_data_health = MagicMock(return_value=healthy_votes[4])
+
+    state, conf, cov, reasons, healths = await agg.assess()
+    assert state is MarketRiskState.CAUTION
+    assert any("stress_confirmations=1" in r for r in reasons)
+
+
+@pytest.mark.asyncio
+async def test_isolated_breadth_stress_keeps_dynamic_pipeline_alive():
+    """Scanner receives CAUTION on isolated breadth STRESS and continues dynamic candidate pipeline."""
+    async def _history(symbol, timeframe, start, end, prefer_cache=True):
+        if timeframe == "1Min":
+            return _make_normal_1min()
+        if symbol in ("AAPL", "MSFT", "NVDA", "AMZN", "META", "JPM", "BAC", "XLK", "XLF"):
+            return _make_daily(advancing=False)
+        return _make_daily(advancing=True)
+
+    dm = SimpleNamespace(
+        history=_history,
+        provider=SimpleNamespace(supports_asset_discovery=False),
+    )
+    scanner = MarketScanner(dm, [])
+    state, conf, reasons = await scanner._assess_market_risk()
+    assert state is MarketRiskState.CAUTION
+
