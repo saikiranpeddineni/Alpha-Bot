@@ -174,3 +174,80 @@ class TestCanonicalTelemetryInvariants:
         tracker.restore_checkpoint(payload)
         assert tracker.peak_equity >= tracker.session_start_equity
         assert tracker.peak_equity == pytest.approx(101715.68)
+
+    def test_zero_pnl_missing_stop_is_not_valid_breakeven(self):
+        record = {
+            "symbol": "AAPL",
+            "strategy": "orb",
+            "direction": "long",
+            "replayed": True,
+            "simulated_pnl": 0.0,
+            "price": 100.0,
+            "stop_loss": None,
+            "mfe_pct": 0.0,
+            "mae_pct": 0.0,
+        }
+
+        evidence = CanonicalOutcomeResolver.resolve(record)
+
+        assert evidence.realized_r is None
+        assert evidence.valid is False
+        assert evidence.invalid_reason == "MISSING_CANONICAL_R"
+
+    def test_zero_pnl_wrong_side_long_stop_is_invalid(self):
+        record = {
+            "symbol": "AAPL",
+            "strategy": "orb",
+            "direction": "long",
+            "replayed": True,
+            "simulated_pnl": 0.0,
+            "price": 100.0,
+            "stop_loss": 101.0,
+            "mfe_pct": 0.0,
+            "mae_pct": 0.0,
+        }
+
+        evidence = CanonicalOutcomeResolver.resolve(record)
+
+        assert evidence.realized_r is None
+        assert evidence.valid is False
+        assert evidence.invalid_reason == "WRONG_SIDE_STOP"
+
+    def test_zero_pnl_wrong_side_short_stop_is_invalid(self):
+        record = {
+            "symbol": "AAPL",
+            "strategy": "momentum",
+            "direction": "short",
+            "replayed": True,
+            "simulated_pnl": 0.0,
+            "price": 100.0,
+            "stop_loss": 99.0,
+            "mfe_pct": 0.0,
+            "mae_pct": 0.0,
+        }
+
+        evidence = CanonicalOutcomeResolver.resolve(record)
+
+        assert evidence.realized_r is None
+        assert evidence.valid is False
+        assert evidence.invalid_reason == "WRONG_SIDE_STOP"
+
+    def test_zero_pnl_with_valid_risk_is_valid_zero_r(self):
+        record = {
+            "symbol": "AAPL",
+            "strategy": "orb",
+            "direction": "long",
+            "replayed": True,
+            "simulated_pnl": 0.0,
+            "price": 100.0,
+            "stop_loss": 98.0,
+            "mfe_pct": 0.0,
+            "mae_pct": 0.0,
+        }
+
+        evidence = CanonicalOutcomeResolver.resolve(record)
+
+        assert evidence.valid is True
+        assert evidence.realized_r == pytest.approx(0.0)
+        assert evidence.invalid_reason is None
+
