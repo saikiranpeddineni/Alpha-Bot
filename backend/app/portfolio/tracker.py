@@ -448,6 +448,8 @@ class PortfolioTracker:
             pnl=round(pnl, 2),
             pnl_pct=round(pnl / basis * 100.0, 3) if basis else 0.0,
             r_multiple=r_multiple,
+            initial_stop=round(lot.initial_stop_loss, 4) if lot.initial_stop_loss is not None else None,
+            initial_risk=round(init_risk, 4) if init_risk is not None else None,
             strategy=lot.strategy,
             exit_reason=fill.reason or "exit",
             mfe=round(mfe_val, 4),
