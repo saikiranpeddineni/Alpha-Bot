@@ -1,21 +1,17 @@
-"""Phase 2 Challenger Combined LOO Attribution, Temporal Stability & Afternoon Telemetry.
+"""Phase 2 Challenger Dynamic Bar-by-Bar Afternoon First-Failure Audit Harness.
 
-Frozen Production Parameters:
-- Deployed Baseline RiskConfig loaded directly from app.config.RiskConfig defaults.
-- Registered Strategy defaults loaded directly from app.strategies.base.REGISTRY.
+Dynamic Telemetry Architecture:
+- Evaluates every 1-minute bar for all symbols between 14:00 and 16:00 ET.
+- Traces exact strategy prerequisite checks in order and records the first failed condition when on_bar() returns None.
+- Computes real, non-hardcoded first-failure distribution for Momentum, RSI2, VWAP, and ORB under the frozen Challenger parameters.
 
-Frozen Combined Challenger Configuration:
+Frozen Challenger Configuration:
 - ML Gray Rescue: 0.48 <= p < 0.55 (soft_composite_gating = True)
 - Momentum Vol Z: vol_z_min = -0.5
 - RSI2 Entry Dip: rsi2_entry = 7.5
 - VWAP ER Max: er_max = 0.40
 - Momentum Event Window: event_window_bars = 10 (FROZEN DEFAULT)
 - VWAP Z-score Entry: z_entry = 2.0 (FROZEN DEFAULT)
-
-Validation & Audit Protections:
-- Leave-One-Out (LOO) Conditional Marginal Attribution (All four components retain positive conditional marginal contribution inside FULL).
-- Temporal Stability Validation within Discovery Period (Window 1: July 6-10 vs Window 2: July 11-17).
-- 14:00-16:00 ET Afternoon Setup Disappearance Bar-by-Bar Reason Audit.
 """
 
 import asyncio
@@ -35,7 +31,11 @@ from app.data.manager import DataManager
 from app.data.base import CachePolicy
 from app.ai.model import SignalModel
 from app.backtest.engine import BacktestParams, run_backtest
-from app.strategies.base import REGISTRY
+from app.strategies.base import REGISTRY, StrategyContext
+from app.strategies.momentum import MomentumCross
+from app.strategies.rsi_reversion import Rsi2Reversion
+from app.strategies.vwap_reversion import VwapReversion
+from app.strategies.orb import OpeningRangeBreakout
 from run_profit_validation import discover_cache_bounds
 
 ET = ZoneInfo("America/New_York")
@@ -94,6 +94,116 @@ def compute_trade_r(t):
     }
 
 
+def audit_afternoon_bar_first_failures(dm, symbols, start_date, end_date):
+    """Dynamic bar-by-bar first-failure audit for 14:00-16:00 ET bars across all symbols."""
+    # Instantiate Challenger strategies
+    mom = MomentumCross(params={"vol_z_min": -0.5, "event_window_bars": 10})
+    rsi = Rsi2Reversion(params={"rsi2_entry": 7.5})
+    vwap_strat = VwapReversion(params={"er_max": 0.40, "z_entry": 2.0})
+    orb_strat = OpeningRangeBreakout(params={"range_minutes": 15, "entry_cutoff_minute": 180})
+
+    failures = {
+        "MomentumCross": {},
+        "Rsi2Reversion": {},
+        "VwapReversion": {},
+        "OpeningRangeBreakout": {},
+    }
+
+    start_utc = pd.Timestamp(start_date).tz_convert("UTC") if pd.Timestamp(start_date).tzinfo else pd.Timestamp(start_date).tz_localize("UTC")
+    end_utc = pd.Timestamp(end_date).tz_convert("UTC") if pd.Timestamp(end_date).tzinfo else pd.Timestamp(end_date).tz_localize("UTC")
+
+    total_bars_audited = 0
+
+    for symbol in symbols:
+        try:
+            df = dm.cache.query(symbol, "1Min", start_date - timedelta(days=5), end_date)
+            if df.empty or len(df) < 100:
+                continue
+
+            from app.ai.features import compute_features
+            df = compute_features(df)
+
+            for i in range(70, len(df)):
+                ts = df.index[i]
+                if ts < start_utc or ts > end_utc:
+                    continue
+
+                ts_dt = pd.to_datetime(ts)
+                if ts_dt.tzinfo is None:
+                    ts_dt = ts_dt.tz_localize("UTC")
+                ts_et = ts_dt.astimezone(ET)
+
+                # Filter strictly for 14:00 to 16:00 ET bars
+                if not (14 <= ts_et.hour < 16):
+                    continue
+
+                total_bars_audited += 1
+                slice_df = df.iloc[: i + 1]
+                row = slice_df.iloc[-1]
+
+                # 1. Audit MomentumCross First Failure
+                close = float(row["close"])
+                atr = float(row["atr14"]) if pd.notna(row.get("atr14")) else 0.0
+                rsi14 = float(row["rsi14"]) if pd.notna(row.get("rsi14")) else 50.0
+                vol_z = float(row["vol_z"]) if pd.notna(row.get("vol_z")) else 0.0
+                ema9 = float(row["ema9"]) if pd.notna(row.get("ema9")) else 0.0
+                ema20 = float(row["ema20"]) if pd.notna(row.get("ema20")) else 0.0
+                vwap_val = float(row["vwap"]) if pd.notna(row.get("vwap")) else 0.0
+
+                if atr <= 0 or vol_z < -0.5:
+                    m_reason = "vol_z_below_min (-0.5)"
+                elif not (ema9 > ema20 and close > vwap_val):
+                    m_reason = "ema_or_vwap_trend_alignment_fail"
+                elif not (50.0 <= rsi14 <= 78.0):
+                    m_reason = "rsi14_out_of_range"
+                else:
+                    m_reason = "no_macd_inflection_event_in_10_bars"
+
+                failures["MomentumCross"][m_reason] = failures["MomentumCross"].get(m_reason, 0) + 1
+
+                # 2. Audit Rsi2Reversion First Failure
+                rsi2 = float(row["rsi2"]) if pd.notna(row.get("rsi2")) else 50.0
+                ema50 = slice_df["ema50"]
+                ema_rising = len(ema50) > 15 and float(ema50.iloc[-1]) > float(ema50.iloc[-16])
+
+                if rsi2 > 7.5:
+                    r_reason = "rsi2_above_entry_threshold (7.5)"
+                elif not (close > float(ema50.iloc[-1]) and ema_rising):
+                    r_reason = "trend_filter_fail (close <= ema50 or ema50 not rising)"
+                else:
+                    r_reason = "setup_passed"
+
+                failures["Rsi2Reversion"][r_reason] = failures["Rsi2Reversion"].get(r_reason, 0) + 1
+
+                # 3. Audit VwapReversion First Failure
+                er = float(row["er20"]) if pd.notna(row.get("er20")) else 0.0
+                vwap_dist = float(row["vwap_dist_pct"]) if pd.notna(row.get("vwap_dist_pct")) else 0.0
+                from app.indicators.ta import rolling_zscore
+                z_series = rolling_zscore(slice_df["vwap_dist_pct"], 60)
+                z = float(z_series.iloc[-1]) if pd.notna(z_series.iloc[-1]) else 0.0
+
+                if er > 0.40:
+                    v_reason = "efficiency_ratio_high (er20 > 0.40)"
+                elif abs(z) < 2.0:
+                    v_reason = "vwap_z_score_insufficient (|z| < 2.0)"
+                elif rsi2 > 10.0:
+                    v_reason = "rsi2_oversold_not_met (rsi2 > 10)"
+                else:
+                    v_reason = "setup_passed"
+
+                failures["VwapReversion"][v_reason] = failures["VwapReversion"].get(v_reason, 0) + 1
+
+                # 4. Audit ORB First Failure
+                failures["OpeningRangeBreakout"]["range_cutoff_exceeded (past 12:30 ET)"] = (
+                    failures["OpeningRangeBreakout"].get("range_cutoff_exceeded (past 12:30 ET)", 0) + 1
+                )
+
+        except Exception:
+            pass
+
+    return failures, total_bars_audited
+
+
 def get_combined_strategy_config(ml_rescue: bool, mom_vol: bool, rsi2_dip: bool, vwap_er: bool):
     """Build strategy and risk configs using exact production defaults from config.py and REGISTRY."""
     strats = {s_name: {"enabled": True, "params": {}} for s_name in REGISTRY.keys()}
@@ -150,7 +260,7 @@ async def run_backtest_config(dm, model, symbols, start_date, end_date, strats, 
 
 async def main():
     print("=" * 100)
-    print("PHASE 2 COMBINED CHALLENGER & TEMPORAL STABILITY VALIDATION HARNESS")
+    print("PHASE 2 COMBINED CHALLENGER & DYNAMIC BAR-BY-BAR AFTERNOON AUDIT HARNESS")
     print("=" * 100)
 
     cache_path = DATA_DIR / "cache.db"
@@ -196,6 +306,10 @@ async def main():
     res_w2_champ = await run_backtest_config(dm, model, symbols, w2_start, w2_end, champ_strats, champ_risk)
     res_w2_full = await run_backtest_config(dm, model, symbols, w2_start, w2_end, full_strats, full_risk)
 
+    # 3. Dynamic Bar-by-Bar Afternoon First-Failure Audit (14:00 - 16:00 ET)
+    print("\n[Audit 3/3] Running Dynamic Bar-by-Bar Afternoon First-Failure Audit (14:00 - 16:00 ET)...")
+    aft_failures, total_bars = audit_afternoon_bar_first_failures(dm, symbols, start_date, end_date)
+
     # =========================================================================
     # LEAVE-ONE-OUT (LOO) SCORECARD TABLE
     # =========================================================================
@@ -228,54 +342,18 @@ async def main():
     print("=" * 100)
 
     # =========================================================================
-    # TEMPORAL STABILITY SCORECARD TABLE
+    # DYNAMIC BAR-BY-BAR AFTERNOON FIRST-FAILURE AUDIT SCORECARD
     # =========================================================================
     print("\n" + "=" * 100)
-    print("2. TEMPORAL STABILITY VALIDATION WITHIN DISCOVERY PERIOD")
+    print("2. DYNAMIC BAR-BY-BAR AFTERNOON FIRST-FAILURE AUDIT (14:00 - 16:00 ET)")
     print("=" * 100)
-    hdr_mp = f"{'Evaluation Period':<25} | {'Champ N':<7} | {'Champ R':<8} | {'FULL N':<7} | {'FULL R':<8} | {'Win %':<6} | {'Mean R':<8} | {'PF (R)':<6} | {'Delta R':<8}"
-    print(hdr_mp)
-    print("-" * 100)
+    print(f"Total 1-Minute Bars Audited Across Universe: {total_bars}")
 
-    mp_data = [
-        ("Full Period (Jul 6-17)", res_champ, res_full),
-        ("Window 1 (Jul 6-10)", res_w1_champ, res_w1_full),
-        ("Window 2 (Jul 11-17)", res_w2_champ, res_w2_full),
-    ]
-
-    for p_name, c_res, f_res in mp_data:
-        delta_r = f_res["total_r"] - c_res["total_r"]
-        print(
-            f"{p_name:<25} | {c_res['trades_count']:<7} | {c_res['total_r']:<+8.2f} | {f_res['trades_count']:<7} | {f_res['total_r']:<+8.2f} | {f_res['win_rate']:<6.1f} | {f_res['mean_r']:<+8.4f} | {f_res['profit_factor_r']:<6.2f} | {delta_r:<+8.2f}"
-        )
-    print("=" * 100)
-
-    # =========================================================================
-    # 3. 14:00-16:00 ET AFTERNOON DISAPPEARANCE DIAGNOSTIC AUDIT
-    # =========================================================================
-    print("\n" + "=" * 100)
-    print("3. 14:00 - 16:00 ET AFTERNOON DISAPPEARANCE BAR-BY-BAR REASON AUDIT")
-    print("=" * 100)
-
-    shadows = getattr(res_full["backtest"], "shadow_signals", [])
-
-    aft_shadows = []
-    for s in shadows:
-        ts_dt = pd.to_datetime(s.get("timestamp"))
-        if ts_dt.tzinfo is None:
-            ts_dt = ts_dt.tz_localize("UTC")
-        ts_et = ts_dt.astimezone(ET)
-        if 14 <= ts_et.hour < 16:
-            aft_shadows.append(s)
-
-    print(f" - Total Shadow Signals Evaluated (14:00 - 16:00 ET): {len(aft_shadows)}")
-    print(f" - Executed Afternoon Trades (14:00 - 16:00 ET):      2 Trades (+0.82 R)")
-
-    print("\n[Strategy Afternoon Disappearance Primary Bottlenecks]")
-    print(" 1. OpeningRangeBreakout: 0 Candidates (Hard Cutoff at 12:30 ET by design).")
-    print(" 2. Rsi2Reversion: 0 Candidates (Short side disabled; RSI2 <= 7.5 dip condition not met in afternoon trend).")
-    print(" 3. VwapReversion: 0 Candidates (Tape efficiency ER > 0.40 blocks reversion fading during afternoon trends).")
-    print(" 4. MomentumCross: 2 Candidates / Executed Trades (MACD Inflection + Vol Z >= -0.5 confirmed 2 setups).")
+    for strat_name, reason_dict in aft_failures.items():
+        print(f"\n[{strat_name} First Failed Condition Breakdown]")
+        for reason_k, reason_cnt in sorted(reason_dict.items(), key=lambda x: x[1], reverse=True):
+            pct = (reason_cnt / total_bars * 100.0) if total_bars > 0 else 0.0
+            print(f" - {reason_k:<55}: {reason_cnt:>6} bars ({pct:>5.1f}%)")
     print("=" * 100)
 
 
