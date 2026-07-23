@@ -9,8 +9,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import math
+from datetime import datetime, UTC
+from zoneinfo import ZoneInfo
 import pandas as pd
 import numpy as np
+
+ET = ZoneInfo("America/New_York")
 
 
 @dataclass(frozen=True)
@@ -24,7 +28,7 @@ class CanonicalEvidence:
     regime: str
     regime_source: str  # "VIX" vs "SPY_VOL_PROXY"
     replay_valid: bool
-    evidence_version: str = "v1"
+    evidence_version: str = "v1.0"
 
 
 class CanonicalOutcomeResolver:
@@ -32,34 +36,94 @@ class CanonicalOutcomeResolver:
 
     @staticmethod
     def compute_canonical_r(
-        pnl: float | None,
-        entry: float | None,
-        stop: float | None,
-        mae_pct: float | None = None
+        pnl_pct: float | None = None,
+        entry: float | None = None,
+        stop: float | None = None,
+        direction: str | None = None,
+        mae_pct: float | None = None,
+        **kwargs,
     ) -> float | None:
-        """Compute canonical R-multiple.
-        
-        Preserves 0.0 as a valid 0R breakeven trade. Returns None if PnL is missing or invalid.
+        """Compute canonical R from an explicitly percentage-based return.
+
+        Invariants:
+        - R is emitted only when entry and stop define valid initial risk.
+        - LONG stop must be strictly below entry.
+        - SHORT stop must be strictly above entry.
+        - Zero-distance/missing/wrong-side stops return None.
+        - 0.0R is valid only when risk itself is valid.
+        - No dollar-PnL / percentage-return unit inference is allowed.
         """
-        if pnl is None or pd.isna(pnl) or not math.isfinite(pnl):
+        if pnl_pct is None and "pnl" in kwargs:
+            pnl_pct = kwargs["pnl"]
+        if entry is None or stop is None:
             return None
 
-        # 0.0 PnL is a valid 0R breakeven trade
-        if abs(pnl) < 1e-9:
-            return 0.0
+        try:
+            entry_val = float(entry)
+            stop_val = float(stop)
+        except (TypeError, ValueError):
+            return None
 
-        if entry is not None and stop is not None and pd.notna(entry) and pd.notna(stop) and entry > 0 and abs(entry - stop) > 0:
-            risk_pct = abs(entry - stop) / entry
-            dollar_risk = 10000.0 * risk_pct
-            if dollar_risk > 0:
-                return float(pnl / dollar_risk)
+        if (
+            not math.isfinite(entry_val)
+            or not math.isfinite(stop_val)
+            or entry_val <= 0
+        ):
+            return None
 
-        if mae_pct is not None and pd.notna(mae_pct) and mae_pct > 0:
-            dollar_risk_est = 10000.0 * (float(mae_pct) / 100.0)
-            if dollar_risk_est > 0:
-                return float(pnl / dollar_risk_est)
+        risk_dist = abs(entry_val - stop_val)
+        if risk_dist <= 1e-6:
+            return None
 
-        return None
+        dir_lower = str(direction or "").lower()
+
+        if ("long" in dir_lower or "buy" in dir_lower) and stop_val >= entry_val:
+            return None
+
+        if ("short" in dir_lower or "sell" in dir_lower) and stop_val <= entry_val:
+            return None
+
+        if pnl_pct is None or pd.isna(pnl_pct):
+            return None
+
+        try:
+            pnl_pct_val = float(pnl_pct)
+        except (TypeError, ValueError):
+            return None
+
+        if not math.isfinite(pnl_pct_val):
+            return None
+
+        # pnl_pct is explicitly percentage return.
+        directional_price_change = entry_val * (pnl_pct_val / 100.0)
+
+        return directional_price_change / risk_dist
+
+    @staticmethod
+    def get_canonical_episode_id(record: dict | pd.Series) -> str | None:
+        """Return deterministic market setup episode ID independent of policy variant and 1m re-triggering.
+
+        Identity components: Symbol + Strategy + Direction + Date + 15-Minute Setup Window.
+        Note: Provisional identity mechanism for paper telemetry.
+        """
+        r_dict = record.to_dict() if isinstance(record, pd.Series) else dict(record)
+        payload_raw = r_dict.get("payload")
+        payload = json.loads(payload_raw) if isinstance(payload_raw, str) and payload_raw.startswith("{") else (payload_raw if isinstance(payload_raw, dict) else {})
+
+        sym = str(r_dict.get("symbol") or payload.get("symbol") or "").strip().upper()
+        strat = str(r_dict.get("strategy") or payload.get("strategy") or "").strip().lower()
+        direction = str(r_dict.get("direction") or payload.get("direction") or "").strip().lower()
+        ts_raw = str(r_dict.get("ts") or r_dict.get("timestamp") or payload.get("ts") or payload.get("timestamp") or "").strip()
+
+        if not (sym and strat and direction and ts_raw):
+            return None
+
+        try:
+            ts_dt = datetime.fromisoformat(ts_raw.replace("Z", "+00:00")).astimezone(ET)
+            m_bucket = (ts_dt.minute // 15) * 15
+            return f"{sym}_{strat}_{direction}_{ts_dt.strftime('%Y%m%d_%H')}_{m_bucket:02d}"
+        except Exception:
+            return f"{sym}_{strat}_{direction}_{ts_raw[:13]}"
 
     @classmethod
     def resolve(cls, record: dict | pd.Series, horizon: str | None = None) -> CanonicalEvidence:
@@ -84,6 +148,8 @@ class CanonicalOutcomeResolver:
             payload = {}
 
         strategy_name = str(row_dict.get("strategy") or payload.get("strategy") or "").lower()
+        direction = str(row_dict.get("direction") or payload.get("direction") or "").lower()
+
         if horizon is None or horizon == "60m":
             from app.strategies.memory import STRATEGY_HORIZON, _DEFAULT_HORIZON
             horizons = STRATEGY_HORIZON.get(strategy_name, _DEFAULT_HORIZON)
@@ -92,11 +158,11 @@ class CanonicalOutcomeResolver:
             target_horizon = horizon
 
         # Extract entry, stop, PnL, MAE, MFE
-        entry = float(payload.get("price") or payload.get("entry_price") or row_dict.get("entry_price") or 0.0) or None
-        stop = float(payload.get("stop_loss") or row_dict.get("stop_loss") or 0.0) or None
-        pnl = row_dict.get("simulated_pnl")
-        if pnl is None or (isinstance(pnl, float) and pd.isna(pnl)):
-            pnl = payload.get("simulated_pnl")
+        entry = float(payload.get("price") or payload.get("entry_price") or row_dict.get("entry_price") or row_dict.get("price") or 0.0) or None
+        stop = float(payload.get("stop_loss") or payload.get("proposed_stop_loss") or row_dict.get("stop_loss") or row_dict.get("proposed_stop_loss") or 0.0) or None
+        pnl_pct = row_dict.get("simulated_pnl")
+        if pnl_pct is None or (isinstance(pnl_pct, float) and pd.isna(pnl_pct)):
+            pnl_pct = payload.get("simulated_pnl")
 
         mae = row_dict.get("mae_pct")
         if mae is None or (isinstance(mae, float) and pd.isna(mae)):
@@ -114,6 +180,17 @@ class CanonicalOutcomeResolver:
         replayed = bool(row_dict.get("replayed", False) or payload.get("replayed", False))
         replay_failed = bool(row_dict.get("replay_failed", False))
 
+        invalid_reason = None
+
+        # Zero-distance and Wrong side stop checks
+        if entry is not None and stop is not None:
+            if abs(entry - stop) <= 1e-6:
+                invalid_reason = "ZERO_DISTANCE_STOP"
+            elif ("long" in direction or "buy" in direction) and stop >= entry:
+                invalid_reason = "WRONG_SIDE_STOP"
+            elif ("short" in direction or "sell" in direction) and stop <= entry:
+                invalid_reason = "WRONG_SIDE_STOP"
+
         r_val = row_dict.get("realized_r") or payload.get("realized_r")
         if r_val is None:
             alt_exits = row_dict.get("alternative_exits") or payload.get("alternative_exits")
@@ -125,27 +202,45 @@ class CanonicalOutcomeResolver:
             if isinstance(alt_exits, dict) and "exit_production" in alt_exits:
                 r_val = alt_exits["exit_production"].get("realized_r")
 
-        if r_val is not None:
+        if invalid_reason is not None:
+            realized_r = None
+            valid_r = False
+        elif r_val is not None:
             try:
                 realized_r = float(r_val)
                 valid_r = math.isfinite(realized_r)
             except (ValueError, TypeError):
-                pass
+                realized_r = None
+                valid_r = False
         else:
-            realized_r = cls.compute_canonical_r(pnl=pnl, entry=entry, stop=stop, mae_pct=mae)
+            realized_r = cls.compute_canonical_r(
+                pnl_pct=pnl_pct,
+                entry=entry,
+                stop=stop,
+                direction=direction,
+                mae_pct=mae,
+            )
             valid_r = (realized_r is not None)
 
+        # Sanity Invariant: realized_r <= mfe_r + 1e-4
+        if valid_r and realized_r is not None and entry is not None and stop is not None and mfe is not None:
+            risk_dist = abs(entry - stop)
+            if risk_dist > 1e-6:
+                mfe_r = (float(mfe) / 100.0 * entry) / risk_dist
+                if realized_r > mfe_r + 1e-4:
+                    valid_r = False
+                    invalid_reason = "REALIZED_R_EXCEEDS_MFE_R"
 
-        invalid_reason = None
-        if not replayed:
-            valid_r = False
-            invalid_reason = "NOT_REPLAYED"
-        elif replay_failed:
-            valid_r = False
-            invalid_reason = "REPLAY_NOT_VALID"
-        elif realized_r is None:
-            valid_r = False
-            invalid_reason = "MISSING_CANONICAL_R"
+        if invalid_reason is None:
+            if not replayed:
+                valid_r = False
+                invalid_reason = "NOT_REPLAYED"
+            elif replay_failed:
+                valid_r = False
+                invalid_reason = "REPLAY_NOT_VALID"
+            elif realized_r is None:
+                valid_r = False
+                invalid_reason = "MISSING_CANONICAL_R"
 
         return CanonicalEvidence(
             valid=valid_r,
@@ -179,7 +274,6 @@ class CanonicalOutcomeResolver:
         """
         evidences = [cls.resolve(r) for r in records]
         
-        # Collect observed regime sources in the records
         sources_observed = set(e.regime_source for e in evidences if e.valid)
 
         if fail_on_mixed_sources and len(sources_observed) > 1 and regime_source is None:

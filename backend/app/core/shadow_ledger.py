@@ -51,6 +51,7 @@ class ShadowLedger:
         direction: str,
         stop_loss: float | None,
         entry_price: float,
+        proposed_stop_loss: float | None = None,
     ) -> dict:
         """Calculate causal future returns, MAE, MFE, and R multiples at offsets
 
@@ -61,25 +62,30 @@ class ShadowLedger:
         Fix #186: Session-close offset is inclusive of the last bar of the session.
         Fix #175/#183: MFE on a stop-hit bar is bounded by bar["open"] to prevent
         crediting favorable movement that occurred after the stop triggered.
+        Prospective Telemetry: proposed_stop_loss preserves hypothetical risk definition prior to ML gating.
         """
         outcomes = {}
         if i + 1 >= len(df):
             return outcomes
 
-        # Fix A1 (#194/#197): Determine stop validity before computing risk.
+        # Determine stop validity before computing risk.
         stop_is_synthetic = False
-        if stop_loss is None or stop_loss == entry_price:
+        eff_stop = stop_loss if stop_loss is not None else proposed_stop_loss
+
+        if eff_stop is None or eff_stop == entry_price:
             initial_stop = entry_price * (0.985 if direction == "long" else 1.015)
             stop_is_synthetic = True
-        else:
-            initial_stop = stop_loss
-
-        if direction == "long" and initial_stop >= entry_price:
+        elif direction == "long" and eff_stop >= entry_price:
+            # Wrong-side stop for LONG -> invalid!
             initial_stop = entry_price * 0.985
             stop_is_synthetic = True
-        elif direction == "short" and initial_stop <= entry_price:
+        elif direction == "short" and eff_stop <= entry_price:
+            # Wrong-side stop for SHORT -> invalid!
             initial_stop = entry_price * 1.015
             stop_is_synthetic = True
+        else:
+            initial_stop = eff_stop
+            stop_is_synthetic = False
 
         initial_risk = abs(entry_price - initial_stop)
         # Epsilon guard only — prevents divide-by-zero; the old 0.2%/$0.05 floor
@@ -313,10 +319,21 @@ class ShadowLedger:
             except Exception:
                 pass
 
+        # Derive proposed stop loss if stop_loss was not explicitly passed
+        proposed_stop_loss = None
+        if stop_loss is not None:
+            proposed_stop_loss = stop_loss
+        elif strategy_params and isinstance(strategy_params, dict):
+            sl_pct = strategy_params.get("stop_loss_pct") or strategy_params.get("sl_pct")
+            if sl_pct and signal_price > 0:
+                proposed_stop_loss = signal_price * (1.0 - float(sl_pct) / 100.0 if direction == "long" else 1.0 + float(sl_pct) / 100.0)
+
         # Calculate outcomes
         outcomes = {}
         if df is not None and not df.empty and i != -1:
-            outcomes = ShadowLedger.calculate_forward_outcomes(df, i, direction, stop_loss, entry_price)
+            outcomes = ShadowLedger.calculate_forward_outcomes(
+                df, i, direction, stop_loss, entry_price, proposed_stop_loss=proposed_stop_loss
+            )
 
         payload = {
             "candidate_id": candidate_id,
@@ -327,6 +344,7 @@ class ShadowLedger:
             "signal_price": round(signal_price, 4),
             "entry_price": round(entry_price, 4),
             "stop_loss": round(stop_loss, 4) if stop_loss is not None else None,
+            "proposed_stop_loss": round(proposed_stop_loss, 4) if proposed_stop_loss is not None else None,
             "take_profit": round(take_profit, 4) if take_profit is not None else None,
             "clock_phase": clock_phase,
             "behavior_state": behavior_state,

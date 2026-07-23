@@ -94,11 +94,50 @@ def generate_eod_reflection_report(db: Database, now: datetime | None = None, en
     champ_global_win_rate = (champ_global_wins / champ_global_approved * 100.0) if champ_global_approved > 0 else 0.0
     champ_global_expectancy = (champ_global_total_r / champ_global_approved) if champ_global_approved > 0 else 0.0
 
+    # Fetch actual realized portfolio execution trades
+    realized_trades = []
+    try:
+        realized_trades = db.recent_trades(limit=200)
+    except Exception:
+        pass
+
+    today_str = now.strftime("%Y-%m-%d")
+    today_trades = [
+        t for t in realized_trades 
+        if t.get("exit_at") and str(t.get("exit_at"))[:10] == today_str
+    ]
+    if not today_trades:
+        # Fall back to latest day trades if today has 0 fills
+        today_trades = realized_trades[:10]
+
+    realized_pnl_total = sum(float(t.get("pnl", 0.0) or 0.0) for t in today_trades)
+    realized_wins = sum(1 for t in today_trades if float(t.get("pnl", 0.0) or 0.0) > 0.0)
+    realized_losses = sum(1 for t in today_trades if float(t.get("pnl", 0.0) or 0.0) < 0.0)
+    realized_win_rate = (realized_wins / len(today_trades) * 100.0) if today_trades else 0.0
+
     # Build markdown report header
     report = []
-    report.append("# EOD Policy Performance Reflection Report")
+    report.append("# EOD Policy Performance & Reflection Report")
     report.append(f"Generated at: {now.strftime('%Y-%m-%d %H:%M:%S')} UTC\n")
-    report.append("| Policy ID | Role | Candidates | Approved | Vetoed | Win Rate | Expectancy (R) | Total Realized (R) | Matched Champ Expectancy | Edge Over Champ |")
+    report.append("> [!IMPORTANT]")
+    report.append("> **PROVENANCE & REPORTING SEPARATION:**")
+    report.append("> - **Section 1 (Live/Paper Execution P&L):** Displays actual executed trade fills and realized dollars from the runtime `trades` table.")
+    report.append("> - **Section 2 (Counterfactual Shadow Replay Analytics):** Displays offline price movement tracking across theoretical policy variants (`champion` vs `challengers`). Shadow replay metrics represent theoretical simulated moves and do NOT reflect live account performance.\n")
+
+    report.append("## Section 1: Live/Paper Executed Portfolio Performance")
+    if today_trades:
+        report.append(f"- **Executed Trades Count:** {len(today_trades)}")
+        report.append(f"- **Realized Wins / Losses:** {realized_wins} W / {realized_losses} L ({realized_win_rate:.1f}% Win Rate)")
+        report.append(f"- **Realized Session P&L:** **${realized_pnl_total:+,.2f}**\n")
+        report.append("| Trade ID | Symbol | Exit Time | Realized PnL ($) | Mode |")
+        report.append("| :--- | :--- | :--- | :--- | :--- |")
+        for t in today_trades[:10]:
+            report.append(f"| `{str(t.get('id', ''))[:8]}` | `{t.get('symbol', 'N/A')}` | `{str(t.get('exit_at', ''))[:19]}` | **${float(t.get('pnl', 0.0) or 0.0):+,.2f}** | {t.get('mode', 'paper')} |")
+    else:
+        report.append("*No executed live/paper trades logged for this session.*\n")
+
+    report.append("\n## Section 2: Counterfactual Shadow Replay Policy Analytics (Simulated)")
+    report.append("| Policy ID | Role | Candidates | Approved | Vetoed | Shadow Win Rate | Shadow Expectancy (R) | Simulated Replay (R) | Matched Champ Expectancy | Edge Over Champ |")
     report.append("| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |")
 
     # Add Champion global baseline row
