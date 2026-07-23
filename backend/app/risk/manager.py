@@ -14,7 +14,7 @@ Capital preservation rules, in evaluation order:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pandas as pd
 
@@ -47,7 +47,6 @@ def is_entry_order(order: Order, positions: list[Position]) -> bool:
     pos = next((p for p in positions if p.symbol.upper() == order.symbol.upper()), None)
     if pos is None:
         return True
-    # If same side as position, it is an entry/position increase. If opposite, it is an exit.
     if pos.qty > 0 and order.side == OrderSide.SELL:
         return False
     if pos.qty < 0 and order.side == OrderSide.BUY:
@@ -64,8 +63,6 @@ class AccountContext:
     session_start_equity: float
     peak_equity: float
     day_trades_today: int
-    # Rolling 5-calendar-day day-trade count for PDT guard (does not reset on
-    # session roll — supplied by PortfolioTracker.rolling_day_trade_count()).
     rolling_day_trades: int = 0
     is_paper: bool = False
     pending_entry_symbols: list[str] = field(default_factory=list)
@@ -76,7 +73,7 @@ class RiskDecision:
     approved: bool
     reason: str
     order: OrderRequest | None = None
-    kelly_fraction: float | None = None  # fractional Kelly used for sizing (Phase 3)
+    kelly_fraction: float | None = None
 
 
 class RiskManager:
@@ -86,7 +83,7 @@ class RiskManager:
         self.hard_halted: bool = False
         self.hard_halt_reason: str = ""
         self.daily_halted: bool = False
-        self.daily_halt_date = None
+        self.daily_halt_date: date | None = None
         self.consecutive_losses: int = 0
         self.cooldown_until: datetime | None = None
         self.strategy_consecutive_losses: dict[str, int] = {}
@@ -96,7 +93,7 @@ class RiskManager:
         self.core_watchlist: list[str] | None = None
 
     def get_risk_state(self) -> dict:
-        """Return serializable snapshot of safety-critical risk state for #43 atomic persistence."""
+        """Return serializable snapshot of safety-critical risk state for atomic persistence."""
         return {
             "consecutive_losses": self.consecutive_losses,
             "strategy_consecutive_losses": dict(self.strategy_consecutive_losses),
@@ -104,11 +101,13 @@ class RiskManager:
             "symbol_cooldowns": {sym: ts.isoformat() for sym, ts in self.symbol_cooldowns.items()},
             "strategy_cooldowns": {strat: ts.isoformat() for strat, ts in self.strategy_cooldowns.items()},
             "hard_halted": self.hard_halted,
+            "hard_halt_reason": self.hard_halt_reason,
             "daily_halted": self.daily_halted,
+            "daily_halt_date": self.daily_halt_date.isoformat() if self.daily_halt_date else None,
         }
 
     def restore_risk_state(self, data: dict) -> None:
-        """Restore safety-critical risk state from checkpoint (#43)."""
+        """Restore safety-critical risk state from a durable checkpoint."""
         if not isinstance(data, dict):
             return
         self.consecutive_losses = data.get("consecutive_losses", 0)
@@ -130,9 +129,15 @@ class RiskManager:
                     self.strategy_cooldowns[strat] = datetime.fromisoformat(ts_str)
                 except Exception:
                     pass
-        self.hard_halted = data.get("hard_halted", False)
-        self.daily_halted = data.get("daily_halted", False)
-
+        self.hard_halted = bool(data.get("hard_halted", False))
+        self.hard_halt_reason = str(data.get("hard_halt_reason") or "")
+        self.daily_halted = bool(data.get("daily_halted", False))
+        halt_date = data.get("daily_halt_date")
+        if halt_date:
+            try:
+                self.daily_halt_date = date.fromisoformat(halt_date)
+            except (TypeError, ValueError):
+                self.daily_halt_date = None
 
     # ---- lifecycle hooks ----
 
@@ -146,11 +151,10 @@ class RiskManager:
                 "risk",
                 f"Loss on {symbol} -- cooling down this ticker for {self.config.cooldown_minutes} minutes"
             )
-            
-            # Track strategy-specific consecutive losses
+
             current_losses = self.strategy_consecutive_losses.get(strategy, 0) + 1
             self.strategy_consecutive_losses[strategy] = current_losses
-            
+
             if current_losses >= self.config.consecutive_loss_limit:
                 cooldown_time = now_dt + timedelta(minutes=self.config.cooldown_minutes)
                 self.strategy_cooldowns[strategy] = cooldown_time
@@ -159,23 +163,23 @@ class RiskManager:
                     f"Strategy '{strategy}' has {current_losses} consecutive losses -- pausing new entries "
                     f"for this strategy for {self.config.cooldown_minutes} minutes",
                 )
-            
-            # Keep legacy fields updated for UI/backward compatibility
+
             self.consecutive_losses = max(self.strategy_consecutive_losses.values(), default=0)
             active_cooldowns = [t for t in self.strategy_cooldowns.values() if t > now_dt]
             self.cooldown_until = max(active_cooldowns) if active_cooldowns else None
         else:
             self.strategy_consecutive_losses[strategy] = 0
-            # Keep legacy fields updated
             self.consecutive_losses = max(self.strategy_consecutive_losses.values(), default=0)
-            # Clean expired cooldowns from dict
             self.strategy_cooldowns = {k: v for k, v in self.strategy_cooldowns.items() if v > now_dt}
             active_cooldowns = list(self.strategy_cooldowns.values())
             self.cooldown_until = max(active_cooldowns) if active_cooldowns else None
 
     def roll_session(self, session_date) -> None:  # noqa: ANN001
-        if self.daily_halted and self.daily_halt_date != session_date:
+        # A daily halt may clear only on a verified forward session transition.
+        # Same-session, stale, backward, or missing halt dates must never fail open.
+        if self.daily_halted and self.daily_halt_date is not None and session_date > self.daily_halt_date:
             self.daily_halted = False
+            self.daily_halt_date = None
             applog.info("risk", "New session -- daily loss halt cleared")
         self.cooldown_until = None
         self.consecutive_losses = 0
@@ -236,16 +240,7 @@ class RiskManager:
         now: datetime | None = None,
         kelly_override: float | None = None,
     ) -> RiskDecision:
-        """Evaluate a proposed entry and return a sizing decision.
-
-        Parameters
-        ----------
-        kelly_override:
-            When provided by the CapitalAllocationOptimizer, this fractional
-            Kelly value (0-1) replaces the fixed ``risk_per_trade_pct`` for
-            position sizing. It is capped at ``cfg.kelly_fraction_cap``.
-            Pass ``None`` (default) to use the existing fixed-fraction logic.
-        """
+        """Evaluate a proposed entry and return a sizing decision."""
         cfg = self.config
         symbol = signal.symbol.upper()
         strategy = signal.strategy or "manual"
@@ -268,7 +263,6 @@ class RiskManager:
         if len(ctx.positions) >= cfg.max_open_positions:
             return RiskDecision(False, f"max open positions ({cfg.max_open_positions}) reached")
 
-        # Sector concentration check
         from app.portfolio.allocator import _sector
         sector = _sector(symbol)
         sector_count = sum(1 for p in ctx.positions if _sector(p.symbol.upper()) == sector)
@@ -283,14 +277,11 @@ class RiskManager:
         price = signal.price or float(bars["close"].iloc[-1])
         if price < cfg.min_price:
             return RiskDecision(False, f"price {price:.2f} below minimum {cfg.min_price}")
-        recent = bars.tail(120)  # Smooth out opening volume spikes by checking a 2-hour window instead of 30 mins
+        recent = bars.tail(120)
         avg_dollar_vol = float((recent["close"] * recent["volume"]).mean())
         if avg_dollar_vol < cfg.min_avg_dollar_volume:
             return RiskDecision(False, f"illiquid: avg ${avg_dollar_vol:,.0f}/min below minimum")
 
-        # PDT protection: block only for small LIVE accounts; warn on paper.
-        # Use the rolling 5-calendar-day count so session rollover does not
-        # restore consumed PDT capacity.
         if ctx.rolling_day_trades >= PDT_MAX_DAY_TRADES and ctx.equity < PDT_EQUITY_MIN:
             if not ctx.is_paper:
                 return RiskDecision(False, "PDT guard: 3 day trades used in rolling window and equity < $25k (live)")
@@ -302,7 +293,6 @@ class RiskManager:
                     "limit on a live account under $25k",
                 )
 
-        # ---- stop synthesis & position sizing ----
         stop_loss = signal.stop_loss
         atr = None
         if "atr14" in bars.columns and pd.notna(bars["atr14"].iloc[-1]):
@@ -322,10 +312,8 @@ class RiskManager:
         if stop_distance < min_distance:
             return RiskDecision(False, f"stop too tight ({stop_distance:.4f})")
 
-        # Determine effective risk fraction
         risk_mult = getattr(signal, "risk_multiplier", 1.0)
         if kelly_override is not None:
-            # Phase 3: fractional Kelly from CapitalAllocationOptimizer
             kelly_cap = getattr(cfg, "kelly_fraction_cap", 0.15)
             effective_allocation = min(kelly_override, kelly_cap) * risk_mult
             target_notional = ctx.equity * effective_allocation
@@ -354,22 +342,20 @@ class RiskManager:
                         scanner_mult = 0.50
                 else:
                     scanner_mult = 0.50
-                
                 effective_risk_pct *= scanner_mult
                 applog.info("risk", f"Explicit scanner asset {symbol}: scaling risk by {scanner_mult:.2f} to {effective_risk_pct:.4f}%")
             elif legacy_dynamic:
                 effective_risk_pct *= 0.75
                 applog.info("risk", f"Legacy dynamic asset {symbol}: scaling risk by 0.75 to {effective_risk_pct:.4f}%")
-            
+
             effective_risk_pct *= risk_mult
             if risk_mult != 1.0:
                 applog.info("risk", f"Dynamic safety risk multiplier applied: scaling risk to {effective_risk_pct}%")
-                
+
             kelly_used = effective_risk_pct / 100.0
             risk_amount = ctx.equity * kelly_used
             qty = int(risk_amount / stop_distance)
 
-        # --- binding-constraint trace ---
         qty_unconstrained = qty
         max_notional = ctx.equity * cfg.max_position_pct / 100.0
         qty_after_notional = min(qty, int(max_notional / price))
