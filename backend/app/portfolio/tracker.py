@@ -458,6 +458,7 @@ class PortfolioTracker:
             pnl=round(pnl, 2),
             pnl_pct=round(pnl / basis * 100.0, 3) if basis else 0.0,
             r_multiple=r_multiple,
+            candidate_id=getattr(fill, "client_order_id", getattr(fill, "order_id", None)),
             initial_stop=round(lot.initial_stop_loss, 4) if lot.initial_stop_loss is not None else None,
             initial_risk=round(init_risk, 4) if init_risk is not None else None,
             strategy=lot.strategy,

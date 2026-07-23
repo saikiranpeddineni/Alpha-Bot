@@ -241,6 +241,7 @@ class TradeRecord(BaseModel):
     exit_reason: str = ""
 
     # Observability & Excursion Metrics
+    candidate_id: str | None = None
     initial_stop: float | None = None
     initial_risk: float | None = None
     signal_timestamp_utc: datetime | None = None

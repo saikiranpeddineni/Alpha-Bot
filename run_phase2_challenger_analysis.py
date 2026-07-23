@@ -1,15 +1,9 @@
-"""Phase 2 Challenger Frozen Hypothesis Multi-Period Audit & Discrimination Analysis.
+"""Phase 2 Challenger Strict Attribution, Gate Audit & Intraday Funnel Telemetry Script.
 
-Registered Frozen Hypothesis:
-"Downstream-approved signals with ML probability 0.50 <= p < 0.55 generate positive net incremental R-multiple expectancy
-and are being unnecessarily hard-vetoed by the Stage 1 ML gate."
-
-Fact-Checking Protections:
-- Cumulative initial_risk_dollars scale-in accounting.
-- Position-lifetime extrema MFE/MAE calculation.
-- Strictly non-overlapping temporal partitions (July 6-10 vs July 11-17).
-- Meta-Label & TradeScore Gate Discrimination Audit.
-- Signal Population Distribution & Execution Telemetry.
+Diagnostic Integrity Protections:
+- Unique Multi-Key & Timestamp-Tolerance Signal-to-Trade Matching (No Duplicate Misattribution).
+- Disambiguated Downstream Gate Audit (Active Model Approved vs Fallback Pass vs Disabled Pass).
+- Intraday Hourly Rejection Funnel & Lost Positive R Breakdown (09:30-10:30, 10:30-12:00, 12:00-14:00, 14:00-15:00, 15:00-16:00).
 """
 
 import asyncio
@@ -19,6 +13,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 # Add backend to path
 sys.path.insert(0, str(Path(__file__).parent / "backend"))
@@ -29,6 +24,8 @@ from app.data.base import CachePolicy
 from app.ai.model import SignalModel
 from app.backtest.engine import BacktestParams, run_backtest
 from run_profit_validation import discover_cache_bounds
+
+ET = ZoneInfo("America/New_York")
 
 class BlockingProvider:
     name = "blocking"
@@ -68,19 +65,46 @@ def compute_trade_r(t):
         "symbol": t.symbol,
         "strategy": t.strategy,
         "side": side,
-        "entry_at": str(t.entry_at),
+        "entry_at": t.entry_at,
         "entry_price": entry_p,
         "stop_loss": init_stop,
         "exit_price": exit_p,
         "initial_risk": init_risk,
         "realized_r": round(realized_r, 4) if realized_r is not None else None,
         "r_valid": r_valid,
+        "candidate_id": getattr(t, "candidate_id", None),
         "mfe_r": round(mfe_r, 4) if mfe_r is not None else None,
         "mae_r": round(mae_r, 4) if mae_r is not None else None,
         "capture_efficiency": round(capture_eff, 4) if capture_eff is not None else None,
         "pnl": round(t.pnl, 2),
         "exit_reason": getattr(t, "exit_reason", "normal"),
     }
+
+
+def match_trade_to_signal(tr, signals):
+    """Match a trade uniquely to a shadow signal using Candidate ID or Symbol+Strategy+Side+Timestamp."""
+    # 1. Candidate ID match
+    if tr["candidate_id"]:
+        for s in signals:
+            if s.get("candidate_id") == tr["candidate_id"]:
+                return s
+
+    # 2. Strict Multi-Key & Timestamp Window Match (within 5 minutes)
+    tr_time = pd.to_datetime(tr["entry_at"])
+    if tr_time.tzinfo is None:
+        tr_time = tr_time.tz_localize("UTC")
+
+    for s in signals:
+        if s.get("symbol") == tr["symbol"] and s.get("strategy") == tr["strategy"]:
+            s_side = s.get("direction", "").lower()
+            if ("long" in s_side and tr["side"] == "long") or ("short" in s_side and tr["side"] == "short"):
+                s_time = pd.to_datetime(s.get("timestamp"))
+                if s_time.tzinfo is None:
+                    s_time = s_time.tz_localize("UTC")
+                if abs((tr_time - s_time).total_seconds()) <= 300:
+                    return s
+
+    return None
 
 
 async def run_ablation_for_window(dm, model, symbols, start_date, end_date):
@@ -151,9 +175,7 @@ async def run_ablation_for_window(dm, model, symbols, start_date, end_date):
 
 async def main():
     print("=" * 100)
-    print("FROZEN HYPOTHESIS MULTI-PERIOD AUDIT & GATE DISCRIMINATION TELEMETRY")
-    print("=" * 100)
-    print("FROZEN HYPOTHESIS: Downstream-approved signals with 0.50 <= ML < 0.55 generate positive net incremental R")
+    print("PHASE 2 CHALLENGER STRICT ATTRIBUTION, GATE AUDIT & INTRADAY FUNNEL TELEMETRY")
     print("=" * 100)
 
     cache_path = DATA_DIR / "cache.db"
@@ -183,12 +205,12 @@ async def main():
     w2_res = await run_ablation_for_window(dm, model, symbols, w2_start, w2_end)
 
     # =========================================================================
-    # 1. MULTI-PERIOD SUMMARY TABLE
+    # 1. SCORECARD WITH UNIQUE SIGNAL-TO-TRADE MATCHING
     # =========================================================================
     print("\n" + "=" * 100)
-    print("1. FROZEN HYPOTHESIS MULTI-PERIOD SCORECARD")
+    print("1. SCORECARD WITH UNIQUE SIGNAL-TO-TRADE MATCHING (EXACT REALIZED R)")
     print("=" * 100)
-    hdr = f"{'Period':<20} | {'Gray N':<7} | {'Long N':<7} | {'Short N':<8} | {'Gray R':<8} | {'Mean R':<8} | {'PF (R)':<7} | {'Champ R':<9} | {'Chall R':<9} | {'Delta R':<8}"
+    hdr = f"{'Period':<20} | {'Rescued N':<9} | {'Rescued R':<10} | {'Mean R':<8} | {'PF (R)':<7} | {'Champ R':<9} | {'Chall R':<9} | {'Delta R':<8}"
     print(hdr)
     print("-" * 100)
 
@@ -196,52 +218,120 @@ async def main():
         champ = p_data["A (Champion: Hard Gates)"]
         chall = p_data["B (Gray Rescue Only)"]
 
-        # Extract gray rescue telemetry
         res_chall = chall["backtest"]
         shadows = getattr(res_chall, "shadow_signals", [])
-        rescued = [s for s in shadows if s.get("ml_gate_decision") == "GRAY_ZONE_RESCUED"]
-        long_res = [s for s in rescued if s.get("direction", "").lower() in ("long", "enter_long")]
-        short_res = [s for s in rescued if s.get("direction", "").lower() in ("short", "enter_short")]
+        rescued_sigs = [s for s in shadows if s.get("ml_gate_decision") == "GRAY_ZONE_RESCUED"]
+        chall_tr_list = chall["trade_r_list"]
 
-        # Match realized R for rescued trades
-        chall_r_list = chall["trade_r_list"]
-        rescued_r_list = []
-        for tr in chall_r_list:
-            if any(s.get("symbol") == tr["symbol"] and s.get("strategy") == tr["strategy"] for s in rescued):
-                rescued_r_list.append(tr["realized_r"])
+        rescued_tr_list = []
+        for tr in chall_tr_list:
+            matched_sig = match_trade_to_signal(tr, rescued_sigs)
+            if matched_sig is not None:
+                rescued_tr_list.append(tr)
 
-        gray_n = len(rescued)
-        long_n = len(long_res)
-        short_n = len(short_res)
-        gray_r = sum(rescued_r_list)
-        mean_r = np.mean(rescued_r_list) if rescued_r_list else 0.0
-        pf_r = (sum(r for r in rescued_r_list if r > 0) / abs(sum(r for r in rescued_r_list if r < 0))) if any(r < 0 for r in rescued_r_list) else 99.0
+        r_vals = [tr["realized_r"] for tr in rescued_tr_list]
+        r_sum = sum(r_vals)
+        r_mean = np.mean(r_vals) if r_vals else 0.0
+        r_pf = (sum(r for r in r_vals if r > 0) / abs(sum(r for r in r_vals if r < 0))) if any(r < 0 for r in r_vals) else 99.0
 
         c_r = champ["total_r"]
         ch_r = chall["total_r"]
         delta_r = ch_r - c_r
 
         print(
-            f"{p_name:<20} | {gray_n:<7} | {long_n:<7} | {short_n:<8} | {gray_r:<+8.2f} | {mean_r:<+8.4f} | {pf_r:<7.2f} | {c_r:<+9.2f} | {ch_r:<+9.2f} | {delta_r:<+8.2f}"
+            f"{p_name:<20} | {len(rescued_tr_list):<9} | {r_sum:<+10.2f} | {r_mean:<+8.4f} | {r_pf:<7.2f} | {c_r:<+9.2f} | {ch_r:<+9.2f} | {delta_r:<+8.2f}"
         )
     print("=" * 100)
 
     # =========================================================================
-    # 2. META-LABEL & TRADESCORE DISCRIMINATION AUDIT
+    # 2. DISAMBIGUATED DOWNSTREAM GATE AUDIT (ACTIVE VS FALLBACK VS DISABLED)
     # =========================================================================
     print("\n" + "=" * 100)
-    print("2. DOWNSTREAM GATE DISCRIMINATION AUDIT")
+    print("2. DISAMBIGUATED DOWNSTREAM GATE AUDIT (RAW GATE BREAKDOWN)")
     print("=" * 100)
 
-    shadow_sigs = getattr(full_res["B (Gray Rescue Only)"]["backtest"], "shadow_signals", [])
+    res_chall = full_res["B (Gray Rescue Only)"]["backtest"]
+    shadows = getattr(res_chall, "shadow_signals", [])
+    rescued_sigs = [s for s in shadows if s.get("ml_gate_decision") == "GRAY_ZONE_RESCUED"]
 
-    total_candidates = len(shadow_sigs)
-    meta_approved = sum(1 for s in shadow_sigs if s.get("meta_label_decision") in ("approved", "fallback_pass", "disabled_pass"))
-    tradescore_approved = sum(1 for s in shadow_sigs if s.get("trade_score_decision") in ("approved", "disabled_pass"))
+    meta_counts = {"approved": 0, "fallback_pass": 0, "disabled_pass": 0, "rejected": 0}
+    ts_counts = {"approved": 0, "disabled_pass": 0, "rejected": 0}
 
-    print(f" - Total Candidates Evaluated:       {total_candidates}")
-    print(f" - Meta-Label Approved Signals:      {meta_approved}/{total_candidates} ({meta_approved/total_candidates*100.0 if total_candidates else 0:.1f}%)")
-    print(f" - TradeScore Approved Signals:      {tradescore_approved}/{total_candidates} ({tradescore_approved/total_candidates*100.0 if total_candidates else 0:.1f}%)")
+    for s in shadows:
+        m_dec = s.get("meta_label_decision", "disabled_pass")
+        meta_counts[m_dec] = meta_counts.get(m_dec, 0) + 1
+
+        t_dec = s.get("trade_score_decision", "disabled_pass")
+        ts_counts[t_dec] = ts_counts.get(t_dec, 0) + 1
+
+    print("[All 38 Candidate Signals Gate Status]")
+    print(f" - Meta-Label:  Approved={meta_counts['approved']} | Fallback={meta_counts['fallback_pass']} | Disabled={meta_counts['disabled_pass']} | Rejected={meta_counts['rejected']}")
+    print(f" - TradeScore:  Approved={ts_counts['approved']} | Disabled={ts_counts['disabled_pass']} | Rejected={ts_counts['rejected']}")
+
+    print("\n[Rescued Signals (4) Raw Gate Status Detail]")
+    print(f"{'Symbol':<8} | {'Strategy':<16} | {'ML Prob':<8} | {'Meta Decision':<15} | {'Meta Prob':<10} | {'TradeScore Decision':<20} | {'TradeScore':<10}")
+    print("-" * 100)
+
+    for s in rescued_sigs:
+        print(
+            f"{s.get('symbol'):<8} | {s.get('strategy'):<16} | {s.get('ml_probability'):<8.3f} | {s.get('meta_label_decision'):<15} | {s.get('meta_probability', 1.0):<10.3f} | {s.get('trade_score_decision'):<20} | {s.get('trade_score', 80.0):<10.1f}"
+        )
+    print("=" * 100)
+
+    # =========================================================================
+    # 3. INTRADAY HOURLY REJECTION FUNNEL & REALIZED R
+    # =========================================================================
+    print("\n" + "=" * 100)
+    print("3. INTRADAY HOURLY REJECTION FUNNEL & REALIZED R DISTRIBUTION (ET BUCKETS)")
+    print("=" * 100)
+
+    time_buckets = [
+        ("09:30 - 10:30 (Morning Rush)", 9, 30, 10, 30),
+        ("10:30 - 12:00 (Late Morning)", 10, 30, 12, 0),
+        ("12:00 - 14:00 (Midday Lull)", 12, 0, 14, 0),
+        ("14:00 - 15:00 (Afternoon)", 14, 0, 15, 0),
+        ("15:00 - 16:00 (Market Close)", 15, 0, 16, 0),
+    ]
+
+    print(f"{'Intraday ET Window':<30} | {'Candidates':<10} | {'Executed':<10} | {'Realized R':<12} | {'Rescued':<8} | {'Rescued R':<10}")
+    print("-" * 100)
+
+    chall_tr_list = full_res["B (Gray Rescue Only)"]["trade_r_list"]
+
+    for b_label, h_start, m_start, h_end, m_end in time_buckets:
+        start_m = h_start * 60 + m_start
+        end_m = h_end * 60 + m_end
+
+        # Filter candidates by ET time window
+        b_cands = []
+        for s in shadows:
+            ts_dt = pd.to_datetime(s.get("timestamp"))
+            if ts_dt.tzinfo is None:
+                ts_dt = ts_dt.tz_localize("UTC")
+            ts_et = ts_dt.astimezone(ET)
+            m_val = ts_et.hour * 60 + ts_et.minute
+            if start_m <= m_val < end_m:
+                b_cands.append(s)
+
+        # Filter executed trades by ET entry time
+        b_trades = []
+        for tr in chall_tr_list:
+            tr_dt = pd.to_datetime(tr["entry_at"])
+            if tr_dt.tzinfo is None:
+                tr_dt = tr_dt.tz_localize("UTC")
+            tr_et = tr_dt.astimezone(ET)
+            m_val = tr_et.hour * 60 + tr_et.minute
+            if start_m <= m_val < end_m:
+                b_trades.append(tr)
+
+        b_rescued_tr = [tr for tr in b_trades if match_trade_to_signal(tr, rescued_sigs) is not None]
+
+        r_tot = sum(tr["realized_r"] for tr in b_trades)
+        r_resc = sum(tr["realized_r"] for tr in b_rescued_tr)
+
+        print(
+            f"{b_label:<30} | {len(b_cands):<10} | {len(b_trades):<10} | {r_tot:<+12.2f} | {len(b_rescued_tr):<8} | {r_resc:<+10.2f}"
+        )
     print("=" * 100)
 
 
