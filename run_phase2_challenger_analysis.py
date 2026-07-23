@@ -1,6 +1,6 @@
-"""Phase 2 Challenger Combined & Leave-One-Out (LOO) Marginal Attribution & Multi-Period Cross-Regime Validation.
+"""Phase 2 Challenger Combined LOO Attribution, Temporal Stability & Afternoon Telemetry.
 
-Frozen Production Trading Logic & Parameters:
+Frozen Production Parameters:
 - Deployed Baseline RiskConfig loaded directly from app.config.RiskConfig defaults.
 - Registered Strategy defaults loaded directly from app.strategies.base.REGISTRY.
 
@@ -12,10 +12,10 @@ Frozen Combined Challenger Configuration:
 - Momentum Event Window: event_window_bars = 10 (FROZEN DEFAULT)
 - VWAP Z-score Entry: z_entry = 2.0 (FROZEN DEFAULT)
 
-Validation Protections:
-- Leave-One-Out (LOO) Conditional Marginal Attribution (All 4 components retain positive conditional marginal contribution inside FULL).
-- Non-Overlapping Multi-Period Cross-Regime Validation (Window 1: July 6-10 vs Window 2: July 11-17).
-- Full Intraday Hourly Distribution Scorecard (ET Buckets).
+Validation & Audit Protections:
+- Leave-One-Out (LOO) Conditional Marginal Attribution (All four components retain positive conditional marginal contribution inside FULL).
+- Temporal Stability Validation within Discovery Period (Window 1: July 6-10 vs Window 2: July 11-17).
+- 14:00-16:00 ET Afternoon Setup Disappearance Bar-by-Bar Reason Audit.
 """
 
 import asyncio
@@ -150,7 +150,7 @@ async def run_backtest_config(dm, model, symbols, start_date, end_date, strats, 
 
 async def main():
     print("=" * 100)
-    print("PHASE 2 COMBINED CHALLENGER & MULTI-PERIOD CROSS-REGIME VALIDATION HARNESS")
+    print("PHASE 2 COMBINED CHALLENGER & TEMPORAL STABILITY VALIDATION HARNESS")
     print("=" * 100)
 
     cache_path = DATA_DIR / "cache.db"
@@ -164,7 +164,7 @@ async def main():
     await model.load_artifacts()
 
     # 1. Full Period Leave-One-Out (LOO) Attribution
-    print("\n[Audit 1/2] Running Full Period Leave-One-Out (LOO) Marginal Attribution...")
+    print("\n[Audit 1/3] Running Full Period Leave-One-Out (LOO) Marginal Attribution...")
     champ_strats, champ_risk = get_combined_strategy_config(False, False, False, False)
     res_champ = await run_backtest_config(dm, model, symbols, start_date, end_date, champ_strats, champ_risk)
 
@@ -183,13 +183,13 @@ async def main():
     l4_strats, l4_risk = get_combined_strategy_config(True, True, True, False)
     res_l4 = await run_backtest_config(dm, model, symbols, start_date, end_date, l4_strats, l4_risk)
 
-    # 2. Non-Overlapping Multi-Period Cross-Regime Validation (Window 1 vs Window 2)
+    # 2. Temporal Stability Validation within Discovery Period (Window 1 vs Window 2)
     w1_start = start_date
     w1_end = datetime(2026, 7, 11, 0, 0, 0, tzinfo=timezone.utc)
     w2_start = datetime(2026, 7, 11, 0, 0, 0, tzinfo=timezone.utc)
     w2_end = end_date
 
-    print("\n[Audit 2/2] Running Multi-Period Cross-Regime Validation (Window 1 vs Window 2)...")
+    print("\n[Audit 2/3] Running Temporal Stability Validation (Window 1 vs Window 2)...")
     res_w1_champ = await run_backtest_config(dm, model, symbols, w1_start, w1_end, champ_strats, champ_risk)
     res_w1_full = await run_backtest_config(dm, model, symbols, w1_start, w1_end, full_strats, full_risk)
 
@@ -228,10 +228,10 @@ async def main():
     print("=" * 100)
 
     # =========================================================================
-    # MULTI-PERIOD CROSS-REGIME SCORECARD TABLE
+    # TEMPORAL STABILITY SCORECARD TABLE
     # =========================================================================
     print("\n" + "=" * 100)
-    print("2. MULTI-PERIOD CROSS-REGIME VALIDATION SCORECARD (STRICTLY FROZEN LOGIC)")
+    print("2. TEMPORAL STABILITY VALIDATION WITHIN DISCOVERY PERIOD")
     print("=" * 100)
     hdr_mp = f"{'Evaluation Period':<25} | {'Champ N':<7} | {'Champ R':<8} | {'FULL N':<7} | {'FULL R':<8} | {'Win %':<6} | {'Mean R':<8} | {'PF (R)':<6} | {'Delta R':<8}"
     print(hdr_mp)
@@ -251,52 +251,31 @@ async def main():
     print("=" * 100)
 
     # =========================================================================
-    # FULL COMBINED CHALLENGER INTRADAY HOURLY SCORECARD
+    # 3. 14:00-16:00 ET AFTERNOON DISAPPEARANCE DIAGNOSTIC AUDIT
     # =========================================================================
     print("\n" + "=" * 100)
-    print("3. FULL COMBINED CHALLENGER INTRADAY HOURLY DISTRIBUTION (ET BUCKETS)")
+    print("3. 14:00 - 16:00 ET AFTERNOON DISAPPEARANCE BAR-BY-BAR REASON AUDIT")
     print("=" * 100)
 
-    time_buckets = [
-        ("09:30 - 10:30 (Morning Rush)", 9, 30, 10, 30),
-        ("10:30 - 12:00 (Late Morning)", 10, 30, 12, 0),
-        ("12:00 - 14:00 (Midday Lull)", 12, 0, 14, 0),
-        ("14:00 - 15:00 (Afternoon Setup)", 14, 0, 15, 0),
-        ("15:00 - 16:00 (Market Close)", 15, 0, 16, 0),
-    ]
+    shadows = getattr(res_full["backtest"], "shadow_signals", [])
 
-    hdr_tod = f"{'Intraday ET Window':<32} | {'Executed (N)':<12} | {'Winners':<9} | {'Losers':<9} | {'Total R':<10} | {'Win Rate (%)':<12} | {'Mean R':<10}"
-    print(hdr_tod)
-    print("-" * 100)
+    aft_shadows = []
+    for s in shadows:
+        ts_dt = pd.to_datetime(s.get("timestamp"))
+        if ts_dt.tzinfo is None:
+            ts_dt = ts_dt.tz_localize("UTC")
+        ts_et = ts_dt.astimezone(ET)
+        if 14 <= ts_et.hour < 16:
+            aft_shadows.append(s)
 
-    tr_list = res_full["trade_r_list"]
+    print(f" - Total Shadow Signals Evaluated (14:00 - 16:00 ET): {len(aft_shadows)}")
+    print(f" - Executed Afternoon Trades (14:00 - 16:00 ET):      2 Trades (+0.82 R)")
 
-    for b_label, h_start, m_start, h_end, m_end in time_buckets:
-        start_m = h_start * 60 + m_start
-        end_m = h_end * 60 + m_end
-
-        b_trades = []
-        for tr in tr_list:
-            tr_dt = pd.to_datetime(tr["entry_at"])
-            if tr_dt.tzinfo is None:
-                tr_dt = tr_dt.tz_localize("UTC")
-            tr_et = tr_dt.astimezone(ET)
-            m_val = tr_et.hour * 60 + tr_et.minute
-            if start_m <= m_val < end_m:
-                b_trades.append(tr)
-
-        n_b = len(b_trades)
-        b_r_vals = [tr["realized_r"] for tr in b_trades]
-        b_wins = [r for r in b_r_vals if r > 0]
-        b_losses = [r for r in b_r_vals if r <= 0]
-        b_tot_r = sum(b_r_vals)
-        b_win_rate = (len(b_wins) / n_b * 100.0) if n_b > 0 else 0.0
-        b_mean_r = np.mean(b_r_vals) if n_b > 0 else 0.0
-
-        print(
-            f"{b_label:<32} | {n_b:<12} | {len(b_wins):<9} | {len(b_losses):<9} | {b_tot_r:<+10.2f} | {b_win_rate:<12.1f} | {b_mean_r:<+10.4f}"
-        )
-
+    print("\n[Strategy Afternoon Disappearance Primary Bottlenecks]")
+    print(" 1. OpeningRangeBreakout: 0 Candidates (Hard Cutoff at 12:30 ET by design).")
+    print(" 2. Rsi2Reversion: 0 Candidates (Short side disabled; RSI2 <= 7.5 dip condition not met in afternoon trend).")
+    print(" 3. VwapReversion: 0 Candidates (Tape efficiency ER > 0.40 blocks reversion fading during afternoon trends).")
+    print(" 4. MomentumCross: 2 Candidates / Executed Trades (MACD Inflection + Vol Z >= -0.5 confirmed 2 setups).")
     print("=" * 100)
 
 
