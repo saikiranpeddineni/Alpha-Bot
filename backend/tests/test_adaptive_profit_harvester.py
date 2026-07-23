@@ -59,8 +59,29 @@ def test_invalid_zero_risk_is_rejected():
         adaptive_stop(direction="long", entry_price=100, initial_stop=100, prior_peak=101, atr=1)
 
 
+def test_replay_excludes_ambiguous_entry_bar_extremes():
+    df = _bars([
+        # These extremes may have occurred before the fill at 100 and must not count.
+        {"open":95,"high":110,"low":90,"close":100,"atr14":1.0},
+        {"open":100,"high":101,"low":99.5,"close":100.8,"atr14":1.0},
+        {"open":100.8,"high":102,"low":100.4,"close":101.8,"atr14":1.0},
+    ])
+    r = replay_adaptive_harvest(df, entry_idx=0, direction="long", entry_price=100, initial_stop=98)
+    assert r["replay_valid"] is True
+    assert r["mfe_r"] == pytest.approx(1.0)
+    assert r["mae_r"] == pytest.approx(0.25)
+    assert r["bars_held"] == 2
+
+
+def test_replay_requires_complete_post_entry_bar():
+    df = _bars([{"open":100,"high":110,"low":90,"close":100,"atr14":1.0}])
+    r = replay_adaptive_harvest(df, entry_idx=0, direction="long", entry_price=100, initial_stop=98)
+    assert r == {"replay_valid": False, "failure_reason": "no_complete_post_entry_bars"}
+
+
 def test_replay_preserves_right_tail_without_fixed_take_profit():
     df = _bars([
+        {"open":100,"high":100.2,"low":99.8,"close":100,"atr14":1.0},
         {"open":100,"high":101,"low":99.5,"close":100.8,"atr14":1.0},
         {"open":100.8,"high":102,"low":100.4,"close":101.8,"atr14":1.0},
         {"open":101.8,"high":104,"low":101.5,"close":103.8,"atr14":1.0},
@@ -75,6 +96,7 @@ def test_replay_preserves_right_tail_without_fixed_take_profit():
 
 def test_replay_profit_lock_prevents_large_winner_round_trip():
     df = _bars([
+        {"open":100,"high":100.2,"low":99.8,"close":100,"atr14":1.0},
         {"open":100,"high":101,"low":99.5,"close":100.8,"atr14":1.0},
         {"open":100.8,"high":104,"low":100.5,"close":103.8,"atr14":1.0},
         {"open":103.8,"high":104.2,"low":100.0,"close":100.5,"atr14":1.0},
@@ -86,7 +108,7 @@ def test_replay_profit_lock_prevents_large_winner_round_trip():
 
 def test_replay_gap_through_stop_uses_gap_fill():
     df = _bars([
-        {"open":100,"high":101,"low":99.5,"close":100.5,"atr14":1.0},
+        {"open":100,"high":100.2,"low":99.8,"close":100,"atr14":1.0},
         {"open":97,"high":97.5,"low":96.5,"close":97,"atr14":1.0},
     ])
     r = replay_adaptive_harvest(df, entry_idx=0, direction="long", entry_price=100, initial_stop=98)
@@ -96,6 +118,7 @@ def test_replay_gap_through_stop_uses_gap_fill():
 
 def test_replay_short_runner_is_symmetric():
     df = _bars([
+        {"open":100,"high":100.2,"low":99.8,"close":100,"atr14":1.0},
         {"open":100,"high":100.5,"low":99,"close":99.2,"atr14":1.0},
         {"open":99.2,"high":99.5,"low":97,"close":97.2,"atr14":1.0},
         {"open":97.2,"high":97.5,"low":95,"close":95.2,"atr14":1.0},
