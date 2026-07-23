@@ -87,23 +87,30 @@ def replay_adaptive_harvest(df: Any, *, entry_idx: int, direction: str,
                             entry_price: float, initial_stop: float,
                             max_bars: int = 60,
                             config: HarvestConfig | None = None) -> dict[str, Any]:
-    """Causally replay adaptive harvesting over OHLC bars.
+    """Causally replay adaptive harvesting over complete post-entry OHLC bars.
 
-    Stop for each bar is calculated from the *previous* peak. Intrabar ambiguity
-    is resolved conservatively: if the original stop and favourable excursion
-    could both occur on the same bar, the stop is credited first. No fixed TP is
-    used, intentionally preserving right-tail participation.
+    ``entry_idx`` identifies the bar containing the fill. Because minute OHLC does
+    not reveal whether that bar's high/low happened before or after the fill, the
+    entry bar is deliberately excluded. Replay starts at ``entry_idx + 1``. This
+    sacrifices up to one minute of observable path rather than manufacturing MFE,
+    MAE, or a stop hit from pre-entry price action.
+
+    Stop for each evaluated bar is calculated from the previous completed peak.
+    No fixed TP is used, intentionally preserving right-tail participation.
     """
     if entry_idx < 0 or entry_idx >= len(df):
         return {}
     side = direction.lower()
+    if side not in {"long", "short"}:
+        return {"replay_valid": False, "failure_reason": "invalid_direction"}
     risk = abs(entry_price - initial_stop)
     if risk <= 1e-12:
         return {"replay_valid": False, "failure_reason": "zero_initial_risk"}
 
-    bars = df.iloc[entry_idx: entry_idx + max_bars]
+    start_idx = entry_idx + 1
+    bars = df.iloc[start_idx: start_idx + max_bars]
     if bars.empty:
-        return {}
+        return {"replay_valid": False, "failure_reason": "no_complete_post_entry_bars"}
 
     peak = entry_price
     mfe_price = entry_price
@@ -118,7 +125,7 @@ def replay_adaptive_harvest(df: Any, *, entry_idx: int, direction: str,
     for step, (bar_ts, bar) in enumerate(bars.iterrows()):
         bars_held = step + 1
         high, low = float(bar["high"]), float(bar["low"])
-        open_price, close = float(bar["open"]), float(bar["close"])
+        open_price = float(bar["open"])
         atr = float(bar.get("atr14", 0.0) or 0.0)
         decision = adaptive_stop(direction=side, entry_price=entry_price,
                                  initial_stop=initial_stop, prior_peak=peak, atr=max(0.0, atr),
@@ -129,11 +136,11 @@ def replay_adaptive_harvest(df: Any, *, entry_idx: int, direction: str,
         if stop_hit:
             # Gap-through stops cannot receive a better fill than the bar open.
             if side == "long":
-                exit_price = min(open_price, current_stop) if open_price < current_stop else current_stop
+                exit_price = open_price if open_price < current_stop else current_stop
                 mae_price = min(mae_price, exit_price)
                 mfe_price = max(mfe_price, open_price)
             else:
-                exit_price = max(open_price, current_stop) if open_price > current_stop else current_stop
+                exit_price = open_price if open_price > current_stop else current_stop
                 mae_price = max(mae_price, exit_price)
                 mfe_price = min(mfe_price, open_price)
             exit_reason, exit_ts = "adaptive_stop", bar_ts
