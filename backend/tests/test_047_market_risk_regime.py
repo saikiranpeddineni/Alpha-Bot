@@ -535,9 +535,9 @@ async def test_isolated_breadth_stress_keeps_dynamic_pipeline_alive():
     async def _history(symbol, timeframe, start, end, prefer_cache=True):
         if timeframe == "1Min":
             return _make_normal_1min()
-        if symbol in ("AAPL", "MSFT", "NVDA", "AMZN", "META", "JPM", "BAC", "XLK", "XLF"):
-            return _make_daily(advancing=False)
-        return _make_daily(advancing=True)
+        if symbol in ("SPY", "QQQ"):
+            return _make_daily(advancing=True)
+        return _make_daily(advancing=False)
 
     dm = SimpleNamespace(
         history=_history,
