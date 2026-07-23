@@ -159,3 +159,18 @@ class TestCanonicalTelemetryInvariants:
         assert ep_id1 == "NOW_orb_short_20260723_09_30"
         assert ep_id2 == "NOW_orb_short_20260723_09_45"
         assert ep_id1 != ep_id2
+
+    def test_peak_equity_restoration_invariant(self):
+        """Invariant 9: Peak equity must never sit below session start equity after checkpoint restoration."""
+        from app.portfolio.tracker import PortfolioTracker
+        tracker = PortfolioTracker()
+        payload = {
+            "session_date": "2026-07-23",
+            "session_start_equity": 101715.68,
+            "peak_equity": 101503.89,  # Deprecated or lower peak state restored
+            "day_realized_pnl": -500.96,
+            "realized_pnl": -500.96
+        }
+        tracker.restore_checkpoint(payload)
+        assert tracker.peak_equity >= tracker.session_start_equity
+        assert tracker.peak_equity == pytest.approx(101715.68)

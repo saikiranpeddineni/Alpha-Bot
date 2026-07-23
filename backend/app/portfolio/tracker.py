@@ -285,8 +285,12 @@ class PortfolioTracker:
         self.realized_pnl = float(payload.get("realized_pnl", 0.0))
         self.day_realized_pnl = float(payload.get("day_realized_pnl", 0.0))
         self.session_date = date.fromisoformat(payload["session_date"]) if payload.get("session_date") else None
-        self.session_start_equity = payload.get("session_start_equity")
-        self.peak_equity = float(payload.get("peak_equity", 0.0))
+        self.session_start_equity = float(payload["session_start_equity"]) if payload.get("session_start_equity") is not None else None
+        restored_peak = float(payload.get("peak_equity", 0.0))
+        if self.session_start_equity is not None:
+            self.peak_equity = max(restored_peak, self.session_start_equity)
+        else:
+            self.peak_equity = restored_peak
         if "day_trade_dates" in payload:
             self._day_trade_dates = [date.fromisoformat(d) for d in payload.get("day_trade_dates", []) if d]
         elif payload.get("day_trades_today") and self.session_date:
