@@ -39,12 +39,15 @@ class CanonicalOutcomeResolver:
         pnl: float | None,
         entry: float | None,
         stop: float | None,
+        direction: str | None = None,
         mae_pct: float | None = None
     ) -> float | None:
         """Compute canonical R-multiple.
         
-        Preserves 0.0 as a valid 0R breakeven trade. Returns None if PnL, entry, or stop are missing/invalid.
-        Strict Telemetry Invariant: Never falls back to percentage return or estimated MAE.
+        Strict Telemetry Invariant:
+        R = directional_price_change / abs(entry - stop).
+        Returns None if entry or stop are missing, zero-distance, or wrong-sided.
+        Preserves 0.0 as a valid 0R breakeven trade.
         """
         if pnl is None or pd.isna(pnl) or not math.isfinite(pnl):
             return None
@@ -59,12 +62,25 @@ class CanonicalOutcomeResolver:
             and pd.notna(entry) 
             and pd.notna(stop) 
             and entry > 0 
-            and abs(entry - stop) > 1e-6
         ):
-            risk_pct = abs(entry - stop) / entry
-            if risk_pct > 1e-6:
-                dollar_risk = 10000.0 * risk_pct
-                return float(pnl / dollar_risk)
+            risk_dist = abs(entry - stop)
+            if risk_dist <= 1e-6:
+                return None
+
+            # Wrong-side stop validation
+            if direction is not None:
+                dir_lower = str(direction).lower()
+                if ("long" in dir_lower or "buy" in dir_lower) and stop > entry:
+                    return None
+                elif ("short" in dir_lower or "sell" in dir_lower) and stop < entry:
+                    return None
+
+            # Convert percentage return to price change: directional_price_change = entry * (pnl_pct / 100.0)
+            # R = (entry * pnl_pct / 100.0) / risk_dist
+            pnl_val = float(pnl)
+            pnl_pct = pnl_val if abs(pnl_val) < 1000.0 else (pnl_val / 10000.0 * 100.0)
+            price_change = float(entry) * (pnl_pct / 100.0)
+            return float(price_change / risk_dist)
 
         return None
 
@@ -73,6 +89,7 @@ class CanonicalOutcomeResolver:
         """Return deterministic market setup episode ID independent of policy variant and 1m re-triggering.
 
         Identity components: Symbol + Strategy + Direction + Date + 15-Minute Setup Window.
+        Note: Provisional identity mechanism for paper telemetry.
         """
         r_dict = record.to_dict() if isinstance(record, pd.Series) else dict(record)
         payload_raw = r_dict.get("payload")
@@ -116,6 +133,8 @@ class CanonicalOutcomeResolver:
             payload = {}
 
         strategy_name = str(row_dict.get("strategy") or payload.get("strategy") or "").lower()
+        direction = str(row_dict.get("direction") or payload.get("direction") or "").lower()
+
         if horizon is None or horizon == "60m":
             from app.strategies.memory import STRATEGY_HORIZON, _DEFAULT_HORIZON
             horizons = STRATEGY_HORIZON.get(strategy_name, _DEFAULT_HORIZON)
@@ -125,7 +144,7 @@ class CanonicalOutcomeResolver:
 
         # Extract entry, stop, PnL, MAE, MFE
         entry = float(payload.get("price") or payload.get("entry_price") or row_dict.get("entry_price") or row_dict.get("price") or 0.0) or None
-        stop = float(payload.get("stop_loss") or row_dict.get("stop_loss") or 0.0) or None
+        stop = float(payload.get("stop_loss") or payload.get("proposed_stop_loss") or row_dict.get("stop_loss") or row_dict.get("proposed_stop_loss") or 0.0) or None
         pnl = row_dict.get("simulated_pnl")
         if pnl is None or (isinstance(pnl, float) and pd.isna(pnl)):
             pnl = payload.get("simulated_pnl")
@@ -146,6 +165,17 @@ class CanonicalOutcomeResolver:
         replayed = bool(row_dict.get("replayed", False) or payload.get("replayed", False))
         replay_failed = bool(row_dict.get("replay_failed", False))
 
+        invalid_reason = None
+
+        # Zero-distance and Wrong side stop checks
+        if entry is not None and stop is not None:
+            if abs(entry - stop) <= 1e-6:
+                invalid_reason = "ZERO_DISTANCE_STOP"
+            elif ("long" in direction or "buy" in direction) and stop > entry:
+                invalid_reason = "WRONG_SIDE_STOP"
+            elif ("short" in direction or "sell" in direction) and stop < entry:
+                invalid_reason = "WRONG_SIDE_STOP"
+
         r_val = row_dict.get("realized_r") or payload.get("realized_r")
         if r_val is None:
             alt_exits = row_dict.get("alternative_exits") or payload.get("alternative_exits")
@@ -157,7 +187,10 @@ class CanonicalOutcomeResolver:
             if isinstance(alt_exits, dict) and "exit_production" in alt_exits:
                 r_val = alt_exits["exit_production"].get("realized_r")
 
-        if r_val is not None:
+        if invalid_reason is not None:
+            realized_r = None
+            valid_r = False
+        elif r_val is not None:
             try:
                 realized_r = float(r_val)
                 valid_r = math.isfinite(realized_r)
@@ -165,10 +198,8 @@ class CanonicalOutcomeResolver:
                 realized_r = None
                 valid_r = False
         else:
-            realized_r = cls.compute_canonical_r(pnl=pnl, entry=entry, stop=stop, mae_pct=mae)
+            realized_r = cls.compute_canonical_r(pnl=pnl, entry=entry, stop=stop, direction=direction, mae_pct=mae)
             valid_r = (realized_r is not None)
-
-        invalid_reason = None
 
         # Sanity Invariant: realized_r <= mfe_r + 1e-4
         if valid_r and realized_r is not None and entry is not None and stop is not None and mfe is not None:
@@ -222,7 +253,6 @@ class CanonicalOutcomeResolver:
         """
         evidences = [cls.resolve(r) for r in records]
         
-        # Collect observed regime sources in the records
         sources_observed = set(e.regime_source for e in evidences if e.valid)
 
         if fail_on_mixed_sources and len(sources_observed) > 1 and regime_source is None:
