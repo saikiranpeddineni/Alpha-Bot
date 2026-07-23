@@ -86,6 +86,9 @@ class Signal(BaseModel):
     strategy_params: dict | None = None
     parent_candidate_id: str | None = None
     risk_multiplier: float = 1.0
+    discovery_source: str | None = None
+    scanner_score: float | None = None
+    scanner_auc: float | None = None
 
 
 class OrderRequest(BaseModel):

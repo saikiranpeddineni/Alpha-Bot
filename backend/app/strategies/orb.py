@@ -35,9 +35,22 @@ class OpeningRangeBreakout(Strategy):
     def __init__(self, params: dict | None = None, enabled: bool = True) -> None:
         super().__init__(params, enabled)
         self._traded: set[tuple[str, object]] = set()
+        self._pending: dict[tuple[str, object], datetime] = {}
 
     def reset(self) -> None:
         self._traded.clear()
+        self._pending.clear()
+
+    def on_entry_filled(self, symbol: str, timestamp: object) -> None:
+        dt = getattr(timestamp, "date", lambda: timestamp)()
+        key = (symbol, dt)
+        self._pending.pop(key, None)
+        self._traded.add(key)
+
+    def on_entry_rejected(self, symbol: str, timestamp: object) -> None:
+        dt = getattr(timestamp, "date", lambda: timestamp)()
+        key = (symbol, dt)
+        self._pending.pop(key, None)
 
     def on_bar(self, ctx: StrategyContext, symbol: str, df: pd.DataFrame) -> Signal | None:
         p = self.params
@@ -46,8 +59,17 @@ class OpeningRangeBreakout(Strategy):
 
         et_dates = df.index.tz_convert(ET).date
         today = et_dates[-1]
-        if (symbol, today) in self._traded:
+        key = (symbol, today)
+        if key in self._traded:
             return None
+
+        pending_time = self._pending.get(key)
+        if pending_time is not None:
+            # Auto-expire stale pending entries older than 5 minutes
+            if (ctx.now - pending_time) < timedelta(minutes=5):
+                return None
+            self._pending.pop(key, None)
+
         today_df = df[et_dates == today]
         n_today = len(today_df)
         rng_n = int(p["range_minutes"])
@@ -75,7 +97,7 @@ class OpeningRangeBreakout(Strategy):
             risk = close - stop
             if risk <= 0:
                 return None
-            self._traded.add((symbol, today))
+            self._pending[key] = ctx.now
             return Signal(
                 symbol=symbol,
                 action=SignalAction.ENTER_LONG,
@@ -91,7 +113,7 @@ class OpeningRangeBreakout(Strategy):
             risk = stop - close
             if risk <= 0:
                 return None
-            self._traded.add((symbol, today))
+            self._pending[key] = ctx.now
             return Signal(
                 symbol=symbol,
                 action=SignalAction.ENTER_SHORT,
