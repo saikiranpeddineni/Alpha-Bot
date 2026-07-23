@@ -494,3 +494,93 @@ async def test_live_mode_tick_clears_stale_resurrection_queue(temp_db):
 
     assert len(engine.resurrection_queue) == 0, \
         "Live-mode _tick must clear all pre-existing resurrection queue entries"
+
+
+# ===========================================================================
+# Invariant 8: STRESS regime scanner execution and state survival
+# ===========================================================================
+
+@pytest.mark.asyncio
+async def test_scanner_stress_defensive_watchlist_completes_successfully(temp_db):
+    """
+    STRESS -> defensive watchlist -> engine bookkeeping
+    must complete without runtime exception.
+    """
+    from app.core.scanner import ScannerOutcome, DEFENSIVE_WATCHLIST
+
+    engine = _make_engine(temp_db)
+    engine.data.history = AsyncMock(return_value=pd.DataFrame())
+
+    scanner_mock = MagicMock()
+    scanner_mock.run = AsyncMock(
+        return_value=(ScannerOutcome.SUCCESS_NONEMPTY, DEFENSIVE_WATCHLIST.copy())
+    )
+    scanner_mock.get_last_scans = MagicMock(return_value=[])
+
+    with patch("app.core.scanner.MarketScanner", return_value=scanner_mock):
+        result = await engine.run_market_scanner(is_intraday=False)
+
+    assert result is not None
+    assert result == DEFENSIVE_WATCHLIST
+    assert engine.scanned_watchlist == sorted(DEFENSIVE_WATCHLIST)
+    assert engine.scanned_watchlist_ttl is not None
+    for sym in DEFENSIVE_WATCHLIST:
+        assert sym in engine.scanned_watchlist_ttl
+
+
+@pytest.mark.asyncio
+async def test_scanner_can_run_twice_with_scanned_watchlist_ttl(temp_db):
+    """
+    Scanner TTL state initialized by Engine must survive
+    repeated successful scanner runs.
+    """
+    from app.core.scanner import ScannerOutcome
+
+    engine = _make_engine(temp_db)
+    engine.data.history = AsyncMock(return_value=pd.DataFrame())
+
+    scanner_mock = MagicMock()
+    scanner_mock.run = AsyncMock(
+        return_value=(ScannerOutcome.SUCCESS_NONEMPTY, ["AAPL", "MSFT"])
+    )
+    scanner_mock.get_last_scans = MagicMock(return_value=[])
+
+    with patch("app.core.scanner.MarketScanner", return_value=scanner_mock):
+        res1 = await engine.run_market_scanner(is_intraday=False)
+        res2 = await engine.run_market_scanner(is_intraday=True)
+
+    assert res1 == ["AAPL", "MSFT"]
+    assert res2 == ["AAPL", "MSFT"]
+    assert engine.scanned_watchlist == ["AAPL", "MSFT"]
+    assert "AAPL" in engine.scanned_watchlist_ttl
+    assert "MSFT" in engine.scanned_watchlist_ttl
+
+
+@pytest.mark.asyncio
+async def test_scanner_endpoint_returns_200_for_stress_defensive_scan(temp_db):
+    """
+    A valid STRESS scanner outcome is not an HTTP error.
+    """
+    from fastapi.testclient import TestClient
+    from app.main import app
+    from app.core.scanner import ScannerOutcome, DEFENSIVE_WATCHLIST
+
+    engine = _make_engine(temp_db)
+    engine.data.history = AsyncMock(return_value=pd.DataFrame())
+
+    scanner_mock = MagicMock()
+    scanner_mock.run = AsyncMock(
+        return_value=(ScannerOutcome.SUCCESS_NONEMPTY, DEFENSIVE_WATCHLIST.copy())
+    )
+    scanner_mock.get_last_scans = MagicMock(return_value=[])
+
+    with patch("app.api.routes._engine", return_value=engine):
+        with patch("app.core.scanner.MarketScanner", return_value=scanner_mock):
+            client = TestClient(app)
+            response = client.post("/api/scanner/run")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "success"
+    assert data["watchlist"] == DEFENSIVE_WATCHLIST
+

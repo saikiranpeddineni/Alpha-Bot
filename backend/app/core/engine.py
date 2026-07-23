@@ -140,6 +140,11 @@ class TradingEngine:
         self._last_data_bar_ts: dict[str, datetime] = {}
         self._data_gap_symbols: set[str] = set()
 
+        # Scanner state initialization
+        self.scanned_watchlist: list[str] = []
+        self.scanned_watchlist_ttl: dict[str, int] = {}
+        self.scanned_watchlist_expires_at: dict[str, datetime] = {}
+
         # Feature 4: Economic calendar / event guard
         from app.core.calendar import EventCalendar
         self.calendar = EventCalendar(alpaca_client=None)  # client attached in ensure_data()
@@ -1548,8 +1553,12 @@ class TradingEngine:
                             initial_atr=initial_atr,
                         )
                         applog.info("counterfactual", f"Live Closed Trade {symbol} Exit Counterfactual Replay: {counterfactuals}")
-                except Exception:
-                    pass
+                except Exception as exc:
+                    applog.warning(
+                        "counterfactual",
+                        f"Live exit counterfactual replay failed for {symbol}: {exc}",
+                        exc_info=True,
+                    )
 
                 # Cleanup peak/trough/stop
                 if symbol in self._position_peaks:
@@ -2809,7 +2818,6 @@ class TradingEngine:
                 applog.info("engine", "Pre-market scan complete. Starting targeted warm-start training...")
                 try:
                     from datetime import timedelta
-                    from app.core.domain import utcnow
                     end = utcnow()
                     start = end - timedelta(days=30)
 

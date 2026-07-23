@@ -562,6 +562,11 @@ async def run_scanner(request: Request) -> dict:
         new_watchlist = await _engine(request).run_market_scanner()
         return {"status": "success", "watchlist": new_watchlist}
     except Exception as exc:
+        applog.error(
+            "routes",
+            f"Scanner endpoint error: {exc}",
+            exc_info=True,
+        )
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
