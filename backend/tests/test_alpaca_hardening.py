@@ -11,18 +11,30 @@ from app.brokers.alpaca_hardening import (
 from app.core.domain import OrderStatus
 
 
-def test_documented_terminal_alpaca_statuses_do_not_look_submitted():
-    for status in ("done_for_day", "replaced", "stopped", "suspended", "calculated"):
+def test_only_unambiguously_terminal_nonfill_statuses_are_canceled():
+    for status in ("canceled", "expired", "replaced"):
         assert normalize_order_status(status) == OrderStatus.CANCELED
 
 
-def test_documented_transitional_statuses_remain_submitted():
-    for status in ("pending_cancel", "pending_replace", "accepted_for_bidding"):
+def test_nonterminal_or_ambiguous_alpaca_statuses_remain_tracked():
+    for status in (
+        "accepted",
+        "pending_new",
+        "pending_cancel",
+        "pending_replace",
+        "accepted_for_bidding",
+        "done_for_day",
+        "stopped",
+        "suspended",
+        "calculated",
+    ):
         assert normalize_order_status(status) == OrderStatus.SUBMITTED
 
 
-def test_partially_filled_is_preserved():
+def test_fill_and_rejection_statuses_are_preserved():
     assert normalize_order_status("partially_filled") == OrderStatus.PARTIALLY_FILLED
+    assert normalize_order_status("filled") == OrderStatus.FILLED
+    assert normalize_order_status("rejected") == OrderStatus.REJECTED
 
 
 def test_stock_price_precision_matches_alpaca_rules():
