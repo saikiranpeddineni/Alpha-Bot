@@ -130,6 +130,7 @@ class AlpacaBroker(Broker):
 
         self._symbol_strategies: dict[str, str] = {}
         self._shortable_cache: dict[str, bool] = {}
+        self._shorting_enabled: bool | None = None
         self.account_id: str | None = None
 
     @property
@@ -139,9 +140,10 @@ class AlpacaBroker(Broker):
     async def connect(self) -> None:
         acct = await _call(self._client.get_account, label="get_account")
         self.account_id = str(acct.account_number)
+        self._shorting_enabled = bool(getattr(acct, "shorting_enabled", True))
         applog.info(
             "broker.alpaca",
-            f"Connected to Alpaca ({'paper' if self.is_paper else 'LIVE'}) account {self.account_id} -- equity ${float(acct.equity):,.2f}",
+            f"Connected to Alpaca ({'paper' if self.is_paper else 'LIVE'}) account {self.account_id} -- equity ${float(acct.equity):,.2f} (shorting_enabled={self._shorting_enabled})",
         )
         await self._bootstrap_durable_fill_baseline()
 
@@ -431,6 +433,10 @@ class AlpacaBroker(Broker):
             raise
         except Exception as exc:  # noqa: BLE001
             if self._is_definitive_rejection(exc):
+                err_msg = str(exc).lower()
+                if "not allowed to short" in err_msg or "40310000" in err_msg:
+                    self._shorting_enabled = False
+                    self._shortable_cache[req.symbol.upper()] = False
                 applog.error("broker.alpaca", f"Order rejected {req.symbol} {req.side} {qty}: {exc}")
                 return Order(
                     client_order_id=req.client_order_id,
@@ -646,13 +652,26 @@ class AlpacaBroker(Broker):
         except Exception as exc:  # noqa: BLE001
             applog.warning("broker.alpaca", f"close {symbol} failed: {exc}")
     async def is_shortable(self, symbol: str) -> bool:
+        if self._shorting_enabled is False:
+            return False
+
         sym = symbol.upper()
         if sym in self._shortable_cache:
             return self._shortable_cache[sym]
+
+        try:
+            acct = await _call(self._client.get_account, label="get_account")
+            self._shorting_enabled = bool(getattr(acct, "shorting_enabled", True))
+            if not self._shorting_enabled:
+                self._shortable_cache[sym] = False
+                return False
+        except Exception:
+            pass
+
         try:
             asset = await _call(self._client.get_asset, sym, label=f"get_asset/{sym}")
             # Asset is shortable if Alpaca says it is shortable and easy to borrow
-            shortable = bool(asset.shortable and asset.easy_to_borrow)
+            shortable = bool(getattr(asset, "shortable", False) and getattr(asset, "easy_to_borrow", False))
             self._shortable_cache[sym] = shortable
             return shortable
         except Exception as exc:
