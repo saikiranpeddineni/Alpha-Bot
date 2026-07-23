@@ -19,21 +19,23 @@ ALPACA_STATUS_MAP: dict[str, OrderStatus] = {
     "filled": OrderStatus.FILLED,
     "canceled": OrderStatus.CANCELED,
     "expired": OrderStatus.CANCELED,
-    "done_for_day": OrderStatus.CANCELED,
+    # done_for_day can become executable again on the next trading day; stopped
+    # is guaranteed but not yet executed; suspended is ineligible but not a
+    # terminal cancellation. Keep all three tracked as live/non-terminal.
+    "done_for_day": OrderStatus.SUBMITTED,
+    "stopped": OrderStatus.SUBMITTED,
+    "suspended": OrderStatus.SUBMITTED,
+    # calculated may represent either filled or done-for-day while settlement is
+    # pending. Without the preceding state, SUBMITTED is the conservative map.
+    "calculated": OrderStatus.SUBMITTED,
+    # The original order is terminal once Alpaca replaces it with a new order.
     "replaced": OrderStatus.CANCELED,
-    "stopped": OrderStatus.CANCELED,
-    "suspended": OrderStatus.CANCELED,
-    "calculated": OrderStatus.CANCELED,
     "rejected": OrderStatus.REJECTED,
 }
 
 
 def normalize_order_status(raw_status: object) -> OrderStatus:
-    """Map every documented Alpaca order state to an internal state.
-
-    Unknown states fail conservatively as SUBMITTED so reconciliation continues
-    to track them instead of falsely declaring a terminal result.
-    """
+    """Map Alpaca order states without falsely declaring ambiguous states terminal."""
     value = str(raw_status).split(".")[-1].lower() if raw_status is not None else ""
     return ALPACA_STATUS_MAP.get(value, OrderStatus.SUBMITTED)
 
