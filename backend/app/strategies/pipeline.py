@@ -313,7 +313,14 @@ class SignalPipeline:
                 )
 
                 if ml < self.ml_threshold:
-                    if enforce_veto:
+                    hard_reject_cutoff = getattr(self.trade_score_engine.risk_config, "ml_hard_reject_threshold", 0.48)
+                    if self.soft_composite_gating and ml >= hard_reject_cutoff:
+                        sig.ml_gate_decision = "GRAY_ZONE_EVALUATION"
+                        applog.info(
+                            "pipeline",
+                            f"{symbol}: ML gray zone active ({ml:.4f} in [{hard_reject_cutoff:.2f}, {self.ml_threshold:.2f}]). Evaluating Meta & TradeScore."
+                        )
+                    elif enforce_veto:
                         sig.ml_gate_decision = "REJECT"
                         rejected.append((
                             sig,
@@ -429,6 +436,9 @@ class SignalPipeline:
                     f"[regime={regime}, ml={ml_str}, rr={effective_rr:.2f}]",
                 ))
             else:
+                if getattr(sig, "ml_gate_decision", None) == "GRAY_ZONE_EVALUATION":
+                    sig.ml_gate_decision = "GRAY_ZONE_RESCUED"
+                    applog.info("pipeline", f"{symbol}: GRAY_ZONE_RESCUED by Meta & TradeScore (prob={ml:.4f})")
                 entries.append(sig)
 
         # ---- Stage 5: Conflict resolution ----

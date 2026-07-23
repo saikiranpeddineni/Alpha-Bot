@@ -44,6 +44,7 @@ class MomentumCross(Strategy):
         "rsi_min": 50.0,
         "rsi_max": 78.0,
         "vol_z_min": 0.0,
+        "event_window_bars": 10,
         "atr_stop_mult": 1.5,
         "reward_risk": 1.8,
         "trailing_stop_atr_mult": 0.0,
@@ -122,7 +123,8 @@ class MomentumCross(Strategy):
             self._expire_event(ctx, symbol, direction, df.index[current_bar_idx])
             return False
         bars_elapsed = current_bar_idx - event_idx
-        if bars_elapsed > EVENT_WINDOW_BARS:
+        max_bars = int(self.params.get("event_window_bars", EVENT_WINDOW_BARS))
+        if bars_elapsed > max_bars:
             self._expire_event(ctx, symbol, direction, df.index[current_bar_idx])
             return False
         age = bars_elapsed

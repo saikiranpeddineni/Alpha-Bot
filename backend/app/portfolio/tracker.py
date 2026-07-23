@@ -68,6 +68,7 @@ class _OpenLot:
     stop_loss: float | None = None
     initial_stop_loss: float | None = None
     initial_risk_per_share: float | None = None
+    initial_risk_dollars: float = 0.0
     commission_basis: float = 0.0
     closing_qty: float = 0.0
     closing_notional: float = 0.0
@@ -370,6 +371,7 @@ class PortfolioTracker:
                 self._lots[symbol].stop_loss = initial_stop
                 self._lots[symbol].initial_stop_loss = initial_stop
                 self._lots[symbol].initial_risk_per_share = abs(fill.price - initial_stop)
+                self._lots[symbol].initial_risk_dollars = abs(signed) * abs(fill.price - initial_stop)
             side_str = "BOUGHT" if signed > 0 else "SOLD SHORT"
             total_amt = abs(signed) * fill.price
             applog.info("portfolio", f"[{fill.ts}] {side_str} {symbol}: {abs(signed):g} shares @ {fill.price:.2f} (Total Amt: ${total_amt:,.2f} | {fill.strategy})")
@@ -382,7 +384,10 @@ class PortfolioTracker:
             lot.commission_basis += fill.commission
             if initial_stop is not None:
                 lot.stop_loss = initial_stop
-                lot.initial_risk_per_share = abs(lot.avg_price - initial_stop)
+                lot.initial_stop_loss = initial_stop
+                added_risk_dollars = abs(signed) * abs(fill.price - initial_stop)
+                lot.initial_risk_dollars += added_risk_dollars
+                lot.initial_risk_per_share = lot.initial_risk_dollars / abs(total) if total != 0 else abs(lot.avg_price - initial_stop)
             side_str = "BOUGHT MORE" if signed > 0 else "SOLD MORE SHORT"
             total_amt = abs(signed) * fill.price
             applog.info("portfolio", f"[{fill.ts}] {side_str} {symbol}: {abs(signed):g} shares @ {fill.price:.2f} (Total Amt: ${total_amt:,.2f} | {fill.strategy})")
@@ -425,8 +430,13 @@ class PortfolioTracker:
         basis = lot.avg_price * lot.closing_qty
         pnl = lot.realized_pnl_accum
 
-        init_risk = lot.initial_risk_per_share
-        r_multiple = round(pnl / (init_risk * lot.closing_qty), 2) if (init_risk and lot.closing_qty > 0) else None
+        init_risk_dollars = lot.initial_risk_dollars
+        if init_risk_dollars > 0:
+            r_multiple = round(pnl / init_risk_dollars, 4)
+            init_risk = init_risk_dollars / lot.closing_qty if lot.closing_qty > 0 else lot.initial_risk_per_share
+        else:
+            init_risk = lot.initial_risk_per_share
+            r_multiple = round(pnl / (init_risk * lot.closing_qty), 4) if (init_risk and lot.closing_qty > 0) else None
 
         best = peak_price if peak_price is not None else fill.price
         worst = trough_price if trough_price is not None else fill.price
@@ -448,6 +458,9 @@ class PortfolioTracker:
             pnl=round(pnl, 2),
             pnl_pct=round(pnl / basis * 100.0, 3) if basis else 0.0,
             r_multiple=r_multiple,
+            candidate_id=getattr(fill, "client_order_id", getattr(fill, "order_id", None)),
+            initial_stop=round(lot.initial_stop_loss, 4) if lot.initial_stop_loss is not None else None,
+            initial_risk=round(init_risk, 4) if init_risk is not None else None,
             strategy=lot.strategy,
             exit_reason=fill.reason or "exit",
             mfe=round(mfe_val, 4),
