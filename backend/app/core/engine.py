@@ -2731,9 +2731,17 @@ class TradingEngine:
             if is_intraday:
                 # Intraday: only add new symbols; retain all existing except those
                 # that dropped off scanner AND have no active exposure and not retained by TTL
+                new_set = set(new_watchlist)
+                # Reset TTL for newly scanned intraday symbols
+                for sym in new_set:
+                    self.scanned_watchlist_ttl[sym] = self.risk_config.scanner_watchlist_ttl
+                # Decrement TTL for previously scanned symbols that were not in this scan
+                for sym in list(self.scanned_watchlist_ttl.keys()):
+                    if sym not in new_set:
+                        self.scanned_watchlist_ttl[sym] = max(0, self.scanned_watchlist_ttl.get(sym, 1) - 1)
+
                 retained_dynamic = {sym for sym, ttl in self.scanned_watchlist_ttl.items() if ttl > 0}
                 existing = set(self.scanned_watchlist)
-                new_set = set(new_watchlist)
                 # Symbols to remove: in existing but not in new scan, no active exposure AND not retained by TTL
                 to_remove = (existing - new_set) - (active_trade_symbols | retained_dynamic)
                 # Symbols to add: in new scan but not yet in existing
@@ -3442,8 +3450,10 @@ class TradingEngine:
             rejection_reason (str | None): None if safety checks pass, otherwise the failure reason.
         """
         import json
+        from app.core.domain import SignalAction
         symbol = sig.symbol.upper()
         policy_id = getattr(sig, "policy_id", None) or sig.strategy
+        sig_side = "long" if sig.action in (SignalAction.ENTER_LONG, SignalAction.EXIT_SHORT) else "short"
         
         # 1. Re-entry on same symbol/thesis within 30 minutes after a stop-loss exit
         try:
@@ -3463,18 +3473,22 @@ class TradingEngine:
                         continue
                     exit_reason = trade_data.get("exit_reason", "")
                     sl_hit = trade_data.get("sl_hit", False)
-                    if exit_reason == "stop_loss" or sl_hit:
-                        return f"behavioral_loop_detector: re-entry on same symbol {symbol} within 30 mins after stop"
+                    trade_strategy = trade_data.get("strategy", r.strategy or "")
+                    trade_side = trade_data.get("side", "")
+                    if (exit_reason == "stop_loss" or sl_hit) and (trade_strategy == sig.strategy or trade_side == sig_side):
+                        return f"behavioral_loop_detector: re-entry on same symbol {symbol} ({sig.strategy}/{sig_side}) within 30 mins after stop"
         except Exception as e:
             applog.warning("engine.behavioral", f"Failed re-entry check: {e}")
 
-        # 2. 3 consecutive same-symbol losses
+        # 2. 3 consecutive same-symbol losses within rolling 7-day window
         try:
+            cutoff_7d = now - timedelta(days=7)
             with self.db._session() as s:
                 from app.db.database import TradeRow
                 from sqlalchemy import select
                 stmt = select(TradeRow).where(
-                    TradeRow.symbol == symbol
+                    TradeRow.symbol == symbol,
+                    TradeRow.exit_at >= cutoff_7d
                 ).order_by(TradeRow.exit_at.desc()).limit(3)
                 rows = s.scalars(stmt).all()
                 if len(rows) == 3:
@@ -3487,7 +3501,7 @@ class TradingEngine:
                         pnl = trade_data.get("pnl", r.pnl)
                         losses.append(pnl < 0)
                     if len(losses) == 3 and all(losses):
-                        return f"behavioral_loop_detector: 3 consecutive losses on symbol {symbol}"
+                        return f"behavioral_loop_detector: 3 consecutive losses on symbol {symbol} in past 7 days"
         except Exception as e:
             applog.warning("engine.behavioral", f"Failed consecutive loss check: {e}")
 
@@ -3514,7 +3528,7 @@ class TradingEngine:
                 equity = self.portfolio.equity
                 if equity > 0:
                     turnover = total_volume / equity
-                    if turnover > 2.0:
+                    if turnover > 10.0:
                         return f"behavioral_loop_detector: high portfolio churn/turnover (ROC={turnover:.1%})"
         except Exception as e:
             applog.warning("engine.behavioral", f"Failed churn check: {e}")

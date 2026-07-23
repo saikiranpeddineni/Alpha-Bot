@@ -187,6 +187,7 @@ class ExitCounterfactualEngine:
             "fixed_1_2": {"stop_atr_mult": 1.0, "target_atr_mult": 2.0},
             "fixed_1.5_3": {"stop_atr_mult": 1.5, "target_atr_mult": 3.0},
             "trail_2_atr": {"trailing_atr_mult": 2.0},
+            "partial_1.5r_runner": {"target_atr_mult": 1.5, "trailing_atr_mult": 2.5},
             "time_30m": {"time_stop_bars": 30},
             "time_60m": {"time_stop_bars": 60},
             "ema9_cross": {"exit_on_ema_cross": True},
