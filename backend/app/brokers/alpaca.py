@@ -316,6 +316,38 @@ class AlpacaBroker(Broker):
             else None
         )
 
+        legs = getattr(o, "legs", None)
+        if legs:
+            for child in legs:
+                child_type = (
+                    str(getattr(child, "type", "")).split(".")[-1].lower()
+                    if getattr(child, "type", None)
+                    else ""
+                )
+                child_st_px = getattr(child, "stop_price", None)
+                child_lm_px = getattr(child, "limit_price", None)
+                if (child_type in ("stop", "stop_limit") or child_st_px is not None) and stop_price is None:
+                    if child_st_px is not None:
+                        stop_price = float(child_st_px)
+                if (child_type == "limit" or child_lm_px is not None) and limit_price is None:
+                    if child_lm_px is not None:
+                        limit_price = float(child_lm_px)
+
+        raw_leg = getattr(o, "leg", None)
+        if raw_leg is not None:
+            leg = str(raw_leg).split(".")[-1].lower()
+        elif order_type in (OrderType.STOP, OrderType.STOP_LIMIT):
+            leg = "stop"
+        elif order_class in {"bracket", "oco", "oto"} or getattr(o, "parent_order_id", None) or getattr(o, "parent_id", None):
+            if stop_price is not None and limit_price is None:
+                leg = "stop"
+            elif limit_price is not None and stop_price is None:
+                leg = "take_profit"
+            else:
+                leg = "entry"
+        else:
+            leg = "entry"
+
         return Order(
             id=str(o.id),
             client_order_id=str(o.client_order_id or ""),
@@ -337,11 +369,12 @@ class AlpacaBroker(Broker):
             parent_id=(
                 str(o.parent_order_id)
                 if getattr(o, "parent_order_id", None)
-                else None
+                else (str(o.parent_id) if getattr(o, "parent_id", None) else None)
             ),
+            leg=leg,
             strategy=strategy,
             reason=reason,
-            submitted_at=o.submitted_at or datetime.now(UTC),
+            submitted_at=getattr(o, "submitted_at", None) or datetime.now(UTC),
             filled_at=getattr(o, "filled_at", None),
         )
 

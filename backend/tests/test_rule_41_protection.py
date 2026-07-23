@@ -2,7 +2,7 @@ import pytest
 from datetime import datetime, UTC, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
-from app.core.domain import Order, OrderRequest, OrderSide, OrderStatus, OrderType, Position
+from app.core.domain import Order, OrderRequest, OrderSide, OrderStatus, OrderType, Position, ProtectionState
 from app.core.engine import TradingEngine
 from app.brokers.alpaca import AlpacaBroker
 from app.portfolio.tracker import _OpenLot
@@ -264,3 +264,80 @@ async def test_41_standalone_tp_cancelled_before_stop_recovery(mock_engine):
     
     mock_engine.broker.cancel.assert_called_once_with("order_tp_1")
     mock_engine.broker.submit.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_41_skhy_unrecognized_exit_order_reconciliation_before_recovery(mock_engine):
+    """REGRESSION TEST: SKHY position long 110 with an existing SELL 110 order that reserves
+    all shares (held_for_orders / unavailable) but is initially NOT recognized as valid protection
+    (e.g., invalid stop geometry or unmapped leg).
+
+    Rule #41 MUST NOT submit a second SELL 110 STOP order while the existing order is active.
+    It must request cancellation of the conflicting exit order, set AWAITING_CANCEL_CONFIRMATION,
+    and wait until broker cancellation is confirmed before submitting the recovery stop.
+    """
+    pos = Position(symbol="SKHY", qty=110.0, avg_entry_price=10.00, market_price=10.00)
+    
+    # Existing exit order for 110 shares with invalid geometry (stop_price >= avg_entry_price)
+    # so _is_valid_protective_stop returns False.
+    conflicting_order = Order(
+        id="order_skhy_unrecognized_exit",
+        client_order_id="6a9b_legacy_order",
+        symbol="SKHY",
+        side=OrderSide.SELL,
+        qty=110.0,
+        order_type=OrderType.STOP,
+        stop_price=10.50,  # Invalid: >= avg_entry_price (10.00)
+        status=OrderStatus.SUBMITTED,
+    )
+
+    # Cycle 1: Broker open_orders has conflicting order reserving 110 shares
+    mock_engine.broker.open_orders.return_value = [conflicting_order]
+    mock_engine.broker.get_order_by_client_id.return_value = None
+
+    status_c1 = await mock_engine._reconcile_protection([pos])
+
+    # Assertions for Cycle 1:
+    # 1. Protection status is False
+    assert status_c1["SKHY"] is False
+    assert mock_engine.system_health == "DEGRADED"
+    assert mock_engine.allow_new_entries is False
+
+    # 2. Conflicting order cancellation requested
+    mock_engine.broker.cancel.assert_called_once_with("order_skhy_unrecognized_exit")
+
+    # 3. CRITICAL: NO SECOND SELL 110 STOP order submitted while conflicting order is active!
+    mock_engine.broker.submit.assert_not_called()
+
+    # Cycle 2: Cancellation pending, broker still returns conflicting order or pending status
+    mock_engine.broker.cancel.reset_mock()
+    mock_engine.broker.open_orders.return_value = [conflicting_order]
+
+    status_c2 = await mock_engine._reconcile_protection([pos])
+    assert status_c2["SKHY"] is False
+    mock_engine.broker.submit.assert_not_called()
+
+    # Cycle 3: Broker confirms cancellation (open_orders now empty)
+    mock_engine._protection_state["SKHY"] = ProtectionState.UNPROTECTED
+    mock_engine.broker.open_orders.return_value = []
+    rec_stop = Order(
+        id="order_skhy_rec_stop",
+        client_order_id="protect-SKHY-110",
+        symbol="SKHY",
+        side=OrderSide.SELL,
+        qty=110.0,
+        order_type=OrderType.STOP,
+        stop_price=9.85,
+        status=OrderStatus.SUBMITTED,
+    )
+    mock_engine.broker.submit.return_value = rec_stop
+
+    status_c3 = await mock_engine._reconcile_protection([pos])
+    assert status_c3["SKHY"] is False
+    mock_engine.broker.submit.assert_called_once()
+    req = mock_engine.broker.submit.call_args[0][0]
+    assert req.symbol == "SKHY"
+    assert req.side == OrderSide.SELL
+    assert req.qty == 110.0
+    assert req.order_type == OrderType.STOP
+

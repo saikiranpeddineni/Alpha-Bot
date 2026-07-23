@@ -1895,7 +1895,11 @@ class TradingEngine:
         }
 
         is_stop_leg = (
-            getattr(order, "leg", "") == "stop"
+            (
+                getattr(order, "leg", "") in {"stop", "stop_loss"}
+                or getattr(order, "order_class", "") in {"bracket", "oco", "oto"}
+                or bool(getattr(order, "parent_id", None))
+            )
             and order.stop_price is not None
         )
 
@@ -1970,12 +1974,22 @@ class TradingEngine:
             expected_side = OrderSide.SELL if is_long else OrderSide.BUY
             required_qty = abs(p.qty)
 
-            valid_stops = [
+            symbol_exit_orders = [
                 o for o in open_orders
-                if o.symbol == sym and o.side == expected_side and TradingEngine._is_valid_protective_stop(self, o, p)
+                if o.symbol == sym
+                and o.side == expected_side
+                and o.status not in (
+                    OrderStatus.CANCELED,
+                    OrderStatus.REJECTED,
+                    OrderStatus.FILLED,
+                )
             ]
 
-            matching_stop = valid_stops[0] if valid_stops else None
+            matching_stop = None
+            for o in symbol_exit_orders:
+                if TradingEngine._is_valid_protective_stop(self, o, p):
+                    matching_stop = o
+                    break
 
             if matching_stop is not None:
                 verified_stop_price = matching_stop.stop_price or 0.0
@@ -2032,12 +2046,18 @@ class TradingEngine:
                     cancellation_pending = False
                     recovery_blocked = False
 
-                    for o in open_orders:
-                        if o.symbol != p.symbol or o.side != side:
-                            continue
-                        if o.status in (OrderStatus.CANCELED, OrderStatus.REJECTED, OrderStatus.FILLED):
-                            continue
+                    symbol_exit_orders = [
+                        o for o in open_orders
+                        if o.symbol == p.symbol
+                        and o.side == side
+                        and o.status not in (
+                            OrderStatus.CANCELED,
+                            OrderStatus.REJECTED,
+                            OrderStatus.FILLED,
+                        )
+                    ]
 
+                    for o in symbol_exit_orders:
                         st_px = getattr(o, "stop_price", None)
                         limit_px = getattr(o, "limit_price", None)
                         leg = str(getattr(o, "leg", "") or "").lower()
@@ -2045,8 +2065,7 @@ class TradingEngine:
 
                         is_stop_order = (
                             o.order_type in (OrderType.STOP, OrderType.STOP_LIMIT)
-                            or leg == "stop"
-                            or order_class in {"bracket", "oco", "oto"}
+                            or leg in {"stop", "stop_loss"}
                         )
 
                         is_take_profit = (
@@ -2060,78 +2079,38 @@ class TradingEngine:
                             )
                         )
 
-                        is_bracket_or_oco = (
+                        is_bracket_or_oco_parent = (
                             order_class in {"bracket", "oco", "oto"}
-                            or leg in {"stop", "take_profit", "tp"}
-                            or bool(getattr(o, "parent_order_id", None))
-                            or bool(getattr(o, "parent_id", None))
+                            and not is_stop_order
+                            and not is_take_profit
                         )
 
-                        if is_stop_order:
-                            remaining_qty = o.remaining_qty
-                            is_undersized = remaining_qty < required_qty - 1e-6
-                            is_stale = bool(
-                                opened_at
-                                and o.submitted_at
-                                and o.submitted_at < opened_at - timedelta(seconds=10)
-                            )
-                            if is_undersized or is_stale:
-                                try:
-                                    c_res = self.broker.cancel(o.id)
-                                    if inspect.isawaitable(c_res):
-                                        await c_res
-                                    self._protection_state[p.symbol] = ProtectionState.AWAITING_CANCEL_CONFIRMATION
-                                    applog.warning(
-                                        "engine.protection",
-                                        f"#41: Requested cancellation of under-sized/stale protective stop {o.id} "
-                                        f"for {p.symbol} (qty={o.qty} < required={required_qty:.2f}).",
-                                    )
-                                    cancellation_pending = True
-                                except Exception as cancel_exc:
-                                    cancellation_failed = True
-                                    applog.error(
-                                        "engine.protection",
-                                        f"#41: Failed to cancel under-sized/stale stop {o.id} for {p.symbol}: {cancel_exc}",
-                                    )
-                            continue
-
-                        if is_bracket_or_oco:
+                        if is_bracket_or_oco_parent:
                             applog.warning(
                                 "engine.protection",
-                                f"#41: Broker-managed exit {o.id} detected for {p.symbol}; "
+                                f"#41: Broker-managed exit parent {o.id} detected for {p.symbol}; "
                                 "not cancelling automatically.",
                             )
                             recovery_blocked = True
                             continue
 
-                        if is_take_profit:
-                            try:
-                                c_res = self.broker.cancel(o.id)
-                                if inspect.isawaitable(c_res):
-                                    await c_res
-                                self._protection_state[p.symbol] = ProtectionState.AWAITING_CANCEL_CONFIRMATION
-                                applog.warning(
-                                    "engine.protection",
-                                    f"#41: Requested cancellation of standalone TP {o.id} "
-                                    f"for {p.symbol} because it blocks emergency stop recovery "
-                                    f"(qty={o.qty}, limit={limit_px}).",
-                                )
-                                cancellation_pending = True
-                            except Exception as cancel_exc:
-                                cancellation_failed = True
-                                applog.error(
-                                    "engine.protection",
-                                    f"#41: Failed to cancel blocking TP {o.id} for {p.symbol}: {cancel_exc}",
-                                )
-                            continue
-
-                        if not is_take_profit and not is_stop_order:
+                        try:
+                            c_res = self.broker.cancel(o.id)
+                            if inspect.isawaitable(c_res):
+                                await c_res
+                            self._protection_state[p.symbol] = ProtectionState.AWAITING_CANCEL_CONFIRMATION
+                            applog.warning(
+                                "engine.protection",
+                                f"#41: Requested cancellation of conflicting/unverified exit order {o.id} "
+                                f"for {p.symbol} (qty={o.qty}) before submitting recovery stop.",
+                            )
+                            cancellation_pending = True
+                        except Exception as cancel_exc:
+                            cancellation_failed = True
                             applog.error(
                                 "engine.protection",
-                                f"#41: Unknown active exit order {o.id} for {p.symbol}. "
-                                "Automatic cancellation suppressed; broker reconciliation required.",
+                                f"#41: Failed to cancel conflicting exit order {o.id} for {p.symbol}: {cancel_exc}",
                             )
-                            recovery_blocked = True
 
                     if cancellation_failed or recovery_blocked or cancellation_pending:
                         if cancellation_pending:
