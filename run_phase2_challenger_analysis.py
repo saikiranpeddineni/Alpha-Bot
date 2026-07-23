@@ -1,11 +1,15 @@
-"""Phase 2 Challenger Strict R-Integrity, ML Expectancy Curve & Multi-Window Audit.
+"""Phase 2 Challenger Frozen Hypothesis Multi-Period Audit & Discrimination Analysis.
+
+Registered Frozen Hypothesis:
+"Downstream-approved signals with ML probability 0.50 <= p < 0.55 generate positive net incremental R-multiple expectancy
+and are being unnecessarily hard-vetoed by the Stage 1 ML gate."
 
 Fact-Checking Protections:
-- Non-synthetic cumulative entry risk capital accounting (`initial_risk_dollars`).
-- Position-lifetime extrema verified for MFE/MAE calculation.
-- Strictly non-overlapping temporal windows (July 6-10 vs July 11-17).
-- Complete ML Probability Expectancy Curve across ALL signals (Accepted & Rejected).
-- Separate LONG vs SHORT Gray-Zone Telemetry.
+- Cumulative initial_risk_dollars scale-in accounting.
+- Position-lifetime extrema MFE/MAE calculation.
+- Strictly non-overlapping temporal partitions (July 6-10 vs July 11-17).
+- Meta-Label & TradeScore Gate Discrimination Audit.
+- Signal Population Distribution & Execution Telemetry.
 """
 
 import asyncio
@@ -79,7 +83,7 @@ def compute_trade_r(t):
     }
 
 
-async def run_ablation_for_window(dm, model, symbols, start_date, end_date, window_name="Full Period"):
+async def run_ablation_for_window(dm, model, symbols, start_date, end_date):
     from app.strategies.base import REGISTRY
 
     configs = {
@@ -147,7 +151,9 @@ async def run_ablation_for_window(dm, model, symbols, start_date, end_date, wind
 
 async def main():
     print("=" * 100)
-    print("PHASE 2 CHALLENGER STRICT R-INTEGRITY, ML EXPECTANCY & MULTI-WINDOW AUDIT")
+    print("FROZEN HYPOTHESIS MULTI-PERIOD AUDIT & GATE DISCRIMINATION TELEMETRY")
+    print("=" * 100)
+    print("FROZEN HYPOTHESIS: Downstream-approved signals with 0.50 <= ML < 0.55 generate positive net incremental R")
     print("=" * 100)
 
     cache_path = DATA_DIR / "cache.db"
@@ -161,91 +167,81 @@ async def main():
     await model.load_artifacts()
 
     # 1. Full Period Ablation
-    print("\n[Audit 1/4] Running Full Period Evaluation...")
-    full_res = await run_ablation_for_window(dm, model, symbols, start_date, end_date, "Full Period")
+    print("\n[Audit 1/3] Running Full Period Evaluation...")
+    full_res = await run_ablation_for_window(dm, model, symbols, start_date, end_date)
 
-    # 2. Strictly Non-Overlapping Temporal Windows (July 6-10 vs July 11-17)
+    # 2. Strictly Non-Overlapping Temporal Partitions (July 6-10 vs July 11-17)
     w1_start = start_date
     w1_end = datetime(2026, 7, 11, 0, 0, 0, tzinfo=timezone.utc)
     w2_start = datetime(2026, 7, 11, 0, 0, 0, tzinfo=timezone.utc)
     w2_end = end_date
 
-    print("\n[Audit 2/4] Running Strictly Non-Overlapping Window 1 (July 6 - July 10 23:59)...")
-    w1_res = await run_ablation_for_window(dm, model, symbols, w1_start, w1_end, "July 6-10")
+    print("\n[Audit 2/3] Running Window 1 (July 6 - July 10 23:59:59)...")
+    w1_res = await run_ablation_for_window(dm, model, symbols, w1_start, w1_end)
 
-    print("\n[Audit 3/4] Running Strictly Non-Overlapping Window 2 (July 11 00:00 - July 17)...")
-    w2_res = await run_ablation_for_window(dm, model, symbols, w2_start, w2_end, "July 11-17")
+    print("\n[Audit 3/3] Running Window 2 (July 11 00:00:00 - July 17)...")
+    w2_res = await run_ablation_for_window(dm, model, symbols, w2_start, w2_end)
 
     # =========================================================================
-    # 1. SCORECARD DISPLAY
+    # 1. MULTI-PERIOD SUMMARY TABLE
     # =========================================================================
     print("\n" + "=" * 100)
-    print("1. MULTI-WINDOW STRICTLY NON-OVERLAPPING SCORECARD (EXACT REALIZED R)")
+    print("1. FROZEN HYPOTHESIS MULTI-PERIOD SCORECARD")
     print("=" * 100)
-    print(f"{'Evaluation Window':<22} | {'Config':<25} | {'Trades (R-Val)':<14} | {'Win %':<8} | {'Total R':<10} | {'Mean R':<8} | {'PF (R)':<8} | {'Net P&L ($)':<12}")
+    hdr = f"{'Period':<20} | {'Gray N':<7} | {'Long N':<7} | {'Short N':<8} | {'Gray R':<8} | {'Mean R':<8} | {'PF (R)':<7} | {'Champ R':<9} | {'Chall R':<9} | {'Delta R':<8}"
+    print(hdr)
     print("-" * 100)
 
-    for w_name, w_data in [("Full Period (Jul 6-17)", full_res), ("Window 1 (Jul 6-10)", w1_res), ("Window 2 (Jul 11-17)", w2_res)]:
-        for cfg_name, r in w_data.items():
-            print(
-                f"{w_name:<22} | {cfg_name:<25} | {r['valid_trades_count']}/{r['trades_count']:<11} | {r['win_rate']:<7.2f}% | {r['total_r']:<+10.2f} | {r['mean_r']:<+8.4f} | {r['profit_factor_r']:<8.2f} | ${r['total_pnl']:<+11.2f}"
-            )
-        print("-" * 100)
+    for p_name, p_data in [("Full Period (Jul 6-17)", full_res), ("Window 1 (Jul 6-10)", w1_res), ("Window 2 (Jul 11-17)", w2_res)]:
+        champ = p_data["A (Champion: Hard Gates)"]
+        chall = p_data["B (Gray Rescue Only)"]
 
-    # =========================================================================
-    # 2. LONG VS SHORT GRAY-ZONE CANDIDATE TELEMETRY
-    # =========================================================================
-    print("\n" + "=" * 100)
-    print("2. LONG VS SHORT GRAY-ZONE POPULATION & RESCUED TELEMETRY")
-    print("=" * 100)
+        # Extract gray rescue telemetry
+        res_chall = chall["backtest"]
+        shadows = getattr(res_chall, "shadow_signals", [])
+        rescued = [s for s in shadows if s.get("ml_gate_decision") == "GRAY_ZONE_RESCUED"]
+        long_res = [s for s in rescued if s.get("direction", "").lower() in ("long", "enter_long")]
+        short_res = [s for s in rescued if s.get("direction", "").lower() in ("short", "enter_short")]
 
-    res_chall = full_res["B (Gray Rescue Only)"]["backtest"]
-    shadow_sigs = getattr(res_chall, "shadow_signals", [])
+        # Match realized R for rescued trades
+        chall_r_list = chall["trade_r_list"]
+        rescued_r_list = []
+        for tr in chall_r_list:
+            if any(s.get("symbol") == tr["symbol"] and s.get("strategy") == tr["strategy"] for s in rescued):
+                rescued_r_list.append(tr["realized_r"])
 
-    gray_sigs = [s for s in shadow_sigs if 0.48 <= s.get("ml_probability", 0.0) < 0.55]
-    gray_longs = [s for s in gray_sigs if s.get("direction", "").lower() in ("long", "enter_long")]
-    gray_shorts = [s for s in gray_sigs if s.get("direction", "").lower() in ("short", "enter_short")]
+        gray_n = len(rescued)
+        long_n = len(long_res)
+        short_n = len(short_res)
+        gray_r = sum(rescued_r_list)
+        mean_r = np.mean(rescued_r_list) if rescued_r_list else 0.0
+        pf_r = (sum(r for r in rescued_r_list if r > 0) / abs(sum(r for r in rescued_r_list if r < 0))) if any(r < 0 for r in rescued_r_list) else 99.0
 
-    rescued_sigs = [s for s in shadow_sigs if s.get("ml_gate_decision") == "GRAY_ZONE_RESCUED"]
-    rescued_longs = [s for s in rescued_sigs if s.get("direction", "").lower() in ("long", "enter_long")]
-    rescued_shorts = [s for s in rescued_sigs if s.get("direction", "").lower() in ("short", "enter_short")]
-
-    print(f" - Total Gray-Zone Candidates (0.48 <= p < 0.55): {len(gray_sigs)}")
-    print(f"   * LONG Gray Candidates:  {len(gray_longs)}  (Rescued: {len(rescued_longs)})")
-    print(f"   * SHORT Gray Candidates: {len(gray_shorts)}  (Rescued: {len(rescued_shorts)})")
-
-    # =========================================================================
-    # 3. COMPLETE ML PROBABILITY EXPECTANCY CURVE
-    # =========================================================================
-    print("\n" + "=" * 100)
-    print("3. COMPLETE ML PROBABILITY EXPECTANCY CURVE (ALL SIGNALS)")
-    print("=" * 100)
-
-    prob_bins = [
-        ("< 0.40", 0.0, 0.40),
-        ("0.40 - 0.45", 0.40, 0.45),
-        ("0.45 - 0.48", 0.45, 0.48),
-        ("0.48 - 0.50", 0.48, 0.50),
-        ("0.50 - 0.52", 0.50, 0.52),
-        ("0.52 - 0.55", 0.52, 0.55),
-        ("0.55 - 0.60", 0.55, 0.60),
-        ("0.60 - 0.65", 0.60, 0.65),
-        ("> 0.65", 0.65, 1.00),
-    ]
-
-    print(f"{'ML Bucket':<15} | {'Candidates':<10} | {'Meta Pass':<10} | {'TradeScore Pass':<15} | {'Executed/Rescued':<16}")
-    print("-" * 100)
-
-    for bin_label, p_min, p_max in prob_bins:
-        cands = [s for s in shadow_sigs if p_min <= s.get("ml_probability", 0.0) < p_max]
-        meta_p = [s for s in cands if s.get("meta_label_decision") in ("approved", "fallback_pass", "disabled_pass")]
-        ts_p = [s for s in cands if s.get("trade_score_decision") in ("approved", "disabled_pass")]
-        exec_p = [s for s in cands if s.get("final_decision") in ("pipeline_approved", "GRAY_ZONE_RESCUED")]
+        c_r = champ["total_r"]
+        ch_r = chall["total_r"]
+        delta_r = ch_r - c_r
 
         print(
-            f"{bin_label:<15} | {len(cands):<10} | {len(meta_p):<10} | {len(ts_p):<15} | {len(exec_p):<16}"
+            f"{p_name:<20} | {gray_n:<7} | {long_n:<7} | {short_n:<8} | {gray_r:<+8.2f} | {mean_r:<+8.4f} | {pf_r:<7.2f} | {c_r:<+9.2f} | {ch_r:<+9.2f} | {delta_r:<+8.2f}"
         )
+    print("=" * 100)
 
+    # =========================================================================
+    # 2. META-LABEL & TRADESCORE DISCRIMINATION AUDIT
+    # =========================================================================
+    print("\n" + "=" * 100)
+    print("2. DOWNSTREAM GATE DISCRIMINATION AUDIT")
+    print("=" * 100)
+
+    shadow_sigs = getattr(full_res["B (Gray Rescue Only)"]["backtest"], "shadow_signals", [])
+
+    total_candidates = len(shadow_sigs)
+    meta_approved = sum(1 for s in shadow_sigs if s.get("meta_label_decision") in ("approved", "fallback_pass", "disabled_pass"))
+    tradescore_approved = sum(1 for s in shadow_sigs if s.get("trade_score_decision") in ("approved", "disabled_pass"))
+
+    print(f" - Total Candidates Evaluated:       {total_candidates}")
+    print(f" - Meta-Label Approved Signals:      {meta_approved}/{total_candidates} ({meta_approved/total_candidates*100.0 if total_candidates else 0:.1f}%)")
+    print(f" - TradeScore Approved Signals:      {tradescore_approved}/{total_candidates} ({tradescore_approved/total_candidates*100.0 if total_candidates else 0:.1f}%)")
     print("=" * 100)
 
 
