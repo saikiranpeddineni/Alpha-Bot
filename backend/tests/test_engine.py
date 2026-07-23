@@ -160,3 +160,32 @@ async def test_engine_tick_with_day_trade_dates(engine: TradingEngine):
     assert engine.status()["state"] == "running"
     await engine.stop()
 
+
+def test_intraminute_timestamp_counterfactual_lookup():
+    """Regression test for SKHY counterfactual replay failure:
+    Trade entry timestamp contains seconds and microseconds (e.g. 13:41:23.133156),
+    while sym_frame index contains 1-minute bar timestamps (13:41:00, 13:42:00).
+    searchsorted index resolution must map 13:41:23.133156 to index 0 (the 13:41:00 bar).
+    """
+    import pandas as pd
+    from datetime import datetime, UTC
+
+    # Create 1-minute OHLC dataframe index
+    times = pd.date_range("2026-07-23 13:41:00", periods=5, freq="1min", tz="UTC")
+    df = pd.DataFrame({"open": [10.0]*5, "high": [10.5]*5, "low": [9.5]*5, "close": [10.2]*5}, index=times)
+
+    # Microsecond precision entry timestamp: 13:41:23.133156
+    entry_at = datetime(2026, 7, 23, 13, 41, 23, 133156, tzinfo=UTC)
+    entry_ts = pd.Timestamp(entry_at)
+
+    if df.index.tz is not None:
+        if entry_ts.tzinfo is None:
+            entry_ts = entry_ts.tz_localize("UTC")
+        entry_ts = entry_ts.tz_convert(df.index.tz)
+
+    entry_idx = df.index.searchsorted(entry_ts, side="right") - 1
+
+    assert entry_idx == 0
+    assert df.index[entry_idx] == pd.Timestamp("2026-07-23 13:41:00", tz="UTC")
+
+

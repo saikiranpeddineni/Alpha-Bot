@@ -1537,7 +1537,22 @@ class TradingEngine:
                 try:
                     sym_frame = enrich(self.data.frame(symbol, "1Min", limit=600)) if self.data else pd.DataFrame()
                     if not sym_frame.empty:
-                        entry_idx = sym_frame.index.get_loc(trade.entry_at)
+                        entry_ts = pd.Timestamp(trade.entry_at)
+
+                        if sym_frame.index.tz is not None:
+                            if entry_ts.tzinfo is None:
+                                entry_ts = entry_ts.tz_localize("UTC")
+                            entry_ts = entry_ts.tz_convert(sym_frame.index.tz)
+                        elif entry_ts.tzinfo is not None:
+                            entry_ts = entry_ts.tz_localize(None)
+
+                        entry_idx = sym_frame.index.searchsorted(entry_ts, side="right") - 1
+
+                        if entry_idx < 0 or entry_idx >= len(sym_frame):
+                            raise ValueError(
+                                f"Entry timestamp {trade.entry_at} outside available "
+                                f"counterfactual frame for {symbol}"
+                            )
                         entry_price = trade.entry_price
                         side = trade.side
                         init_stop_price = init_stop if init_stop is not None else entry_price * (0.985 if side == "long" else 1.015)
