@@ -510,6 +510,8 @@ async def test_scanner_stress_defensive_watchlist_completes_successfully(temp_db
 
     engine = _make_engine(temp_db)
     engine.data.history = AsyncMock(return_value=pd.DataFrame())
+    engine.broker.positions = AsyncMock(return_value=[])
+    engine.broker.open_orders = AsyncMock(return_value=[])
 
     scanner_mock = MagicMock()
     scanner_mock.run = AsyncMock(
@@ -538,6 +540,8 @@ async def test_scanner_can_run_twice_with_scanned_watchlist_ttl(temp_db):
 
     engine = _make_engine(temp_db)
     engine.data.history = AsyncMock(return_value=pd.DataFrame())
+    engine.broker.positions = AsyncMock(return_value=[])
+    engine.broker.open_orders = AsyncMock(return_value=[])
 
     scanner_mock = MagicMock()
     scanner_mock.run = AsyncMock(
@@ -567,6 +571,8 @@ async def test_scanner_endpoint_returns_200_for_stress_defensive_scan(temp_db):
 
     engine = _make_engine(temp_db)
     engine.data.history = AsyncMock(return_value=pd.DataFrame())
+    engine.broker.positions = AsyncMock(return_value=[])
+    engine.broker.open_orders = AsyncMock(return_value=[])
 
     scanner_mock = MagicMock()
     scanner_mock.run = AsyncMock(
