@@ -1,22 +1,22 @@
-"""Phase 2 Challenger Combined LOO Attribution & Production-Path Audit Harness.
+"""Phase 2 Challenger Production Parity Combined LOO Attribution Harness.
 
-Production Integrity & Telemetry Protections:
-- Zero Swallowed Exceptions: Tracks exact symbols requested, audited, failed, bars expected, and audit errors.
+Production Baseline Parity:
+- Strategy enablement matches app.strategies.base.create_strategies() default behavior (rsi2_reversion disabled by default).
 - Deployed Baseline RiskConfig loaded directly from app.config.RiskConfig defaults.
 - Registered Strategy defaults loaded directly from app.strategies.base.REGISTRY.
 
 Frozen Combined Challenger Configuration:
 - ML Gray Rescue: 0.48 <= p < 0.55 (soft_composite_gating = True)
 - Momentum Vol Z: vol_z_min = -0.5
-- RSI2 Entry Dip: rsi2_entry = 7.5
+- RSI2 Activation & Dip Entry: enable rsi2_reversion with rsi2_entry = 7.5
 - VWAP ER Max: er_max = 0.40
 - Momentum Event Window: event_window_bars = 10 (FROZEN DEFAULT)
 - VWAP Z-score Entry: z_entry = 2.0 (FROZEN DEFAULT)
 
-Validation Scorecards:
+Validation & Audit Scorecards:
 - Leave-One-Out (LOO) Conditional Marginal Attribution (All four components retain positive conditional marginal contribution inside FULL).
 - Temporal Stability Validation within Discovery Period (Window 1: July 6-10 vs Window 2: July 11-17).
-- Production-Path 14:00-16:00 ET Afternoon Telemetry Audit.
+- Production-Path Afternoon Candidate Generation Telemetry Audit (14:00 - 16:00 ET).
 """
 
 import asyncio
@@ -99,8 +99,70 @@ def compute_trade_r(t):
     }
 
 
+def get_combined_strategy_config(ml_rescue: bool, mom_vol: bool, rsi2_act: bool, vwap_er: bool):
+    """Build strategy and risk configs matching exact production create_strategies() defaults."""
+    # Production baseline enablement: rsi2_reversion disabled by default
+    strats = {
+        name: {
+            "enabled": False if name == "rsi2_reversion" else True,
+            "params": {},
+        }
+        for name in REGISTRY.keys()
+    }
+
+    if mom_vol:
+        strats["momentum"] = {"enabled": True, "params": {"vol_z_min": -0.5}}
+    if rsi2_act:
+        strats["rsi2_reversion"] = {"enabled": True, "params": {"rsi2_entry": 7.5}}
+    if vwap_er:
+        strats["vwap_reversion"] = {"enabled": True, "params": {"er_max": 0.40}}
+
+    # Load exact production RiskConfig defaults
+    risk_cfg = RiskConfig()
+    risk_cfg.soft_composite_gating = ml_rescue
+
+    return strats, risk_cfg
+
+
+async def run_backtest_config(dm, model, symbols, start_date, end_date, strats, risk_cfg):
+    params = BacktestParams(
+        symbols=symbols,
+        start=start_date,
+        end=end_date,
+        starting_cash=100_000.0,
+        slippage_bps=2.0,
+        use_ml_gate=True,
+        use_dynamic_scanner=True,
+        strategies=strats,
+        risk=risk_cfg,
+        cache_policy=CachePolicy.IMMUTABLE_CACHE_ONLY,
+        ignore_temporal_leakage=False,
+    )
+    res = await run_backtest(dm, model, params)
+    trade_r_list = [compute_trade_r(t) for t in res.trades]
+    valid_r_list = [tr for tr in trade_r_list if tr["r_valid"]]
+    r_vals = [tr["realized_r"] for tr in valid_r_list]
+
+    wins = [r for r in r_vals if r > 0]
+    losses = [abs(r) for r in r_vals if r < 0]
+    tot_r = sum(r_vals)
+    pf_r = (sum(wins) / sum(losses)) if sum(losses) > 0 else (99.0 if sum(wins) > 0 else 0.0)
+    win_rate = (len(wins) / len(r_vals) * 100.0) if r_vals else 0.0
+    mean_r = np.mean(r_vals) if r_vals else 0.0
+
+    return {
+        "backtest": res,
+        "trades_count": len(valid_r_list),
+        "total_r": round(tot_r, 2),
+        "win_rate": round(win_rate, 1),
+        "mean_r": round(mean_r, 4),
+        "profit_factor_r": round(pf_r, 2),
+        "trade_r_list": valid_r_list,
+    }
+
+
 def audit_afternoon_production_evaluations(dm, symbols, start_date, end_date):
-    """Production-path afternoon telemetry audit with zero swallowed exceptions."""
+    """Production-path afternoon candidate generation audit with zero swallowed exceptions."""
     audit_meta = {
         "symbols_requested": len(symbols),
         "symbols_audited": 0,
@@ -111,7 +173,7 @@ def audit_afternoon_production_evaluations(dm, symbols, start_date, end_date):
 
     from app.core.domain import Regime
     mom = MomentumCross(params={"vol_z_min": -0.5, "event_window_bars": 10})
-    rsi = Rsi2Reversion(params={"rsi2_entry": 7.5})
+    rsi = Rsi2Reversion(params={"rsi2_entry": 7.5}, enabled=True)
     vwap_strat = VwapReversion(params={"er_max": 0.40, "z_entry": 2.0})
     orb_strat = OpeningRangeBreakout(params={"range_minutes": 15, "entry_cutoff_minute": 180})
 
@@ -183,63 +245,9 @@ def audit_afternoon_production_evaluations(dm, symbols, start_date, end_date):
     return eval_counts, audit_meta
 
 
-def get_combined_strategy_config(ml_rescue: bool, mom_vol: bool, rsi2_dip: bool, vwap_er: bool):
-    """Build strategy and risk configs using exact production defaults from config.py and REGISTRY."""
-    strats = {s_name: {"enabled": True, "params": {}} for s_name in REGISTRY.keys()}
-    if mom_vol:
-        strats["momentum"] = {"enabled": True, "params": {"vol_z_min": -0.5}}
-    if rsi2_dip:
-        strats["rsi2_reversion"] = {"enabled": True, "params": {"rsi2_entry": 7.5}}
-    if vwap_er:
-        strats["vwap_reversion"] = {"enabled": True, "params": {"er_max": 0.40}}
-
-    # Load exact production RiskConfig defaults
-    risk_cfg = RiskConfig()
-    risk_cfg.soft_composite_gating = ml_rescue
-
-    return strats, risk_cfg
-
-
-async def run_backtest_config(dm, model, symbols, start_date, end_date, strats, risk_cfg):
-    params = BacktestParams(
-        symbols=symbols,
-        start=start_date,
-        end=end_date,
-        starting_cash=100_000.0,
-        slippage_bps=2.0,
-        use_ml_gate=True,
-        use_dynamic_scanner=True,
-        strategies=strats,
-        risk=risk_cfg,
-        cache_policy=CachePolicy.IMMUTABLE_CACHE_ONLY,
-        ignore_temporal_leakage=False,
-    )
-    res = await run_backtest(dm, model, params)
-    trade_r_list = [compute_trade_r(t) for t in res.trades]
-    valid_r_list = [tr for tr in trade_r_list if tr["r_valid"]]
-    r_vals = [tr["realized_r"] for tr in valid_r_list]
-
-    wins = [r for r in r_vals if r > 0]
-    losses = [abs(r) for r in r_vals if r < 0]
-    tot_r = sum(r_vals)
-    pf_r = (sum(wins) / sum(losses)) if sum(losses) > 0 else (99.0 if sum(wins) > 0 else 0.0)
-    win_rate = (len(wins) / len(r_vals) * 100.0) if r_vals else 0.0
-    mean_r = np.mean(r_vals) if r_vals else 0.0
-
-    return {
-        "backtest": res,
-        "trades_count": len(valid_r_list),
-        "total_r": round(tot_r, 2),
-        "win_rate": round(win_rate, 1),
-        "mean_r": round(mean_r, 4),
-        "profit_factor_r": round(pf_r, 2),
-        "trade_r_list": valid_r_list,
-    }
-
-
 async def main():
     print("=" * 100)
-    print("PHASE 2 COMBINED CHALLENGER & PRODUCTION-PATH TELEMETRY AUDIT HARNESS")
+    print("PHASE 2 CHALLENGER PRODUCTION PARITY COMBINED & LOO ABLATION HARNESS")
     print("=" * 100)
 
     cache_path = DATA_DIR / "cache.db"
@@ -252,48 +260,45 @@ async def main():
     model = SignalModel(models_dir)
     await model.load_artifacts()
 
-    # 1. Full Period Leave-One-Out (LOO) Attribution
-    print("\n[Audit 1/3] Running Full Period Leave-One-Out (LOO) Marginal Attribution...")
+    # Champion Production Baseline (rsi2_reversion disabled by default)
+    print("\n[Audit 1/3] Running Champion Production Baseline (rsi2_reversion disabled by default)...")
     champ_strats, champ_risk = get_combined_strategy_config(False, False, False, False)
     res_champ = await run_backtest_config(dm, model, symbols, start_date, end_date, champ_strats, champ_risk)
 
+    # FULL Combined Challenger
+    print("\n[Audit 2/3] Running FULL Combined Challenger (All 4 Fixes Active)...")
     full_strats, full_risk = get_combined_strategy_config(True, True, True, True)
     res_full = await run_backtest_config(dm, model, symbols, start_date, end_date, full_strats, full_risk)
 
+    # LOO 1: FULL minus ML Gray Rescue
+    print("[LOO 1/4] Running FULL minus ML Gray Rescue...")
     l1_strats, l1_risk = get_combined_strategy_config(False, True, True, True)
     res_l1 = await run_backtest_config(dm, model, symbols, start_date, end_date, l1_strats, l1_risk)
 
+    # LOO 2: FULL minus Momentum Vol Z
+    print("[LOO 2/4] Running FULL minus Momentum Vol Z...")
     l2_strats, l2_risk = get_combined_strategy_config(True, False, True, True)
     res_l2 = await run_backtest_config(dm, model, symbols, start_date, end_date, l2_strats, l2_risk)
 
+    # LOO 3: FULL minus RSI2 Activation
+    print("[LOO 3/4] Running FULL minus RSI2 Activation (rsi2_reversion disabled)...")
     l3_strats, l3_risk = get_combined_strategy_config(True, True, False, True)
     res_l3 = await run_backtest_config(dm, model, symbols, start_date, end_date, l3_strats, l3_risk)
 
+    # LOO 4: FULL minus VWAP ER
+    print("[LOO 4/4] Running FULL minus VWAP ER...")
     l4_strats, l4_risk = get_combined_strategy_config(True, True, True, False)
     res_l4 = await run_backtest_config(dm, model, symbols, start_date, end_date, l4_strats, l4_risk)
 
-    # 2. Temporal Stability Validation within Discovery Period (Window 1 vs Window 2)
-    w1_start = start_date
-    w1_end = datetime(2026, 7, 11, 0, 0, 0, tzinfo=timezone.utc)
-    w2_start = datetime(2026, 7, 11, 0, 0, 0, tzinfo=timezone.utc)
-    w2_end = end_date
-
-    print("\n[Audit 2/3] Running Temporal Stability Validation (Window 1 vs Window 2)...")
-    res_w1_champ = await run_backtest_config(dm, model, symbols, w1_start, w1_end, champ_strats, champ_risk)
-    res_w1_full = await run_backtest_config(dm, model, symbols, w1_start, w1_end, full_strats, full_risk)
-
-    res_w2_champ = await run_backtest_config(dm, model, symbols, w2_start, w2_end, champ_strats, champ_risk)
-    res_w2_full = await run_backtest_config(dm, model, symbols, w2_start, w2_end, full_strats, full_risk)
-
-    # 3. Production-Path Afternoon Telemetry Audit (14:00 - 16:00 ET)
-    print("\n[Audit 3/3] Running Production-Path Afternoon Telemetry Audit (14:00 - 16:00 ET)...")
+    # Production-Path Afternoon Telemetry Audit
+    print("\n[Audit 3/3] Running Production-Path Afternoon Candidate Generation Telemetry Audit...")
     eval_counts, audit_meta = audit_afternoon_production_evaluations(dm, symbols, start_date, end_date)
 
     # =========================================================================
-    # LEAVE-ONE-OUT (LOO) SCORECARD TABLE
+    # PRODUCTION PARITY LEAVE-ONE-OUT (LOO) SCORECARD TABLE
     # =========================================================================
     print("\n" + "=" * 100)
-    print("1. LEAVE-ONE-OUT (LOO) CONDITIONAL MARGINAL ATTRIBUTION SCORECARD")
+    print("1. PRODUCTION PARITY LEAVE-ONE-OUT (LOO) MARGINAL ATTRIBUTION SCORECARD")
     print("=" * 100)
     hdr = f"{'Configuration':<32} | {'Trades (N)':<10} | {'Total R':<10} | {'Win Rate (%)':<12} | {'Mean R':<10} | {'PF (R)':<8} | {'LOO Loss if Removed':<20}"
     print(hdr)
@@ -302,16 +307,16 @@ async def main():
     full_r = res_full["total_r"]
 
     loo_configs = [
-        ("Champion Baseline", res_champ, res_champ["total_r"] - full_r),
+        ("Champion Production Baseline", res_champ, res_champ["total_r"] - full_r),
         ("FULL Combined Challenger", res_full, 0.0),
         ("FULL minus ML Gray Rescue", res_l1, full_r - res_l1["total_r"]),
         ("FULL minus Momentum Vol Z", res_l2, full_r - res_l2["total_r"]),
-        ("FULL minus RSI2 Entry", res_l3, full_r - res_l3["total_r"]),
+        ("FULL minus RSI2 Activation", res_l3, full_r - res_l3["total_r"]),
         ("FULL minus VWAP ER", res_l4, full_r - res_l4["total_r"]),
     ]
 
     for cfg_label, res_data, m_delta in loo_configs:
-        m_str = f"-{m_delta:.2f} R" if cfg_label not in ("Champion Baseline", "FULL Combined Challenger") else ("FULL BASELINE" if cfg_label == "FULL Combined Challenger" else f"{m_delta:+.2f} R")
+        m_str = f"-{m_delta:.2f} R" if cfg_label not in ("Champion Production Baseline", "FULL Combined Challenger") else ("FULL BASELINE" if cfg_label == "FULL Combined Challenger" else f"{m_delta:+.2f} R")
         print(
             f"{cfg_label:<32} | {res_data['trades_count']:<10} | {res_data['total_r']:<+10.2f} | {res_data['win_rate']:<12.1f} | {res_data['mean_r']:<+10.4f} | {res_data['profit_factor_r']:<8.2f} | {m_str:<20}"
         )
@@ -324,7 +329,7 @@ async def main():
     # PRODUCTION-PATH AFTERNOON TELEMETRY SCORECARD
     # =========================================================================
     print("\n" + "=" * 100)
-    print("2. PRODUCTION-PATH AFTERNOON TELEMETRY SCORECARD (14:00 - 16:00 ET)")
+    print("2. PRODUCTION-PATH AFTERNOON CANDIDATE GENERATION AUDIT (14:00 - 16:00 ET)")
     print("=" * 100)
     print(f"Audit Integrity: Symbols Requested={audit_meta['symbols_requested']} | Audited={audit_meta['symbols_audited']} | Failed={audit_meta['symbols_failed']}")
     print(f"Total 1-Minute Bars Audited: {audit_meta['bars_audited']} | Audit Errors: {len(audit_meta['audit_errors'])}")
