@@ -103,7 +103,7 @@ async def run_baseline_backtest(dm, model, risk_cfg):
         strategies=strategies,
         risk=risk_cfg,
         cache_policy=CachePolicy.IMMUTABLE_CACHE_ONLY,
-        ignore_temporal_leakage=True,
+        ignore_temporal_leakage=False,
     )
     
     result = await run_backtest(dm, model, params)
@@ -126,7 +126,7 @@ async def run_scanner_backtest(dm, model, risk_cfg):
         strategies=strategies,
         risk=risk_cfg,
         cache_policy=CachePolicy.IMMUTABLE_CACHE_ONLY,
-        ignore_temporal_leakage=True,
+        ignore_temporal_leakage=False,
     )
     
     result = await run_backtest(dm, model, params)
@@ -153,7 +153,7 @@ async def run_threshold_backtest(dm, model, risk_cfg, threshold):
         strategies=strategies,
         risk=cfg,
         cache_policy=CachePolicy.IMMUTABLE_CACHE_ONLY,
-        ignore_temporal_leakage=True,
+        ignore_temporal_leakage=False,
     )
     
     result = await run_backtest(dm, model, params)

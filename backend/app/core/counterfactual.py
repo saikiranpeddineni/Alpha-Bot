@@ -28,15 +28,37 @@ class ExitCounterfactualEngine:
           - time_stop_bars
           - exit_on_ema_cross (bool)
         """
+        if initial_stop == entry_price:
+            raise ValueError("initial_stop must differ from entry_price")
+
         # Enforce stop-loss sign sanity relative to entry price (gap protection)
-        if side == "long" and initial_stop >= entry_price:
+        if side == "long" and initial_stop > entry_price:
             initial_stop = entry_price * 0.985
-        elif side == "short" and initial_stop <= entry_price:
+        elif side == "short" and initial_stop < entry_price:
             initial_stop = entry_price * 1.015
 
         initial_risk = abs(entry_price - initial_stop)
+        if initial_risk <= 0:
+            raise ValueError("initial_stop must differ from entry_price")
         # Prevent denominator inflation: minimum risk distance of 0.2% of entry or $0.05
         initial_risk = max(initial_risk, entry_price * 0.002, 0.05)
+
+        # Validate partial policy parameters if provided
+        partial_target_r = policy_params.get("partial_target_r")
+        partial_fraction = float(policy_params.get("partial_fraction", 0.50))
+        runner_trailing_mult = policy_params.get("runner_trailing_atr_mult")
+
+        if partial_target_r is not None:
+            partial_target_r = float(partial_target_r)
+            if partial_target_r <= 0:
+                raise ValueError("partial_target_r must be > 0")
+            if not 0.0 < partial_fraction < 1.0:
+                raise ValueError("partial_fraction must satisfy 0 < fraction < 1")
+
+        if runner_trailing_mult is not None:
+            runner_trailing_mult = float(runner_trailing_mult)
+            if runner_trailing_mult <= 0:
+                raise ValueError("runner_trailing_atr_mult must be > 0")
 
         # Extract path from entry_idx + 1 onwards (intraday only)
         current_date = df.index[entry_idx].date()
@@ -52,6 +74,10 @@ class ExitCounterfactualEngine:
                 "r_multiple": 0.0,
                 "bars_held": 0,
                 "ambiguous": False,
+                "partial_taken": False,
+                "partial_fraction": 0.0,
+                "runner_fraction": 0.0,
+                "intrabar_ambiguous": False,
             }
 
         # Initialize policy variables
@@ -74,12 +100,9 @@ class ExitCounterfactualEngine:
             )
 
         trailing_mult = policy_params.get("trailing_atr_mult")
-        runner_trailing_mult = policy_params.get("runner_trailing_atr_mult")
         time_stop = policy_params.get("time_stop_bars")
         ema_cross = policy_params.get("exit_on_ema_cross")
 
-        partial_target_r = policy_params.get("partial_target_r")
-        partial_fraction = policy_params.get("partial_fraction", 0.50)
         partial_target_price = None
         if partial_target_r is not None:
             partial_target_price = (
@@ -94,10 +117,11 @@ class ExitCounterfactualEngine:
         exit_idx = None
         bars_held = 0
 
-        # Partial runner state tracking
+        # Partial runner state tracking with intrabar look-ahead protection
         partial_taken = False
         realized_r_accum = 0.0
         remaining_fraction = 1.0
+        activate_runner_next_bar = False
 
         for step, (ts, bar) in enumerate(path_df.iterrows()):
             bars_held = step + 1
@@ -105,17 +129,20 @@ class ExitCounterfactualEngine:
             low = float(bar["low"])
             close = float(bar["close"])
 
-            # Check partial scaled exit target if enabled
-            if partial_target_price and not partial_taken:
-                partial_hit = (high >= partial_target_price) if side == "long" else (low <= partial_target_price)
-                if partial_hit:
-                    partial_taken = True
-                    pnl_partial = (partial_target_price - entry_price) if side == "long" else (entry_price - partial_target_price)
-                    r_partial = pnl_partial / initial_risk
-                    realized_r_accum += partial_fraction * r_partial
-                    remaining_fraction -= partial_fraction
-                    # Move stop to breakeven after partial profit
-                    stop_price = max(stop_price, entry_price) if side == "long" else min(stop_price, entry_price)
+            # Activate protection created by PREVIOUS bar's partial fill
+            if activate_runner_next_bar:
+                if side == "long":
+                    stop_price = max(stop_price, entry_price)
+                else:
+                    stop_price = min(stop_price, entry_price)
+                activate_runner_next_bar = False
+
+            # Capture stop that actually existed entering this bar (no retroactive change)
+            stop_at_bar_start = stop_price
+
+            old_stop_hit = (
+                low <= stop_at_bar_start if side == "long" else high >= stop_at_bar_start
+            )
 
             # Time stop trigger
             if time_stop and bars_held >= time_stop:
@@ -135,8 +162,34 @@ class ExitCounterfactualEngine:
                     exit_idx = df.index.get_loc(ts)
                     break
 
-            # Update trailing stop (uses peak price reached)
-            curr_trailing_mult = runner_trailing_mult if (partial_taken and runner_trailing_mult) else trailing_mult
+            # Partial target check
+            partial_hit = False
+            if partial_target_price is not None and not partial_taken:
+                partial_hit = (
+                    high >= partial_target_price if side == "long" else low <= partial_target_price
+                )
+
+                if partial_hit and old_stop_hit:
+                    ambiguous = True
+                    # Conservative assumption: pre-existing stop hit first
+                    exit_price = stop_at_bar_start
+                    exit_idx = df.index.get_loc(ts)
+                    break
+
+                if partial_hit:
+                    partial_taken = True
+                    r_partial = partial_target_r
+                    realized_r_accum += partial_fraction * r_partial
+                    remaining_fraction -= partial_fraction
+                    activate_runner_next_bar = True
+
+            # Update trailing stop (Runner trailing must NOT activate on partial's own bar)
+            curr_trailing_mult = trailing_mult
+            if partial_taken and not activate_runner_next_bar:
+                curr_trailing_mult = (
+                    runner_trailing_mult if runner_trailing_mult is not None else trailing_mult
+                )
+
             if curr_trailing_mult and "atr14" in bar and pd.notna(bar["atr14"]):
                 curr_atr = float(bar["atr14"])
                 if side == "long":
@@ -149,28 +202,18 @@ class ExitCounterfactualEngine:
                     stop_price = min(stop_price, proposed_stop)
 
             # Check boundary conditions for stops and final targets
-            stop_hit = False
+            stop_hit = old_stop_hit
             target_hit = False
+            if target_price:
+                target_hit = (high >= target_price) if side == "long" else (low <= target_price)
 
-            if side == "long":
-                if low <= stop_price:
-                    stop_hit = True
-                if target_price and high >= target_price:
-                    target_hit = True
-            else:
-                if high >= stop_price:
-                    stop_hit = True
-                if target_price and low <= target_price:
-                    target_hit = True
-
-            # Intrabar path ambiguity check
             if stop_hit and target_hit:
                 ambiguous = True
-                exit_price = stop_price
+                exit_price = stop_at_bar_start
                 exit_idx = df.index.get_loc(ts)
                 break
             elif stop_hit:
-                exit_price = stop_price
+                exit_price = stop_at_bar_start
                 exit_idx = df.index.get_loc(ts)
                 break
             elif target_hit:
@@ -187,7 +230,7 @@ class ExitCounterfactualEngine:
         # P&L and R computation (incorporates partial scaled exit if triggered)
         final_leg_pnl = (exit_price - entry_price) if side == "long" else (entry_price - exit_price)
         final_leg_r = final_leg_pnl / initial_risk
-        
+
         if partial_taken:
             r_multiple = realized_r_accum + remaining_fraction * final_leg_r
             pnl = r_multiple * initial_risk
@@ -204,6 +247,10 @@ class ExitCounterfactualEngine:
             "r_multiple": round(r_multiple, 4),
             "bars_held": bars_held,
             "ambiguous": ambiguous,
+            "partial_taken": partial_taken,
+            "partial_fraction": partial_fraction if partial_taken else 0.0,
+            "runner_fraction": remaining_fraction if partial_taken else 0.0,
+            "intrabar_ambiguous": ambiguous,
         }
 
     @staticmethod

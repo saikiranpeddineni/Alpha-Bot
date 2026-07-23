@@ -907,13 +907,14 @@ class TradingEngine:
                 # Enrich signals with fresh scanner context if discovered dynamically
                 for sig, _ in candidates:
                     sym = sig.symbol.upper()
-                    if hasattr(self, "scanner_context") and sym in self.scanner_context:
-                        sctx = self.scanner_context[sym]
-                        age_sec = (now - sctx["scanned_at"]).total_seconds() if getattr(sctx["scanned_at"], "tzinfo", None) == now.tzinfo else (now.timestamp() - sctx["scanned_at"].timestamp())
-                        if 0 <= age_sec < 86400:
-                            sig.discovery_source = "scanner"
-                            sig.scanner_score = sctx["score"]
-                            sig.scanner_auc = sctx["auc"]
+                    if hasattr(self, "scanner_context"):
+                        sctx = self.scanner_context.get(sym)
+                        if sctx is not None:
+                            expires_at = sctx.get("expires_at")
+                            if expires_at is not None and now < expires_at:
+                                sig.discovery_source = "scanner"
+                                sig.scanner_score = sctx.get("score")
+                                sig.scanner_auc = sctx.get("auc")
 
                 # Gather candidate signals
                 alloc_signals = [sig for sig, _ in candidates]
@@ -2721,7 +2722,10 @@ class TradingEngine:
             new_watchlist = []
 
         now_utc = utcnow()
-        # Persist scanner candidate context (score, auc, timestamp)
+        ttl_minutes = max(1, int(getattr(self.risk_config, "scanner_watchlist_ttl_minutes", 120)))
+        expires_at_scan = now_utc + timedelta(minutes=ttl_minutes)
+
+        # Persist scanner candidate context (score, auc, timestamp, expiration)
         if not hasattr(self, "scanner_context"):
             self.scanner_context = {}
         for item in scanner.get_last_scans():
@@ -2731,6 +2735,7 @@ class TradingEngine:
                     "score": item.get("score", 0.0),
                     "auc": item.get("auc", 0.0),
                     "scanned_at": now_utc,
+                    "expires_at": expires_at_scan,
                 }
 
         if outcome in (ScannerOutcome.SUCCESS_NONEMPTY, ScannerOutcome.SUCCESS_EMPTY):
@@ -2755,18 +2760,18 @@ class TradingEngine:
             if not hasattr(self, "scanned_watchlist_expires_at"):
                 self.scanned_watchlist_expires_at = {}
 
-            ttl_minutes = getattr(self.risk_config, "scanner_watchlist_ttl_minutes", 120)
             scanned_set = set(new_watchlist)
 
             for sym in scanned_set:
                 self.scanned_watchlist_ttl[sym] = self.risk_config.scanner_watchlist_ttl
-                self.scanned_watchlist_expires_at[sym] = now_utc + timedelta(minutes=ttl_minutes)
+                self.scanned_watchlist_expires_at[sym] = expires_at_scan
 
-            # Cleanup expired entries
+            # Cleanup expired entries from watchlist state and scanner context
             expired_keys = [sym for sym, exp in self.scanned_watchlist_expires_at.items() if now_utc >= exp]
             for sym in expired_keys:
                 self.scanned_watchlist_expires_at.pop(sym, None)
                 self.scanned_watchlist_ttl.pop(sym, None)
+                self.scanner_context.pop(sym, None)
 
             retained_dynamic = {
                 sym for sym, exp in self.scanned_watchlist_expires_at.items() if now_utc < exp

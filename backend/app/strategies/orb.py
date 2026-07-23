@@ -35,9 +35,22 @@ class OpeningRangeBreakout(Strategy):
     def __init__(self, params: dict | None = None, enabled: bool = True) -> None:
         super().__init__(params, enabled)
         self._traded: set[tuple[str, object]] = set()
+        self._pending: set[tuple[str, object]] = set()
 
     def reset(self) -> None:
         self._traded.clear()
+        self._pending.clear()
+
+    def on_entry_filled(self, symbol: str, timestamp: object) -> None:
+        dt = getattr(timestamp, "date", lambda: timestamp)()
+        key = (symbol, dt)
+        self._pending.discard(key)
+        self._traded.add(key)
+
+    def on_entry_rejected(self, symbol: str, timestamp: object) -> None:
+        dt = getattr(timestamp, "date", lambda: timestamp)()
+        key = (symbol, dt)
+        self._pending.discard(key)
 
     def on_bar(self, ctx: StrategyContext, symbol: str, df: pd.DataFrame) -> Signal | None:
         p = self.params
@@ -46,7 +59,7 @@ class OpeningRangeBreakout(Strategy):
 
         et_dates = df.index.tz_convert(ET).date
         today = et_dates[-1]
-        if (symbol, today) in self._traded:
+        if (symbol, today) in self._traded or (symbol, today) in self._pending:
             return None
         today_df = df[et_dates == today]
         n_today = len(today_df)
@@ -75,7 +88,7 @@ class OpeningRangeBreakout(Strategy):
             risk = close - stop
             if risk <= 0:
                 return None
-            self._traded.add((symbol, today))
+            self._pending.add((symbol, today))
             return Signal(
                 symbol=symbol,
                 action=SignalAction.ENTER_LONG,
@@ -91,7 +104,7 @@ class OpeningRangeBreakout(Strategy):
             risk = stop - close
             if risk <= 0:
                 return None
-            self._traded.add((symbol, today))
+            self._pending.add((symbol, today))
             return Signal(
                 symbol=symbol,
                 action=SignalAction.ENTER_SHORT,

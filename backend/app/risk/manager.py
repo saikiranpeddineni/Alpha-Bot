@@ -334,10 +334,15 @@ class RiskManager:
             kelly_used = effective_allocation
         else:
             effective_risk_pct = cfg.risk_per_trade_pct
-            is_scanner_discovered = (getattr(signal, "discovery_source", None) == "scanner") or (
-                self.core_watchlist is not None and symbol not in self.core_watchlist
+            explicit_scanner = (getattr(signal, "discovery_source", None) == "scanner")
+            legacy_dynamic = (
+                not explicit_scanner
+                and getattr(signal, "discovery_source", None) is None
+                and self.core_watchlist is not None
+                and symbol not in self.core_watchlist
             )
-            if is_scanner_discovered:
+
+            if explicit_scanner:
                 scanner_score = getattr(signal, "scanner_score", None)
                 scanner_auc = getattr(signal, "scanner_auc", None)
                 if scanner_score is not None and scanner_auc is not None:
@@ -348,10 +353,13 @@ class RiskManager:
                     else:
                         scanner_mult = 0.50
                 else:
-                    scanner_mult = 0.75  # Calibrated default for dynamically discovered scanner assets
+                    scanner_mult = 0.50
                 
                 effective_risk_pct *= scanner_mult
-                applog.info("risk", f"Scanned asset {symbol}: scaling risk by {scanner_mult:.2f} to {effective_risk_pct:.4f}%")
+                applog.info("risk", f"Explicit scanner asset {symbol}: scaling risk by {scanner_mult:.2f} to {effective_risk_pct:.4f}%")
+            elif legacy_dynamic:
+                effective_risk_pct *= 0.75
+                applog.info("risk", f"Legacy dynamic asset {symbol}: scaling risk by 0.75 to {effective_risk_pct:.4f}%")
             
             effective_risk_pct *= risk_mult
             if risk_mult != 1.0:
