@@ -125,6 +125,7 @@ class ExitCounterfactualEngine:
 
         for step, (ts, bar) in enumerate(path_df.iterrows()):
             bars_held = step + 1
+            open_val = float(bar["open"])
             high = float(bar["high"])
             low = float(bar["low"])
             close = float(bar["close"])
@@ -141,50 +142,57 @@ class ExitCounterfactualEngine:
             active_stop = stop_price
             next_bar_stop = active_stop
 
-            old_stop_hit = (
-                low <= active_stop if side == "long" else high >= active_stop
-            )
+            # Gap-through-stop fill price calculation for realism
+            if side == "long":
+                stop_fill = min(active_stop, open_val) if open_val <= active_stop else active_stop
+                stop_hit = low <= active_stop
+                target_hit = (high >= target_price) if target_price else False
+                partial_hit = (high >= partial_target_price) if (partial_target_price and not partial_taken) else False
+            else:
+                stop_fill = max(active_stop, open_val) if open_val >= active_stop else active_stop
+                stop_hit = high >= active_stop
+                target_hit = (low <= target_price) if target_price else False
+                partial_hit = (low <= partial_target_price) if (partial_target_price and not partial_taken) else False
 
-            # Time stop trigger
+            # 1. Pre-existing protective stop precedence & intrabar ambiguity resolution
+            if stop_hit and (target_hit or partial_hit):
+                ambiguous = True
+                exit_price = stop_fill
+                exit_idx = df.index.get_loc(ts)
+                break
+            elif stop_hit:
+                exit_price = stop_fill
+                exit_idx = df.index.get_loc(ts)
+                break
+
+            # 2. Target hit (full exit)
+            if target_hit:
+                exit_price = target_price
+                exit_idx = df.index.get_loc(ts)
+                break
+
+            # 3. Partial target hit (partial scale-out, position continues)
+            if partial_hit:
+                partial_taken = True
+                r_partial = partial_target_r
+                realized_r_accum += partial_fraction * r_partial
+                remaining_fraction -= partial_fraction
+                activate_runner_next_bar = True
+
+            # 4. Close-based exit conditions (time stop & EMA cross)
             if time_stop and bars_held >= time_stop:
                 exit_price = close
                 exit_idx = df.index.get_loc(ts)
                 break
 
-            # EMA cross trigger
             if ema_cross and "ema9" in bar and pd.notna(bar["ema9"]):
                 ema9 = float(bar["ema9"])
-                if side == "long" and close < ema9:
-                    exit_price = close
-                    exit_idx = df.index.get_loc(ts)
-                    break
-                elif side == "short" and close > ema9:
+                if (side == "long" and close < ema9) or (side == "short" and close > ema9):
                     exit_price = close
                     exit_idx = df.index.get_loc(ts)
                     break
 
-            # Partial target check
-            partial_hit = False
-            if partial_target_price is not None and not partial_taken:
-                partial_hit = (
-                    high >= partial_target_price if side == "long" else low <= partial_target_price
-                )
-
-                if partial_hit and old_stop_hit:
-                    ambiguous = True
-                    # Conservative assumption: pre-existing stop hit first
-                    exit_price = active_stop
-                    exit_idx = df.index.get_loc(ts)
-                    break
-
-                if partial_hit:
-                    partial_taken = True
-                    r_partial = partial_target_r
-                    realized_r_accum += partial_fraction * r_partial
-                    remaining_fraction -= partial_fraction
-                    activate_runner_next_bar = True
-
-            # Update trailing stop for NEXT bar (Runner trailing does NOT activate on partial's own bar)
+            # 5. Update trailing stop for NEXT bar
             curr_trailing_mult = trailing_mult
             if partial_taken and not activate_runner_next_bar:
                 curr_trailing_mult = (
@@ -201,26 +209,6 @@ class ExitCounterfactualEngine:
                     peak_price = min(peak_price, low)
                     proposed = peak_price + curr_trailing_mult * curr_atr
                     next_bar_stop = min(next_bar_stop, proposed)
-
-            # Check boundary conditions for stops and final targets
-            stop_hit = old_stop_hit
-            target_hit = False
-            if target_price:
-                target_hit = (high >= target_price) if side == "long" else (low <= target_price)
-
-            if stop_hit and target_hit:
-                ambiguous = True
-                exit_price = active_stop
-                exit_idx = df.index.get_loc(ts)
-                break
-            elif stop_hit:
-                exit_price = active_stop
-                exit_idx = df.index.get_loc(ts)
-                break
-            elif target_hit:
-                exit_price = target_price
-                exit_idx = df.index.get_loc(ts)
-                break
 
             # Carry forward next bar stop protection
             stop_price = next_bar_stop

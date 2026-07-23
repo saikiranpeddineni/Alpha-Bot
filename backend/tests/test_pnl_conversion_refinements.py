@@ -44,6 +44,62 @@ def test_partial_and_old_stop_same_bar_is_conservative():
     assert result["r_multiple"] == -1.0
 
 
+def test_stop_precedence_over_time_stop():
+    """Pre-existing stop hit on bar low takes precedence over close-based time_stop on bar close."""
+    dates = pd.date_range("2026-07-23 09:30:00", periods=5, freq="1Min", tz="UTC")
+    # Entry 100, Stop 95. Bar 2 (bars_held=2): open 97, low 94 (hits stop 95), close 99.
+    df = pd.DataFrame({
+        "open": [100.0, 97.0, 100.0, 100.0, 100.0],
+        "high": [100.0, 100.0, 100.0, 100.0, 100.0],
+        "low":  [100.0, 94.0,  100.0, 100.0, 100.0],
+        "close": [100.0, 99.0, 100.0, 100.0, 100.0],
+        "atr14": [1.0] * 5,
+    }, index=dates)
+
+    result = ExitCounterfactualEngine.replay_policy(
+        df=df,
+        entry_idx=0,
+        entry_price=100.0,
+        side="long",
+        initial_stop=95.0,
+        initial_atr=1.0,
+        policy_name="time_2m",
+        policy_params={"time_stop_bars": 2}
+    )
+
+    # Must exit at stop 95.0, NOT at time stop close 99.0!
+    assert result["exit_price"] == 95.0
+    assert result["r_multiple"] == -1.0
+
+
+def test_gap_through_stop_fill_price():
+    """If bar opens below stop (gap down), exit_price fills at gap opening price."""
+    dates = pd.date_range("2026-07-23 09:30:00", periods=5, freq="1Min", tz="UTC")
+    # Entry 100, Stop 95. Bar 1 opens at 90.0 (gap through stop 95.0).
+    df = pd.DataFrame({
+        "open": [100.0, 90.0, 100.0, 100.0, 100.0],
+        "high": [100.0, 91.0, 100.0, 100.0, 100.0],
+        "low":  [100.0, 89.0, 100.0, 100.0, 100.0],
+        "close": [100.0, 90.5, 100.0, 100.0, 100.0],
+        "atr14": [1.0] * 5,
+    }, index=dates)
+
+    result = ExitCounterfactualEngine.replay_policy(
+        df=df,
+        entry_idx=0,
+        entry_price=100.0,
+        side="long",
+        initial_stop=95.0,
+        initial_atr=1.0,
+        policy_name="fixed_1_2",
+        policy_params={"stop_atr_mult": 1.0, "target_atr_mult": 2.0}
+    )
+
+    # Realistic gap fill at 90.0, NOT 95.0!
+    assert result["exit_price"] == 90.0
+    assert result["r_multiple"] == -2.0
+
+
 def test_breakeven_stop_not_retroactive_same_bar():
     """Breakeven stop from partial target fill does NOT trigger on the partial bar's low."""
     dates = pd.date_range("2026-07-23 09:30:00", periods=5, freq="1Min", tz="UTC")
