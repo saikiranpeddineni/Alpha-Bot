@@ -904,6 +904,17 @@ class TradingEngine:
                 from app.portfolio.allocator import process_portfolio_allocations
                 from app.risk.manager import is_entry_order
 
+                # Enrich signals with fresh scanner context if discovered dynamically
+                for sig, _ in candidates:
+                    sym = sig.symbol.upper()
+                    if hasattr(self, "scanner_context") and sym in self.scanner_context:
+                        sctx = self.scanner_context[sym]
+                        age_sec = (now - sctx["scanned_at"]).total_seconds() if getattr(sctx["scanned_at"], "tzinfo", None) == now.tzinfo else (now.timestamp() - sctx["scanned_at"].timestamp())
+                        if 0 <= age_sec < 86400:
+                            sig.discovery_source = "scanner"
+                            sig.scanner_score = sctx["score"]
+                            sig.scanner_auc = sctx["auc"]
+
                 # Gather candidate signals
                 alloc_signals = [sig for sig, _ in candidates]
                 df_by_symbol = {sig.symbol: df for sig, df in candidates}
@@ -2709,6 +2720,19 @@ class TradingEngine:
         if outcome == ScannerOutcome.SUCCESS_EMPTY:
             new_watchlist = []
 
+        now_utc = utcnow()
+        # Persist scanner candidate context (score, auc, timestamp)
+        if not hasattr(self, "scanner_context"):
+            self.scanner_context = {}
+        for item in scanner.get_last_scans():
+            sym = item.get("symbol", "").upper()
+            if sym:
+                self.scanner_context[sym] = {
+                    "score": item.get("score", 0.0),
+                    "auc": item.get("auc", 0.0),
+                    "scanned_at": now_utc,
+                }
+
         if outcome in (ScannerOutcome.SUCCESS_NONEMPTY, ScannerOutcome.SUCCESS_EMPTY):
             # Feature 1: Hysteresis — protect symbols with open positions & pending orders from removal
             open_symbols: set[str] = set()
@@ -2728,23 +2752,30 @@ class TradingEngine:
                 )
                 return self.watchlist
 
-            if is_intraday:
-                # Intraday: only add new symbols; retain all existing except those
-                # that dropped off scanner AND have no active exposure and not retained by TTL
-                new_set = set(new_watchlist)
-                # Reset TTL for newly scanned intraday symbols
-                for sym in new_set:
-                    self.scanned_watchlist_ttl[sym] = self.risk_config.scanner_watchlist_ttl
-                # Decrement TTL for previously scanned symbols that were not in this scan
-                for sym in list(self.scanned_watchlist_ttl.keys()):
-                    if sym not in new_set:
-                        self.scanned_watchlist_ttl[sym] = max(0, self.scanned_watchlist_ttl.get(sym, 1) - 1)
+            if not hasattr(self, "scanned_watchlist_expires_at"):
+                self.scanned_watchlist_expires_at = {}
 
-                retained_dynamic = {sym for sym, ttl in self.scanned_watchlist_ttl.items() if ttl > 0}
+            ttl_minutes = getattr(self.risk_config, "scanner_watchlist_ttl_minutes", 120)
+            scanned_set = set(new_watchlist)
+
+            for sym in scanned_set:
+                self.scanned_watchlist_ttl[sym] = self.risk_config.scanner_watchlist_ttl
+                self.scanned_watchlist_expires_at[sym] = now_utc + timedelta(minutes=ttl_minutes)
+
+            # Cleanup expired entries
+            expired_keys = [sym for sym, exp in self.scanned_watchlist_expires_at.items() if now_utc >= exp]
+            for sym in expired_keys:
+                self.scanned_watchlist_expires_at.pop(sym, None)
+                self.scanned_watchlist_ttl.pop(sym, None)
+
+            retained_dynamic = {
+                sym for sym, exp in self.scanned_watchlist_expires_at.items() if now_utc < exp
+            }
+
+            if is_intraday:
+                new_set = set(new_watchlist)
                 existing = set(self.scanned_watchlist)
-                # Symbols to remove: in existing but not in new scan, no active exposure AND not retained by TTL
                 to_remove = (existing - new_set) - (active_trade_symbols | retained_dynamic)
-                # Symbols to add: in new scan but not yet in existing
                 to_add = new_set - existing
                 updated = (existing - to_remove) | to_add
                 self.scanned_watchlist = sorted(updated)
@@ -2757,17 +2788,6 @@ class TradingEngine:
                 else:
                     applog.info("engine", "Intraday watchlist refresh: no changes")
             else:
-                # Morning scan: full replacement (active exposures and TTL-retained symbols protected)
-                scanned_set = set(new_watchlist)
-                # Reset TTL for today's scanned symbols
-                for sym in scanned_set:
-                    self.scanned_watchlist_ttl[sym] = self.risk_config.scanner_watchlist_ttl
-                # Decrement TTL for previously scanned symbols that were not scanned today
-                for sym in list(self.scanned_watchlist_ttl.keys()):
-                    if sym not in scanned_set:
-                        self.scanned_watchlist_ttl[sym] = self.scanned_watchlist_ttl.get(sym, 1) - 1
-                
-                retained_dynamic = {sym for sym, ttl in self.scanned_watchlist_ttl.items() if ttl > 0}
                 final = scanned_set | retained_dynamic | active_trade_symbols
                 self.scanned_watchlist = sorted(final)
                 applog.info(
@@ -3451,10 +3471,24 @@ class TradingEngine:
         """
         import json
         from app.core.domain import SignalAction
+
+        if sig.action == SignalAction.ENTER_LONG:
+            sig_side = "long"
+        elif sig.action == SignalAction.ENTER_SHORT:
+            sig_side = "short"
+        else:
+            return None
+
         symbol = sig.symbol.upper()
-        policy_id = getattr(sig, "policy_id", None) or sig.strategy
-        sig_side = "long" if sig.action in (SignalAction.ENTER_LONG, SignalAction.EXIT_SHORT) else "short"
-        
+
+        def _norm_side(val: object) -> str:
+            v = str(val or "").strip().lower()
+            if v in ("long", "buy"):
+                return "long"
+            if v in ("short", "sell"):
+                return "short"
+            return ""
+
         # 1. Re-entry on same symbol/thesis within 30 minutes after a stop-loss exit
         try:
             cutoff = now - timedelta(minutes=30)
@@ -3474,13 +3508,15 @@ class TradingEngine:
                     exit_reason = trade_data.get("exit_reason", "")
                     sl_hit = trade_data.get("sl_hit", False)
                     trade_strategy = trade_data.get("strategy", r.strategy or "")
-                    trade_side = trade_data.get("side", "")
-                    if (exit_reason == "stop_loss" or sl_hit) and (trade_strategy == sig.strategy or trade_side == sig_side):
+                    trade_side = _norm_side(trade_data.get("side", ""))
+
+                    same_thesis = (trade_strategy == sig.strategy) and (trade_side == sig_side)
+                    if (exit_reason == "stop_loss" or sl_hit) and same_thesis:
                         return f"behavioral_loop_detector: re-entry on same symbol {symbol} ({sig.strategy}/{sig_side}) within 30 mins after stop"
         except Exception as e:
             applog.warning("engine.behavioral", f"Failed re-entry check: {e}")
 
-        # 2. 3 consecutive same-symbol losses within rolling 7-day window
+        # 2. 3 consecutive same-symbol/thesis losses within rolling 7-day window
         try:
             cutoff_7d = now - timedelta(days=7)
             with self.db._session() as s:
@@ -3489,19 +3525,23 @@ class TradingEngine:
                 stmt = select(TradeRow).where(
                     TradeRow.symbol == symbol,
                     TradeRow.exit_at >= cutoff_7d
-                ).order_by(TradeRow.exit_at.desc()).limit(3)
+                ).order_by(TradeRow.exit_at.desc()).limit(10)
                 rows = s.scalars(stmt).all()
-                if len(rows) == 3:
-                    losses = []
-                    for r in rows:
-                        try:
-                            trade_data = json.loads(r.payload)
-                        except Exception:
-                            continue
+                matching_losses = []
+                for r in rows:
+                    try:
+                        trade_data = json.loads(r.payload)
+                    except Exception:
+                        continue
+                    trade_strategy = trade_data.get("strategy", r.strategy or "")
+                    trade_side = _norm_side(trade_data.get("side", ""))
+                    if trade_strategy == sig.strategy and trade_side == sig_side:
                         pnl = trade_data.get("pnl", r.pnl)
-                        losses.append(pnl < 0)
-                    if len(losses) == 3 and all(losses):
-                        return f"behavioral_loop_detector: 3 consecutive losses on symbol {symbol} in past 7 days"
+                        matching_losses.append(pnl < 0)
+                        if len(matching_losses) == 3:
+                            break
+                if len(matching_losses) == 3 and all(matching_losses):
+                    return f"behavioral_loop_detector: 3 consecutive losses on symbol {symbol} ({sig.strategy}/{sig_side}) in past 7 days"
         except Exception as e:
             applog.warning("engine.behavioral", f"Failed consecutive loss check: {e}")
 
@@ -3528,8 +3568,8 @@ class TradingEngine:
                 equity = self.portfolio.equity
                 if equity > 0:
                     turnover = total_volume / equity
-                    if turnover > 10.0:
-                        return f"behavioral_loop_detector: high portfolio churn/turnover (ROC={turnover:.1%})"
+                    if turnover > 5.0:
+                        return f"behavioral_loop_detector: high portfolio churn (turnover={turnover:.2f}x equity)"
         except Exception as e:
             applog.warning("engine.behavioral", f"Failed churn check: {e}")
 

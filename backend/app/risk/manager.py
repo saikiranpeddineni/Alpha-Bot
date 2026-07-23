@@ -334,7 +334,10 @@ class RiskManager:
             kelly_used = effective_allocation
         else:
             effective_risk_pct = cfg.risk_per_trade_pct
-            if self.core_watchlist is not None and symbol not in self.core_watchlist:
+            is_scanner_discovered = (getattr(signal, "discovery_source", None) == "scanner") or (
+                self.core_watchlist is not None and symbol not in self.core_watchlist
+            )
+            if is_scanner_discovered:
                 scanner_score = getattr(signal, "scanner_score", None)
                 scanner_auc = getattr(signal, "scanner_auc", None)
                 if scanner_score is not None and scanner_auc is not None:

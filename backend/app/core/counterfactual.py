@@ -74,8 +74,19 @@ class ExitCounterfactualEngine:
             )
 
         trailing_mult = policy_params.get("trailing_atr_mult")
+        runner_trailing_mult = policy_params.get("runner_trailing_atr_mult")
         time_stop = policy_params.get("time_stop_bars")
         ema_cross = policy_params.get("exit_on_ema_cross")
+
+        partial_target_r = policy_params.get("partial_target_r")
+        partial_fraction = policy_params.get("partial_fraction", 0.50)
+        partial_target_price = None
+        if partial_target_r is not None:
+            partial_target_price = (
+                entry_price + partial_target_r * initial_risk
+                if side == "long"
+                else entry_price - partial_target_r * initial_risk
+            )
 
         peak_price = entry_price
         ambiguous = False
@@ -83,15 +94,28 @@ class ExitCounterfactualEngine:
         exit_idx = None
         bars_held = 0
 
-        # Close of day is the last bar in the path
-        final_idx = len(path_df) - 1
+        # Partial runner state tracking
+        partial_taken = False
+        realized_r_accum = 0.0
+        remaining_fraction = 1.0
 
         for step, (ts, bar) in enumerate(path_df.iterrows()):
             bars_held = step + 1
             high = float(bar["high"])
             low = float(bar["low"])
             close = float(bar["close"])
-            open_val = float(bar["open"])
+
+            # Check partial scaled exit target if enabled
+            if partial_target_price and not partial_taken:
+                partial_hit = (high >= partial_target_price) if side == "long" else (low <= partial_target_price)
+                if partial_hit:
+                    partial_taken = True
+                    pnl_partial = (partial_target_price - entry_price) if side == "long" else (entry_price - partial_target_price)
+                    r_partial = pnl_partial / initial_risk
+                    realized_r_accum += partial_fraction * r_partial
+                    remaining_fraction -= partial_fraction
+                    # Move stop to breakeven after partial profit
+                    stop_price = max(stop_price, entry_price) if side == "long" else min(stop_price, entry_price)
 
             # Time stop trigger
             if time_stop and bars_held >= time_stop:
@@ -112,18 +136,19 @@ class ExitCounterfactualEngine:
                     break
 
             # Update trailing stop (uses peak price reached)
-            if trailing_mult and "atr14" in bar and pd.notna(bar["atr14"]):
+            curr_trailing_mult = runner_trailing_mult if (partial_taken and runner_trailing_mult) else trailing_mult
+            if curr_trailing_mult and "atr14" in bar and pd.notna(bar["atr14"]):
                 curr_atr = float(bar["atr14"])
                 if side == "long":
                     peak_price = max(peak_price, high)
-                    proposed_stop = peak_price - trailing_mult * curr_atr
+                    proposed_stop = peak_price - curr_trailing_mult * curr_atr
                     stop_price = max(stop_price, proposed_stop)
                 else:
                     peak_price = min(peak_price, low)
-                    proposed_stop = peak_price + trailing_mult * curr_atr
+                    proposed_stop = peak_price + curr_trailing_mult * curr_atr
                     stop_price = min(stop_price, proposed_stop)
 
-            # Check boundary conditions for stops and targets
+            # Check boundary conditions for stops and final targets
             stop_hit = False
             target_hit = False
 
@@ -141,7 +166,6 @@ class ExitCounterfactualEngine:
             # Intrabar path ambiguity check
             if stop_hit and target_hit:
                 ambiguous = True
-                # CONSERVATIVE: stop hit is assumed first
                 exit_price = stop_price
                 exit_idx = df.index.get_loc(ts)
                 break
@@ -160,12 +184,21 @@ class ExitCounterfactualEngine:
             exit_price = float(last_bar["close"])
             exit_idx = df.index.get_loc(path_df.index[-1])
 
-        # P&L and R computation
-        pnl = (exit_price - entry_price) if side == "long" else (entry_price - exit_price)
-        r_multiple = pnl / initial_risk
+        # P&L and R computation (incorporates partial scaled exit if triggered)
+        final_leg_pnl = (exit_price - entry_price) if side == "long" else (entry_price - exit_price)
+        final_leg_r = final_leg_pnl / initial_risk
+        
+        if partial_taken:
+            r_multiple = realized_r_accum + remaining_fraction * final_leg_r
+            pnl = r_multiple * initial_risk
+            effective_exit_price = (entry_price + pnl) if side == "long" else (entry_price - pnl)
+        else:
+            pnl = final_leg_pnl
+            r_multiple = final_leg_r
+            effective_exit_price = exit_price
 
         return {
-            "exit_price": round(exit_price, 4),
+            "exit_price": round(effective_exit_price, 4),
             "exit_idx": exit_idx,
             "pnl_pct": round(pnl / entry_price * 100.0, 4) if entry_price > 0 else 0.0,
             "r_multiple": round(r_multiple, 4),
@@ -182,12 +215,16 @@ class ExitCounterfactualEngine:
         initial_stop: float,
         initial_atr: float,
     ) -> dict:
-        """Run all 6 default exit counterfactual policies for comparison."""
+        """Run all default exit counterfactual policies for comparison."""
         policies = {
             "fixed_1_2": {"stop_atr_mult": 1.0, "target_atr_mult": 2.0},
             "fixed_1.5_3": {"stop_atr_mult": 1.5, "target_atr_mult": 3.0},
             "trail_2_atr": {"trailing_atr_mult": 2.0},
-            "partial_1.5r_runner": {"target_atr_mult": 1.5, "trailing_atr_mult": 2.5},
+            "partial_1.5r_runner": {
+                "partial_target_r": 1.5,
+                "partial_fraction": 0.50,
+                "runner_trailing_atr_mult": 2.5,
+            },
             "time_30m": {"time_stop_bars": 30},
             "time_60m": {"time_stop_bars": 60},
             "ema9_cross": {"exit_on_ema_cross": True},
