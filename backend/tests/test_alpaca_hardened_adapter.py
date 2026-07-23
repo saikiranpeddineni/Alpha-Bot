@@ -1,3 +1,4 @@
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -59,7 +60,7 @@ async def test_is_shortable_missing_account_permission_fails_closed(monkeypatch)
     assert await broker.is_shortable("AMZN") is False
 
 
-def test_to_order_maps_done_for_day_terminal():
+def test_to_order_keeps_done_for_day_nonterminal():
     broker = _broker_without_client_init()
     broker._meta = {}
     raw = SimpleNamespace(
@@ -69,15 +70,20 @@ def test_to_order_maps_done_for_day_terminal():
         parent_id=None, submitted_at=None, filled_at=None,
     )
     order = broker._to_order(raw)
-    assert order.status == OrderStatus.CANCELED
+    assert order.status == OrderStatus.SUBMITTED
 
 
 @pytest.mark.asyncio
-async def test_paginate_orders_forces_ascending_and_submitted_cursor(monkeypatch):
+async def test_paginate_orders_forces_ascending_and_uses_submitted_at_cursor(monkeypatch):
     calls = []
-    first_ts = __import__("datetime").datetime(2026, 7, 1, tzinfo=__import__("datetime").timezone.utc)
-    page1 = [SimpleNamespace(id=str(i), submitted_at=first_ts) for i in range(2)]
-    page2 = [SimpleNamespace(id="3", submitted_at=first_ts)]
+    first_ts = datetime(2026, 7, 1, tzinfo=UTC)
+    second_ts = first_ts + timedelta(microseconds=1)
+    third_ts = second_ts + timedelta(microseconds=1)
+    page1 = [
+        SimpleNamespace(id="1", submitted_at=first_ts),
+        SimpleNamespace(id="2", submitted_at=second_ts),
+    ]
+    page2 = [SimpleNamespace(id="3", submitted_at=third_ts)]
     pages = iter([page1, page2])
 
     async def fake_call(_fn, request, **_kwargs):
@@ -85,7 +91,10 @@ async def test_paginate_orders_forces_ascending_and_submitted_cursor(monkeypatch
         return next(pages)
 
     monkeypatch.setattr(legacy, "_call", fake_call)
-    request = SimpleNamespace(status="all", after=None, limit=2, symbols=None, side=None, nested=None, until=None)
+    request = SimpleNamespace(
+        status="all", after=None, limit=2, symbols=None, side=None,
+        nested=None, until=None,
+    )
     result = await _paginate_orders(SimpleNamespace(get_orders=AsyncMock()), request)
-    assert [o.id for o in result] == ["0", "1", "3"]
-    assert calls[1].after == first_ts
+    assert [o.id for o in result] == ["1", "2", "3"]
+    assert calls[1].after == second_ts
