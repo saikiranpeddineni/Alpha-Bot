@@ -2725,12 +2725,13 @@ class TradingEngine:
         ttl_minutes = max(1, int(getattr(self.risk_config, "scanner_watchlist_ttl_minutes", 120)))
         expires_at_scan = now_utc + timedelta(minutes=ttl_minutes)
 
-        # Persist scanner candidate context (score, auc, timestamp, expiration)
+        # Persist scanner candidate context only for symbols in current scan outcome
         if not hasattr(self, "scanner_context"):
             self.scanner_context = {}
+        current_symbols = {s.upper() for s in new_watchlist}
         for item in scanner.get_last_scans():
-            sym = item.get("symbol", "").upper()
-            if sym:
+            sym = str(item.get("symbol", "")).upper()
+            if sym and sym in current_symbols:
                 self.scanner_context[sym] = {
                     "score": item.get("score", 0.0),
                     "auc": item.get("auc", 0.0),

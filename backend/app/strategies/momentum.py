@@ -66,7 +66,7 @@ class MomentumCross(Strategy):
         evt = self._sym_events(symbol)
         existing = evt.get(direction)
         if existing is None or existing.get("emitted", False):
-            evt[direction] = {"origin_time": bar_time, "time": bar_time, "emitted": False}
+            evt[direction] = {"origin_time": bar_time, "latest_time": bar_time, "emitted": False}
             self._debug(
                 ctx,
                 f"[momentum] MACD_EVENT_CREATED sym={symbol} dir={direction} event_ts={bar_time}",
@@ -81,7 +81,7 @@ class MomentumCross(Strategy):
 
     def _consume_event(self, ctx: StrategyContext, symbol: str, direction: str, candidate_time) -> None:
         evt = self._sym_events(symbol).get(direction, {})
-        event_time = evt.get("origin_time", evt.get("time"))
+        event_time = evt.get("origin_time")
         self._sym_events(symbol)[direction]["emitted"] = True
         self._debug(
             ctx,
@@ -91,7 +91,7 @@ class MomentumCross(Strategy):
 
     def _expire_event(self, ctx: StrategyContext, symbol: str, direction: str, current_time) -> None:
         evt = self._sym_events(symbol).get(direction, {})
-        event_time = evt.get("origin_time", evt.get("time"))
+        event_time = evt.get("origin_time")
         del self._sym_events(symbol)[direction]
         self._debug(
             ctx,
@@ -111,7 +111,9 @@ class MomentumCross(Strategy):
         evt = self._sym_events(symbol).get(direction)
         if evt is None or evt.get("emitted"):
             return False
-        event_time = evt.get("origin_time", evt["time"])
+        event_time = evt.get("origin_time")
+        if event_time is None:
+            return False
         # Find the bar index of the event
         try:
             event_idx = df.index.get_loc(event_time)

@@ -129,7 +129,7 @@ class ExitCounterfactualEngine:
             low = float(bar["low"])
             close = float(bar["close"])
 
-            # Activate protection created by PREVIOUS bar's partial fill
+            # Activate breakeven protection created by PREVIOUS bar's partial fill
             if activate_runner_next_bar:
                 if side == "long":
                     stop_price = max(stop_price, entry_price)
@@ -137,11 +137,12 @@ class ExitCounterfactualEngine:
                     stop_price = min(stop_price, entry_price)
                 activate_runner_next_bar = False
 
-            # Capture stop that actually existed entering this bar (no retroactive change)
-            stop_at_bar_start = stop_price
+            # Active stop entering this bar (cannot be modified retroactively by current bar)
+            active_stop = stop_price
+            next_bar_stop = active_stop
 
             old_stop_hit = (
-                low <= stop_at_bar_start if side == "long" else high >= stop_at_bar_start
+                low <= active_stop if side == "long" else high >= active_stop
             )
 
             # Time stop trigger
@@ -172,7 +173,7 @@ class ExitCounterfactualEngine:
                 if partial_hit and old_stop_hit:
                     ambiguous = True
                     # Conservative assumption: pre-existing stop hit first
-                    exit_price = stop_at_bar_start
+                    exit_price = active_stop
                     exit_idx = df.index.get_loc(ts)
                     break
 
@@ -183,7 +184,7 @@ class ExitCounterfactualEngine:
                     remaining_fraction -= partial_fraction
                     activate_runner_next_bar = True
 
-            # Update trailing stop (Runner trailing must NOT activate on partial's own bar)
+            # Update trailing stop for NEXT bar (Runner trailing does NOT activate on partial's own bar)
             curr_trailing_mult = trailing_mult
             if partial_taken and not activate_runner_next_bar:
                 curr_trailing_mult = (
@@ -194,12 +195,12 @@ class ExitCounterfactualEngine:
                 curr_atr = float(bar["atr14"])
                 if side == "long":
                     peak_price = max(peak_price, high)
-                    proposed_stop = peak_price - curr_trailing_mult * curr_atr
-                    stop_price = max(stop_price, proposed_stop)
+                    proposed = peak_price - curr_trailing_mult * curr_atr
+                    next_bar_stop = max(next_bar_stop, proposed)
                 else:
                     peak_price = min(peak_price, low)
-                    proposed_stop = peak_price + curr_trailing_mult * curr_atr
-                    stop_price = min(stop_price, proposed_stop)
+                    proposed = peak_price + curr_trailing_mult * curr_atr
+                    next_bar_stop = min(next_bar_stop, proposed)
 
             # Check boundary conditions for stops and final targets
             stop_hit = old_stop_hit
@@ -209,17 +210,20 @@ class ExitCounterfactualEngine:
 
             if stop_hit and target_hit:
                 ambiguous = True
-                exit_price = stop_at_bar_start
+                exit_price = active_stop
                 exit_idx = df.index.get_loc(ts)
                 break
             elif stop_hit:
-                exit_price = stop_at_bar_start
+                exit_price = active_stop
                 exit_idx = df.index.get_loc(ts)
                 break
             elif target_hit:
                 exit_price = target_price
                 exit_idx = df.index.get_loc(ts)
                 break
+
+            # Carry forward next bar stop protection
+            stop_price = next_bar_stop
 
         # Fallback to close of session if not triggered
         if exit_price is None:

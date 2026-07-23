@@ -184,10 +184,10 @@ def test_partial_runner_invalid_parameters():
 
 
 def test_orb_pending_candidate_consumption():
-    """Verify ORB uses _pending state and callbacks on entry fill / rejection."""
+    """Verify ORB uses _pending dict state and callbacks on entry fill / rejection."""
     orb = OpeningRangeBreakout()
     ts = datetime.now(timezone.utc)
-    orb._pending.add(("NVDA", ts.date()))
+    orb._pending[("NVDA", ts.date())] = ts
 
     # Candidate is pending -> cannot generate second candidate
     assert ("NVDA", ts.date()) in orb._pending
@@ -198,7 +198,7 @@ def test_orb_pending_candidate_consumption():
     assert ("NVDA", ts.date()) not in orb._traded
 
     # Re-adding and simulating fill marks traded
-    orb._pending.add(("NVDA", ts.date()))
+    orb._pending[("NVDA", ts.date())] = ts
     orb.on_entry_filled("NVDA", ts)
     assert ("NVDA", ts.date()) not in orb._pending
     assert ("NVDA", ts.date()) in orb._traded
