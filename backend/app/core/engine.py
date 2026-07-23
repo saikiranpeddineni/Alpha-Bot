@@ -3591,7 +3591,8 @@ class TradingEngine:
                 return f"behavioral_loop_detector: duplicate pending order for symbol {symbol}"
 
         # 5. Reject -> Resurrect -> Reject loop detection
-        if self.db.get_policy_resurrection_count(policy_id) >= 3:
+        policy_id = getattr(sig, "candidate_id", None) or getattr(sig, "policy_id", None)
+        if policy_id and self.db.get_policy_resurrection_count(policy_id) >= 3:
             return f"behavioral_loop_detector: policy {policy_id} exceeded max resurrection limit of 3"
 
         # 6. Strategy/thesis correlation clustering check
