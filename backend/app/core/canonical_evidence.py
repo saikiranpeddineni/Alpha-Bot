@@ -9,8 +9,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import math
+from datetime import datetime, UTC
+from zoneinfo import ZoneInfo
 import pandas as pd
 import numpy as np
+
+ET = ZoneInfo("America/New_York")
 
 
 @dataclass(frozen=True)
@@ -24,7 +28,7 @@ class CanonicalEvidence:
     regime: str
     regime_source: str  # "VIX" vs "SPY_VOL_PROXY"
     replay_valid: bool
-    evidence_version: str = "v1"
+    evidence_version: str = "v1.0"
 
 
 class CanonicalOutcomeResolver:
@@ -39,7 +43,8 @@ class CanonicalOutcomeResolver:
     ) -> float | None:
         """Compute canonical R-multiple.
         
-        Preserves 0.0 as a valid 0R breakeven trade. Returns None if PnL is missing or invalid.
+        Preserves 0.0 as a valid 0R breakeven trade. Returns None if PnL, entry, or stop are missing/invalid.
+        Strict Telemetry Invariant: Never falls back to percentage return or estimated MAE.
         """
         if pnl is None or pd.isna(pnl) or not math.isfinite(pnl):
             return None
@@ -48,18 +53,45 @@ class CanonicalOutcomeResolver:
         if abs(pnl) < 1e-9:
             return 0.0
 
-        if entry is not None and stop is not None and pd.notna(entry) and pd.notna(stop) and entry > 0 and abs(entry - stop) > 0:
+        if (
+            entry is not None 
+            and stop is not None 
+            and pd.notna(entry) 
+            and pd.notna(stop) 
+            and entry > 0 
+            and abs(entry - stop) > 1e-6
+        ):
             risk_pct = abs(entry - stop) / entry
-            dollar_risk = 10000.0 * risk_pct
-            if dollar_risk > 0:
+            if risk_pct > 1e-6:
+                dollar_risk = 10000.0 * risk_pct
                 return float(pnl / dollar_risk)
 
-        if mae_pct is not None and pd.notna(mae_pct) and mae_pct > 0:
-            dollar_risk_est = 10000.0 * (float(mae_pct) / 100.0)
-            if dollar_risk_est > 0:
-                return float(pnl / dollar_risk_est)
-
         return None
+
+    @staticmethod
+    def get_canonical_episode_id(record: dict | pd.Series) -> str | None:
+        """Return deterministic market setup episode ID independent of policy variant and 1m re-triggering.
+
+        Identity components: Symbol + Strategy + Direction + Date + 15-Minute Setup Window.
+        """
+        r_dict = record.to_dict() if isinstance(record, pd.Series) else dict(record)
+        payload_raw = r_dict.get("payload")
+        payload = json.loads(payload_raw) if isinstance(payload_raw, str) and payload_raw.startswith("{") else (payload_raw if isinstance(payload_raw, dict) else {})
+
+        sym = str(r_dict.get("symbol") or payload.get("symbol") or "").strip().upper()
+        strat = str(r_dict.get("strategy") or payload.get("strategy") or "").strip().lower()
+        direction = str(r_dict.get("direction") or payload.get("direction") or "").strip().lower()
+        ts_raw = str(r_dict.get("ts") or r_dict.get("timestamp") or payload.get("ts") or payload.get("timestamp") or "").strip()
+
+        if not (sym and strat and direction and ts_raw):
+            return None
+
+        try:
+            ts_dt = datetime.fromisoformat(ts_raw.replace("Z", "+00:00")).astimezone(ET)
+            m_bucket = (ts_dt.minute // 15) * 15
+            return f"{sym}_{strat}_{direction}_{ts_dt.strftime('%Y%m%d_%H')}_{m_bucket:02d}"
+        except Exception:
+            return f"{sym}_{strat}_{direction}_{ts_raw[:13]}"
 
     @classmethod
     def resolve(cls, record: dict | pd.Series, horizon: str | None = None) -> CanonicalEvidence:
@@ -92,7 +124,7 @@ class CanonicalOutcomeResolver:
             target_horizon = horizon
 
         # Extract entry, stop, PnL, MAE, MFE
-        entry = float(payload.get("price") or payload.get("entry_price") or row_dict.get("entry_price") or 0.0) or None
+        entry = float(payload.get("price") or payload.get("entry_price") or row_dict.get("entry_price") or row_dict.get("price") or 0.0) or None
         stop = float(payload.get("stop_loss") or row_dict.get("stop_loss") or 0.0) or None
         pnl = row_dict.get("simulated_pnl")
         if pnl is None or (isinstance(pnl, float) and pd.isna(pnl)):
@@ -130,22 +162,33 @@ class CanonicalOutcomeResolver:
                 realized_r = float(r_val)
                 valid_r = math.isfinite(realized_r)
             except (ValueError, TypeError):
-                pass
+                realized_r = None
+                valid_r = False
         else:
             realized_r = cls.compute_canonical_r(pnl=pnl, entry=entry, stop=stop, mae_pct=mae)
             valid_r = (realized_r is not None)
 
-
         invalid_reason = None
-        if not replayed:
-            valid_r = False
-            invalid_reason = "NOT_REPLAYED"
-        elif replay_failed:
-            valid_r = False
-            invalid_reason = "REPLAY_NOT_VALID"
-        elif realized_r is None:
-            valid_r = False
-            invalid_reason = "MISSING_CANONICAL_R"
+
+        # Sanity Invariant: realized_r <= mfe_r + 1e-4
+        if valid_r and realized_r is not None and entry is not None and stop is not None and mfe is not None:
+            risk_dist = abs(entry - stop)
+            if risk_dist > 1e-6:
+                mfe_r = (float(mfe) / 100.0 * entry) / risk_dist
+                if realized_r > mfe_r + 1e-4:
+                    valid_r = False
+                    invalid_reason = "REALIZED_R_EXCEEDS_MFE_R"
+
+        if invalid_reason is None:
+            if not replayed:
+                valid_r = False
+                invalid_reason = "NOT_REPLAYED"
+            elif replay_failed:
+                valid_r = False
+                invalid_reason = "REPLAY_NOT_VALID"
+            elif realized_r is None:
+                valid_r = False
+                invalid_reason = "MISSING_CANONICAL_R"
 
         return CanonicalEvidence(
             valid=valid_r,
