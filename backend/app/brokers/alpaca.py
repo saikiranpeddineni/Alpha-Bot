@@ -665,8 +665,10 @@ class AlpacaBroker(Broker):
             if not self._shorting_enabled:
                 self._shortable_cache[sym] = False
                 return False
-        except Exception:
-            pass
+        except Exception as exc:
+            if self._shorting_enabled is None:
+                applog.warning("broker.alpaca", f"Failed to verify account shorting permission: {exc}")
+                return False
 
         try:
             asset = await _call(self._client.get_asset, sym, label=f"get_asset/{sym}")

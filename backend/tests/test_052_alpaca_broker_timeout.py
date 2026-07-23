@@ -264,3 +264,13 @@ async def test_submit_shorting_rejection_caches_disabled(monkeypatch):
     assert broker._shorting_enabled is False
     assert await broker.is_shortable("AMZN") is False
 
+
+@pytest.mark.asyncio
+async def test_is_shortable_account_check_failure_returns_false(monkeypatch):
+    broker = _make_broker(monkeypatch)
+    broker._client.get_account = MagicMock(side_effect=RuntimeError("API Network Error"))
+
+    res = await broker.is_shortable("AMZN")
+    assert res is False
+    assert broker._shorting_enabled is None
+
