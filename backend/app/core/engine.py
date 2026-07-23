@@ -2816,7 +2816,6 @@ class TradingEngine:
                 # Only retrain model on the morning scan (30-day history)
                 applog.info("engine", "Pre-market scan complete. Starting targeted warm-start training...")
                 try:
-                    from datetime import timedelta
                     end = utcnow()
                     start = end - timedelta(days=30)
 
