@@ -179,3 +179,19 @@ class TestPDTGuardIntegration:
     def test_zero_trades_does_not_block(self):
         tracker = PortfolioTracker()
         assert tracker.day_trades_in_window(as_of=date(2024, 1, 9)) == 0
+
+
+def test_day_trades_in_window_accepts_datetime():
+    tracker = PortfolioTracker()
+    tracker._day_trade_dates = [
+        date(2026, 7, 21),
+        date(2026, 7, 22),
+        date(2026, 7, 23),
+    ]
+
+    result = tracker.day_trades_in_window(
+        datetime(2026, 7, 23, 12, 5, tzinfo=UTC)
+    )
+
+    assert result == 3
+

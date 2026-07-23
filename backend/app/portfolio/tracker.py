@@ -136,7 +136,7 @@ class PortfolioTracker:
     # PDT rolling-window counter
     # ------------------------------------------------------------------
 
-    def day_trades_in_window(self, as_of: date | None = None) -> int:
+    def day_trades_in_window(self, as_of: date | datetime | None = None) -> int:
         """Count intraday round-trips inside the rolling 5-business-day window.
 
         *as_of* defaults to ``date.today()`` when omitted, but callers that
@@ -148,9 +148,25 @@ class PortfolioTracker:
         4 prior business days = 5 business days total), matching the SEC PDT
         rolling-window definition.
         """
-        session = as_of or self.session_date or (self._day_trade_dates[-1] if self._day_trade_dates else date.today())
-        window_start = _business_days_ago(session, _PDT_WINDOW_BUSINESS_DAYS - 1)
-        return sum(1 for d in self._day_trade_dates if window_start <= d <= session)
+        session = as_of or self.session_date or (
+            self._day_trade_dates[-1]
+            if self._day_trade_dates
+            else date.today()
+        )
+
+        if isinstance(session, datetime):
+            session = session.date()
+
+        window_start = _business_days_ago(
+            session,
+            _PDT_WINDOW_BUSINESS_DAYS - 1,
+        )
+
+        return sum(
+            1
+            for d in self._day_trade_dates
+            if window_start <= d <= session
+        )
 
     @property
     def day_trades_today(self) -> int:
