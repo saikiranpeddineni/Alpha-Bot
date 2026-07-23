@@ -240,39 +240,59 @@ class MarketRiskAggregator:
             return MarketRiskState.UNKNOWN, 0.0, coverage, reason_codes, input_healths
 
         total_weight = sum(v.health.confidence for v in healthy_votes)
-        weighted_confidence = total_weight / len(healthy_votes) if healthy_votes else 0.0
+        assessment_confidence = total_weight / len(healthy_votes) if healthy_votes else 0.0
 
-        if weighted_confidence < _MIN_CONFIDENCE:
-            reason_codes = [f"LOW_CONFIDENCE({weighted_confidence:.2f})"]
+        if assessment_confidence < _MIN_CONFIDENCE:
+            reason_codes = [f"LOW_CONFIDENCE({assessment_confidence:.2f})"]
             applog.warning(
                 "market_regime",
-                f"MarketRiskState=UNKNOWN: weighted confidence {weighted_confidence:.2f} < {_MIN_CONFIDENCE}. "
+                f"MarketRiskState=UNKNOWN: assessment confidence {assessment_confidence:.2f} < {_MIN_CONFIDENCE}. "
                 f"coverage={coverage:.2f}",
             )
-            return MarketRiskState.UNKNOWN, weighted_confidence, coverage, reason_codes, input_healths
+            return MarketRiskState.UNKNOWN, assessment_confidence, coverage, reason_codes, input_healths
 
-        # Weighted vote aggregation
-        state_weights: dict[MarketRiskState, float] = {}
-        for v in healthy_votes:
-            state_weights[v.state] = state_weights.get(v.state, 0.0) + v.health.confidence
+        # Separate directional market signal votes from derived data_health meta-signal
+        market_votes = [v for v in healthy_votes if v.family != "data_health"]
 
-        # Escalate to highest state with meaningful weight
-        state = MarketRiskState.NORMAL
-        for s in (MarketRiskState.PANIC, MarketRiskState.STRESS, MarketRiskState.CAUTION):
-            if state_weights.get(s, 0.0) > 0:
-                state = s
-                break
+        panic_votes = [v for v in market_votes if v.state is MarketRiskState.PANIC]
+        stress_votes = [
+            v for v in market_votes
+            if v.state in (MarketRiskState.PANIC, MarketRiskState.STRESS)
+        ]
+        caution_votes = [
+            v for v in market_votes
+            if v.state in (
+                MarketRiskState.PANIC,
+                MarketRiskState.STRESS,
+                MarketRiskState.CAUTION,
+            )
+        ]
 
-        reason_codes = [
-            f"{v.family}:{v.state.value}({v.health.confidence:.2f})" for v in healthy_votes
+        if panic_votes:
+            state = MarketRiskState.PANIC
+        elif len(stress_votes) >= 2:
+            state = MarketRiskState.STRESS
+        elif stress_votes or caution_votes:
+            state = MarketRiskState.CAUTION
+        else:
+            state = MarketRiskState.NORMAL
+
+        market_reason_codes = [
+            f"{v.family}:{v.state.value}({v.health.confidence:.2f})"
+            for v in market_votes
+        ]
+        dh_reason = input_healths["data_health"].reason if "data_health" in input_healths else "OK"
+        reason_codes = market_reason_codes + [
+            f"data_health:{dh_reason}",
+            f"stress_confirmations={len(stress_votes)}",
         ]
 
         applog.info(
             "market_regime",
-            f"MarketRiskState={state.value} confidence={weighted_confidence:.2f} "
-            f"coverage={coverage:.2f} reasons={reason_codes}",
+            f"MarketRiskState={state.value} confidence={assessment_confidence:.2f} "
+            f"coverage={coverage:.2f} stress_confirmations={len(stress_votes)} reasons={reason_codes}",
         )
-        return state, weighted_confidence, coverage, reason_codes, input_healths
+        return state, assessment_confidence, coverage, reason_codes, input_healths
 
     # ------------------------------------------------------------------
     # Signal family implementations

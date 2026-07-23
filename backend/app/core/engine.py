@@ -3093,31 +3093,73 @@ class TradingEngine:
             applog.warning("engine.heartbeat", f"Broker connection lost/unknown: {exc}")
             
         # Monitor 2: Market-data freshness
-        if self.watchlist and self.state == EngineState.RUNNING:
-            symbol_to_check = self.watchlist[0]
-            try:
-                df = self.data.frame(symbol_to_check, "1Min", limit=1)
-                if df is not None and not df.empty:
-                    last_bar_time = df.index[-1]
-                    if isinstance(last_bar_time, str):
-                        last_bar_time = datetime.fromisoformat(last_bar_time)
-                    if last_bar_time.tzinfo is None and now.tzinfo is not None:
-                        last_bar_time = last_bar_time.replace(tzinfo=now.tzinfo)
-                    
-                    from zoneinfo import ZoneInfo
-                    now_et = now.astimezone(ZoneInfo("America/New_York"))
-                    is_synthetic = getattr(getattr(self.data, "provider", None), "name", "") == "synthetic"
-                    if 9 * 60 + 30 <= now_et.hour * 60 + now_et.minute <= 16 * 60:
-                        delay = (now - last_bar_time).total_seconds()
-                        if delay > 600 and self.mode != "demo" and not is_synthetic:
-                            diagnostics["market_data_fresh"] = False
-                            self.allow_new_entries = False
-                            applog.warning("engine.heartbeat", f"Market data is stale. Delay: {delay}s")
-            except Exception as exc:
-                diagnostics["market_data_fresh"] = False
-                if self.mode != "demo":
-                    self.allow_new_entries = False
-                applog.warning("engine.heartbeat", f"Failed to check market data freshness: {exc}")
+        if self.state == EngineState.RUNNING:
+            from zoneinfo import ZoneInfo
+            now_et = now.astimezone(ZoneInfo("America/New_York"))
+            is_synthetic = getattr(getattr(self.data, "provider", None), "name", "") == "synthetic"
+            market_minutes = now_et.hour * 60 + now_et.minute
+            market_open_minutes = 9 * 60 + 30
+            market_close_minutes = 16 * 60
+            minutes_since_open = market_minutes - market_open_minutes
+
+            if market_open_minutes <= market_minutes <= market_close_minutes and not is_synthetic:
+                health_symbols = [sym for sym in ("SPY", "QQQ") if self.watchlist and sym in self.watchlist]
+                if self.watchlist:
+                    health_symbols.append(self.watchlist[0])
+                health_symbols = list(dict.fromkeys(health_symbols))[:3]
+                if not health_symbols:
+                    health_symbols = ["SPY"]
+
+                is_open_grace = (0 <= minutes_since_open < 3)
+
+                symbols_fresh: dict[str, bool] = {}
+                symbols_info: list[str] = []
+
+                for sym in health_symbols:
+                    try:
+                        df = self.data.frame(sym, "1Min", limit=1)
+                        if df is not None and not df.empty:
+                            last_bar_time = df.index[-1]
+                            if isinstance(last_bar_time, str):
+                                last_bar_time = datetime.fromisoformat(last_bar_time)
+                            if last_bar_time.tzinfo is None and now.tzinfo is not None:
+                                last_bar_time = last_bar_time.replace(tzinfo=now.tzinfo)
+
+                            bar_et = last_bar_time.astimezone(ZoneInfo("America/New_York"))
+                            bar_age_sec = (now - last_bar_time).total_seconds()
+                            is_current_session = (
+                                bar_et.date() == now_et.date()
+                                and (bar_et.hour * 60 + bar_et.minute) >= market_open_minutes
+                            )
+
+                            if is_open_grace:
+                                fresh = True
+                            elif minutes_since_open >= 3 and not is_current_session:
+                                fresh = False
+                            else:
+                                fresh = (bar_age_sec <= 600)
+
+                            symbols_fresh[sym] = fresh
+                            symbols_info.append(
+                                f"{sym}: age={bar_age_sec:.0f}s current_session={is_current_session} fresh={fresh}"
+                            )
+                        else:
+                            symbols_fresh[sym] = is_open_grace
+                            symbols_info.append(f"{sym}: no_data fresh={is_open_grace}")
+                    except Exception as exc:
+                        symbols_fresh[sym] = is_open_grace
+                        symbols_info.append(f"{sym}: err={exc}")
+
+                any_fresh = any(symbols_fresh.values())
+                if not any_fresh:
+                    diagnostics["market_data_fresh"] = False
+                    if self.mode != "demo":
+                        self.allow_new_entries = False
+                    applog.warning(
+                        "engine.heartbeat",
+                        f"Market data stale (now_et={now_et.strftime('%H:%M:%S')}, "
+                        f"grace={is_open_grace}): {', '.join(symbols_info)} — BLOCK_NEW_ENTRIES",
+                    )
 
         # Monitor 3: Database health
         try:
