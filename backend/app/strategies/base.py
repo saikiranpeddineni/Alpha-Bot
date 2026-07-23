@@ -13,7 +13,7 @@ API, UI and backtester.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 import pandas as pd
@@ -30,6 +30,18 @@ class StrategyContext:
     debug_mode: bool = False
 
 
+@dataclass
+class StrategyEvaluation:
+    passed: bool
+    first_failed_condition: str | None = None
+    conditions: dict[str, bool] = field(default_factory=dict)
+    values: dict[str, float] = field(default_factory=dict)
+
+    def __post_init__(self):
+        if self.conditions is None: self.conditions = {}
+        if self.values is None: self.values = {}
+
+
 class Strategy(ABC):
     """Subclass and set: name, description, default_params; implement on_bar."""
 
@@ -44,6 +56,11 @@ class Strategy(ABC):
     @abstractmethod
     def on_bar(self, ctx: StrategyContext, symbol: str, df: pd.DataFrame) -> Signal | None:
         """Called once per newly closed bar with the enriched frame (oldest->newest)."""
+
+    def diagnose_bar(self, ctx: StrategyContext, symbol: str, df: pd.DataFrame) -> StrategyEvaluation:
+        """Diagnostic evaluation tracing exact prerequisite checks and first failed condition."""
+        sig = self.on_bar(ctx, symbol, df)
+        return StrategyEvaluation(passed=sig is not None, first_failed_condition=None if sig else "unspecified_rejection")
 
     def reset(self) -> None:
         """Clear per-session state (fresh backtest / engine restart)."""
