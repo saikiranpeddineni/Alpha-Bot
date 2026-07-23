@@ -1,11 +1,14 @@
-"""Phase 2 Challenger Strategy Near-Miss Counterfactual Diagnostic Engine.
+"""Phase 2 Challenger One-Factor Strategy & Gate Ablation Harness.
 
-One-Factor Diagnostic Experiments:
-- Momentum: Event Window Expiration (11-15 bars) & Sub-Zero Volume Z-score (-0.5 <= vol_z < 0.0).
-- RSI2: Relaxed Panic Dips (5.0 < RSI2 <= 7.5 & 7.5 < RSI2 <= 10.0).
-- VWAP: Efficiency Ratio Relaxation (0.30 < ER <= 0.40) & Z-score Relaxation (1.5 <= |z| < 2.0).
+Rigorously Isolates 6 Independent One-Factor Experiments using Production Strategy Classes:
+1. ML Gray-Zone Soft Rescue (ml_confidence_threshold=0.55, soft_composite_gating=False vs True).
+2. Momentum Volume Z-score (vol_z_min=0.0 vs -0.5).
+3. Momentum Event Window (event_window_bars=10 vs 15).
+4. RSI2 Entry Threshold (rsi2_entry=5.0 vs 7.5).
+5. VWAP Efficiency Ratio Max (er_max=0.30 vs 0.40).
+6. VWAP Z-score Entry (z_entry=2.0 vs 1.5).
 
-All near-misses are replayed using ExitCounterfactualEngine to measure net counterfactual R and expectancy.
+All experiments use exact candidate ID attribution and full backtest position/portfolio arbitration.
 """
 
 import asyncio
@@ -25,7 +28,7 @@ from app.data.manager import DataManager
 from app.data.base import CachePolicy
 from app.ai.model import SignalModel
 from app.backtest.engine import BacktestParams, run_backtest
-from app.core.counterfactual import ExitCounterfactualEngine
+from app.strategies.base import REGISTRY
 from run_profit_validation import discover_cache_bounds
 
 ET = ZoneInfo("America/New_York")
@@ -84,103 +87,65 @@ def compute_trade_r(t):
     }
 
 
-def analyze_strategy_near_misses(dm, symbols, start_date, end_date):
-    """Scan 1-min bars for single-factor near-miss setups and replay counterfactual R."""
-    near_miss_results = {
-        "Momentum (Event Age 11-15 bars)": [],
-        "Momentum (Vol Z -0.5 to 0.0)": [],
-        "RSI2 (Dip 5.0 to 7.5)": [],
-        "RSI2 (Dip 7.5 to 10.0)": [],
-        "VWAP (ER 0.30 to 0.40)": [],
-        "VWAP (Z-score 1.5 to 2.0)": [],
+async def run_single_experiment(dm, model, symbols, start_date, end_date, exp_name, champ_strats, champ_risk, chall_strats, chall_risk):
+    params_champ = BacktestParams(
+        symbols=symbols,
+        start=start_date,
+        end=end_date,
+        starting_cash=100_000.0,
+        slippage_bps=2.0,
+        use_ml_gate=True,
+        use_dynamic_scanner=True,
+        strategies=champ_strats,
+        risk=champ_risk,
+        cache_policy=CachePolicy.IMMUTABLE_CACHE_ONLY,
+        ignore_temporal_leakage=False,
+    )
+    res_c = await run_backtest(dm, model, params_champ)
+    trades_c = [compute_trade_r(t) for t in res_c.trades if compute_trade_r(t)["r_valid"]]
+    r_vals_c = [tr["realized_r"] for tr in trades_c]
+    tot_r_c = sum(r_vals_c)
+
+    params_chall = BacktestParams(
+        symbols=symbols,
+        start=start_date,
+        end=end_date,
+        starting_cash=100_000.0,
+        slippage_bps=2.0,
+        use_ml_gate=True,
+        use_dynamic_scanner=True,
+        strategies=chall_strats,
+        risk=chall_risk,
+        cache_policy=CachePolicy.IMMUTABLE_CACHE_ONLY,
+        ignore_temporal_leakage=False,
+    )
+    res_ch = await run_backtest(dm, model, params_chall)
+    trades_ch = [compute_trade_r(t) for t in res_ch.trades if compute_trade_r(t)["r_valid"]]
+    r_vals_ch = [tr["realized_r"] for tr in trades_ch]
+    tot_r_ch = sum(r_vals_ch)
+
+    wins_ch = [r for r in r_vals_ch if r > 0]
+    losses_ch = [abs(r) for r in r_vals_ch if r < 0]
+    pf_ch = (sum(wins_ch) / sum(losses_ch)) if sum(losses_ch) > 0 else (99.0 if sum(wins_ch) > 0 else 0.0)
+    win_rate_ch = (len(wins_ch) / len(r_vals_ch) * 100.0) if r_vals_ch else 0.0
+    mean_r_ch = np.mean(r_vals_ch) if r_vals_ch else 0.0
+
+    return {
+        "exp_name": exp_name,
+        "champ_trades": len(r_vals_c),
+        "champ_r": round(tot_r_c, 2),
+        "chall_trades": len(r_vals_ch),
+        "chall_r": round(tot_r_ch, 2),
+        "win_rate": round(win_rate_ch, 1),
+        "mean_r": round(mean_r_ch, 4),
+        "pf_r": round(pf_ch, 2),
+        "delta_r": round(tot_r_ch - tot_r_c, 2),
     }
-
-    start_utc = pd.Timestamp(start_date).tz_convert("UTC") if pd.Timestamp(start_date).tzinfo else pd.Timestamp(start_date).tz_localize("UTC")
-    end_utc = pd.Timestamp(end_date).tz_convert("UTC") if pd.Timestamp(end_date).tzinfo else pd.Timestamp(end_date).tz_localize("UTC")
-
-    for symbol in symbols:
-        try:
-            df = dm.cache.query(symbol, "1Min", start_date - timedelta(days=5), end_date)
-            if df.empty or len(df) < 100:
-                continue
-
-            from app.ai.features import compute_features
-            df = compute_features(df)
-
-            for i in range(70, len(df) - 30):
-                ts = df.index[i]
-                if ts < start_utc or ts > end_utc:
-                    continue
-
-                row = df.iloc[i]
-                close = float(row["close"])
-                atr = float(row["atr14"]) if pd.notna(row.get("atr14")) else close * 0.01
-                if atr <= 0: continue
-
-                # 1. RSI2 Dip 5.0 to 7.5 & 7.5 to 10.0 (Above rising EMA50)
-                rsi2 = float(row["rsi2"]) if pd.notna(row.get("rsi2")) else 50.0
-                ema50 = df["ema50"]
-                if len(ema50) > i + 15 and pd.notna(ema50.iloc[i]) and pd.notna(ema50.iloc[i - 15]):
-                    ema_rising = float(ema50.iloc[i]) > float(ema50.iloc[i - 15])
-                    if close > float(ema50.iloc[i]) and ema_rising:
-                        if 5.0 < rsi2 <= 7.5:
-                            stop = close - 1.5 * atr
-                            res = ExitCounterfactualEngine.replay_policy(
-                                df, i, close, "long", stop, atr, "baseline_1.5r", {"target_atr_mult": 2.25}
-                            )
-                            near_miss_results["RSI2 (Dip 5.0 to 7.5)"].append(res["realized_r"])
-                        elif 7.5 < rsi2 <= 10.0:
-                            stop = close - 1.5 * atr
-                            res = ExitCounterfactualEngine.replay_policy(
-                                df, i, close, "long", stop, atr, "baseline_1.5r", {"target_atr_mult": 2.25}
-                            )
-                            near_miss_results["RSI2 (Dip 7.5 to 10.0)"].append(res["realized_r"])
-
-                # 2. VWAP ER 0.30 to 0.40 & Z-score 1.5 to 2.0
-                vwap = float(row["vwap"]) if pd.notna(row.get("vwap")) else 0.0
-                er = float(row["er20"]) if pd.notna(row.get("er20")) else 0.0
-                vwap_dist = float(row["vwap_dist_pct"]) if pd.notna(row.get("vwap_dist_pct")) else 0.0
-
-                from app.indicators.ta import rolling_zscore
-                z_series = rolling_zscore(df["vwap_dist_pct"].iloc[:i+1], 60)
-                z = float(z_series.iloc[-1]) if pd.notna(z_series.iloc[-1]) else 0.0
-
-                if vwap > 0 and close < vwap and rsi2 <= 10.0:
-                    if 0.30 < er <= 0.40 and z <= -2.0:
-                        stop = close - 2.0 * atr
-                        res = ExitCounterfactualEngine.replay_policy(
-                            df, i, close, "long", stop, atr, "vwap_target", {"target_price": vwap}
-                        )
-                        near_miss_results["VWAP (ER 0.30 to 0.40)"].append(res["realized_r"])
-                    elif er <= 0.30 and -2.0 < z <= -1.5:
-                        stop = close - 2.0 * atr
-                        res = ExitCounterfactualEngine.replay_policy(
-                            df, i, close, "long", stop, atr, "vwap_target", {"target_price": vwap}
-                        )
-                        near_miss_results["VWAP (Z-score 1.5 to 2.0)"].append(res["realized_r"])
-
-                # 3. Momentum Sub-Zero Vol Z (-0.5 <= vol_z < 0.0)
-                vol_z = float(row["vol_z"]) if pd.notna(row.get("vol_z")) else 0.0
-                ema9 = float(row["ema9"]) if pd.notna(row.get("ema9")) else 0.0
-                ema20 = float(row["ema20"]) if pd.notna(row.get("ema20")) else 0.0
-                rsi14 = float(row["rsi14"]) if pd.notna(row.get("rsi14")) else 50.0
-
-                if -0.5 <= vol_z < 0.0 and ema9 > ema20 and close > vwap and 50.0 <= rsi14 <= 78.0:
-                    stop = close - 1.5 * atr
-                    res = ExitCounterfactualEngine.replay_policy(
-                        df, i, close, "long", stop, atr, "baseline_1.8rr", {"target_atr_mult": 2.7}
-                    )
-                    near_miss_results["Momentum (Vol Z -0.5 to 0.0)"].append(res["realized_r"])
-
-        except Exception:
-            pass
-
-    return near_miss_results
 
 
 async def main():
     print("=" * 100)
-    print("PHASE 2 CHALLENGER STRATEGY NEAR-MISS COUNTERFACTUAL DIAGNOSTIC HARNESS")
+    print("PHASE 2 CHALLENGER ONE-FACTOR FULL-SYSTEM ABLATION SCORECARD")
     print("=" * 100)
 
     cache_path = DATA_DIR / "cache.db"
@@ -189,31 +154,71 @@ async def main():
     dm = DataManager(BlockingProvider(), cache_path)
     dm.validate_cache_coverage = lambda *args, **kwargs: None
 
-    print("\n[Executing One-Factor Near-Miss Counterfactual Replays...]")
-    near_miss_res = analyze_strategy_near_misses(dm, symbols, start_date, end_date)
+    models_dir = DATA_DIR / "models"
+    model = SignalModel(models_dir)
+    await model.load_artifacts()
 
+    base_strats = {s_name: {"enabled": True, "params": {}} for s_name in REGISTRY.keys()}
+    base_risk = RiskConfig(ml_confidence_threshold=0.55, soft_composite_gating=False)
+
+    experiments = []
+
+    # 1. ML Gray Rescue
+    print("\n[Running Exp 1/6] ML Gray-Zone Soft Rescue (0.48 <= p < 0.55)...")
+    chall_risk_1 = RiskConfig(ml_confidence_threshold=0.55, soft_composite_gating=True)
+    exp1 = await run_single_experiment(dm, model, symbols, start_date, end_date, "1. ML Gray Rescue (0.48-0.55)", base_strats, base_risk, base_strats, chall_risk_1)
+    experiments.append(exp1)
+
+    # 2. Momentum Volume Z-score
+    print("[Running Exp 2/6] Momentum Volume Z-score (vol_z_min: 0.0 -> -0.5)...")
+    strats_2 = {s_name: {"enabled": True, "params": {}} for s_name in REGISTRY.keys()}
+    strats_2["momentum"] = {"enabled": True, "params": {"vol_z_min": -0.5}}
+    exp2 = await run_single_experiment(dm, model, symbols, start_date, end_date, "2. Momentum Vol Z (0.0 -> -0.5)", base_strats, base_risk, strats_2, base_risk)
+    experiments.append(exp2)
+
+    # 3. Momentum Event Window
+    print("[Running Exp 3/6] Momentum Event Window (event_window_bars: 10 -> 15)...")
+    strats_3 = {s_name: {"enabled": True, "params": {}} for s_name in REGISTRY.keys()}
+    strats_3["momentum"] = {"enabled": True, "params": {"event_window_bars": 15}}
+    exp3 = await run_single_experiment(dm, model, symbols, start_date, end_date, "3. Momentum Event Window (10 -> 15)", base_strats, base_risk, strats_3, base_risk)
+    experiments.append(exp3)
+
+    # 4. RSI2 Entry Threshold
+    print("[Running Exp 4/6] RSI2 Entry Dip Threshold (rsi2_entry: 5.0 -> 7.5)...")
+    strats_4 = {s_name: {"enabled": True, "params": {}} for s_name in REGISTRY.keys()}
+    strats_4["rsi2_reversion"] = {"enabled": True, "params": {"rsi2_entry": 7.5}}
+    exp4 = await run_single_experiment(dm, model, symbols, start_date, end_date, "4. RSI2 Dip Entry (5.0 -> 7.5)", base_strats, base_risk, strats_4, base_risk)
+    experiments.append(exp4)
+
+    # 5. VWAP ER Max
+    print("[Running Exp 5/6] VWAP Efficiency Ratio Max (er_max: 0.30 -> 0.40)...")
+    strats_5 = {s_name: {"enabled": True, "params": {}} for s_name in REGISTRY.keys()}
+    strats_5["vwap_reversion"] = {"enabled": True, "params": {"er_max": 0.40}}
+    exp5 = await run_single_experiment(dm, model, symbols, start_date, end_date, "5. VWAP ER Max (0.30 -> 0.40)", base_strats, base_risk, strats_5, base_risk)
+    experiments.append(exp5)
+
+    # 6. VWAP Z-score Entry
+    print("[Running Exp 6/6] VWAP Z-score Entry (z_entry: 2.0 -> 1.5)...")
+    strats_6 = {s_name: {"enabled": True, "params": {}} for s_name in REGISTRY.keys()}
+    strats_6["vwap_reversion"] = {"enabled": True, "params": {"z_entry": 1.5}}
+    exp6 = await run_single_experiment(dm, model, symbols, start_date, end_date, "6. VWAP Z Entry (2.0 -> 1.5)", base_strats, base_risk, strats_6, base_risk)
+    experiments.append(exp6)
+
+    # =========================================================================
+    # ONE-FACTOR ABLATION SCORECARD TABLE
+    # =========================================================================
     print("\n" + "=" * 100)
-    print("STRATEGY NEAR-MISS COUNTERFACTUAL EXPECTANCY SCORECARD")
+    print("ONE-FACTOR FULL-SYSTEM ABLATION SCORECARD (EXACT PRODUCTION STRATEGY CLASSES)")
     print("=" * 100)
-    hdr = f"{'Strategy / Failed Condition':<35} | {'Near Misses':<12} | {'Winners':<9} | {'Losers':<9} | {'Total CF R':<12} | {'Mean CF R/Trade':<15}"
+    hdr = f"{'One-Factor Experiment':<32} | {'Champ N':<7} | {'Champ R':<8} | {'Chall N':<7} | {'Chall R':<8} | {'Win %':<6} | {'Mean R':<8} | {'PF (R)':<6} | {'Delta R':<8}"
     print(hdr)
     print("-" * 100)
 
-    for cond_label, r_list in near_miss_res.items():
-        n_miss = len(r_list)
-        wins = [r for r in r_list if r > 0]
-        losses = [r for r in r_list if r <= 0]
-        tot_r = sum(r_list)
-        mean_r = np.mean(r_list) if n_miss > 0 else 0.0
-
+    for exp in experiments:
         print(
-            f"{cond_label:<35} | {n_miss:<12} | {len(wins):<9} | {len(losses):<9} | {tot_r:<+12.2f} | {mean_r:<+15.4f}"
+            f"{exp['exp_name']:<32} | {exp['champ_trades']:<7} | {exp['champ_r']:<+8.2f} | {exp['chall_trades']:<7} | {exp['chall_r']:<+8.2f} | {exp['win_rate']:<6.1f} | {exp['mean_r']:<+8.4f} | {exp['pf_r']:<6.2f} | {exp['delta_r']:<+8.2f}"
         )
 
-    print("=" * 100)
-    print("\n[Diagnostic Key Takeaway]")
-    print(" - Positive Total CF R indicates a candidate restriction that unnecessarily starves the strategy.")
-    print(" - Negative Total CF R confirms that the existing restriction successfully blocks losing trades.")
     print("=" * 100)
 
 
