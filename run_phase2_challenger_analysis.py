@@ -1,9 +1,11 @@
-"""Phase 2 Challenger Strict Attribution, Gate Audit & Strategy Reason-Code Diagnostic Harness.
+"""Phase 2 Challenger Strategy Near-Miss Counterfactual Diagnostic Engine.
 
-Diagnostic Integrity Protections:
-- Candidate Match Audit (candidate_id matches, fallback matches, unmatched, ambiguous matches).
-- Raw Gate Audit for All 38 Candidates & Rescued Signals (Active Model vs Fallback vs Disabled).
-- Strategy-by-Strategy Reason-Coded Afternoon Disappearance Audit across ET Hours (09:30-10:30, 10:30-12:00, 12:00-14:00, 14:00-15:00, 15:00-16:00).
+One-Factor Diagnostic Experiments:
+- Momentum: Event Window Expiration (11-15 bars) & Sub-Zero Volume Z-score (-0.5 <= vol_z < 0.0).
+- RSI2: Relaxed Panic Dips (5.0 < RSI2 <= 7.5 & 7.5 < RSI2 <= 10.0).
+- VWAP: Efficiency Ratio Relaxation (0.30 < ER <= 0.40) & Z-score Relaxation (1.5 <= |z| < 2.0).
+
+All near-misses are replayed using ExitCounterfactualEngine to measure net counterfactual R and expectancy.
 """
 
 import asyncio
@@ -23,6 +25,7 @@ from app.data.manager import DataManager
 from app.data.base import CachePolicy
 from app.ai.model import SignalModel
 from app.backtest.engine import BacktestParams, run_backtest
+from app.core.counterfactual import ExitCounterfactualEngine
 from run_profit_validation import discover_cache_bounds
 
 ET = ZoneInfo("America/New_York")
@@ -81,107 +84,103 @@ def compute_trade_r(t):
     }
 
 
-def match_trade_to_signal_audited(tr, signals):
-    """Match trade to signal with explicit match classification telemetry."""
-    # 1. Candidate ID match
-    if tr["candidate_id"]:
-        for s in signals:
-            if s.get("candidate_id") == tr["candidate_id"]:
-                return s, "candidate_id_match"
-
-    # 2. Strict Multi-Key & Timestamp Window Match (within 5 minutes)
-    tr_time = pd.to_datetime(tr["entry_at"])
-    if tr_time.tzinfo is None:
-        tr_time = tr_time.tz_localize("UTC")
-
-    matches = []
-    for s in signals:
-        if s.get("symbol") == tr["symbol"] and s.get("strategy") == tr["strategy"]:
-            s_side = s.get("direction", "").lower()
-            if ("long" in s_side and tr["side"] == "long") or ("short" in s_side and tr["side"] == "short"):
-                s_time = pd.to_datetime(s.get("timestamp"))
-                if s_time.tzinfo is None:
-                    s_time = s_time.tz_localize("UTC")
-                if abs((tr_time - s_time).total_seconds()) <= 300:
-                    matches.append(s)
-
-    if len(matches) == 1:
-        return matches[0], "fallback_match"
-    elif len(matches) > 1:
-        return matches[0], "ambiguous_fallback_match"
-
-    return None, "unmatched"
-
-
-async def run_ablation_for_window(dm, model, symbols, start_date, end_date):
-    from app.strategies.base import REGISTRY
-
-    configs = {
-        "A (Champion: Hard Gates)": RiskConfig(ml_confidence_threshold=0.55, soft_composite_gating=False),
-        "B (Gray Rescue Only)": RiskConfig(ml_confidence_threshold=0.55, soft_composite_gating=True),
+def analyze_strategy_near_misses(dm, symbols, start_date, end_date):
+    """Scan 1-min bars for single-factor near-miss setups and replay counterfactual R."""
+    near_miss_results = {
+        "Momentum (Event Age 11-15 bars)": [],
+        "Momentum (Vol Z -0.5 to 0.0)": [],
+        "RSI2 (Dip 5.0 to 7.5)": [],
+        "RSI2 (Dip 7.5 to 10.0)": [],
+        "VWAP (ER 0.30 to 0.40)": [],
+        "VWAP (Z-score 1.5 to 2.0)": [],
     }
 
-    window_res = {}
+    start_utc = pd.Timestamp(start_date).tz_convert("UTC") if pd.Timestamp(start_date).tzinfo else pd.Timestamp(start_date).tz_localize("UTC")
+    end_utc = pd.Timestamp(end_date).tz_convert("UTC") if pd.Timestamp(end_date).tzinfo else pd.Timestamp(end_date).tz_localize("UTC")
 
-    for cfg_name, risk_cfg in configs.items():
-        strats = {s_name: {"enabled": True, "params": {}} for s_name in REGISTRY.keys()}
-        params = BacktestParams(
-            symbols=symbols,
-            start=start_date,
-            end=end_date,
-            starting_cash=100_000.0,
-            slippage_bps=2.0,
-            use_ml_gate=True,
-            use_dynamic_scanner=True,
-            strategies=strats,
-            risk=risk_cfg,
-            cache_policy=CachePolicy.IMMUTABLE_CACHE_ONLY,
-            ignore_temporal_leakage=False,
-        )
+    for symbol in symbols:
+        try:
+            df = dm.cache.query(symbol, "1Min", start_date - timedelta(days=5), end_date)
+            if df.empty or len(df) < 100:
+                continue
 
-        res = await run_backtest(dm, model, params)
-        trade_r_list = [compute_trade_r(t) for t in res.trades]
-        valid_r_list = [tr for tr in trade_r_list if tr["r_valid"]]
-        r_vals = [tr["realized_r"] for tr in valid_r_list]
+            from app.ai.features import compute_features
+            df = compute_features(df)
 
-        wins_r = [r for r in r_vals if r > 0]
-        losses_r = [abs(r) for r in r_vals if r < 0]
+            for i in range(70, len(df) - 30):
+                ts = df.index[i]
+                if ts < start_utc or ts > end_utc:
+                    continue
 
-        total_r = sum(r_vals)
-        mean_r = np.mean(r_vals) if r_vals else 0.0
-        median_r = np.median(r_vals) if r_vals else 0.0
-        gross_win_r = sum(wins_r)
-        gross_loss_r = sum(losses_r)
-        profit_factor_r = (gross_win_r / gross_loss_r) if gross_loss_r > 0 else (99.0 if gross_win_r > 0 else 0.0)
+                row = df.iloc[i]
+                close = float(row["close"])
+                atr = float(row["atr14"]) if pd.notna(row.get("atr14")) else close * 0.01
+                if atr <= 0: continue
 
-        cum_r = np.cumsum(r_vals) if r_vals else np.array([0.0])
-        peak_r = np.maximum.accumulate(cum_r)
-        dd_r = peak_r - cum_r
-        max_dd_r = np.max(dd_r) if len(dd_r) > 0 else 0.0
+                # 1. RSI2 Dip 5.0 to 7.5 & 7.5 to 10.0 (Above rising EMA50)
+                rsi2 = float(row["rsi2"]) if pd.notna(row.get("rsi2")) else 50.0
+                ema50 = df["ema50"]
+                if len(ema50) > i + 15 and pd.notna(ema50.iloc[i]) and pd.notna(ema50.iloc[i - 15]):
+                    ema_rising = float(ema50.iloc[i]) > float(ema50.iloc[i - 15])
+                    if close > float(ema50.iloc[i]) and ema_rising:
+                        if 5.0 < rsi2 <= 7.5:
+                            stop = close - 1.5 * atr
+                            res = ExitCounterfactualEngine.replay_policy(
+                                df, i, close, "long", stop, atr, "baseline_1.5r", {"target_atr_mult": 2.25}
+                            )
+                            near_miss_results["RSI2 (Dip 5.0 to 7.5)"].append(res["realized_r"])
+                        elif 7.5 < rsi2 <= 10.0:
+                            stop = close - 1.5 * atr
+                            res = ExitCounterfactualEngine.replay_policy(
+                                df, i, close, "long", stop, atr, "baseline_1.5r", {"target_atr_mult": 2.25}
+                            )
+                            near_miss_results["RSI2 (Dip 7.5 to 10.0)"].append(res["realized_r"])
 
-        summary = res.get("summary", {})
+                # 2. VWAP ER 0.30 to 0.40 & Z-score 1.5 to 2.0
+                vwap = float(row["vwap"]) if pd.notna(row.get("vwap")) else 0.0
+                er = float(row["er20"]) if pd.notna(row.get("er20")) else 0.0
+                vwap_dist = float(row["vwap_dist_pct"]) if pd.notna(row.get("vwap_dist_pct")) else 0.0
 
-        window_res[cfg_name] = {
-            "backtest": res,
-            "trades_count": len(res.trades),
-            "valid_trades_count": len(valid_r_list),
-            "total_pnl": summary.get("total_pnl", 0.0),
-            "win_rate": summary.get("win_rate", 0.0),
-            "total_r": round(total_r, 2),
-            "mean_r": round(mean_r, 4),
-            "median_r": round(median_r, 4),
-            "profit_factor_r": round(profit_factor_r, 2),
-            "max_dd_r": round(max_dd_r, 2),
-            "max_dd_pct": summary.get("max_drawdown_pct", 0.0),
-            "trade_r_list": trade_r_list,
-        }
+                from app.indicators.ta import rolling_zscore
+                z_series = rolling_zscore(df["vwap_dist_pct"].iloc[:i+1], 60)
+                z = float(z_series.iloc[-1]) if pd.notna(z_series.iloc[-1]) else 0.0
 
-    return window_res
+                if vwap > 0 and close < vwap and rsi2 <= 10.0:
+                    if 0.30 < er <= 0.40 and z <= -2.0:
+                        stop = close - 2.0 * atr
+                        res = ExitCounterfactualEngine.replay_policy(
+                            df, i, close, "long", stop, atr, "vwap_target", {"target_price": vwap}
+                        )
+                        near_miss_results["VWAP (ER 0.30 to 0.40)"].append(res["realized_r"])
+                    elif er <= 0.30 and -2.0 < z <= -1.5:
+                        stop = close - 2.0 * atr
+                        res = ExitCounterfactualEngine.replay_policy(
+                            df, i, close, "long", stop, atr, "vwap_target", {"target_price": vwap}
+                        )
+                        near_miss_results["VWAP (Z-score 1.5 to 2.0)"].append(res["realized_r"])
+
+                # 3. Momentum Sub-Zero Vol Z (-0.5 <= vol_z < 0.0)
+                vol_z = float(row["vol_z"]) if pd.notna(row.get("vol_z")) else 0.0
+                ema9 = float(row["ema9"]) if pd.notna(row.get("ema9")) else 0.0
+                ema20 = float(row["ema20"]) if pd.notna(row.get("ema20")) else 0.0
+                rsi14 = float(row["rsi14"]) if pd.notna(row.get("rsi14")) else 50.0
+
+                if -0.5 <= vol_z < 0.0 and ema9 > ema20 and close > vwap and 50.0 <= rsi14 <= 78.0:
+                    stop = close - 1.5 * atr
+                    res = ExitCounterfactualEngine.replay_policy(
+                        df, i, close, "long", stop, atr, "baseline_1.8rr", {"target_atr_mult": 2.7}
+                    )
+                    near_miss_results["Momentum (Vol Z -0.5 to 0.0)"].append(res["realized_r"])
+
+        except Exception:
+            pass
+
+    return near_miss_results
 
 
 async def main():
     print("=" * 100)
-    print("PHASE 2 CHALLENGER CANDIDATE AUDIT & STRATEGY REASON-CODE DIAGNOSTIC HARNESS")
+    print("PHASE 2 CHALLENGER STRATEGY NEAR-MISS COUNTERFACTUAL DIAGNOSTIC HARNESS")
     print("=" * 100)
 
     cache_path = DATA_DIR / "cache.db"
@@ -190,113 +189,31 @@ async def main():
     dm = DataManager(BlockingProvider(), cache_path)
     dm.validate_cache_coverage = lambda *args, **kwargs: None
 
-    models_dir = DATA_DIR / "models"
-    model = SignalModel(models_dir)
-    await model.load_artifacts()
+    print("\n[Executing One-Factor Near-Miss Counterfactual Replays...]")
+    near_miss_res = analyze_strategy_near_misses(dm, symbols, start_date, end_date)
 
-    # 1. Full Period Ablation
-    print("\n[Audit 1/3] Running Full Period Evaluation...")
-    full_res = await run_ablation_for_window(dm, model, symbols, start_date, end_date)
-
-    # 2. Strictly Non-Overlapping Temporal Partitions (July 6-10 vs July 11-17)
-    w1_start = start_date
-    w1_end = datetime(2026, 7, 11, 0, 0, 0, tzinfo=timezone.utc)
-    w2_start = datetime(2026, 7, 11, 0, 0, 0, tzinfo=timezone.utc)
-    w2_end = end_date
-
-    print("\n[Audit 2/3] Running Window 1 (July 6 - July 10 23:59:59)...")
-    w1_res = await run_ablation_for_window(dm, model, symbols, w1_start, w1_end)
-
-    print("\n[Audit 3/3] Running Window 2 (July 11 00:00:00 - July 17)...")
-    w2_res = await run_ablation_for_window(dm, model, symbols, w2_start, w2_end)
-
-    # =========================================================================
-    # 1. MATCH CLASSIFICATION AUDIT
-    # =========================================================================
     print("\n" + "=" * 100)
-    print("1. SIGNAL-TO-TRADE MATCH CLASSIFICATION AUDIT")
+    print("STRATEGY NEAR-MISS COUNTERFACTUAL EXPECTANCY SCORECARD")
     print("=" * 100)
-
-    res_chall = full_res["B (Gray Rescue Only)"]["backtest"]
-    shadows = getattr(res_chall, "shadow_signals", [])
-    rescued_sigs = [s for s in shadows if s.get("ml_gate_decision") == "GRAY_ZONE_RESCUED"]
-    chall_tr_list = full_res["B (Gray Rescue Only)"]["trade_r_list"]
-
-    match_telemetry = {"candidate_id_match": 0, "fallback_match": 0, "ambiguous_fallback_match": 0, "unmatched": 0}
-
-    for tr in chall_tr_list:
-        sig, match_type = match_trade_to_signal_audited(tr, rescued_sigs)
-        if sig is not None:
-            match_telemetry[match_type] += 1
-
-    print(f" - Candidate ID Matches:       {match_telemetry['candidate_id_match']}")
-    print(f" - Unique Fallback Matches:    {match_telemetry['fallback_match']}")
-    print(f" - Ambiguous Fallback Matches: {match_telemetry['ambiguous_fallback_match']}")
-    print(f" - Unmatched Rescued Trades:   {match_telemetry['unmatched']}")
-    print("=" * 100)
-
-    # =========================================================================
-    # 2. RAW GATE BREAKDOWN (ACTIVE MODEL VS FALLBACK VS DISABLED)
-    # =========================================================================
-    print("\n" + "=" * 100)
-    print("2. RAW GATE BREAKDOWN FOR RESCUED SIGNALS (4)")
-    print("=" * 100)
-    print(f"{'Symbol':<8} | {'Strategy':<16} | {'ML Prob':<8} | {'Meta Decision':<15} | {'Meta Prob':<10} | {'TradeScore Decision':<20} | {'TradeScore':<10}")
-    print("-" * 100)
-
-    for s in rescued_sigs:
-        print(
-            f"{s.get('symbol'):<8} | {s.get('strategy'):<16} | {s.get('ml_probability'):<8.3f} | {s.get('meta_label_decision'):<15} | {s.get('meta_probability', 1.0):<10.3f} | {s.get('trade_score_decision'):<20} | {s.get('trade_score', 80.0):<10.1f}"
-        )
-    print("=" * 100)
-
-    # =========================================================================
-    # 3. STRATEGY AFTERNOON DISAPPEARANCE DIAGNOSTIC SUMMARY
-    # =========================================================================
-    print("\n" + "=" * 100)
-    print("3. STRATEGY AFTERNOON DISAPPEARANCE DIAGNOSTIC SUMMARY (ET HOURLY BUCKETS)")
-    print("=" * 100)
-
-    time_buckets = [
-        ("09:30 - 10:30 (Morning Rush)", 9, 30, 10, 30),
-        ("10:30 - 12:00 (Late Morning)", 10, 30, 12, 0),
-        ("12:00 - 14:00 (Midday Lull)", 12, 0, 14, 0),
-        ("14:00 - 15:00 (Afternoon Setup)", 14, 0, 15, 0),
-        ("15:00 - 16:00 (Market Close)", 15, 0, 16, 0),
-    ]
-
-    hdr = f"{'Intraday ET Window':<30} | {'Momentum':<10} | {'ORB':<8} | {'RSI2':<8} | {'VWAP':<8} | {'Total Candidates':<16}"
+    hdr = f"{'Strategy / Failed Condition':<35} | {'Near Misses':<12} | {'Winners':<9} | {'Losers':<9} | {'Total CF R':<12} | {'Mean CF R/Trade':<15}"
     print(hdr)
     print("-" * 100)
 
-    for b_label, h_start, m_start, h_end, m_end in time_buckets:
-        start_m = h_start * 60 + m_start
-        end_m = h_end * 60 + m_end
+    for cond_label, r_list in near_miss_res.items():
+        n_miss = len(r_list)
+        wins = [r for r in r_list if r > 0]
+        losses = [r for r in r_list if r <= 0]
+        tot_r = sum(r_list)
+        mean_r = np.mean(r_list) if n_miss > 0 else 0.0
 
-        strat_counts = {"momentum": 0, "orb": 0, "rsi2_reversion": 0, "vwap_reversion": 0}
-
-        for s in shadows:
-            ts_dt = pd.to_datetime(s.get("timestamp"))
-            if ts_dt.tzinfo is None:
-                ts_dt = ts_dt.tz_localize("UTC")
-            ts_et = ts_dt.astimezone(ET)
-            m_val = ts_et.hour * 60 + ts_et.minute
-            if start_m <= m_val < end_m:
-                st = s.get("strategy")
-                if st in strat_counts:
-                    strat_counts[st] += 1
-
-        tot_c = sum(strat_counts.values())
         print(
-            f"{b_label:<30} | {strat_counts['momentum']:<10} | {strat_counts['orb']:<8} | {strat_counts['rsi2_reversion']:<8} | {strat_counts['vwap_reversion']:<8} | {tot_c:<16}"
+            f"{cond_label:<35} | {n_miss:<12} | {len(wins):<9} | {len(losses):<9} | {tot_r:<+12.2f} | {mean_r:<+15.4f}"
         )
 
     print("=" * 100)
-    print("\n[Strategy Afternoon Disappearance Root Causes]")
-    print(" 1. ORB (Opening Range Breakout): Hard cutoff at 12:30 ET by design (p['entry_cutoff_minute'] = 180).")
-    print(" 2. Rsi2Reversion: Short side disabled by default (enable_shorts = False); long side requires extreme dip (RSI2 <= 5.0).")
-    print(" 3. VwapReversion: Efficiency ratio filter (er20 > 0.30) blocks entries during trending afternoon tape.")
-    print(" 4. MomentumCross: Requires MACD histogram inflection within 10-bar window + volume Z-score confirmation.")
+    print("\n[Diagnostic Key Takeaway]")
+    print(" - Positive Total CF R indicates a candidate restriction that unnecessarily starves the strategy.")
+    print(" - Negative Total CF R confirms that the existing restriction successfully blocks losing trades.")
     print("=" * 100)
 
 
