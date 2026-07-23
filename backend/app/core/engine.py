@@ -827,7 +827,7 @@ class TradingEngine:
             session_start_equity=self.portfolio.session_start_equity or account.equity,
             peak_equity=self.portfolio.peak_equity,
             day_trades_today=self.portfolio.day_trades_today,
-            rolling_day_trades=self.portfolio.day_trades_in_window(now),
+            rolling_day_trades=self.portfolio.day_trades_in_window(session),
             is_paper=self.broker.is_paper,
         )
         halt = self.risk.check_halts(ctx, now=now)
@@ -1000,7 +1000,7 @@ class TradingEngine:
                                 session_start_equity=self.portfolio.session_start_equity or account.equity,
                                 peak_equity=self.portfolio.peak_equity,
                                 day_trades_today=self.portfolio.day_trades_today,
-                                rolling_day_trades=self.portfolio.day_trades_in_window(now),
+                                rolling_day_trades=self.portfolio.day_trades_in_window(session),
                                 is_paper=self.broker.is_paper,
                                 pending_entry_symbols=list(effective_pending_entries),
                             )

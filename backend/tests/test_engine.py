@@ -147,3 +147,16 @@ async def test_engine_rejects_live_without_gates(engine: TradingEngine):
     with pytest.raises(PermissionError):
         await engine.start("live", confirm="LIVE")
     assert engine.state == EngineState.STOPPED
+
+
+async def test_engine_tick_with_day_trade_dates(engine: TradingEngine):
+    from datetime import date
+    await engine.start("demo")
+    engine.portfolio._day_trade_dates = [
+        date(2026, 7, 21),
+        date(2026, 7, 22),
+    ]
+    await engine._tick()
+    assert engine.status()["state"] == "running"
+    await engine.stop()
+
