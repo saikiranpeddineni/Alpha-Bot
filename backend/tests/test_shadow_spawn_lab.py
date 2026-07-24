@@ -303,9 +303,10 @@ def test_malformed_fingerprint_fail_closed(tmp_path):
     coord = SpawnShadowCoordinator(db=db)
     coord.initialize_from_db()
 
-    # Branch drops tampered child instead of keeping it as UNAVAILABLE — verify exclusion
+    # Coordinator keeps the tampered executor in the pool but marks it UNAVAILABLE
     exec_inst = coord.executors.get("child_tampered")
-    assert exec_inst is None, "Fingerprint-mismatched child must be excluded from the executor pool"
+    assert exec_inst is not None
+    assert exec_inst.status == "UNAVAILABLE"
 
 
 # 17. Malformed Timestamp Fail-Closed: Missing or naive timestamp marks child UNAVAILABLE
