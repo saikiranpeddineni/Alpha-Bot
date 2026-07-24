@@ -1,8 +1,7 @@
 """Child Policy Executor for Live Shadow Spawn Laboratory.
 
-Evaluates market context independently for a child policy variant,
-manages hypothetical decisions, virtual order/fill state, and disagreement taxonomy.
-Zero references to live Broker execution methods.
+Executes counterfactual risk, threshold, sizing, and exit policy evaluations for candidate market observations
+in isolated virtual sandboxes without touching production broker execution or Champion decision loops.
 """
 from __future__ import annotations
 
@@ -15,12 +14,15 @@ from app.research.spawn.spawn_virtual_portfolio import SpawnVirtualPortfolio
 
 
 class ChildPolicyExecutor:
-    """Executes independent evaluation and virtual portfolio accounting for one child policy variant."""
+    """Executes counterfactual policy evaluation and virtual portfolio accounting for one child variant."""
 
     def __init__(self, config: ChildPolicyConfig) -> None:
         self.config = config
         self.policy_id = config.policy_id
         self.config_fingerprint = config.compute_fingerprint()
+        
+        # Watermark tracker for state-idempotent observation processing
+        self.processed_watermarks: dict[str, dict[str, Any]] = {}
         
         # Enforce fail-closed on malformed spawn timestamp
         if not isinstance(config.spawned_at, datetime) or config.spawned_at.tzinfo is None:
@@ -80,6 +82,11 @@ class ChildPolicyExecutor:
         champion_cand = observation.get("champion_candidate") or {}
         cand_id = champion_cand.get("id") or f"{symbol}_{strategy.upper()}_{int(ts.timestamp())}"
 
+        # State-Idempotent Observation Guard: Return cached evaluation if already processed
+        watermark_key = f"{self.policy_id}|{cand_id}|{ts.isoformat()}"
+        if watermark_key in self.processed_watermarks:
+            return self.processed_watermarks[watermark_key]
+
         # 1. Update OHLC price and check virtual exits (Stop Loss / Take Profit / Trailing Stop)
         exit_rec = self.portfolio.update_ohlc_and_check_exits(symbol, open_px, high_px, low_px, close_px, ts)
 
@@ -105,7 +112,6 @@ class ChildPolicyExecutor:
             ml_pass = float(raw_ml_prob) >= ml_thresh
             ml_dec = "PASS" if ml_pass else "REJECT"
         else:
-            # Require ML probability to be explicitly provided in context; no synthetic 0.50 fallback
             ml_pass = False
             ml_dec = "UNAVAILABLE"
 
@@ -119,7 +125,6 @@ class ChildPolicyExecutor:
             meta_pass = float(raw_meta_prob) >= meta_thresh
             meta_dec = "PASS" if meta_pass else "REJECT"
         else:
-            # Require Meta probability to be explicitly provided; no synthetic 0.60 fallback
             meta_pass = False
             meta_dec = "UNAVAILABLE"
 
@@ -130,7 +135,6 @@ class ChildPolicyExecutor:
             score_pass = float(raw_trade_score) >= score_thresh
             score_dec = "PASS" if score_pass else "REJECT"
         else:
-            # Require TradeScore to be explicitly provided; no synthetic 70.0 fallback
             score_pass = False
             score_dec = "UNAVAILABLE"
 
@@ -167,7 +171,6 @@ class ChildPolicyExecutor:
         if hypo_pass:
             qty = self.portfolio.calculate_position_size(price, stop_loss)
             if qty > 0:
-                # Deterministic virtual order ID
                 virt_order_id = f"virt_{self.policy_id}_{hashlib.sha256(f'{cand_id}|{ts.isoformat()}'.encode()).hexdigest()[:10]}"
                 pos = self.portfolio.open_virtual_position(
                     symbol=symbol,
@@ -221,4 +224,12 @@ class ChildPolicyExecutor:
                 "exit_record": exit_rec,
             }
         }
+        
+        # Store in watermark cache for state-idempotent deduplication
+        self.processed_watermarks[watermark_key] = event_rec
+        if len(self.processed_watermarks) > 2000:
+            oldest_keys = list(self.processed_watermarks.keys())[:500]
+            for k in oldest_keys:
+                del self.processed_watermarks[k]
+                
         return event_rec

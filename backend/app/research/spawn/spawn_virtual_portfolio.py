@@ -61,6 +61,7 @@ class SpawnVirtualPortfolio:
         self.allow_fractional = bool(self.risk_config.get("allow_fractional", False))
 
         self.positions: dict[str, VirtualPosition] = {}
+        self.last_prices: dict[str, float] = {}
         self.pending_orders: list[dict[str, Any]] = []
         self.daily_pnl: float = 0.0
         self.realized_r: float = 0.0
@@ -68,10 +69,13 @@ class SpawnVirtualPortfolio:
         self.closed_trades: list[dict[str, Any]] = []
 
     def mark_to_market(self, current_prices: dict[str, float]) -> float:
-        """Recalculates marked equity, peak equity, and drawdown across all open positions."""
+        """Recalculates marked equity, peak equity, and drawdown across all open positions using persistent last prices."""
+        if current_prices:
+            self.last_prices.update(current_prices)
+
         unrealized = 0.0
         for sym, pos in self.positions.items():
-            price = current_prices.get(sym, pos.entry_price)
+            price = self.last_prices.get(sym, pos.entry_price)
             unrealized += pos.unrealized_pnl(price)
             
         self.marked_equity = self.cash + unrealized
@@ -134,6 +138,7 @@ class SpawnVirtualPortfolio:
             virtual_order_id=order_id
         )
         self.positions[sym] = pos
+        self.last_prices[sym] = price
         self.mark_to_market({sym: price})
         return pos
 
@@ -151,13 +156,42 @@ class SpawnVirtualPortfolio:
         if not pos:
             return None
 
-        # Update MFE / MAE bounds using full OHLC bar
+        # Intrabar sequencing fix: Capture effective stop entering the bar
+        effective_stop = pos.trailing_stop if pos.trailing_stop is not None else pos.initial_stop
+
+        # Check OHLC Exits using effective stop entering the bar (prevents intrabar look-ahead)
+        exit_triggered = False
+        exit_reason = ""
+        exit_price = close_px
+
+        if pos.side == "long":
+            if low_px <= effective_stop:
+                exit_triggered = True
+                exit_reason = "STOP_LOSS"
+                exit_price = effective_stop
+            elif pos.initial_target and high_px >= pos.initial_target:
+                exit_triggered = True
+                exit_reason = "TAKE_PROFIT"
+                exit_price = pos.initial_target
+        else:  # short
+            if high_px >= effective_stop:
+                exit_triggered = True
+                exit_reason = "STOP_LOSS"
+                exit_price = effective_stop
+            elif pos.initial_target and low_px <= pos.initial_target:
+                exit_triggered = True
+                exit_reason = "TAKE_PROFIT"
+                exit_price = pos.initial_target
+
+        if exit_triggered:
+            return self.close_virtual_position(sym, exit_price, exit_reason, now)
+
+        # Position survived the bar: update MFE/MAE peak/trough and calculate trailing stop for next bar
         if high_px > pos.peak_price:
             pos.peak_price = high_px
         if low_px < pos.trough_price or pos.trough_price == 0:
             pos.trough_price = low_px
 
-        # Trailing stop update if configured
         trail_mult = float(self.risk_config.get("trailing_stop_atr_mult", 0.0))
         if trail_mult > 0 and pos.peak_price > pos.entry_price:
             risk_dist = pos.initial_risk_per_share
@@ -170,33 +204,6 @@ class SpawnVirtualPortfolio:
                 if pos.trailing_stop is None or new_trail < pos.trailing_stop:
                     pos.trailing_stop = new_trail
 
-        # Check OHLC Exits
-        exit_triggered = False
-        exit_reason = ""
-        exit_price = close_px
-
-        if pos.side == "long":
-            if low_px <= (pos.trailing_stop if pos.trailing_stop is not None else pos.initial_stop):
-                exit_triggered = True
-                exit_reason = "STOP_LOSS"
-                exit_price = pos.trailing_stop if pos.trailing_stop is not None else pos.initial_stop
-            elif pos.initial_target and high_px >= pos.initial_target:
-                exit_triggered = True
-                exit_reason = "TAKE_PROFIT"
-                exit_price = pos.initial_target
-        else:  # short
-            if high_px >= (pos.trailing_stop if pos.trailing_stop is not None else pos.initial_stop):
-                exit_triggered = True
-                exit_reason = "STOP_LOSS"
-                exit_price = pos.trailing_stop if pos.trailing_stop is not None else pos.initial_stop
-            elif pos.initial_target and low_px <= pos.initial_target:
-                exit_triggered = True
-                exit_reason = "TAKE_PROFIT"
-                exit_price = pos.initial_target
-
-        if exit_triggered:
-            return self.close_virtual_position(sym, exit_price, exit_reason, now)
-            
         self.mark_to_market({sym: close_px})
         return None
 
@@ -258,6 +265,7 @@ class SpawnVirtualPortfolio:
             "equity": self.marked_equity,
             "peak_equity": self.peak_equity,
             "positions": pos_dict,
+            "last_prices": self.last_prices,
             "pending_orders": self.pending_orders,
             "daily_pnl": self.daily_pnl,
             "realized_r": self.realized_r,
@@ -273,6 +281,7 @@ class SpawnVirtualPortfolio:
         self.daily_pnl = float(checkpoint.get("daily_pnl", 0.0))
         self.realized_r = float(checkpoint.get("realized_r", 0.0))
         self.trade_count = int(checkpoint.get("trade_count", 0))
+        self.last_prices = checkpoint.get("last_prices") or {}
 
         pos_dict = checkpoint.get("positions") or {}
         self.positions.clear()
@@ -283,6 +292,8 @@ class SpawnVirtualPortfolio:
                     entry_at = datetime.fromisoformat(entry_at_raw)
                 except ValueError:
                     entry_at = datetime.now(timezone.utc)
+            elif isinstance(entry_at_raw, datetime):
+                entry_at = entry_at_raw
             else:
                 entry_at = datetime.now(timezone.utc)
                 

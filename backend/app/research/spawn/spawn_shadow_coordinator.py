@@ -177,21 +177,45 @@ class SpawnShadowCoordinator:
             applog.error("spawn_coordinator", f"Error in offloaded evaluation/persistence thread: {e}")
 
     def retire_child(self, policy_id: str, now: datetime | None = None) -> bool:
-        """Retires an active child strategy, flattens virtual positions, and saves final checkpoint."""
+        """Retires an active child strategy, flattens virtual positions, and saves final checkpoint and retirement trade events."""
+        import hashlib
         executor = self.executors.get(policy_id)
         now_ts = now or datetime.now(timezone.utc)
         if executor:
             executor.status = "RETIRED"
-            # Flatten open virtual positions deterministically
+            retire_events = []
             open_symbols = list(executor.portfolio.positions.keys())
+            
             for sym in open_symbols:
                 pos = executor.portfolio.positions.get(sym)
                 if pos:
-                    executor.portfolio.close_virtual_position(sym, pos.entry_price, "RETIRED_FLATTEN", now_ts)
+                    trade_rec = executor.portfolio.close_virtual_position(sym, pos.entry_price, "RETIRED_FLATTEN", now_ts)
+                    evt_id = hashlib.sha256(f"{policy_id}|{sym}|{now_ts.isoformat()}|RETIREMENT_EXIT".encode()).hexdigest()
+                    retire_events.append({
+                        "id": evt_id,
+                        "policy_id": policy_id,
+                        "parent_policy_id": executor.config.parent_policy_id,
+                        "config_fingerprint": executor.config_fingerprint,
+                        "candidate_id": f"retire_{sym}_{int(now_ts.timestamp())}",
+                        "ts": now_ts,
+                        "symbol": sym,
+                        "strategy": "retirement",
+                        "direction": pos.side,
+                        "signal_generated": False,
+                        "hypothetical_final_decision": "REJECTED",
+                        "disagreement_category": "NON_COMPARABLE",
+                        "entry_price": pos.entry_price,
+                        "virtual_exit_price": trade_rec["exit_price"],
+                        "virtual_exit_reason": "RETIRED_FLATTEN",
+                        "realized_r": trade_rec["realized_r"],
+                        "mfe_r": trade_rec["mfe_r"],
+                        "mae_r": trade_rec["mae_r"],
+                        "payload_obj": {"exit_record": trade_rec}
+                    })
             
             if self.db:
                 self.db.retire_spawned_strategy(policy_id)
-                self.db.commit_spawn_observation([], [(policy_id, executor.portfolio.to_checkpoint_dict())])
-            applog.info("spawn_coordinator", f"Retired child policy {policy_id} and flattened virtual positions.")
+                self.db.commit_spawn_observation(retire_events, [(policy_id, executor.portfolio.to_checkpoint_dict())])
+            applog.info("spawn_coordinator", f"Retired child policy {policy_id} and flattened virtual positions with telemetry.")
             return True
         return False

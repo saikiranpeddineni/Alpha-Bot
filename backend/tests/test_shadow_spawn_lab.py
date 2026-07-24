@@ -27,7 +27,6 @@ async def test_causal_boundary_child_cannot_evaluate_before_spawned_at():
     cfg = ChildPolicyConfig(policy_id="child_causal_1", spawned_at=future_spawn)
     executor = ChildPolicyExecutor(cfg)
     
-    # Event timestamp is before spawned_at -> must return None
     obs = {"symbol": "NVDA", "strategy": "momentum", "direction": "long", "price": 120.0, "ts": now}
     res = executor.evaluate_observation(obs)
     assert res is None
@@ -58,7 +57,6 @@ def test_immutability_fingerprint_remains_invariant():
     assert fp1 == fp2
     assert len(fp1) == 64
 
-    # Tampering with fingerprint triggers UNAVAILABLE status
     exec1 = ChildPolicyExecutor(cfg1)
     exec1.config.ml_overrides["ml_threshold"] = 0.99
     assert exec1.assert_config_integrity() is False
@@ -115,15 +113,22 @@ async def test_child_isolation_child_a_fill_does_not_affect_child_b():
     assert "TSLA" not in exec_b.portfolio.positions
 
 
-# 6. Equity Isolation & Mark-to-Market: Child virtual equity changes do not affect Champion account
-def test_equity_isolation_child_virtual_equity_does_not_affect_champion():
-    port = SpawnVirtualPortfolio("child_eq_1", seed_capital=10000.0)
-    port.open_virtual_position("NVDA", "long", 10.0, 100.0, 95.0, 110.0, datetime.now(timezone.utc))
-    port.mark_to_market({"NVDA": 105.0})
+# 6. Multi-Position Mark-to-Market Fix: Persistent last prices preserve unrealized P&L across position ticks
+def test_multi_position_mark_to_market_persistent_prices():
+    port = SpawnVirtualPortfolio("child_multi_mtm", seed_capital=10000.0)
+    now = datetime.now(timezone.utc)
     
+    port.open_virtual_position("AAPL", "long", 10.0, 100.0, 90.0, 120.0, now)
+    port.open_virtual_position("NVDA", "long", 10.0, 200.0, 190.0, 220.0, now)
+    
+    # AAPL gains $50 (+5/share)
+    port.mark_to_market({"AAPL": 105.0})
     assert port.marked_equity == 10050.0
-    champion_account_equity = 100000.0
-    assert champion_account_equity == 100000.0
+    
+    # NVDA observation tick arrives: AAPL must retain its $105.0 last price in last_prices map
+    port.mark_to_market({"NVDA": 200.0})
+    assert port.last_prices["AAPL"] == 105.0
+    assert port.marked_equity == 10050.0
 
 
 # 7. Production Fail-Open: Child exception does not alter Champion accepted/rejected lists
@@ -199,15 +204,14 @@ def test_restart_recovery_restores_child_virtual_portfolio():
     assert "GOOGL" in port2.positions
     assert port2.positions["GOOGL"].qty == 50.0
     assert port2.positions["GOOGL"].entry_price == 320.0
+    assert port2.last_prices["GOOGL"] == 320.0
 
 
-# 12. Idempotency: Duplicate candidate events for the same timestamp produce deterministic IDs
+# 12. State-Idempotent Observation Processing: Duplicate observation yields cached event without re-mutating portfolio
 @pytest.mark.asyncio
-async def test_idempotency_duplicate_candidate_events(tmp_path):
-    db = Database(tmp_path / "test_idempotency.db")
+async def test_state_idempotent_observation_processing():
     now = datetime.now(timezone.utc)
-    
-    cfg = ChildPolicyConfig(policy_id="child_dup", spawned_at=now - timedelta(days=1))
+    cfg = ChildPolicyConfig(policy_id="child_state_idem", spawned_at=now - timedelta(days=1))
     exec1 = ChildPolicyExecutor(cfg)
     
     obs = {
@@ -216,17 +220,17 @@ async def test_idempotency_duplicate_candidate_events(tmp_path):
         "direction": "long",
         "price": 500.0,
         "ts": now,
-        "champion_candidate": {"id": "cand_123", "ml_probability": 0.60, "meta_probability": 0.70, "trade_score": 80.0}
+        "champion_candidate": {"id": "cand_999", "ml_probability": 0.60, "meta_probability": 0.70, "trade_score": 80.0}
     }
     
     rec1 = exec1.evaluate_observation(obs)
+    trade_count_after_first = exec1.portfolio.trade_count
+    
+    # Process identical observation again
     rec2 = exec1.evaluate_observation(obs)
     
     assert rec1["id"] == rec2["id"]
-    
-    # Atomic DB commit deduplicates cleanly
-    db.commit_spawn_observation([rec1], [("child_dup", exec1.portfolio.to_checkpoint_dict())])
-    db.commit_spawn_observation([rec2], [("child_dup", exec1.portfolio.to_checkpoint_dict())])
+    assert exec1.portfolio.trade_count == trade_count_after_first
 
 
 # 13. Policy Disambiguation: Same candidate + different policy IDs remain separate
@@ -259,19 +263,19 @@ async def test_retirement_enforcement_retired_children_stop_receiving_events():
     assert res is None
 
 
-# 15. Retirement Position Cleanup & Coordinator Retire: Flattens open positions deterministically
+# 15. Retirement Telemetry: Persists RETIRED_FLATTEN shadow event and checkpoint
 @pytest.mark.asyncio
-async def test_retirement_position_cleanup(tmp_path):
+async def test_retirement_position_cleanup_and_telemetry(tmp_path):
     db = Database(tmp_path / "test_retire.db")
     now = datetime.now(timezone.utc)
     coord = SpawnShadowCoordinator(db=db)
     
-    cfg = ChildPolicyConfig(policy_id="child_ret_clean", spawned_at=now - timedelta(days=1))
+    cfg = ChildPolicyConfig(policy_id="child_ret_telemetry", spawned_at=now - timedelta(days=1))
     executor = ChildPolicyExecutor(cfg)
     executor.portfolio.open_virtual_position("NFLX", "long", 10.0, 600.0, 590.0, 620.0, now)
-    coord.executors["child_ret_clean"] = executor
+    coord.executors["child_ret_telemetry"] = executor
     
-    res = coord.retire_child("child_ret_clean", now)
+    res = coord.retire_child("child_ret_telemetry", now)
     assert res is True
     assert executor.status == "RETIRED"
     assert "NFLX" not in executor.portfolio.positions
@@ -303,8 +307,7 @@ def test_malformed_timestamp_fail_closed():
     executor = ChildPolicyExecutor(cfg)
     assert executor.status == "UNAVAILABLE"
     
-    # Naive timestamp in observation also returns None
-    naive_obs = {"symbol": "AAPL", "price": 150.0, "ts": datetime.now()}  # Naive ts
+    naive_obs = {"symbol": "AAPL", "price": 150.0, "ts": datetime.now()}
     assert executor.evaluate_observation(naive_obs) is None
 
 
@@ -314,7 +317,6 @@ def test_active_ceiling_enforced(tmp_path):
     db.save_spawned_strategy("child_c1", 60000.0)
     db.save_spawned_strategy("child_c2", 30000.0)
     
-    # Attempting to spawn 3rd child exceeding $100k total ceiling raises ValueError
     with pytest.raises(ValueError, match="capital ceiling"):
         db.save_spawned_strategy("child_c3", 20000.0)
 
@@ -342,7 +344,6 @@ async def test_zero_synthetic_fallbacks_missing_scores():
     cfg = ChildPolicyConfig(policy_id="child_nosynth", spawned_at=now - timedelta(days=1))
     executor = ChildPolicyExecutor(cfg)
     
-    # Observation with NO ML probability or Meta probability in context
     obs = {"symbol": "AMD", "strategy": "momentum", "direction": "long", "price": 150.0, "ts": now}
     res = executor.evaluate_observation(obs)
     
@@ -352,20 +353,22 @@ async def test_zero_synthetic_fallbacks_missing_scores():
     assert res["hypothetical_final_decision"] == "REJECTED"
 
 
-# 21. OHLC Execution: Stop-loss trigger checked against Low (Long) and High (Short)
-def test_ohlc_execution_stop_loss_trigger():
+# 21. Intrabar Trailing Stop Sequencing: Evaluates stop entering the bar before updating trailing stop
+def test_intrabar_trailing_stop_sequencing():
     now = datetime.now(timezone.utc)
-    port = SpawnVirtualPortfolio("child_ohlc", seed_capital=10000.0)
-    port.open_virtual_position("SNDK", "long", 10.0, 100.0, 95.0, 110.0, now)
+    port = SpawnVirtualPortfolio("child_intrabar", seed_capital=10000.0, risk_config={"trailing_stop_atr_mult": 1.0})
+    port.open_virtual_position("SNDK", "long", 10.0, 100.0, 95.0, 120.0, now)
     
-    # Bar close is 98 (above 95 stop), but bar LOW touch is 94 (below 95 stop)
-    res = port.update_ohlc_and_check_exits("SNDK", open_px=99.0, high_px=99.5, low_px=94.0, close_px=98.0, now=now)
+    # Position entering bar has initial stop 95.0.
+    # Bar high is 110 (which would raise stop to 105), but bar LOW is 94 (which touches 95 stop).
+    # Intrabar sequencing fix ensures stop loss at 95.0 triggers before trailing stop is updated!
+    res = port.update_ohlc_and_check_exits("SNDK", open_px=100.0, high_px=110.0, low_px=94.0, close_px=108.0, now=now)
     assert res is not None
     assert res["exit_reason"] == "STOP_LOSS"
     assert res["exit_price"] == 95.0
 
 
-# 22. Backtest and Live-Shadow Parity: Identical inputs produce identical decisions
+# 22. Backtest and Live-Shadow Coordinator Parity
 @pytest.mark.asyncio
 async def test_backtest_live_parity_identical_causal_inputs():
     now = datetime.now(timezone.utc)
@@ -390,7 +393,7 @@ async def test_backtest_live_parity_identical_causal_inputs():
     assert res_live["disagreement_category"] == res_bt["disagreement_category"]
 
 
-# 23. Champion Parity: Champion decisions identical with spawn enabled vs disabled
+# 23. Champion Parity: SpawnShadowCoordinator does not delay or mutate Champion candidate decisions
 @pytest.mark.asyncio
 async def test_champion_parity_champion_decisions_identical_with_spawn_enabled_vs_disabled(tmp_path):
     db = Database(tmp_path / "test_champ_parity.db")
