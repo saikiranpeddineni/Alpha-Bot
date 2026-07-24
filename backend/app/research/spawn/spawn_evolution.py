@@ -56,35 +56,16 @@ class SpawnEvolutionEngine:
         trades = int(portfolio.trade_count)
         realized_r = float(portfolio.realized_r)
         expectancy_r = realized_r / trades if trades else 0.0
-        # Selection and retirement must use the worst historical drawdown, not
-        # merely the drawdown at the instant fitness happens to be sampled.
         drawdown_pct = float(portfolio.get_max_drawdown_pct())
         equity_return_pct = ((portfolio.marked_equity / portfolio.seed_capital) - 1.0) * 100.0 if portfolio.seed_capital else 0.0
-        eligible = (
-            executor.status == "ACTIVE"
-            and trades >= self.settings.min_trades_for_selection
-            and drawdown_pct <= self.settings.max_drawdown_pct
-        )
+        eligible = executor.status == "ACTIVE" and trades >= self.settings.min_trades_for_selection and drawdown_pct <= self.settings.max_drawdown_pct
         fitness = expectancy_r - 0.05 * drawdown_pct + 0.01 * equity_return_pct
         if not eligible:
             fitness = -1_000_000.0 + fitness
-        return FitnessSnapshot(
-            executor.policy_id,
-            trades,
-            realized_r,
-            expectancy_r,
-            drawdown_pct,
-            equity_return_pct,
-            fitness,
-            eligible,
-        )
+        return FitnessSnapshot(executor.policy_id, trades, realized_r, expectancy_r, drawdown_pct, equity_return_pct, fitness, eligible)
 
     def rank(self, executors: Iterable[ChildPolicyExecutor]) -> list[FitnessSnapshot]:
-        return sorted(
-            (self.score(executor) for executor in executors),
-            key=lambda item: (item.fitness, item.trades, item.policy_id),
-            reverse=True,
-        )
+        return sorted((self.score(executor) for executor in executors), key=lambda item: (item.fitness, item.trades, item.policy_id), reverse=True)
 
     def select_elites(self, executors: dict[str, ChildPolicyExecutor]) -> list[ChildPolicyExecutor]:
         return [executors[item.policy_id] for item in self.rank(executors.values()) if item.eligible][: self.settings.elite_count]
@@ -92,43 +73,29 @@ class SpawnEvolutionEngine:
     def bootstrap_configs(self, now: datetime | None = None) -> list[ChildPolicyConfig]:
         now = now or datetime.now(timezone.utc)
         seeds = [
-            (0.48, 45.0, 0.5, 0.0),
-            (0.50, 50.0, 0.7, 0.5),
-            (0.52, 55.0, 0.8, 1.0),
-            (0.55, 60.0, 0.6, 1.5),
-            (0.58, 65.0, 0.5, 2.0),
-            (0.62, 70.0, 0.4, 2.5),
+            (0.48, 45.0, 0.5, 0.0), (0.50, 50.0, 0.7, 0.5), (0.52, 55.0, 0.8, 1.0),
+            (0.55, 60.0, 0.6, 1.5), (0.58, 65.0, 0.5, 2.0), (0.62, 70.0, 0.4, 2.5),
         ]
         out = []
         for index, (ml_threshold, score, risk, trail) in enumerate(seeds[: self.settings.bootstrap_population]):
-            out.append(
-                ChildPolicyConfig(
-                    policy_id=f"spawn_g0_seed_{index + 1:02d}",
-                    parent_policy_id="champion",
-                    policy_version="g0",
-                    spawned_at=now,
-                    seed_capital=self.settings.seed_capital,
-                    execution_mode="SHADOW_ONLY",
-                    ml_overrides={"ml_threshold": ml_threshold},
-                    risk_overrides={
-                        "min_trade_score": score,
-                        "risk_per_trade_pct": risk,
-                        "max_position_pct": 20.0,
-                        "trailing_stop_atr_mult": trail,
-                    },
-                    spawn_reason="BOOTSTRAP_DIVERSE_RISK_EXIT_COHORT",
-                )
-            )
+            out.append(ChildPolicyConfig(
+                policy_id=f"spawn_g0_seed_{index + 1:02d}", parent_policy_id="champion", policy_version="g0",
+                spawned_at=now, seed_capital=self.settings.seed_capital, execution_mode="SHADOW_ONLY",
+                ml_overrides={"ml_threshold": ml_threshold},
+                risk_overrides={
+                    "min_trade_score": score, "risk_per_trade_pct": risk, "max_position_pct": 20.0,
+                    "trailing_stop_atr_mult": trail,
+                    # Fractional sizing is intentionally shadow-only. It removes integer-share
+                    # quantization from policy comparison without changing Champion execution.
+                    "allow_fractional": True,
+                },
+                spawn_reason="BOOTSTRAP_DIVERSE_RISK_EXIT_COHORT",
+            ))
         return out
 
     @staticmethod
     def _copy(config):
-        return (
-            dict(config.strategy_overrides),
-            dict(config.ml_overrides),
-            dict(config.meta_overrides),
-            dict(config.risk_overrides),
-        )
+        return dict(config.strategy_overrides), dict(config.ml_overrides), dict(config.meta_overrides), dict(config.risk_overrides)
 
     def _mutate_value(self, value, lower, upper):
         span = upper - lower
@@ -140,40 +107,35 @@ class SpawnEvolutionEngine:
         group, key = self.rng.choice(list(self.PARAM_BOUNDS))
         target = {"ml": ml, "risk": risk}[group]
         lower, upper = self.PARAM_BOUNDS[(group, key)]
-        defaults = {
-            "ml_threshold": 0.48,
-            "min_trade_score": 50.0,
-            "risk_per_trade_pct": 1.0,
-            "max_position_pct": 25.0,
-            "trailing_stop_atr_mult": 0.0,
-        }
+        defaults = {"ml_threshold": 0.48, "min_trade_score": 50.0, "risk_per_trade_pct": 1.0, "max_position_pct": 25.0, "trailing_stop_atr_mult": 0.0}
         target[key] = round(self._mutate_value(target.get(key, defaults[key]), lower, upper), 6)
+        # Keep fractional sizing invariant throughout the research lineage. This is
+        # simulation fidelity, not a mutation dimension and never reaches the broker.
+        risk["allow_fractional"] = True
         raw = f"{parent.policy_id}|{parent.compute_fingerprint()}|{self.generation}|{key}|{target[key]}|{now.isoformat()}"
         child_id = f"spawn_g{self.generation}_{hashlib.sha256(raw.encode()).hexdigest()[:12]}"
         return ChildPolicyConfig(
-            policy_id=child_id,
-            parent_policy_id=parent.policy_id,
-            policy_version=f"g{self.generation}",
-            spawned_at=now,
-            seed_capital=min(parent.seed_capital, self.settings.seed_capital),
-            execution_mode="SHADOW_ONLY",
-            strategy_overrides=strategy,
-            ml_overrides=ml,
-            meta_overrides=meta,
-            risk_overrides=risk,
-            code_commit_sha=parent.code_commit_sha,
-            model_manifest_sha=parent.model_manifest_sha,
+            policy_id=child_id, parent_policy_id=parent.policy_id, policy_version=f"g{self.generation}", spawned_at=now,
+            seed_capital=min(parent.seed_capital, self.settings.seed_capital), execution_mode="SHADOW_ONLY",
+            strategy_overrides=strategy, ml_overrides=ml, meta_overrides=meta, risk_overrides=risk,
+            code_commit_sha=parent.code_commit_sha, model_manifest_sha=parent.model_manifest_sha,
             spawn_reason=f"EVOLUTION_MUTATION:{group}.{key}",
         )
+
+    @staticmethod
+    def behavior_signature(executor: ChildPolicyExecutor) -> str:
+        """Fingerprint observable completed trade behavior, independent of config identity."""
+        payload = "|".join(
+            f"{trade.get('symbol')}:{trade.get('side')}:{trade.get('entry_at')}:{trade.get('exit_at')}:{trade.get('exit_reason')}"
+            for trade in executor.portfolio.closed_trades
+        )
+        return hashlib.sha256(payload.encode()).hexdigest()
 
     def next_generation(self, executors, now=None):
         elites = self.select_elites(executors)
         if not elites:
             return []
-        count = min(
-            max(0, self.settings.max_population - sum(executor.status == "ACTIVE" for executor in executors.values())),
-            self.settings.children_per_cycle,
-        )
+        count = min(max(0, self.settings.max_population - sum(executor.status == "ACTIVE" for executor in executors.values())), self.settings.children_per_cycle)
         if not count:
             return []
         self.generation += 1
@@ -190,17 +152,36 @@ class SpawnEvolutionEngine:
                 out.append(child)
         return out
 
+    def behavior_clone_groups(self, executors: dict[str, ChildPolicyExecutor], min_trades: int = 1) -> dict[str, list[str]]:
+        """Expose redundant evaluated policies without prematurely deleting new children.
+
+        A newborn has no forward evidence, so admission-time behavioral deduplication would
+        incorrectly classify every new child as identical. Deduplication is therefore an
+        evidence-stage concern: once children have completed trades, telemetry can identify
+        redundant execution streams and the retirement layer can act only with adequate sample.
+        """
+        groups: dict[str, list[str]] = {}
+        for executor in executors.values():
+            if executor.portfolio.trade_count < min_trades:
+                continue
+            groups.setdefault(self.behavior_signature(executor), []).append(executor.policy_id)
+        return {signature: ids for signature, ids in groups.items() if len(ids) > 1}
+
     def retirement_candidates(self, executors):
         scored = self.rank(executors.values())
         sampled = [item for item in scored if item.trades >= self.settings.min_trades_for_selection]
-        weak = [
-            item.policy_id
-            for item in sampled
-            if item.drawdown_pct > self.settings.max_drawdown_pct or item.expectancy_r < -0.20
-        ]
+        weak = [item.policy_id for item in sampled if item.drawdown_pct > self.settings.max_drawdown_pct or item.expectancy_r < -0.20]
+
+        # If sufficiently sampled children are behaviorally identical, keep the strongest
+        # representative and free redundant research slots. Never retire under-sampled
+        # policies merely because their short execution histories happen to match.
+        score_by_id = {item.policy_id: item for item in scored}
+        clones = self.behavior_clone_groups(executors, self.settings.min_trades_for_selection)
+        for ids in clones.values():
+            ordered = sorted(ids, key=lambda policy_id: (score_by_id[policy_id].fitness, score_by_id[policy_id].trades, policy_id), reverse=True)
+            weak.extend(ordered[1:])
+
         overflow = max(0, sum(executor.status == "ACTIVE" for executor in executors.values()) - self.settings.max_population)
         if overflow:
-            weak.extend(
-                [item.policy_id for item in reversed(scored) if item.trades >= self.settings.min_trades_for_selection][:overflow]
-            )
+            weak.extend([item.policy_id for item in reversed(scored) if item.trades >= self.settings.min_trades_for_selection][:overflow])
         return list(dict.fromkeys(weak))
