@@ -100,11 +100,6 @@ class ShadowLedgerRow(Base):
     vix_age: Mapped[float | None] = mapped_column(nullable=True)
     vix_feed_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
     regime_source: Mapped[str | None] = mapped_column(String(20), nullable=True)
-    # Target D Shadow Challenger telemetry (passive):
-    target_d_prob: Mapped[float | None] = mapped_column(nullable=True)
-    target_d_decision: Mapped[str | None] = mapped_column(String(20), nullable=True)
-    target_d_disagreement: Mapped[str | None] = mapped_column(String(30), nullable=True)
-    target_d_generation_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class ContextualPerformanceMemoryRow(Base):
@@ -252,10 +247,6 @@ class Database:
                     "vix_age": "FLOAT",
                     "vix_feed_status": "VARCHAR(20)",
                     "regime_source": "VARCHAR(20)",
-                    "target_d_prob": "FLOAT",
-                    "target_d_decision": "VARCHAR(20)",
-                    "target_d_disagreement": "VARCHAR(30)",
-                    "target_d_generation_id": "VARCHAR(64)",
                 }
 
                 needs_commit = False
