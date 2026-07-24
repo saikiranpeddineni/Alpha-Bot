@@ -42,15 +42,17 @@ def test_v2_runner_needs_larger_giveback_and_gets_wider_atr_room():
     assert d.locked_r >= cfg.runner_floor_r
 
 
-def test_v2_exceptional_runner_protection_is_delayed_and_material():
+def test_v2_exceptional_runner_uses_runner_then_exceptional_giveback_boundaries():
     cfg = HarvestConfig()
-    untouched = adaptive_stop(direction="long", entry_price=100, initial_stop=98, prior_peak=109,
-                              prior_close=107.0, atr=1, config=cfg)
-    protected = adaptive_stop(direction="long", entry_price=100, initial_stop=98, prior_peak=109,
-                              prior_close=106.4, atr=1, config=cfg)
-    assert untouched.state == "runner_preserve"
-    assert protected.state == "exceptional_giveback"
-    assert protected.locked_r >= cfg.exceptional_floor_r
+    runner_protected = adaptive_stop(direction="long", entry_price=100, initial_stop=98, prior_peak=109,
+                                     prior_close=107.0, atr=1, config=cfg)
+    exceptional_protected = adaptive_stop(direction="long", entry_price=100, initial_stop=98, prior_peak=109,
+                                          prior_close=106.4, atr=1, config=cfg)
+    assert runner_protected.state == "runner_giveback"
+    assert runner_protected.prior_giveback_r == pytest.approx(cfg.runner_giveback_r)
+    assert exceptional_protected.state == "exceptional_giveback"
+    assert exceptional_protected.prior_giveback_r >= cfg.exceptional_giveback_r
+    assert exceptional_protected.locked_r >= cfg.exceptional_floor_r
 
 
 def test_stop_is_monotonic_for_long_after_activation():
