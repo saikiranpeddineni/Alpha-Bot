@@ -81,6 +81,9 @@ class SignalPipeline:
         from app.ai.prediction import MetaLabelEngine
         from app.config import MODELS_DIR
         self.meta_label_engine = MetaLabelEngine(MODELS_DIR)
+        # Target D Shadow Challenger passive observer (non-interfering)
+        from app.ai.target_d_observer import TargetDShadowObserver
+        self.target_d_observer = TargetDShadowObserver()
         # Expose on SignalModel so ContinuousTrainer can invalidate meta cache after promotion
         if not hasattr(model, "_meta_label_engine") or model._meta_label_engine is None:
             model._meta_label_engine = self.meta_label_engine
@@ -312,8 +315,8 @@ class SignalPipeline:
                     mins_et=mins_et,
                 )
 
+                hard_reject_cutoff = getattr(self.trade_score_engine.risk_config, "ml_hard_reject_threshold", 0.48)
                 if ml < self.ml_threshold:
-                    hard_reject_cutoff = getattr(self.trade_score_engine.risk_config, "ml_hard_reject_threshold", 0.48)
                     if self.soft_composite_gating and ml >= hard_reject_cutoff:
                         sig.ml_gate_decision = "GRAY_ZONE_EVALUATION"
                         applog.info(
@@ -322,6 +325,18 @@ class SignalPipeline:
                         )
                     elif enforce_veto:
                         sig.ml_gate_decision = "REJECT"
+                        # Target D Shadow Observer Passive Evaluation (Read-Only Telemetry, Fail-Open)
+                        if hasattr(self, "target_d_observer") and self.target_d_observer is not None:
+                            try:
+                                td_res = self.target_d_observer.evaluate_passive(features, sig.ml_probability, sig.ml_gate_decision)
+                                sig.target_d_probability = td_res.get("target_d_probability")
+                                sig.target_d_gate_decision = td_res.get("target_d_decision")
+                                sig.target_d_disagreement = td_res.get("disagreement_category")
+                            except Exception as exc:
+                                applog.error("pipeline", f"Target D passive observation exception (fail-open): {exc}")
+                                sig.target_d_probability = None
+                                sig.target_d_gate_decision = "UNAVAILABLE"
+                                sig.target_d_disagreement = "UNAVAILABLE"
                         rejected.append((
                             sig,
                             f"ML confidence {ml:.4f} < threshold {self.ml_threshold:.4f}",
@@ -336,6 +351,19 @@ class SignalPipeline:
                         )
                 else:
                     sig.ml_gate_decision = "PASS"
+
+                # Target D Shadow Observer Passive Evaluation for non-rejected paths (Read-Only Telemetry, Fail-Open)
+                if hasattr(self, "target_d_observer") and self.target_d_observer is not None:
+                    try:
+                        td_res = self.target_d_observer.evaluate_passive(features, sig.ml_probability, sig.ml_gate_decision)
+                        sig.target_d_probability = td_res.get("target_d_probability")
+                        sig.target_d_gate_decision = td_res.get("target_d_decision")
+                        sig.target_d_disagreement = td_res.get("disagreement_category")
+                    except Exception as exc:
+                        applog.error("pipeline", f"Target D passive observation exception (fail-open): {exc}")
+                        sig.target_d_probability = None
+                        sig.target_d_gate_decision = "UNAVAILABLE"
+                        sig.target_d_disagreement = "UNAVAILABLE"
 
             # ---- Stage 3: Excursion estimates ----
             # ATR-based fallback
