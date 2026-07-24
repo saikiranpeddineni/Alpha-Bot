@@ -768,6 +768,24 @@ class TradingEngine:
                     # Fresh bar arrived — clear gap flag
                     self._last_data_bar_ts[sym_upper] = now
                     self._data_gap_symbols.discard(sym_upper)
+                    # Publish closed bar to shadow spawn army (non-blocking, fail-open)
+                    try:
+                        bar_df = new_closed[sym_upper]
+                        last_row = bar_df.iloc[-1]
+                        bar_ts = bar_df.index[-1].to_pydatetime()
+                        if bar_ts.tzinfo is None:
+                            from datetime import timezone as _tz
+                            bar_ts = bar_ts.replace(tzinfo=_tz.utc)
+                        self.spawn_coordinator.publish_market_bar(
+                            sym_upper,
+                            float(last_row.get("open", last_row.get("close", 0))),
+                            float(last_row.get("high", last_row.get("close", 0))),
+                            float(last_row.get("low", last_row.get("close", 0))),
+                            float(last_row.get("close", 0)),
+                            bar_ts,
+                        )
+                    except Exception:
+                        pass  # fail-open: shadow bar loss never blocks Champion
                 elif sym_upper in self._last_data_bar_ts:
                     elapsed = (now - self._last_data_bar_ts[sym_upper]).total_seconds()
                     if elapsed > _DATA_GAP_THRESHOLD_SECS and sym_upper not in self._data_gap_symbols:
@@ -783,6 +801,7 @@ class TradingEngine:
         else:
             # Outside regular session: clear all gap flags
             self._data_gap_symbols.clear()
+
 
         # 1. advance fill simulation / poll real fills
         if isinstance(self.broker, PaperBroker):

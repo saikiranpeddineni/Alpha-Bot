@@ -62,6 +62,14 @@ class SpawnShadowCoordinator:
         try:self.queue.put_nowait(observation); return True
         except asyncio.QueueFull:self.shadow_events_dropped+=1; return False
         except Exception as exc:applog.warning("spawn_coordinator",f"Shadow publish failed: {exc}"); return False
+    def publish_market_bar(self,symbol:str,open_px:float,high_px:float,low_px:float,close_px:float,ts:datetime)->bool:
+        """Publish a closed 1-minute OHLC bar so open child positions receive subsequent price updates."""
+        if not self.running or not self.executors:return False
+        bar_obs:dict[str,Any]={"kind":"bar","symbol":symbol.upper(),"open":open_px,"high":high_px,"low":low_px,"close":close_px,"price":close_px,"ts":ts}
+        try:self.queue.put_nowait(bar_obs); return True
+        except asyncio.QueueFull:self.shadow_events_dropped+=1; return False
+        except Exception as exc:applog.warning("spawn_coordinator",f"Shadow bar publish failed: {exc}"); return False
+
     async def _background_worker(self)->None:
         while self.running:
             try:
@@ -81,19 +89,43 @@ class SpawnShadowCoordinator:
         if not self.db:return False
         with self.db._session() as s:return s.get(SpawnShadowEventRow,event_id) is not None
     async def _process_observation_out_of_band(self,obs:dict[str,Any])->None:
+        kind=obs.get("kind","candidate")
         def work():
             events=[]; checkpoints=[]
-            for pid,ex in list(self.executors.items()):
-                try:
-                    # Durable idempotency: persisted deterministic event wins after restart,
-                    # so portfolio state can never be mutated twice by the same observation.
-                    if self.db and self._event_exists(self._event_id(pid,obs)):continue
-                    evt=ex.evaluate_observation(obs)
-                    if evt:events.append(evt); checkpoints.append((pid,ex.portfolio.to_checkpoint_dict()))
-                except Exception as err:applog.error("spawn_coordinator",f"Child {pid} evaluation failed: {err}")
+            if kind=="bar":
+                # Bar tick: update OHLC for open positions in every active child
+                sym=str(obs.get("symbol","")).upper()
+                o=float(obs.get("open",obs.get("price",0))); h=float(obs.get("high",obs.get("price",0)))
+                l=float(obs.get("low",obs.get("price",0))); c=float(obs.get("close",obs.get("price",0))); ts=obs["ts"]
+                for pid,ex in list(self.executors.items()):
+                    if ex.status!="ACTIVE" or sym not in ex.portfolio.positions:continue
+                    try:
+                        rec=ex.portfolio.update_ohlc_and_check_exits(sym,o,h,l,c,ts)
+                        checkpoints.append((pid,ex.portfolio.to_checkpoint_dict()))
+                        if rec:
+                            import hashlib
+                            evt_id=hashlib.sha256(f"{pid}|{sym}|{ts.isoformat()}|BAR_EXIT".encode()).hexdigest()
+                            events.append({"id":evt_id,"policy_id":pid,"parent_policy_id":ex.config.parent_policy_id,
+                                "config_fingerprint":ex.config_fingerprint,"candidate_id":f"bar_{sym}_{int(ts.timestamp())}",
+                                "ts":ts,"symbol":sym,"strategy":"bar","direction":"","signal_generated":False,
+                                "hypothetical_final_decision":"REJECTED","disagreement_category":"NON_COMPARABLE",
+                                "entry_price":rec.get("exit_price"),"virtual_exit_price":rec.get("exit_price"),
+                                "virtual_exit_reason":rec.get("exit_reason"),"realized_r":rec.get("realized_r"),
+                                "mfe_r":rec.get("mfe_r"),"mae_r":rec.get("mae_r"),"payload_obj":{"exit_record":rec}})
+                    except Exception as err:applog.error("spawn_coordinator",f"Child {pid} bar update failed: {err}")
+            else:
+                # Candidate observation: full evaluation + virtual entry/exit via evaluate_observation()
+                for pid,ex in list(self.executors.items()):
+                    try:
+                        if self.db and self._event_exists(self._event_id(pid,obs)):continue
+                        evt=ex.evaluate_observation(obs)
+                        if evt:events.append(evt); checkpoints.append((pid,ex.portfolio.to_checkpoint_dict()))
+                    except Exception as err:applog.error("spawn_coordinator",f"Child {pid} evaluation failed: {err}")
             if self.db and (events or checkpoints):self.db.commit_spawn_observation(events,checkpoints)
         await asyncio.to_thread(work); self.observations_processed+=1
-        if self.observations_processed%self.evolution_interval==0:await asyncio.to_thread(self._run_evolution_cycle_sync,obs.get("ts"))
+        if kind!="bar" and self.observations_processed%self.evolution_interval==0:
+            await asyncio.to_thread(self._run_evolution_cycle_sync,obs.get("ts"))
+
     def add_child(self,config:ChildPolicyConfig,persist:bool=True)->bool:
         if config.execution_mode!="SHADOW_ONLY" or config.policy_id in self.executors:return False
         fp=config.compute_fingerprint()

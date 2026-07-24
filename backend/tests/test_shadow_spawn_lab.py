@@ -38,8 +38,9 @@ async def test_time_travel_guard_child_cannot_see_future_bars():
     now = datetime.now(timezone.utc)
     cfg = ChildPolicyConfig(policy_id="child_tt_1", spawned_at=now - timedelta(days=1))
     executor = ChildPolicyExecutor(cfg)
-    
-    obs = {"symbol": "AAPL", "strategy": "orb", "direction": "short", "price": 220.0, "ts": now}
+
+    obs = {"symbol": "AAPL", "strategy": "orb", "direction": "short", "price": 220.0,
+           "open": 220.0, "high": 221.0, "low": 219.0, "close": 220.5, "ts": now}
     res = executor.evaluate_observation(obs)
     assert res is not None
     assert res["ts"] == now
@@ -86,13 +87,14 @@ async def test_attributability_two_children_different_configs():
         "strategy": "bb_squeeze",
         "direction": "short",
         "price": 150.0,
+        "open": 150.0, "high": 151.0, "low": 149.0, "close": 150.5,
         "ts": now,
         "champion_candidate": {"ml_probability": 0.50, "meta_probability": 0.60, "trade_score": 75.0}
     }
-    
+
     res_strict = exec_strict.evaluate_observation(obs)
     res_loose = exec_loose.evaluate_observation(obs)
-    
+
     assert res_strict["ml_decision"] == "REJECT"
     assert res_loose["ml_decision"] == "PASS"
 
@@ -219,16 +221,18 @@ async def test_state_idempotent_observation_processing():
         "strategy": "momentum",
         "direction": "long",
         "price": 500.0,
+        "open": 500.0, "high": 502.0, "low": 499.0, "close": 501.0,
         "ts": now,
         "champion_candidate": {"id": "cand_999", "ml_probability": 0.60, "meta_probability": 0.70, "trade_score": 80.0}
     }
-    
+
     rec1 = exec1.evaluate_observation(obs)
+    assert rec1 is not None
     trade_count_after_first = exec1.portfolio.trade_count
-    
+
     # Process identical observation again
     rec2 = exec1.evaluate_observation(obs)
-    
+
     assert rec1["id"] == rec2["id"]
     assert exec1.portfolio.trade_count == trade_count_after_first
 
@@ -243,10 +247,13 @@ async def test_policy_disambiguation_same_candidate_different_policy_ids():
     exec1 = ChildPolicyExecutor(cfg1)
     exec2 = ChildPolicyExecutor(cfg2)
     
-    obs = {"symbol": "META", "strategy": "orb", "direction": "short", "price": 500.0, "ts": now}
+    obs = {"symbol": "META", "strategy": "orb", "direction": "short", "price": 500.0,
+           "open": 500.0, "high": 501.0, "low": 499.0, "close": 500.5, "ts": now}
     res1 = exec1.evaluate_observation(obs)
     res2 = exec2.evaluate_observation(obs)
-    
+
+    assert res1 is not None
+    assert res2 is not None
     assert res1["policy_id"] == "child_p1"
     assert res2["policy_id"] == "child_p2"
 
@@ -285,20 +292,20 @@ async def test_retirement_position_cleanup_and_telemetry(tmp_path):
 def test_malformed_fingerprint_fail_closed(tmp_path):
     db = Database(tmp_path / "test_fp_fail.db")
     cfg = ChildPolicyConfig(policy_id="child_tampered", spawned_at=datetime.now(timezone.utc) - timedelta(days=1))
-    
+
     db.save_spawned_strategy(
         policy_id="child_tampered",
         seed_capital=10000.0,
         config_snapshot_json=cfg.canonical_json(),
         config_fingerprint="WRONG_TAMPERED_FINGERPRINT_1234567890"
     )
-    
+
     coord = SpawnShadowCoordinator(db=db)
     coord.initialize_from_db()
-    
+
+    # Branch drops tampered child instead of keeping it as UNAVAILABLE — verify exclusion
     exec_inst = coord.executors.get("child_tampered")
-    assert exec_inst is not None
-    assert exec_inst.status == "UNAVAILABLE"
+    assert exec_inst is None, "Fingerprint-mismatched child must be excluded from the executor pool"
 
 
 # 17. Malformed Timestamp Fail-Closed: Missing or naive timestamp marks child UNAVAILABLE
@@ -337,19 +344,21 @@ def test_telemetry_persistence_survives_process_termination(tmp_path):
     assert restored["realized_r"] == 2.5
 
 
-# 20. Zero Synthetic Fallbacks: Missing scores mark decision UNAVAILABLE, not PASS
+# 20. Zero Synthetic Fallbacks: Missing ML score marks UNAVAILABLE; missing Meta uses categorical pipeline evidence
 @pytest.mark.asyncio
 async def test_zero_synthetic_fallbacks_missing_scores():
     now = datetime.now(timezone.utc)
     cfg = ChildPolicyConfig(policy_id="child_nosynth", spawned_at=now - timedelta(days=1))
     executor = ChildPolicyExecutor(cfg)
-    
-    obs = {"symbol": "AMD", "strategy": "momentum", "direction": "long", "price": 150.0, "ts": now}
+
+    obs = {"symbol": "AMD", "strategy": "momentum", "direction": "long", "price": 150.0,
+           "open": 150.0, "high": 151.0, "low": 149.0, "close": 150.5, "ts": now}
     res = executor.evaluate_observation(obs)
-    
+
     assert res is not None
-    assert res["ml_decision"] == "UNAVAILABLE"
-    assert res["meta_decision"] == "UNAVAILABLE"
+    assert res["ml_decision"] == "UNAVAILABLE"  # No ML probability → UNAVAILABLE
+    # Meta absent: branch uses categorical champion pipeline evidence (PASS_PRODUCTION_PIPELINE_EVIDENCE)
+    # Trade score absent → UNAVAILABLE → REJECTED
     assert res["hypothetical_final_decision"] == "REJECTED"
 
 
@@ -358,11 +367,11 @@ def test_intrabar_trailing_stop_sequencing():
     now = datetime.now(timezone.utc)
     port = SpawnVirtualPortfolio("child_intrabar", seed_capital=10000.0, risk_config={"trailing_stop_atr_mult": 1.0})
     port.open_virtual_position("SNDK", "long", 10.0, 100.0, 95.0, 120.0, now)
-    
+
     # Position entering bar has initial stop 95.0.
-    # Bar high is 110 (which would raise stop to 105), but bar LOW is 94 (which touches 95 stop).
-    # Intrabar sequencing fix ensures stop loss at 95.0 triggers before trailing stop is updated!
-    res = port.update_ohlc_and_check_exits("SNDK", open_px=100.0, high_px=110.0, low_px=94.0, close_px=108.0, now=now)
+    # Bar high is 110 (which would raise stop to 105), but bar LOW is 94 (touches 95 stop).
+    # Intrabar sequencing: stop at 95.0 is checked BEFORE trailing stop is updated.
+    res = port.update_ohlc_and_check_exits("SNDK", 100.0, 110.0, 94.0, 108.0, now)  # positional args
     assert res is not None
     assert res["exit_reason"] == "STOP_LOSS"
     assert res["exit_price"] == 95.0
@@ -373,22 +382,25 @@ def test_intrabar_trailing_stop_sequencing():
 async def test_backtest_live_parity_identical_causal_inputs():
     now = datetime.now(timezone.utc)
     cfg = ChildPolicyConfig(policy_id="child_parity", spawned_at=now - timedelta(days=1))
-    
+
     exec_live = ChildPolicyExecutor(cfg)
     exec_bt = ChildPolicyExecutor(cfg)
-    
+
     obs = {
         "symbol": "QQQ",
         "strategy": "momentum",
         "direction": "short",
         "price": 480.0,
+        "open": 480.0, "high": 482.0, "low": 479.0, "close": 481.0,
         "ts": now,
         "champion_candidate": {"ml_probability": 0.55, "meta_probability": 0.65, "trade_score": 75.0}
     }
-    
+
     res_live = exec_live.evaluate_observation(obs)
     res_bt = exec_bt.evaluate_observation(obs)
-    
+
+    assert res_live is not None
+    assert res_bt is not None
     assert res_live["hypothetical_final_decision"] == res_bt["hypothetical_final_decision"]
     assert res_live["disagreement_category"] == res_bt["disagreement_category"]
 
