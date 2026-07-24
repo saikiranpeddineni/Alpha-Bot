@@ -54,14 +54,25 @@ def test_never_widens_original_risk_long_or_short():
     assert adaptive_stop(direction="short", entry_price=100, initial_stop=102, prior_peak=99.5, atr=3).stop_price <= 102
 
 
-def test_invalid_zero_risk_is_rejected():
-    with pytest.raises(ValueError):
-        adaptive_stop(direction="long", entry_price=100, initial_stop=100, prior_peak=101, atr=1)
+def test_invalid_initial_risk_is_rejected():
+    for side, stop in (("long", 100), ("long", 101), ("short", 100), ("short", 99)):
+        with pytest.raises(ValueError):
+            adaptive_stop(direction=side, entry_price=100, initial_stop=stop, prior_peak=101, atr=1)
+
+
+def test_replay_rejects_wrong_side_initial_stop():
+    df = _bars([
+        {"open":100,"high":101,"low":99,"close":100,"atr14":1.0},
+        {"open":100,"high":102,"low":99,"close":101,"atr14":1.0},
+    ])
+    long_result = replay_adaptive_harvest(df, entry_idx=0, direction="long", entry_price=100, initial_stop=101)
+    short_result = replay_adaptive_harvest(df, entry_idx=0, direction="short", entry_price=100, initial_stop=99)
+    assert long_result == {"replay_valid": False, "failure_reason": "long initial_stop must be below entry_price"}
+    assert short_result == {"replay_valid": False, "failure_reason": "short initial_stop must be above entry_price"}
 
 
 def test_replay_excludes_ambiguous_entry_bar_extremes():
     df = _bars([
-        # These extremes may have occurred before the fill at 100 and must not count.
         {"open":95,"high":110,"low":90,"close":100,"atr14":1.0},
         {"open":100,"high":101,"low":99.5,"close":100.8,"atr14":1.0},
         {"open":100.8,"high":102,"low":100.4,"close":101.8,"atr14":1.0},
