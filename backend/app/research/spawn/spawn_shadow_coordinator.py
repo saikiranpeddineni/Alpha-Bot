@@ -2,7 +2,7 @@
 
 Manages active spawned child strategy variants during live/paper engine execution.
 Evaluates market observations out-of-band via a non-blocking queue and persists
-durable research events and portfolio checkpoints to SQLite.
+durable research events and portfolio checkpoints to SQLite in atomic transactions.
 Zero connection to production Broker execution methods.
 """
 from __future__ import annotations
@@ -40,7 +40,7 @@ class SpawnShadowCoordinator:
         }
 
     def initialize_from_db(self) -> int:
-        """Loads all ACTIVE spawned strategies from database and restores portfolio checkpoints."""
+        """Loads all ACTIVE spawned strategies from database, validates fingerprints, and restores checkpoints."""
         if not self.db:
             return 0
         try:
@@ -49,32 +49,48 @@ class SpawnShadowCoordinator:
             for row in active_rows:
                 policy_id = row["policy_id"]
                 cfg_json = row.get("config_snapshot_json")
-                if cfg_json:
-                    try:
-                        cfg_dict = json.loads(cfg_json)
-                        config = ChildPolicyConfig.from_dict(cfg_dict)
-                    except Exception as e:
-                        applog.warning("spawn_coordinator", f"Failed to parse config for policy {policy_id}: {e}")
-                        config = ChildPolicyConfig(
-                            policy_id=policy_id,
-                            seed_capital=float(row.get("seed_capital", 10000.0)),
-                            status=row.get("status", "ACTIVE")
-                        )
-                else:
+                expected_fp = row.get("config_fingerprint")
+                
+                if not cfg_json:
+                    applog.warning("spawn_coordinator", f"Policy {policy_id} missing config snapshot. Marking UNAVAILABLE.")
                     config = ChildPolicyConfig(
                         policy_id=policy_id,
                         seed_capital=float(row.get("seed_capital", 10000.0)),
-                        status=row.get("status", "ACTIVE")
+                        status="UNAVAILABLE",
+                        unavailable_reason="MISSING_CONFIG_SNAPSHOT"
                     )
+                else:
+                    try:
+                        cfg_dict = json.loads(cfg_json)
+                        config = ChildPolicyConfig.from_dict(cfg_dict)
+                        # Validate stored fingerprint matches computed fingerprint
+                        computed_fp = config.compute_fingerprint()
+                        if expected_fp and expected_fp != computed_fp:
+                            applog.error(
+                                "spawn_coordinator",
+                                f"Policy {policy_id} fingerprint mismatch! Expected {expected_fp[:8]}, computed {computed_fp[:8]}. Marking UNAVAILABLE."
+                            )
+                            config.status = "UNAVAILABLE"
+                            config.unavailable_reason = "FINGERPRINT_MISMATCH"
+                    except Exception as e:
+                        applog.error("spawn_coordinator", f"Failed to parse config snapshot for {policy_id}: {e}. Marking UNAVAILABLE.")
+                        config = ChildPolicyConfig(
+                            policy_id=policy_id,
+                            seed_capital=float(row.get("seed_capital", 10000.0)),
+                            status="UNAVAILABLE",
+                            unavailable_reason=f"CORRUPT_CONFIG_SNAPSHOT: {e}"
+                        )
 
                 executor = ChildPolicyExecutor(config)
-                # Restore stateful portfolio checkpoint if present
-                chk = self.db.get_spawn_portfolio_checkpoint(policy_id)
-                if chk:
-                    executor.portfolio.restore_from_checkpoint(chk)
+                # Restore stateful portfolio checkpoint if active and present
+                if executor.status == "ACTIVE":
+                    chk = self.db.get_spawn_portfolio_checkpoint(policy_id)
+                    if chk:
+                        executor.portfolio.restore_from_checkpoint(chk)
 
                 self.executors[policy_id] = executor
-                count += 1
+                if executor.status == "ACTIVE":
+                    count += 1
             applog.info("spawn_coordinator", f"Initialized {count} active child policy executors from DB.")
             return count
         except Exception as e:
@@ -105,7 +121,7 @@ class SpawnShadowCoordinator:
 
     def publish_observation(self, observation: dict[str, Any]) -> bool:
         """Non-blocking publish of a market observation snapshot to the queue.
-        Fail-open for Champion trading: if queue is full or coordinator fails, return False silently.
+        Fail-open for Champion trading: if queue is full or coordinator stopped, return False silently.
         """
         if not self.running or not self.executors:
             return False
@@ -136,8 +152,8 @@ class SpawnShadowCoordinator:
                 applog.error("spawn_coordinator", f"Error in shadow background worker: {e}")
 
     async def _process_observation_out_of_band(self, obs: dict[str, Any]) -> None:
-        """Evaluates observation across all active child executors on worker thread and persists results."""
-        def _run_eval():
+        """Offloads evaluation AND atomic database persistence off the main asyncio event loop."""
+        def _evaluate_and_persist_sync():
             events = []
             checkpoints = []
             for policy_id, executor in list(self.executors.items()):
@@ -148,14 +164,34 @@ class SpawnShadowCoordinator:
                         checkpoints.append((policy_id, executor.portfolio.to_checkpoint_dict()))
                 except Exception as ex:
                     applog.error("spawn_coordinator", f"Error evaluating child policy {policy_id}: {ex}")
-            return events, checkpoints
+            
+            if self.db and (events or checkpoints):
+                try:
+                    self.db.commit_spawn_observation(events, checkpoints)
+                except Exception as db_err:
+                    applog.error("spawn_coordinator", f"Atomic DB commit failed for shadow observation: {db_err}")
 
         try:
-            events, checkpoints = await asyncio.to_thread(_run_eval)
-            if self.db:
-                for evt in events:
-                    self.db.save_spawn_shadow_event(evt)
-                for pid, chk in checkpoints:
-                    self.db.save_spawn_portfolio_checkpoint(pid, chk)
+            await asyncio.to_thread(_evaluate_and_persist_sync)
         except Exception as e:
-            applog.error("spawn_coordinator", f"Error persisting shadow evaluation results: {e}")
+            applog.error("spawn_coordinator", f"Error in offloaded evaluation/persistence thread: {e}")
+
+    def retire_child(self, policy_id: str, now: datetime | None = None) -> bool:
+        """Retires an active child strategy, flattens virtual positions, and saves final checkpoint."""
+        executor = self.executors.get(policy_id)
+        now_ts = now or datetime.now(timezone.utc)
+        if executor:
+            executor.status = "RETIRED"
+            # Flatten open virtual positions deterministically
+            open_symbols = list(executor.portfolio.positions.keys())
+            for sym in open_symbols:
+                pos = executor.portfolio.positions.get(sym)
+                if pos:
+                    executor.portfolio.close_virtual_position(sym, pos.entry_price, "RETIRED_FLATTEN", now_ts)
+            
+            if self.db:
+                self.db.retire_spawned_strategy(policy_id)
+                self.db.commit_spawn_observation([], [(policy_id, executor.portfolio.to_checkpoint_dict())])
+            applog.info("spawn_coordinator", f"Retired child policy {policy_id} and flattened virtual positions.")
+            return True
+        return False

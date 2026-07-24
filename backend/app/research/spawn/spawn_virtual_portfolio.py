@@ -1,12 +1,13 @@
 """Stateful Virtual Portfolio Module for Spawned Child Policies.
 
-Maintains isolated cash, equity, virtual open positions, trailing stops,
-realized R, MFE/MAE tracking, and drawdown accounting for child variants.
+Maintains isolated cash, marked equity, virtual open positions, OHLC trailing stops,
+realized/unrealized P&L, MFE/MAE tracking, and drawdown accounting for child variants.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import math
 from typing import Any
 
 
@@ -29,7 +30,7 @@ class VirtualPosition:
             self.peak_price = self.entry_price
         if not self.trough_price:
             self.trough_price = self.entry_price
-        if not self.trailing_stop:
+        if self.trailing_stop is None:
             self.trailing_stop = self.initial_stop
 
     @property
@@ -37,19 +38,27 @@ class VirtualPosition:
         r = abs(self.entry_price - self.initial_stop)
         return r if r > 0 else 1.0
 
+    def unrealized_pnl(self, current_price: float) -> float:
+        if self.side == "long":
+            return (current_price - self.entry_price) * self.qty
+        else:
+            return (self.entry_price - current_price) * self.qty
+
 
 class SpawnVirtualPortfolio:
     def __init__(self, policy_id: str, seed_capital: float = 10000.0, risk_config: dict[str, Any] | None = None) -> None:
         self.policy_id = policy_id
         self.seed_capital = seed_capital
         self.cash = seed_capital
-        self.equity = seed_capital
+        self.realized_equity = seed_capital
+        self.marked_equity = seed_capital
         self.peak_equity = seed_capital
         self.risk_config = risk_config or {}
         
         self.risk_per_trade_pct = float(self.risk_config.get("risk_per_trade_pct", 1.0))
         self.max_position_pct = float(self.risk_config.get("max_position_pct", 25.0))
         self.max_open_positions = int(self.risk_config.get("max_open_positions", 2))
+        self.allow_fractional = bool(self.risk_config.get("allow_fractional", False))
 
         self.positions: dict[str, VirtualPosition] = {}
         self.pending_orders: list[dict[str, Any]] = []
@@ -58,10 +67,22 @@ class SpawnVirtualPortfolio:
         self.trade_count: int = 0
         self.closed_trades: list[dict[str, Any]] = []
 
+    def mark_to_market(self, current_prices: dict[str, float]) -> float:
+        """Recalculates marked equity, peak equity, and drawdown across all open positions."""
+        unrealized = 0.0
+        for sym, pos in self.positions.items():
+            price = current_prices.get(sym, pos.entry_price)
+            unrealized += pos.unrealized_pnl(price)
+            
+        self.marked_equity = self.cash + unrealized
+        if self.marked_equity > self.peak_equity:
+            self.peak_equity = self.marked_equity
+        return self.marked_equity
+
     def get_drawdown_pct(self) -> float:
         if self.peak_equity <= 0:
             return 0.0
-        dd = (self.peak_equity - self.equity) / self.peak_equity * 100.0
+        dd = (self.peak_equity - self.marked_equity) / self.peak_equity * 100.0
         return max(0.0, dd)
 
     def can_open_position(self, symbol: str) -> bool:
@@ -75,11 +96,17 @@ class SpawnVirtualPortfolio:
         risk_per_share = abs(price - stop_loss)
         if risk_per_share <= 0:
             return 0.0
-        risk_amt = self.equity * (self.risk_per_trade_pct / 100.0)
+        risk_amt = self.marked_equity * (self.risk_per_trade_pct / 100.0)
         qty_risk = risk_amt / risk_per_share
-        max_notional = self.equity * (self.max_position_pct / 100.0)
+        max_notional = self.marked_equity * (self.max_position_pct / 100.0)
         qty_cap = max_notional / price
-        return max(1.0, round(min(qty_risk, qty_cap), 4))
+        
+        raw_qty = min(qty_risk, qty_cap)
+        if self.allow_fractional:
+            return max(0.0, round(raw_qty, 4))
+        else:
+            qty_int = math.floor(raw_qty)
+            return float(qty_int) if qty_int >= 1 else 0.0
 
     def open_virtual_position(
         self,
@@ -93,7 +120,7 @@ class SpawnVirtualPortfolio:
         order_id: str = ""
     ) -> VirtualPosition | None:
         sym = symbol.upper()
-        if not self.can_open_position(sym):
+        if not self.can_open_position(sym) or qty <= 0:
             return None
         
         pos = VirtualPosition(
@@ -107,46 +134,70 @@ class SpawnVirtualPortfolio:
             virtual_order_id=order_id
         )
         self.positions[sym] = pos
+        self.mark_to_market({sym: price})
         return pos
 
-    def update_price_and_check_exits(self, symbol: str, current_price: float, now: datetime) -> dict[str, Any] | None:
+    def update_ohlc_and_check_exits(
+        self,
+        symbol: str,
+        open_px: float,
+        high_px: float,
+        low_px: float,
+        close_px: float,
+        now: datetime
+    ) -> dict[str, Any] | None:
         sym = symbol.upper()
         pos = self.positions.get(sym)
         if not pos:
             return None
 
-        # Update MFE / MAE bounds
-        if current_price > pos.peak_price:
-            pos.peak_price = current_price
-        if current_price < pos.trough_price or pos.trough_price == 0:
-            pos.trough_price = current_price
+        # Update MFE / MAE bounds using full OHLC bar
+        if high_px > pos.peak_price:
+            pos.peak_price = high_px
+        if low_px < pos.trough_price or pos.trough_price == 0:
+            pos.trough_price = low_px
 
-        # Check exits (Stop Loss or Take Profit)
+        # Trailing stop update if configured
+        trail_mult = float(self.risk_config.get("trailing_stop_atr_mult", 0.0))
+        if trail_mult > 0 and pos.peak_price > pos.entry_price:
+            risk_dist = pos.initial_risk_per_share
+            if pos.side == "long":
+                new_trail = pos.peak_price - (risk_dist * trail_mult)
+                if pos.trailing_stop is None or new_trail > pos.trailing_stop:
+                    pos.trailing_stop = new_trail
+            else:
+                new_trail = pos.trough_price + (risk_dist * trail_mult)
+                if pos.trailing_stop is None or new_trail < pos.trailing_stop:
+                    pos.trailing_stop = new_trail
+
+        # Check OHLC Exits
         exit_triggered = False
         exit_reason = ""
-        exit_price = current_price
+        exit_price = close_px
 
         if pos.side == "long":
-            if current_price <= pos.trailing_stop:
+            if low_px <= (pos.trailing_stop if pos.trailing_stop is not None else pos.initial_stop):
                 exit_triggered = True
                 exit_reason = "STOP_LOSS"
-                exit_price = pos.trailing_stop
-            elif pos.initial_target and current_price >= pos.initial_target:
+                exit_price = pos.trailing_stop if pos.trailing_stop is not None else pos.initial_stop
+            elif pos.initial_target and high_px >= pos.initial_target:
                 exit_triggered = True
                 exit_reason = "TAKE_PROFIT"
                 exit_price = pos.initial_target
         else:  # short
-            if current_price >= pos.trailing_stop:
+            if high_px >= (pos.trailing_stop if pos.trailing_stop is not None else pos.initial_stop):
                 exit_triggered = True
                 exit_reason = "STOP_LOSS"
-                exit_price = pos.trailing_stop
-            elif pos.initial_target and current_price <= pos.initial_target:
+                exit_price = pos.trailing_stop if pos.trailing_stop is not None else pos.initial_stop
+            elif pos.initial_target and low_px <= pos.initial_target:
                 exit_triggered = True
                 exit_reason = "TAKE_PROFIT"
                 exit_price = pos.initial_target
 
         if exit_triggered:
             return self.close_virtual_position(sym, exit_price, exit_reason, now)
+            
+        self.mark_to_market({sym: close_px})
         return None
 
     def close_virtual_position(self, symbol: str, exit_price: float, reason: str, now: datetime) -> dict[str, Any]:
@@ -161,12 +212,11 @@ class SpawnVirtualPortfolio:
         mae_r = (pos.entry_price - pos.trough_price) / risk_per_share if pos.side == "long" else (pos.peak_price - pos.entry_price) / risk_per_share
 
         self.cash += pnl
-        self.equity += pnl
+        self.realized_equity += pnl
         self.daily_pnl += pnl
         self.realized_r += realized_r
         self.trade_count += 1
-        if self.equity > self.peak_equity:
-            self.peak_equity = self.equity
+        self.mark_to_market({sym: exit_price})
 
         trade_rec = {
             "policy_id": self.policy_id,
@@ -175,8 +225,8 @@ class SpawnVirtualPortfolio:
             "qty": pos.qty,
             "entry_price": pos.entry_price,
             "exit_price": exit_price,
-            "entry_at": pos.entry_at.isoformat(),
-            "exit_at": now.isoformat(),
+            "entry_at": pos.entry_at.isoformat() if hasattr(pos.entry_at, "isoformat") else str(pos.entry_at),
+            "exit_at": now.isoformat() if hasattr(now, "isoformat") else str(now),
             "pnl": pnl,
             "realized_r": realized_r,
             "mfe_r": mfe_r,
@@ -186,8 +236,6 @@ class SpawnVirtualPortfolio:
         self.closed_trades.append(trade_rec)
         return trade_rec
 
-
-
     def to_checkpoint_dict(self) -> dict[str, Any]:
         pos_dict = {}
         for sym, pos in self.positions.items():
@@ -196,7 +244,7 @@ class SpawnVirtualPortfolio:
                 "side": pos.side,
                 "qty": pos.qty,
                 "entry_price": pos.entry_price,
-                "entry_at": pos.entry_at.isoformat(),
+                "entry_at": pos.entry_at.isoformat() if hasattr(pos.entry_at, "isoformat") else str(pos.entry_at),
                 "initial_stop": pos.initial_stop,
                 "initial_target": pos.initial_target,
                 "trailing_stop": pos.trailing_stop,
@@ -207,7 +255,7 @@ class SpawnVirtualPortfolio:
         return {
             "policy_id": self.policy_id,
             "cash": self.cash,
-            "equity": self.equity,
+            "equity": self.marked_equity,
             "peak_equity": self.peak_equity,
             "positions": pos_dict,
             "pending_orders": self.pending_orders,
@@ -219,8 +267,9 @@ class SpawnVirtualPortfolio:
 
     def restore_from_checkpoint(self, checkpoint: dict[str, Any]) -> None:
         self.cash = float(checkpoint.get("cash", self.seed_capital))
-        self.equity = float(checkpoint.get("equity", self.seed_capital))
-        self.peak_equity = float(checkpoint.get("peak_equity", self.equity))
+        self.marked_equity = float(checkpoint.get("equity", self.seed_capital))
+        self.realized_equity = self.cash
+        self.peak_equity = float(checkpoint.get("peak_equity", self.marked_equity))
         self.daily_pnl = float(checkpoint.get("daily_pnl", 0.0))
         self.realized_r = float(checkpoint.get("realized_r", 0.0))
         self.trade_count = int(checkpoint.get("trade_count", 0))
@@ -229,7 +278,14 @@ class SpawnVirtualPortfolio:
         self.positions.clear()
         for sym, p in pos_dict.items():
             entry_at_raw = p.get("entry_at")
-            entry_at = datetime.fromisoformat(entry_at_raw) if isinstance(entry_at_raw, str) else datetime.now(timezone.utc)
+            if isinstance(entry_at_raw, str):
+                try:
+                    entry_at = datetime.fromisoformat(entry_at_raw)
+                except ValueError:
+                    entry_at = datetime.now(timezone.utc)
+            else:
+                entry_at = datetime.now(timezone.utc)
+                
             self.positions[sym.upper()] = VirtualPosition(
                 symbol=sym.upper(),
                 side=p.get("side", "long"),

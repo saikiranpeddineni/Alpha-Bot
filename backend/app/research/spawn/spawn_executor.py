@@ -7,7 +7,7 @@ Zero references to live Broker execution methods.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-import uuid
+import hashlib
 from typing import Any
 
 from app.research.spawn.spawn_config import ChildPolicyConfig
@@ -23,10 +23,12 @@ class ChildPolicyExecutor:
         self.config_fingerprint = config.compute_fingerprint()
         
         # Enforce fail-closed on malformed spawn timestamp
-        if not isinstance(config.spawned_at, datetime):
+        if not isinstance(config.spawned_at, datetime) or config.spawned_at.tzinfo is None:
             self.status = "UNAVAILABLE"
+            self.unavailable_reason = config.unavailable_reason or "MISSING_OR_NAIVE_SPAWN_TIMESTAMP"
         else:
             self.status = config.status
+            self.unavailable_reason = None
 
         self.portfolio = SpawnVirtualPortfolio(
             policy_id=self.policy_id,
@@ -34,25 +36,34 @@ class ChildPolicyExecutor:
             risk_config=config.risk_overrides
         )
 
+    def assert_config_integrity(self) -> bool:
+        """Verifies that runtime configuration matches initial immutable fingerprint."""
+        if self.config.compute_fingerprint() != self.config_fingerprint:
+            self.status = "UNAVAILABLE"
+            self.unavailable_reason = "CONFIG_FINGERPRINT_MUTATION_DETECTED"
+            return False
+        return True
+
     def is_eligible_at(self, ts: datetime) -> bool:
         """Enforces strict causal spawn boundary: child cannot evaluate data before spawned_at."""
+        if not self.assert_config_integrity():
+            return False
         if self.status != "ACTIVE":
             return False
-        if not isinstance(self.config.spawned_at, datetime):
+        if not isinstance(ts, datetime) or ts.tzinfo is None:
             return False
-        
-        # Normalize timezone awareness
-        spawn_ts = self.config.spawned_at
-        if spawn_ts.tzinfo is None and ts.tzinfo is not None:
-            spawn_ts = spawn_ts.replace(tzinfo=ts.tzinfo)
-        elif spawn_ts.tzinfo is not None and ts.tzinfo is None:
-            spawn_ts = spawn_ts.astimezone(ts.tzinfo)
+        if not isinstance(self.config.spawned_at, datetime) or self.config.spawned_at.tzinfo is None:
+            return False
             
-        return ts >= spawn_ts
+        return ts >= self.config.spawned_at
 
     def evaluate_observation(self, observation: dict[str, Any]) -> dict[str, Any] | None:
         """Evaluates a market observation snapshot independently for this child policy variant."""
-        ts = observation.get("ts") or datetime.now(timezone.utc)
+        ts = observation.get("ts")
+        # Strict fail-closed timestamp validation: reject missing or naive timestamps
+        if not isinstance(ts, datetime) or ts.tzinfo is None:
+            return None
+
         if not self.is_eligible_at(ts):
             return None
 
@@ -60,42 +71,70 @@ class ChildPolicyExecutor:
         strategy = observation.get("strategy", "momentum")
         direction = observation.get("direction", "long").lower()
         price = float(observation.get("price", 0.0))
+        
+        open_px = float(observation.get("open", price))
+        high_px = float(observation.get("high", price))
+        low_px = float(observation.get("low", price))
+        close_px = float(observation.get("close", price))
+
         champion_cand = observation.get("champion_candidate") or {}
         cand_id = champion_cand.get("id") or f"{symbol}_{strategy.upper()}_{int(ts.timestamp())}"
 
-        # Check existing position price updates & exits
-        exit_rec = self.portfolio.update_price_and_check_exits(symbol, price, ts)
+        # 1. Update OHLC price and check virtual exits (Stop Loss / Take Profit / Trailing Stop)
+        exit_rec = self.portfolio.update_ohlc_and_check_exits(symbol, open_px, high_px, low_px, close_px, ts)
 
-        # Independent Policy Evaluation
-        # 1. Strategy Signal check (overrides check)
+        # 2. Independent Strategy Signal Check
         min_atr = float(self.config.strategy_overrides.get("min_atr", 0.0))
         curr_atr = float(observation.get("atr", 1.0))
-        signal_gen = curr_atr >= min_atr
+        
+        rsi_period = int(self.config.strategy_overrides.get("rsi_period", 0))
+        curr_rsi = observation.get("rsi")
+        rsi_pass = True
+        if rsi_period > 0 and curr_rsi is not None:
+            rsi_pass = float(curr_rsi) < 30.0 if direction == "long" else float(curr_rsi) > 70.0
 
-        # 2. ML Probability check
+        signal_gen = (curr_atr >= min_atr) and rsi_pass
+
+        # 3. Independent ML Probability Check (NO SYNTHETIC DEFAULTS)
         raw_ml_prob = champion_cand.get("ml_probability")
         if raw_ml_prob is None:
-            raw_ml_prob = observation.get("ml_probability", 0.50)
+            raw_ml_prob = observation.get("ml_probability")
         
         ml_thresh = float(self.config.ml_overrides.get("ml_threshold", 0.4800))
-        ml_pass = float(raw_ml_prob) >= ml_thresh
-        ml_dec = "PASS" if ml_pass else "REJECT"
+        if raw_ml_prob is not None:
+            ml_pass = float(raw_ml_prob) >= ml_thresh
+            ml_dec = "PASS" if ml_pass else "REJECT"
+        else:
+            # Require ML probability to be explicitly provided in context; no synthetic 0.50 fallback
+            ml_pass = False
+            ml_dec = "UNAVAILABLE"
 
-        # 3. Meta Label Probability check
+        # 4. Independent Meta Label Probability Check (NO SYNTHETIC DEFAULTS)
         raw_meta_prob = champion_cand.get("meta_probability")
         if raw_meta_prob is None:
-            raw_meta_prob = observation.get("meta_probability", 0.60)
+            raw_meta_prob = observation.get("meta_probability")
             
         meta_thresh = float(self.config.meta_overrides.get("meta_threshold", 0.5500))
-        meta_pass = float(raw_meta_prob) >= meta_thresh
-        meta_dec = "PASS" if meta_pass else "REJECT"
+        if raw_meta_prob is not None:
+            meta_pass = float(raw_meta_prob) >= meta_thresh
+            meta_dec = "PASS" if meta_pass else "REJECT"
+        else:
+            # Require Meta probability to be explicitly provided; no synthetic 0.60 fallback
+            meta_pass = False
+            meta_dec = "UNAVAILABLE"
 
-        # 4. Trade Score check
-        raw_trade_score = champion_cand.get("trade_score") or observation.get("trade_score", 70.0)
+        # 5. Independent Trade Score Check (NO SYNTHETIC DEFAULTS)
+        raw_trade_score = champion_cand.get("trade_score") if "trade_score" in champion_cand else observation.get("trade_score")
         score_thresh = float(self.config.risk_overrides.get("min_trade_score", 50.0))
-        score_pass = float(raw_trade_score) >= score_thresh
+        if raw_trade_score is not None:
+            score_pass = float(raw_trade_score) >= score_thresh
+            score_dec = "PASS" if score_pass else "REJECT"
+        else:
+            # Require TradeScore to be explicitly provided; no synthetic 70.0 fallback
+            score_pass = False
+            score_dec = "UNAVAILABLE"
 
-        # 5. Virtual Risk / Concurrency check
+        # 6. Virtual Risk & Sizing Check
         can_enter = self.portfolio.can_open_position(symbol)
         risk_dec = "PASS" if can_enter else "REJECT_CONCURRENCY"
 
@@ -127,22 +166,29 @@ class ChildPolicyExecutor:
 
         if hypo_pass:
             qty = self.portfolio.calculate_position_size(price, stop_loss)
-            virt_order_id = f"virt_{self.policy_id}_{uuid.uuid4().hex[:8]}"
-            pos = self.portfolio.open_virtual_position(
-                symbol=symbol,
-                side=direction,
-                qty=qty,
-                price=price,
-                stop_loss=stop_loss,
-                take_profit=take_profit,
-                now=ts,
-                order_id=virt_order_id
-            )
-            if pos:
-                virt_fill_px = price
+            if qty > 0:
+                # Deterministic virtual order ID
+                virt_order_id = f"virt_{self.policy_id}_{hashlib.sha256(f'{cand_id}|{ts.isoformat()}'.encode()).hexdigest()[:10]}"
+                pos = self.portfolio.open_virtual_position(
+                    symbol=symbol,
+                    side=direction,
+                    qty=qty,
+                    price=price,
+                    stop_loss=stop_loss,
+                    take_profit=take_profit,
+                    now=ts,
+                    order_id=virt_order_id
+                )
+                if pos:
+                    virt_fill_px = price
+
+        # Deterministic Event ID: sha256(policy_id + candidate_id + ts_iso + EVALUATION)
+        det_evt_id = hashlib.sha256(
+            f"{self.policy_id}|{cand_id}|{ts.isoformat()}|EVALUATION".encode("utf-8")
+        ).hexdigest()
 
         event_rec = {
-            "id": f"evt_{self.policy_id}_{uuid.uuid4().hex[:12]}",
+            "id": det_evt_id,
             "policy_id": self.policy_id,
             "parent_policy_id": self.config.parent_policy_id,
             "config_fingerprint": self.config_fingerprint,

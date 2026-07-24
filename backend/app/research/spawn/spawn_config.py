@@ -5,7 +5,7 @@ and SHA256 fingerprint calculation to guarantee immutable research identity.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -17,10 +17,11 @@ class ChildPolicyConfig:
     policy_id: str
     parent_policy_id: str = "champion"
     policy_version: str = "v1"
-    spawned_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    spawned_at: datetime | None = field(default_factory=lambda: datetime.now(timezone.utc))
     seed_capital: float = 10000.0
     status: str = "ACTIVE"
     execution_mode: str = "SHADOW_ONLY"
+    unavailable_reason: str | None = None
     
     # Strategy overrides (e.g., {"rsi2_period": 3, "trailing_stop_atr_mult": 1.5})
     strategy_overrides: dict[str, Any] = field(default_factory=dict)
@@ -60,15 +61,21 @@ class ChildPolicyConfig:
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> ChildPolicyConfig:
         spawned_at_raw = d.get("spawned_at")
+        status = d.get("status", "ACTIVE")
+        reason = None
+        sp_at = None
+
         if isinstance(spawned_at_raw, str):
             try:
                 sp_at = datetime.fromisoformat(spawned_at_raw)
             except ValueError:
-                sp_at = datetime.now(timezone.utc)
+                status = "UNAVAILABLE"
+                reason = "INVALID_SPAWN_TIMESTAMP_FORMAT"
         elif isinstance(spawned_at_raw, datetime):
             sp_at = spawned_at_raw
         else:
-            sp_at = datetime.now(timezone.utc)
+            status = "UNAVAILABLE"
+            reason = "MISSING_SPAWN_TIMESTAMP"
 
         return cls(
             policy_id=d["policy_id"],
@@ -76,8 +83,9 @@ class ChildPolicyConfig:
             policy_version=d.get("policy_version", "v1"),
             spawned_at=sp_at,
             seed_capital=float(d.get("seed_capital", 10000.0)),
-            status=d.get("status", "ACTIVE"),
+            status=status,
             execution_mode=d.get("execution_mode", "SHADOW_ONLY"),
+            unavailable_reason=reason,
             strategy_overrides=d.get("strategy_overrides") or {},
             ml_overrides=d.get("ml_overrides") or {},
             meta_overrides=d.get("meta_overrides") or {},

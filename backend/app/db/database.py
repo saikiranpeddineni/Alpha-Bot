@@ -1237,22 +1237,38 @@ class Database:
         model_manifest_sha: str | None = None,
         spawned_at: datetime | None = None
     ) -> None:
-        """Saves a spawned strategy or sets it to ACTIVE with immutable research metadata."""
+        """Saves a spawned strategy or sets it to ACTIVE with immutable research metadata and $100k ceiling enforcement."""
         from datetime import timezone
+        from sqlalchemy import select, func
         now_utc = datetime.now(timezone.utc)
         sp_at = spawned_at or now_utc
         with self._session() as s:
             from app.db.database import SpawnedStrategyRow
             row = s.query(SpawnedStrategyRow).filter(SpawnedStrategyRow.policy_id == policy_id).first()
+            
+            # Transactionally calculate current active capital
+            active_stmt = select(func.sum(SpawnedStrategyRow.seed_capital)).where(
+                SpawnedStrategyRow.status == "ACTIVE",
+                SpawnedStrategyRow.policy_id != policy_id
+            )
+            current_active = s.scalar(active_stmt) or 0.0
+            if current_active + seed_capital > 100000.0:
+                raise ValueError(
+                    f"Global spawned capital ceiling ($100,000.00) exceeded: active ({current_active:.2f}) + requested ({seed_capital:.2f}) > 100000.00"
+                )
+
             if row:
                 row.status = "ACTIVE"
                 row.seed_capital = seed_capital
-                row.spawned_at = sp_at
                 row.retired_at = None
-                if parent_policy_id: row.parent_policy_id = parent_policy_id
+                # Provenance Immutability Guard: Do NOT mutate original snapshot/fingerprint if set
+                if not row.config_snapshot_json and config_snapshot_json:
+                    row.config_snapshot_json = config_snapshot_json
+                if not row.config_fingerprint and config_fingerprint:
+                    row.config_fingerprint = config_fingerprint
+                if not row.parent_policy_id and parent_policy_id:
+                    row.parent_policy_id = parent_policy_id
                 if policy_version: row.policy_version = policy_version
-                if config_snapshot_json: row.config_snapshot_json = config_snapshot_json
-                if config_fingerprint: row.config_fingerprint = config_fingerprint
                 if created_from_candidate: row.created_from_candidate = created_from_candidate
                 if spawn_reason: row.spawn_reason = spawn_reason
                 row.execution_mode = execution_mode
@@ -1276,6 +1292,86 @@ class Database:
                     model_manifest_sha=model_manifest_sha
                 )
                 s.add(row)
+            s.commit()
+
+    def commit_spawn_observation(self, events: list[dict], checkpoints: list[tuple[str, dict]]) -> None:
+        """Atomically persists shadow decision events and portfolio checkpoints in a single SQLite transaction."""
+        import json
+        from datetime import timezone
+        with self._session() as s:
+            from app.db.database import SpawnShadowEventRow, SpawnPortfolioCheckpointRow
+            now_utc = datetime.now(timezone.utc)
+            
+            for event_data in events:
+                ts_val = event_data.get("ts") or now_utc
+                evt_row = SpawnShadowEventRow(
+                    id=event_data["id"],
+                    policy_id=event_data["policy_id"],
+                    parent_policy_id=event_data.get("parent_policy_id", "champion"),
+                    config_fingerprint=event_data.get("config_fingerprint", ""),
+                    candidate_id=event_data.get("candidate_id", ""),
+                    ts=ts_val,
+                    symbol=event_data["symbol"],
+                    strategy=event_data["strategy"],
+                    direction=event_data["direction"],
+                    signal_generated=event_data.get("signal_generated", False),
+                    ml_probability=event_data.get("ml_probability"),
+                    ml_decision=event_data.get("ml_decision"),
+                    meta_probability=event_data.get("meta_probability"),
+                    meta_decision=event_data.get("meta_decision"),
+                    trade_score=event_data.get("trade_score"),
+                    risk_decision=event_data.get("risk_decision"),
+                    hypothetical_final_decision=event_data.get("hypothetical_final_decision", "REJECTED"),
+                    disagreement_category=event_data.get("disagreement_category", "NON_COMPARABLE"),
+                    entry_price=event_data.get("entry_price"),
+                    stop_loss=event_data.get("stop_loss"),
+                    take_profit=event_data.get("take_profit"),
+                    virtual_order_id=event_data.get("virtual_order_id"),
+                    virtual_fill_price=event_data.get("virtual_fill_price"),
+                    virtual_exit_price=event_data.get("virtual_exit_price"),
+                    virtual_exit_reason=event_data.get("virtual_exit_reason"),
+                    realized_r=event_data.get("realized_r"),
+                    mfe_r=event_data.get("mfe_r"),
+                    mae_r=event_data.get("mae_r"),
+                    payload_json=json.dumps(event_data.get("payload_obj")) if event_data.get("payload_obj") else None,
+                )
+                s.merge(evt_row)
+
+            for policy_id, checkpoint_data in checkpoints:
+                pos_json = json.dumps(checkpoint_data.get("positions", {}))
+                pending_json = json.dumps(checkpoint_data.get("pending_orders", []))
+                
+                chk_row = s.query(SpawnPortfolioCheckpointRow).filter(
+                    SpawnPortfolioCheckpointRow.policy_id == policy_id
+                ).first()
+                
+                if chk_row:
+                    chk_row.updated_at = now_utc
+                    chk_row.cash = float(checkpoint_data.get("cash", 10000.0))
+                    chk_row.equity = float(checkpoint_data.get("equity", 10000.0))
+                    chk_row.peak_equity = float(checkpoint_data.get("peak_equity", 10000.0))
+                    chk_row.positions_json = pos_json
+                    chk_row.pending_orders_json = pending_json
+                    chk_row.daily_pnl = float(checkpoint_data.get("daily_pnl", 0.0))
+                    chk_row.realized_r = float(checkpoint_data.get("realized_r", 0.0))
+                    chk_row.trade_count = int(checkpoint_data.get("trade_count", 0))
+                    chk_row.drawdown = float(checkpoint_data.get("drawdown", 0.0))
+                else:
+                    chk_row = SpawnPortfolioCheckpointRow(
+                        policy_id=policy_id,
+                        updated_at=now_utc,
+                        cash=float(checkpoint_data.get("cash", 10000.0)),
+                        equity=float(checkpoint_data.get("equity", 10000.0)),
+                        peak_equity=float(checkpoint_data.get("peak_equity", 10000.0)),
+                        positions_json=pos_json,
+                        pending_orders_json=pending_json,
+                        daily_pnl=float(checkpoint_data.get("daily_pnl", 0.0)),
+                        realized_r=float(checkpoint_data.get("realized_r", 0.0)),
+                        trade_count=int(checkpoint_data.get("trade_count", 0)),
+                        drawdown=float(checkpoint_data.get("drawdown", 0.0)),
+                    )
+                    s.add(chk_row)
+            
             s.commit()
 
     def retire_spawned_strategy(self, policy_id: str) -> bool:

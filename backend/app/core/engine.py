@@ -413,6 +413,7 @@ class TradingEngine:
         )
         self._last_train_date = None
         self.state = EngineState.RUNNING
+        await self.spawn_coordinator.start()
         self._task = asyncio.create_task(self._run_loop(), name="trading-engine")
         applog.info(
             "engine",
@@ -446,6 +447,7 @@ class TradingEngine:
                 await self._drain_fills(utcnow())
             except Exception as exc:  # noqa: BLE001
                 applog.error("engine", f"flatten on stop failed: {exc}")
+        await self.spawn_coordinator.stop()
         if self.state != EngineState.HALTED:
             self.state = EngineState.STOPPED
         applog.info("engine", "Engine stopped")
@@ -945,6 +947,45 @@ class TradingEngine:
                     [sig for sig, _ in decision_outcome.approved_entries],
                     session=session,
                 )
+                
+                # Publish immutable candidate observations to SpawnShadowCoordinator out-of-band
+                for sig, df in candidates:
+                    try:
+                        latest_row = df.iloc[-1] if not df.empty else None
+                        open_px = float(latest_row["open"]) if latest_row is not None and "open" in latest_row else float(sig.price)
+                        high_px = float(latest_row["high"]) if latest_row is not None and "high" in latest_row else float(sig.price)
+                        low_px = float(latest_row["low"]) if latest_row is not None and "low" in latest_row else float(sig.price)
+                        close_px = float(latest_row["close"]) if latest_row is not None and "close" in latest_row else float(sig.price)
+                        
+                        cand_id = getattr(sig, "candidate_id", f"{sig.symbol}_{sig.strategy}_{int(now.timestamp())}")
+                        is_approved = any(getattr(s, "candidate_id", None) == getattr(sig, "candidate_id", None) for s, _ in decision_outcome.approved_entries)
+                        champ_decision = "accepted" if is_approved else "rejected"
+                        
+                        obs = {
+                            "symbol": sig.symbol,
+                            "strategy": sig.strategy,
+                            "direction": sig.side,
+                            "price": sig.price,
+                            "open": open_px,
+                            "high": high_px,
+                            "low": low_px,
+                            "close": close_px,
+                            "atr": float(latest_row.get("atr", 1.0)) if latest_row is not None and "atr" in latest_row else 1.0,
+                            "rsi": float(latest_row.get("rsi", 50.0)) if latest_row is not None and "rsi" in latest_row else None,
+                            "stop_loss": sig.stop_loss,
+                            "take_profit": sig.take_profit,
+                            "ts": now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc),
+                            "champion_candidate": {
+                                "id": cand_id,
+                                "ml_probability": getattr(sig, "ml_confidence", None),
+                                "meta_probability": getattr(sig, "meta_probability", None),
+                                "trade_score": getattr(sig, "trade_score", None),
+                                "final_decision": champ_decision,
+                            }
+                        }
+                        self.spawn_coordinator.publish_observation(obs)
+                    except Exception as spawn_pub_err:
+                        applog.warning("engine", f"Failed publishing shadow observation: {spawn_pub_err}")
 
                 # Process gated/rejected entries
                 for sig, reason in decision_outcome.gated_entries:
