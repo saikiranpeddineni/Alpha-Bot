@@ -450,6 +450,13 @@ class PortfolioTracker:
         basis = lot.avg_price * lot.closing_qty
         pnl = lot.realized_pnl_accum
 
+        if lot.initial_stop_loss is None and initial_stop is not None:
+            lot.initial_stop_loss = initial_stop
+            if not lot.initial_risk_per_share and lot.avg_price:
+                lot.initial_risk_per_share = abs(lot.avg_price - initial_stop)
+            if not lot.initial_risk_dollars and lot.avg_price:
+                lot.initial_risk_dollars = abs(lot.closing_qty or lot.qty) * abs(lot.avg_price - initial_stop)
+
         init_risk_dollars = lot.initial_risk_dollars
         if init_risk_dollars > 0:
             r_multiple = round(pnl / init_risk_dollars, 4)
