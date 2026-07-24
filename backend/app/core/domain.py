@@ -18,11 +18,16 @@ class Regime(StrEnum): TREND_UP="trend_up"; TREND_DOWN="trend_down"; RANGE="rang
 class Signal(BaseModel):
     symbol:str; action:SignalAction; confidence:float=Field(ge=0.,le=1.); strategy:str; reason:str; price:float|None=None; stop_loss:float|None=None; take_profit:float|None=None
     ts:datetime=Field(default_factory=utcnow); decision_bar_timestamp_utc:datetime|None=None
-    ml_probability:float|None=None; ml_gate_decision:str|None=None; meta_probability:float|None=None; meta_gate_decision:str|None=None
-    trade_score:float|None=None; trade_score_threshold:float|None=None
-    regime:Regime|None=None; score:float|None=None; candidate_id:str|None=None; strategy_params:dict|None=None; parent_candidate_id:str|None=None; risk_multiplier:float=1.
+    ml_probability:float|None=None; ml_gate_decision:str|None=None; regime:Regime|None=None; score:float|None=None; candidate_id:str|None=None; strategy_params:dict|None=None; parent_candidate_id:str|None=None; risk_multiplier:float=1.
     discovery_source:str|None=None; scanner_score:float|None=None; scanner_auc:float|None=None
     target_d_probability:float|None=None; target_d_gate_decision:str|None=None; target_d_disagreement:str|None=None
+    @property
+    def side(self)->str:
+        return "long" if self.action==SignalAction.ENTER_LONG else "short" if self.action==SignalAction.ENTER_SHORT else "exit"
+    @property
+    def ml_confidence(self)->float|None:return self.ml_probability
+    @property
+    def trade_score(self)->float|None:return float(self.score)*100.0 if self.score is not None else None
 class OrderRequest(BaseModel):
     symbol:str; side:OrderSide; qty:float; order_type:OrderType=OrderType.MARKET; limit_price:float|None=None; stop_price:float|None=None; stop_loss:float|None=None; take_profit:float|None=None
     client_order_id:str=Field(default_factory=new_id); strategy:str="manual"; reason:str=""; time_in_force:str="day"; signal_timestamp_utc:datetime|None=None; decision_bar_timestamp_utc:datetime|None=None
@@ -70,5 +75,4 @@ class AccountSnapshot(BaseModel): equity:float; cash:float; buying_power:float; 
 class Quote(BaseModel): symbol:str; price:float; change_pct:float=0.; volume:float=0.; ts:datetime=Field(default_factory=utcnow)
 class InsightItem(BaseModel): id:str=Field(default_factory=new_id); ts:datetime=Field(default_factory=utcnow); kind:str; title:str; detail:str; symbol:str|None=None; severity:str="info"
 class EngineState(StrEnum): STOPPED="stopped"; RUNNING="running"; HALTED="halted"; SAFE_MODE="safe_mode"
-class SafetyDecision(BaseModel):
-    system_state:str; market_risk_state:str; allow_new_entries:bool; risk_multiplier:float; allowed_strategies:list[str]; require_exit_only:bool; halt_reason:str|None=None
+class SafetyDecision(BaseModel): system_state:str; market_risk_state:str; allow_new_entries:bool; risk_multiplier:float; allowed_strategies:list[str]; require_exit_only:bool; halt_reason:str|None=None
