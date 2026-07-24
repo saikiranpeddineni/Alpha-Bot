@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import time
 from contextlib import asynccontextmanager
 
 # ---- Windows ProactorEventLoop fix ----------------------------------------
@@ -119,6 +120,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.websocket("/ws")
     async def ws_endpoint(ws: WebSocket) -> None:
+        t0 = time.perf_counter()
+        t_broker_ms = 0.0
         bootstrap = {
             "status": engine.status(),
             "quotes": engine.quotes_payload(),
@@ -128,6 +131,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "metrics": engine.metrics_payload(),
         }
         if engine.broker is not None:
+            tb0 = time.perf_counter()
             try:
                 bootstrap["positions"] = [p.to_payload() for p in await engine.broker.positions()]
                 account = await engine.broker.account()
@@ -139,8 +143,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "day_pnl_pct": 0.0,
                     "drawdown_pct": round(engine.portfolio.drawdown_pct(account.equity), 2) if engine.portfolio else 0.0,
                 }
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                applog.warning("ws", f"Broker calls during WebSocket bootstrap failed: {exc}")
+            t_broker_ms = round((time.perf_counter() - tb0) * 1000, 2)
+        
+        t_total_ms = round((time.perf_counter() - t0) * 1000, 2)
+        applog.debug("ws", f"WebSocket bootstrap built in {t_total_ms}ms (broker: {t_broker_ms}ms)")
         await hub.handle(ws, bootstrap)
 
     if FRONTEND_DIST.exists():

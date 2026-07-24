@@ -723,22 +723,17 @@ from fastapi.responses import JSONResponse
 @router.get("/shadow-ledger/candidates")
 async def get_shadow_ledger(request: Request, limit: int = 200) -> JSONResponse:
     engine = _engine(request)
-    signals = _db(request).get_shadow_signals(mode=engine.mode, limit=limit)
-    safe_json = json.dumps(signals, default=str)
+    db = _db(request)
+    mode = engine.mode if engine else "paper"
+    signals = await asyncio.to_thread(db.get_shadow_signals, mode=mode, limit=limit)
+    safe_json = await asyncio.to_thread(json.dumps, signals, default=str)
     return JSONResponse(content=json.loads(safe_json))
 
 
-@router.get("/shadow-ledger/analytics")
-async def get_shadow_ledger_analytics(
-    request: Request,
-    limit: int = 5000,
-    since: str | None = None,
-    min_sample: int = 30,
+def _compute_shadow_ledger_analytics_sync(
+    db, mode: str, alt_policies: list, limit: int, since: str | None, min_sample: int
 ) -> dict:
-    min_sample = max(1, min(min_sample, 200))  # clamp to [1, 200]
-
-    engine = _engine(request)
-    signals = _db(request).get_shadow_signals(mode=engine.mode, limit=limit)
+    signals = db.get_shadow_signals(mode=mode, limit=limit)
     total_available = len(signals)  # best-effort; equals limit when truncated
     truncated = total_available >= limit
     
@@ -834,7 +829,6 @@ async def get_shadow_ledger_analytics(
     
     # Alternative exits comparison
     alt_exits_totals = {}
-    alt_policies = getattr(engine.risk_config, "alternative_exits", [])
     if not isinstance(alt_policies, list):
         alt_policies = []
     policy_ids = ["exit_production"] + [alt["policy_id"] for alt in alt_policies if isinstance(alt, dict) and alt.get("policy_id")]
@@ -1178,14 +1172,28 @@ async def get_shadow_ledger_analytics(
     }
 
 
-
-@router.get("/shadow-ledger/gate-alpha")
-async def get_shadow_ledger_gate_alpha(
+@router.get("/shadow-ledger/analytics")
+async def get_shadow_ledger_analytics(
     request: Request,
     limit: int = 5000,
+    since: str | None = None,
+    min_sample: int = 30,
 ) -> dict:
+    min_sample = max(1, min(min_sample, 200))  # clamp to [1, 200]
+
     engine = _engine(request)
-    signals = _db(request).get_shadow_signals(mode=engine.mode, limit=limit)
+    db = _db(request)
+    mode = engine.mode if engine else "paper"
+    alt_policies = getattr(engine.risk_config, "alternative_exits", []) if engine and hasattr(engine, "risk_config") else []
+
+    return await asyncio.to_thread(
+        _compute_shadow_ledger_analytics_sync,
+        db, mode, alt_policies, limit, since, min_sample
+    )
+
+
+def _compute_gate_alpha_sync(db, mode: str, limit: int) -> dict:
+    signals = db.get_shadow_signals(mode=mode, limit=limit)
     total_available = len(signals)
     truncated = total_available >= limit
     
@@ -1335,6 +1343,17 @@ async def get_shadow_ledger_gate_alpha(
             "truncated": truncated,
         },
     }
+
+
+@router.get("/shadow-ledger/gate-alpha")
+async def get_shadow_ledger_gate_alpha(
+    request: Request,
+    limit: int = 5000,
+) -> dict:
+    engine = _engine(request)
+    db = _db(request)
+    mode = engine.mode if engine else "paper"
+    return await asyncio.to_thread(_compute_gate_alpha_sync, db, mode, limit)
 
 
 @router.get("/shadow-ledger/optimize-grid")
