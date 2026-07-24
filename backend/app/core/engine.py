@@ -1710,10 +1710,41 @@ class TradingEngine:
             peak = self._position_peaks.get(symbol)
             trough = self._position_troughs.get(symbol)
             
-            init_stop = order.stop_loss if order is not None else None
+            init_stop = self._position_initial_stops.get(symbol)
+            if init_stop is None and order is not None and getattr(order, "leg", None) == "entry" and order.stop_loss is not None:
+                init_stop = order.stop_loss
+
+            # Authority Fallback 2: Search recent orders for original entry order stop_loss
             if init_stop is None:
-                init_stop = self._position_initial_stops.get(symbol)
-            else:
+                for recent_ord in reversed(self.recent_orders):
+                    if recent_ord.symbol and recent_ord.symbol.upper() == symbol and recent_ord.stop_loss is not None:
+                        ord_leg = getattr(recent_ord, "leg", None)
+                        ord_class = getattr(recent_ord, "order_class", None)
+                        ord_side = str(getattr(recent_ord, "side", "")).lower()
+                        if ord_leg == "entry" or ord_class == "bracket" or ord_side in ["buy", "sell_short", "orderside.buy", "orderside.sell_short"]:
+                            init_stop = recent_ord.stop_loss
+                            break
+
+            # Authority Fallback 3: position.stop_loss ONLY if it still equals original entry stop (not trailed)
+            if init_stop is None and self.portfolio is not None:
+                try:
+                    positions_dict = getattr(self.portfolio, "positions", {})
+                    pos = positions_dict.get(symbol) if isinstance(positions_dict, dict) else None
+                    if pos is not None and getattr(pos, "stop_loss", None) is not None:
+                        qty_val = getattr(pos, "qty", 0.0)
+                        if isinstance(qty_val, (int, float)) and qty_val != 0:
+                            side = "long" if qty_val > 0 else "short"
+                            entry_px = float(pos.avg_entry_price) if getattr(pos, "avg_entry_price", None) else 0.0
+                            if entry_px > 0:
+                                if (side == "long" and pos.stop_loss < entry_px) or (side == "short" and pos.stop_loss > entry_px):
+                                    if side == "long" and self._position_peaks.get(symbol, entry_px) <= entry_px:
+                                        init_stop = pos.stop_loss
+                                    elif side == "short" and self._position_troughs.get(symbol, entry_px) >= entry_px:
+                                        init_stop = pos.stop_loss
+                except Exception:
+                    pass
+
+            if init_stop is not None and symbol not in self._position_initial_stops:
                 self._position_initial_stops[symbol] = init_stop
 
             trade = self.portfolio.on_fill(

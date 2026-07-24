@@ -189,3 +189,118 @@ def test_intraminute_timestamp_counterfactual_lookup():
     assert df.index[entry_idx] == pd.Timestamp("2026-07-23 13:41:00", tz="UTC")
 
 
+
+@pytest.mark.asyncio
+async def test_drain_fills_recovers_original_stop_when_map_missing(engine: TradingEngine):
+    """Regression test for F-NULL-STOP (SNDK July 23 trade):
+    When _position_initial_stops map entry is missing, _drain_fills must recover
+    the original entry order stop_loss from recent_orders rather than storing null.
+    """
+    from datetime import datetime, timezone
+    from unittest.mock import MagicMock
+    from app.core.domain import Order, OrderSide, OrderStatus, OrderType, TradeRecord, Position
+    from app.brokers.base import Fill
+
+    now = datetime.now(timezone.utc)
+    engine._position_initial_stops.clear()
+    engine.portfolio = MagicMock()
+    engine.portfolio.positions = {}
+    engine.broker = MagicMock()
+    engine.risk = MagicMock()
+
+    # Entry order with stop_loss 1657.0
+    entry_order = Order(
+        id="ord_entry_1",
+        client_order_id="client_ord_1",
+        symbol="SNDK",
+        side=OrderSide.BUY,
+        qty=12.0,
+        order_type=OrderType.MARKET,
+        stop_loss=1657.0,
+        leg="entry",
+        status=OrderStatus.FILLED
+    )
+    engine.recent_orders.append(entry_order)
+
+    # Simulated trade record returned by portfolio.on_fill on position exit
+    exit_trade = TradeRecord(
+        id="t_sndk_1",
+        symbol="SNDK",
+        side="long",
+        qty=12.0,
+        entry_price=1668.5975,
+        exit_price=1655.7583,
+        pnl=-154.07,
+        pnl_pct=-0.769,
+        r_multiple=-1.1071,
+        strategy="orb",
+        exit_reason="exit",
+        entry_at=now,
+        exit_at=now
+    )
+    engine.portfolio.on_fill = MagicMock(return_value=exit_trade)
+    engine.perf_tracker = MagicMock()
+    engine.publish = MagicMock()
+
+    # Exit fill arrives
+    exit_fill = Fill(order_id="ord_exit_1", symbol="SNDK", side=OrderSide.SELL, qty=12.0, price=1655.7583, ts=now)
+    engine.broker.drain_fills = MagicMock(return_value=[exit_fill])
+
+    await engine._drain_fills(now)
+
+    # Verify TradeRecord initial_stop was recovered as 1657.0 (passed to portfolio.on_fill)
+    assert engine.portfolio.on_fill.call_args.kwargs["initial_stop"] == 1657.0
+    assert exit_trade.pnl == -154.07
+    assert exit_trade.r_multiple == -1.1071
+
+
+@pytest.mark.asyncio
+async def test_trailed_stop_not_persisted_as_initial_stop(engine: TradingEngine):
+    """Verify that if position.stop_loss has trailed, the trailed stop is NOT persisted as initial_stop
+    when original entry stop is available.
+    """
+    from datetime import datetime, timezone
+    from unittest.mock import MagicMock
+    from app.core.domain import Order, OrderSide, OrderStatus, OrderType, TradeRecord, Position
+    from app.brokers.base import Fill
+
+    now = datetime.now(timezone.utc)
+    engine._position_initial_stops.clear()
+    engine.portfolio = MagicMock()
+    engine.broker = MagicMock()
+    engine.risk = MagicMock()
+
+    # Original entry order stop was 100.0
+    entry_order = Order(
+        id="ord_entry_2",
+        symbol="AAPL",
+        side=OrderSide.BUY,
+        qty=10.0,
+        order_type=OrderType.MARKET,
+        stop_loss=100.0,
+        leg="entry",
+        status=OrderStatus.FILLED
+    )
+    engine.recent_orders.append(entry_order)
+
+    # Position stop has subsequently trailed to 104.0 (entry price 102.0)
+    pos_trailed = Position(symbol="AAPL", qty=10.0, avg_entry_price=102.0, market_price=106.0, stop_loss=104.0)
+    engine.portfolio.positions = {"AAPL": pos_trailed}
+    engine._position_peaks["AAPL"] = 107.0  # Trailing occurred
+
+    trade = TradeRecord(
+        id="t_aapl_2", symbol="AAPL", side="long", qty=10.0,
+        entry_price=102.0, exit_price=105.0, pnl=30.0, pnl_pct=2.94,
+        r_multiple=1.5, strategy="orb", exit_reason="tp", entry_at=now, exit_at=now
+    )
+    engine.portfolio.on_fill = MagicMock(return_value=trade)
+    engine.perf_tracker = MagicMock()
+    engine.publish = MagicMock()
+
+    exit_fill = Fill(order_id="ord_exit_2", symbol="AAPL", side=OrderSide.SELL, qty=10.0, price=105.0, ts=now)
+    engine.broker.drain_fills = MagicMock(return_value=[exit_fill])
+
+    await engine._drain_fills(now)
+
+    # Original entry stop (100.0) must be used, NOT the trailed stop (104.0)
+    assert engine.portfolio.on_fill.call_args.kwargs["initial_stop"] == 100.0
