@@ -1,8 +1,9 @@
 """Causal adaptive profit-harvesting policy for replay and shadow evaluation.
 
-This module does not gate entries or increase initial risk. It converts the
-prior-bar maximum favourable excursion (MFE) into a monotonic protective stop.
-All decisions are based only on information available before the current bar.
+V2 is intentionally runner-first. Reaching an MFE threshold alone never tightens
+risk. Profit protection activates only after a completed bar confirms meaningful
+giveback from a sufficiently mature excursion. Decisions use prior completed-bar
+state only; the ambiguous fill bar remains excluded from replay.
 """
 
 from dataclasses import dataclass
@@ -11,19 +12,22 @@ from typing import Any
 
 @dataclass(frozen=True)
 class HarvestConfig:
-    """R-based profit states with volatility-aware runner protection."""
+    """Runner-first, giveback-confirmed R-based harvesting policy."""
 
-    breakeven_trigger_r: float = 0.75
-    lock_trigger_r: float = 1.50
-    runner_trigger_r: float = 2.50
-    exceptional_trigger_r: float = 4.00
-    breakeven_lock_r: float = 0.05
-    lock_floor_r: float = 0.75
-    runner_floor_r: float = 1.50
-    exceptional_floor_r: float = 2.75
-    lock_atr_mult: float = 2.25
-    runner_atr_mult: float = 2.75
-    exceptional_atr_mult: float = 2.25
+    # V1's unconditional 0.75R breakeven promotion harmed 73% of evidenced
+    # historical winners. V2 deliberately leaves early winners untouched.
+    activation_mfe_r: float = 1.50
+    runner_mfe_r: float = 2.50
+    exceptional_mfe_r: float = 4.00
+    activation_giveback_r: float = 0.75
+    runner_giveback_r: float = 1.00
+    exceptional_giveback_r: float = 1.25
+    lock_floor_r: float = 0.25
+    runner_floor_r: float = 0.75
+    exceptional_floor_r: float = 1.50
+    lock_atr_mult: float = 2.75
+    runner_atr_mult: float = 3.25
+    exceptional_atr_mult: float = 3.50
 
 
 @dataclass(frozen=True)
@@ -31,6 +35,7 @@ class HarvestDecision:
     state: str
     stop_price: float
     prior_mfe_r: float
+    prior_giveback_r: float
     locked_r: float
 
 
@@ -45,9 +50,16 @@ def _validate_initial_risk(side: str, entry_price: float, initial_stop: float) -
 
 
 def adaptive_stop(*, direction: str, entry_price: float, initial_stop: float,
-                  prior_peak: float, atr: float, current_stop: float | None = None,
+                  prior_peak: float, atr: float, prior_close: float | None = None,
+                  current_stop: float | None = None,
                   config: HarvestConfig | None = None) -> HarvestDecision:
-    """Return a monotonic stop using only prior-bar state."""
+    """Return a monotonic V2 stop using prior completed-bar state only.
+
+    A high-water mark by itself is not a reason to harvest. Protection is armed
+    only when the prior completed close has surrendered enough R from that peak.
+    This prevents ordinary pullbacks on developing runners from causing the V1
+    0.05R/0.75R choke observed in empirical validation.
+    """
     cfg = config or HarvestConfig()
     side = direction.lower()
     if side not in {"long", "short"}:
@@ -59,22 +71,24 @@ def adaptive_stop(*, direction: str, entry_price: float, initial_stop: float,
     if side == "long":
         favourable = max(0.0, prior_peak - entry_price)
         base_stop = max(initial_stop, current_stop if current_stop is not None else initial_stop)
+        giveback = max(0.0, prior_peak - (prior_close if prior_close is not None else prior_peak))
     else:
         favourable = max(0.0, entry_price - prior_peak)
         base_stop = min(initial_stop, current_stop if current_stop is not None else initial_stop)
-    mfe_r = favourable / risk
+        giveback = max(0.0, (prior_close if prior_close is not None else prior_peak) - prior_peak)
 
-    state = "initial_risk"
+    mfe_r = favourable / risk
+    giveback_r = giveback / risk
+    state = "runner_preserve"
     floor_r = None
     atr_mult = None
-    if mfe_r >= cfg.exceptional_trigger_r:
-        state, floor_r, atr_mult = "exceptional_runner", cfg.exceptional_floor_r, cfg.exceptional_atr_mult
-    elif mfe_r >= cfg.runner_trigger_r:
-        state, floor_r, atr_mult = "runner", cfg.runner_floor_r, cfg.runner_atr_mult
-    elif mfe_r >= cfg.lock_trigger_r:
-        state, floor_r, atr_mult = "profit_lock", cfg.lock_floor_r, cfg.lock_atr_mult
-    elif mfe_r >= cfg.breakeven_trigger_r:
-        state, floor_r = "breakeven", cfg.breakeven_lock_r
+
+    if mfe_r >= cfg.exceptional_mfe_r and giveback_r >= cfg.exceptional_giveback_r:
+        state, floor_r, atr_mult = "exceptional_giveback", cfg.exceptional_floor_r, cfg.exceptional_atr_mult
+    elif mfe_r >= cfg.runner_mfe_r and giveback_r >= cfg.runner_giveback_r:
+        state, floor_r, atr_mult = "runner_giveback", cfg.runner_floor_r, cfg.runner_atr_mult
+    elif mfe_r >= cfg.activation_mfe_r and giveback_r >= cfg.activation_giveback_r:
+        state, floor_r, atr_mult = "confirmed_giveback", cfg.lock_floor_r, cfg.lock_atr_mult
 
     stop = base_stop
     if floor_r is not None:
@@ -88,23 +102,18 @@ def adaptive_stop(*, direction: str, entry_price: float, initial_stop: float,
                 stop = min(stop, prior_peak + atr_mult * atr)
 
     locked_r = ((stop - entry_price) / risk) if side == "long" else ((entry_price - stop) / risk)
-    return HarvestDecision(state, float(stop), float(mfe_r), float(locked_r))
+    return HarvestDecision(state, float(stop), float(mfe_r), float(giveback_r), float(locked_r))
 
 
 def replay_adaptive_harvest(df: Any, *, entry_idx: int, direction: str,
                             entry_price: float, initial_stop: float,
                             max_bars: int = 60,
                             config: HarvestConfig | None = None) -> dict[str, Any]:
-    """Causally replay adaptive harvesting over complete post-entry OHLC bars.
+    """Causally replay V2 over complete post-entry OHLC bars.
 
-    ``entry_idx`` identifies the bar containing the fill. Because minute OHLC does
-    not reveal whether that bar's high/low happened before or after the fill, the
-    entry bar is deliberately excluded. Replay starts at ``entry_idx + 1``. This
-    sacrifices up to one minute of observable path rather than manufacturing MFE,
-    MAE, or a stop hit from pre-entry price action.
-
-    Stop for each evaluated bar is calculated from the previous completed peak.
-    No fixed TP is used, intentionally preserving right-tail participation.
+    ``entry_idx`` is the fill-containing bar and is excluded because OHLC cannot
+    establish whether its extremes occurred before or after the fill. Each stop
+    decision uses only peak/close/ATR information from completed prior bars.
     """
     if entry_idx < 0 or entry_idx >= len(df):
         return {}
@@ -122,28 +131,32 @@ def replay_adaptive_harvest(df: Any, *, entry_idx: int, direction: str,
         return {"replay_valid": False, "failure_reason": "no_complete_post_entry_bars"}
 
     peak = entry_price
+    prior_close = entry_price
+    prior_atr = 0.0
     mfe_price = entry_price
     mae_price = entry_price
     current_stop = initial_stop
     exit_price = None
     exit_reason = "time"
     exit_ts = None
-    state = "initial_risk"
+    state = "runner_preserve"
     bars_held = 0
 
     for step, (bar_ts, bar) in enumerate(bars.iterrows()):
         bars_held = step + 1
         high, low = float(bar["high"]), float(bar["low"])
         open_price = float(bar["open"])
-        atr = float(bar.get("atr14", 0.0) or 0.0)
-        decision = adaptive_stop(direction=side, entry_price=entry_price,
-                                 initial_stop=initial_stop, prior_peak=peak, atr=max(0.0, atr),
-                                 current_stop=current_stop, config=config)
+
+        # Strict causality: even ATR is taken from the previous completed bar.
+        decision = adaptive_stop(
+            direction=side, entry_price=entry_price, initial_stop=initial_stop,
+            prior_peak=peak, prior_close=prior_close, atr=max(0.0, prior_atr),
+            current_stop=current_stop, config=config,
+        )
         current_stop, state = decision.stop_price, decision.state
 
         stop_hit = low <= current_stop if side == "long" else high >= current_stop
         if stop_hit:
-            # Gap-through stops cannot receive a better fill than the bar open.
             if side == "long":
                 exit_price = open_price if open_price < current_stop else current_stop
                 mae_price = min(mae_price, exit_price)
@@ -161,6 +174,8 @@ def replay_adaptive_harvest(df: Any, *, entry_idx: int, direction: str,
         else:
             mfe_price, mae_price = min(mfe_price, low), max(mae_price, high)
             peak = min(peak, low)
+        prior_close = float(bar["close"])
+        prior_atr = float(bar.get("atr14", 0.0) or 0.0)
 
     if exit_price is None:
         exit_price = float(bars["close"].iloc[-1])
@@ -174,6 +189,7 @@ def replay_adaptive_harvest(df: Any, *, entry_idx: int, direction: str,
     giveback = mfe_r - realized_r
     return {
         "replay_valid": True,
+        "policy_version": "v2_giveback_confirmed",
         "entry_price": round(entry_price, 4), "exit_price": round(exit_price, 4),
         "exit_reason": exit_reason, "exit_timestamp": str(exit_ts), "bars_held": bars_held,
         "harvest_state": state, "final_stop": round(current_stop, 4),
