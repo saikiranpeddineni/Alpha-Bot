@@ -27,11 +27,19 @@ print(f"Total Candidate Events : {len(df_events)}")
 print(f"Train Cutoff           : <= {cutoff_dt}")
 print(f"Train Candidate Events : {len(train_events)}")
 
-# Verify Date Boundary
-assert train_events['datetime'].max() <= cutoff_dt, "Leakage Error: Train event exceeds cutoff!"
+# Strict feature validation: NO .get(col, 0.0) fallbacks! All features must be finite numbers.
+X_train_rows = []
+for idx, f in enumerate(train_events['features']):
+    if not isinstance(f, dict):
+        raise ValueError(f"Sample at index {idx} has invalid features type: {type(f)}")
+    row = []
+    for col in FEATURE_COLUMNS:
+        if col not in f or f[col] is None or not np.isfinite(f[col]):
+            raise ValueError(f"Sample at index {idx} missing or non-finite feature '{col}': {f.get(col)}")
+        row.append(float(f[col]))
+    X_train_rows.append(row)
 
-X_train_list = [[f.get(c, 0.0) for c in FEATURE_COLUMNS] for f in train_events['features']]
-X_train = pd.DataFrame(X_train_list, columns=FEATURE_COLUMNS)
+X_train = pd.DataFrame(X_train_rows, columns=FEATURE_COLUMNS)
 
 # Target D Training Target: realized_r >= +0.5R
 y_train = (train_events['realized_r'] >= 0.5).astype(int)

@@ -319,26 +319,51 @@ class SignalPipeline:
                 if ml < self.ml_threshold:
                     if self.soft_composite_gating and ml >= hard_reject_cutoff:
                         sig.ml_gate_decision = "GRAY_ZONE_EVALUATION"
+                        applog.info(
+                            "pipeline",
+                            f"{symbol}: ML gray zone active ({ml:.4f} in [{hard_reject_cutoff:.2f}, {self.ml_threshold:.2f}]). Evaluating Meta & TradeScore."
+                        )
                     elif enforce_veto:
                         sig.ml_gate_decision = "REJECT"
+                        # Target D Shadow Observer Passive Evaluation (Read-Only Telemetry, Fail-Open)
+                        if hasattr(self, "target_d_observer") and self.target_d_observer is not None:
+                            try:
+                                td_res = self.target_d_observer.evaluate_passive(features, sig.ml_probability, sig.ml_gate_decision)
+                                sig.target_d_probability = td_res.get("target_d_probability")
+                                sig.target_d_gate_decision = td_res.get("target_d_decision")
+                                sig.target_d_disagreement = td_res.get("disagreement_category")
+                            except Exception as exc:
+                                applog.error("pipeline", f"Target D passive observation exception (fail-open): {exc}")
+                                sig.target_d_probability = None
+                                sig.target_d_gate_decision = "UNAVAILABLE"
+                                sig.target_d_disagreement = "UNAVAILABLE"
+                        rejected.append((
+                            sig,
+                            f"ML confidence {ml:.4f} < threshold {self.ml_threshold:.4f}",
+                        ))
+                        continue
                     else:
                         sig.ml_gate_decision = "BASE_FALLBACK_BYPASS"
+                        applog.info(
+                            "pipeline",
+                            f"{symbol}: RSI2 BASE_FALLBACK ML advisory bypass active: "
+                            f"prob={ml:.4f} < threshold={self.ml_threshold:.4f} (mins_et={mins_et})"
+                        )
                 else:
                     sig.ml_gate_decision = "PASS"
 
-                # Target D Shadow Observer Passive Evaluation (Read-Only Telemetry)
+                # Target D Shadow Observer Passive Evaluation for non-rejected paths (Read-Only Telemetry, Fail-Open)
                 if hasattr(self, "target_d_observer") and self.target_d_observer is not None:
-                    td_res = self.target_d_observer.evaluate_passive(features, sig.ml_probability, sig.ml_gate_decision)
-                    sig.target_d_probability = td_res.get("target_d_probability")
-                    sig.target_d_gate_decision = td_res.get("target_d_decision")
-                    sig.target_d_disagreement = td_res.get("disagreement_category")
-
-                if sig.ml_gate_decision == "REJECT":
-                    rejected.append((
-                        sig,
-                        f"ML confidence {ml:.4f} < threshold {self.ml_threshold:.4f}",
-                    ))
-                    continue
+                    try:
+                        td_res = self.target_d_observer.evaluate_passive(features, sig.ml_probability, sig.ml_gate_decision)
+                        sig.target_d_probability = td_res.get("target_d_probability")
+                        sig.target_d_gate_decision = td_res.get("target_d_decision")
+                        sig.target_d_disagreement = td_res.get("disagreement_category")
+                    except Exception as exc:
+                        applog.error("pipeline", f"Target D passive observation exception (fail-open): {exc}")
+                        sig.target_d_probability = None
+                        sig.target_d_gate_decision = "UNAVAILABLE"
+                        sig.target_d_disagreement = "UNAVAILABLE"
 
             # ---- Stage 3: Excursion estimates ----
             # ATR-based fallback

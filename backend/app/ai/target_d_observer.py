@@ -1,6 +1,7 @@
 """Target D Shadow Challenger Observer.
 Passive, read-only observer that records hypothetical Target D ML decisions for production strategy candidates.
 Strictly non-interfering: Zero authority over order execution, sizing, risk, or production signal decisions.
+Fail-open: Missing features, corrupt artifacts, or prediction exceptions return UNAVAILABLE telemetry and never block signal execution.
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ class TargetDShadowObserver:
         self._load_artifact()
 
     def _load_artifact(self) -> None:
-        """Loads immutable model and metadata artifacts."""
+        """Loads immutable model and metadata artifacts safely."""
         try:
             if os.path.exists(self.model_path):
                 self.model = joblib.load(self.model_path)
@@ -43,6 +44,7 @@ class TargetDShadowObserver:
                 self.threshold = float(self.metadata.get("threshold", 0.48))
         except Exception as exc:
             applog.error("target_d_observer", f"Failed to load Target D artifact: {exc}")
+            self.model = None
 
     def evaluate_passive(
         self,
@@ -55,24 +57,34 @@ class TargetDShadowObserver:
         
         Returns a telemetry dictionary containing Target D predictions and disagreement classification.
         GUARANTEE: Zero side-effects. Does not mutate inputs or alter pipeline decisions.
+        Fail-Open: Missing features, corrupt artifacts, or prediction exceptions return UNAVAILABLE telemetry.
         """
+        unavailable_res = {
+            "target_d_probability": None,
+            "target_d_decision": "UNAVAILABLE",
+            "target_d_threshold": self.threshold,
+            "generation_id": self.generation_id,
+            "disagreement_category": "UNAVAILABLE"
+        }
+
         if self.model is None or features is None:
-            return {
-                "target_d_probability": None,
-                "target_d_decision": "UNAVAILABLE",
-                "target_d_threshold": self.threshold,
-                "generation_id": self.generation_id,
-                "disagreement_category": "UNAVAILABLE"
-            }
+            return unavailable_res
 
         try:
-            # Build feature array in EXACT order of FEATURE_COLUMNS
-            if isinstance(features, pd.Series):
-                x_vec = [float(features.get(c, 0.0)) for c in FEATURE_COLUMNS]
-            elif isinstance(features, dict):
-                x_vec = [float(features.get(c, 0.0)) for c in FEATURE_COLUMNS]
-            else:
-                x_vec = [0.0] * len(FEATURE_COLUMNS)
+            # Strict Feature Validation: Require all FEATURE_COLUMNS to exist, be non-null, and be finite.
+            x_vec = []
+            for col in FEATURE_COLUMNS:
+                if isinstance(features, pd.Series):
+                    val = features.get(col)
+                elif isinstance(features, dict):
+                    val = features.get(col)
+                else:
+                    return unavailable_res
+
+                if val is None or not np.isfinite(val):
+                    # Reject synthetic zero fallbacks -> Return UNAVAILABLE
+                    return unavailable_res
+                x_vec.append(float(val))
 
             X_df = pd.DataFrame([x_vec], columns=FEATURE_COLUMNS)
             probs = self.model.predict_proba(X_df)[0]
@@ -84,7 +96,7 @@ class TargetDShadowObserver:
             target_d_pass = target_d_prob >= self.threshold
             target_d_decision = "PASS" if target_d_pass else "REJECT"
 
-            master_pass = master_decision in ("PASS", "GRAY_ZONE_EVALUATION", "BASE_FALLBACK_BYPASS")
+            master_pass = master_decision in ("PASS", "GRAY_ZONE_EVALUATION", "BASE_FALLBACK_BYPASS", "TEMPORAL_BYPASS")
             
             # Categorize Disagreement
             if master_pass and target_d_pass:
@@ -106,10 +118,4 @@ class TargetDShadowObserver:
             }
         except Exception as exc:
             applog.error("target_d_observer", f"Passive evaluation error: {exc}")
-            return {
-                "target_d_probability": None,
-                "target_d_decision": "ERROR",
-                "target_d_threshold": self.threshold,
-                "generation_id": self.generation_id,
-                "disagreement_category": "ERROR"
-            }
+            return unavailable_res
