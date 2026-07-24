@@ -1,8 +1,14 @@
-"""Bounded evolutionary controller for the SHADOW-ONLY spawn laboratory."""
+"""Bounded evolutionary controller for the SHADOW-ONLY spawn laboratory.
+
+The objective is research quality, not a requested backtest return. Evolution rewards
+capital-normalized growth and expectancy while explicitly penalizing drawdown and
+insufficient evidence. Nothing in this module has broker authority.
+"""
 from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
+import math
 import random
 from typing import Iterable
 from app.research.spawn.spawn_config import ChildPolicyConfig
@@ -16,9 +22,11 @@ class EvolutionSettings:
     children_per_cycle: int = 6
     min_trades_for_selection: int = 12
     max_drawdown_pct: float = 12.0
-    mutation_fraction: float = 0.08
+    mutation_fraction: float = 0.12
     seed_capital: float = 2500.0
     bootstrap_population: int = 6
+    # Require more evidence before a policy receives the full fitness benefit.
+    confidence_trade_count: int = 30
 
 
 @dataclass(frozen=True)
@@ -34,13 +42,16 @@ class FitnessSnapshot:
 
 
 class SpawnEvolutionEngine:
-    """Research-only evolution; parameters are limited to evidence the bridge actually supplies."""
+    """Research-only evolution over evidence-backed candidate/risk/exit dimensions."""
 
+    # These are laboratory bounds, not production recommendations. The wider position
+    # range lets replay measure whether unused capital contains genuine edge. Drawdown
+    # and evidence penalties below prevent raw exposure from automatically winning.
     PARAM_BOUNDS = {
         ("ml", "ml_threshold"): (0.48, 0.80),
         ("risk", "min_trade_score"): (20.0, 95.0),
-        ("risk", "risk_per_trade_pct"): (0.10, 2.0),
-        ("risk", "max_position_pct"): (2.0, 35.0),
+        ("risk", "risk_per_trade_pct"): (0.10, 3.0),
+        ("risk", "max_position_pct"): (5.0, 60.0),
         ("risk", "trailing_stop_atr_mult"): (0.0, 4.0),
     }
 
@@ -50,6 +61,8 @@ class SpawnEvolutionEngine:
         self.generation = 0
         if self.settings.elite_count >= self.settings.max_population:
             raise ValueError("elite_count must be smaller than max_population")
+        if self.settings.confidence_trade_count < self.settings.min_trades_for_selection:
+            raise ValueError("confidence_trade_count must be >= min_trades_for_selection")
 
     def score(self, executor: ChildPolicyExecutor) -> FitnessSnapshot:
         portfolio = executor.portfolio
@@ -59,7 +72,19 @@ class SpawnEvolutionEngine:
         drawdown_pct = float(portfolio.get_max_drawdown_pct())
         equity_return_pct = ((portfolio.marked_equity / portfolio.seed_capital) - 1.0) * 100.0 if portfolio.seed_capital else 0.0
         eligible = executor.status == "ACTIVE" and trades >= self.settings.min_trades_for_selection and drawdown_pct <= self.settings.max_drawdown_pct
-        fitness = expectancy_r - 0.05 * drawdown_pct + 0.01 * equity_return_pct
+
+        # Sample confidence rises smoothly from the selection floor to the configured
+        # evidence target. It prevents a spectacular 12-trade child from automatically
+        # outranking a similarly strong, much better observed policy.
+        confidence = min(1.0, trades / float(self.settings.confidence_trade_count)) if trades else 0.0
+
+        # Growth is useful only when it survives drawdown. log1p keeps very large replay
+        # returns from dominating linearly and works symmetrically for losses > -100%.
+        growth_fraction = max(-0.999999, equity_return_pct / 100.0)
+        growth_score = math.log1p(growth_fraction) * 10.0
+        drawdown_penalty = 0.12 * drawdown_pct + 0.015 * drawdown_pct * drawdown_pct
+        evidence_adjusted_edge = confidence * expectancy_r
+        fitness = evidence_adjusted_edge + growth_score - drawdown_penalty
         if not eligible:
             fitness = -1_000_000.0 + fitness
         return FitnessSnapshot(executor.policy_id, trades, realized_r, expectancy_r, drawdown_pct, equity_return_pct, fitness, eligible)
@@ -72,24 +97,27 @@ class SpawnEvolutionEngine:
 
     def bootstrap_configs(self, now: datetime | None = None) -> list[ChildPolicyConfig]:
         now = now or datetime.now(timezone.utc)
+        # Seed different capital-utilization regimes from day one instead of forcing all
+        # six policies through the same 20% position ceiling.
         seeds = [
-            (0.48, 45.0, 0.5, 0.0), (0.50, 50.0, 0.7, 0.5), (0.52, 55.0, 0.8, 1.0),
-            (0.55, 60.0, 0.6, 1.5), (0.58, 65.0, 0.5, 2.0), (0.62, 70.0, 0.4, 2.5),
+            (0.48, 45.0, 0.5, 0.0, 15.0),
+            (0.50, 50.0, 0.7, 0.5, 25.0),
+            (0.52, 55.0, 0.8, 1.0, 35.0),
+            (0.55, 60.0, 0.6, 1.5, 45.0),
+            (0.58, 65.0, 0.5, 2.0, 55.0),
+            (0.62, 70.0, 0.4, 2.5, 60.0),
         ]
         out = []
-        for index, (ml_threshold, score, risk, trail) in enumerate(seeds[: self.settings.bootstrap_population]):
+        for index, (ml_threshold, score, risk, trail, position_cap) in enumerate(seeds[: self.settings.bootstrap_population]):
             out.append(ChildPolicyConfig(
                 policy_id=f"spawn_g0_seed_{index + 1:02d}", parent_policy_id="champion", policy_version="g0",
                 spawned_at=now, seed_capital=self.settings.seed_capital, execution_mode="SHADOW_ONLY",
                 ml_overrides={"ml_threshold": ml_threshold},
                 risk_overrides={
-                    "min_trade_score": score, "risk_per_trade_pct": risk, "max_position_pct": 20.0,
-                    "trailing_stop_atr_mult": trail,
-                    # Fractional sizing is intentionally shadow-only. It removes integer-share
-                    # quantization from policy comparison without changing Champion execution.
-                    "allow_fractional": True,
+                    "min_trade_score": score, "risk_per_trade_pct": risk, "max_position_pct": position_cap,
+                    "trailing_stop_atr_mult": trail, "allow_fractional": True,
                 },
-                spawn_reason="BOOTSTRAP_DIVERSE_RISK_EXIT_COHORT",
+                spawn_reason="BOOTSTRAP_DIVERSE_CAPITAL_RISK_EXIT_COHORT",
             ))
         return out
 
@@ -104,22 +132,32 @@ class SpawnEvolutionEngine:
     def mutate(self, parent: ChildPolicyConfig, now: datetime | None = None) -> ChildPolicyConfig:
         now = now or datetime.now(timezone.utc)
         strategy, ml, meta, risk = self._copy(parent)
-        group, key = self.rng.choice(list(self.PARAM_BOUNDS))
-        target = {"ml": ml, "risk": risk}[group]
-        lower, upper = self.PARAM_BOUNDS[(group, key)]
         defaults = {"ml_threshold": 0.48, "min_trade_score": 50.0, "risk_per_trade_pct": 1.0, "max_position_pct": 25.0, "trailing_stop_atr_mult": 0.0}
-        target[key] = round(self._mutate_value(target.get(key, defaults[key]), lower, upper), 6)
-        # Keep fractional sizing invariant throughout the research lineage. This is
-        # simulation fidelity, not a mutation dimension and never reaches the broker.
+
+        # Most children alter two independent dimensions. This reduces dead mutations
+        # where a tiny threshold move never crosses a candidate decision boundary.
+        dimensions = list(self.PARAM_BOUNDS)
+        mutation_count = 2 if self.rng.random() < 0.70 else 1
+        selected = self.rng.sample(dimensions, k=mutation_count)
+        mutation_labels = []
+        for group, key in selected:
+            target = {"ml": ml, "risk": risk}[group]
+            lower, upper = self.PARAM_BOUNDS[(group, key)]
+            target[key] = round(self._mutate_value(target.get(key, defaults[key]), lower, upper), 6)
+            mutation_labels.append(f"{group}.{key}={target[key]}")
+
+        # Fractional sizing is a simulation-fidelity invariant, never an evolutionary
+        # dimension and never connected to Champion/broker sizing.
         risk["allow_fractional"] = True
-        raw = f"{parent.policy_id}|{parent.compute_fingerprint()}|{self.generation}|{key}|{target[key]}|{now.isoformat()}"
+        mutation_descriptor = ",".join(mutation_labels)
+        raw = f"{parent.policy_id}|{parent.compute_fingerprint()}|{self.generation}|{mutation_descriptor}|{now.isoformat()}"
         child_id = f"spawn_g{self.generation}_{hashlib.sha256(raw.encode()).hexdigest()[:12]}"
         return ChildPolicyConfig(
             policy_id=child_id, parent_policy_id=parent.policy_id, policy_version=f"g{self.generation}", spawned_at=now,
             seed_capital=min(parent.seed_capital, self.settings.seed_capital), execution_mode="SHADOW_ONLY",
             strategy_overrides=strategy, ml_overrides=ml, meta_overrides=meta, risk_overrides=risk,
             code_commit_sha=parent.code_commit_sha, model_manifest_sha=parent.model_manifest_sha,
-            spawn_reason=f"EVOLUTION_MUTATION:{group}.{key}",
+            spawn_reason=f"EVOLUTION_MULTI_MUTATION:{mutation_descriptor}",
         )
 
     @staticmethod
@@ -142,7 +180,7 @@ class SpawnEvolutionEngine:
         out = []
         seen = {executor.config_fingerprint for executor in executors.values()}
         attempts = 0
-        while len(out) < count and attempts < count * 20:
+        while len(out) < count and attempts < count * 30:
             parent = elites[attempts % len(elites)]
             attempts += 1
             child = self.mutate(parent.config, now)
@@ -153,13 +191,6 @@ class SpawnEvolutionEngine:
         return out
 
     def behavior_clone_groups(self, executors: dict[str, ChildPolicyExecutor], min_trades: int = 1) -> dict[str, list[str]]:
-        """Expose redundant evaluated policies without prematurely deleting new children.
-
-        A newborn has no forward evidence, so admission-time behavioral deduplication would
-        incorrectly classify every new child as identical. Deduplication is therefore an
-        evidence-stage concern: once children have completed trades, telemetry can identify
-        redundant execution streams and the retirement layer can act only with adequate sample.
-        """
         groups: dict[str, list[str]] = {}
         for executor in executors.values():
             if executor.portfolio.trade_count < min_trades:
@@ -172,9 +203,6 @@ class SpawnEvolutionEngine:
         sampled = [item for item in scored if item.trades >= self.settings.min_trades_for_selection]
         weak = [item.policy_id for item in sampled if item.drawdown_pct > self.settings.max_drawdown_pct or item.expectancy_r < -0.20]
 
-        # If sufficiently sampled children are behaviorally identical, keep the strongest
-        # representative and free redundant research slots. Never retire under-sampled
-        # policies merely because their short execution histories happen to match.
         score_by_id = {item.policy_id: item for item in scored}
         clones = self.behavior_clone_groups(executors, self.settings.min_trades_for_selection)
         for ids in clones.values():
