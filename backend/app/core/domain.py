@@ -9,6 +9,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 from enum import StrEnum
+from typing import Any
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -256,6 +257,9 @@ class TradeRecord(BaseModel):
     mae_pct: float | None = None
     capture_efficiency: float | None = None
     hold_bars: int = 0
+
+    # Shadow & Research Telemetry
+    metadata: dict[str, Any] | None = None
 
 
 class AccountSnapshot(BaseModel):

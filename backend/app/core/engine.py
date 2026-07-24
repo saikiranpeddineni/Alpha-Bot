@@ -117,6 +117,8 @@ class TradingEngine:
         self._position_peaks: dict[str, float] = {}
         self._position_troughs: dict[str, float] = {}
         self._position_initial_stops: dict[str, float | None] = {}
+        # PR #271 V2 Adaptive Harvesting: Isolated Shadow State Store (NON-AUTHORITATIVE)
+        self._v2_shadow_states: dict[str, dict] = {}
         self._last_scan_date = None
         self._last_train_date = None
         self._last_event_monitor_min = None
@@ -1118,6 +1120,9 @@ class TradingEngine:
                 self._position_peaks[symbol] = position.avg_entry_price
                 self._position_troughs[symbol] = position.avg_entry_price
                 self._position_initial_stops[symbol] = position.stop_loss
+
+            # PR #271 V2 Adaptive Harvesting: PASSIVE OBSERVER (NON-AUTHORITATIVE)
+            self._evaluate_v2_shadow_passive(symbol, position, df, now)
             
             if position.qty > 0:
                 self._position_peaks[symbol] = max(self._position_peaks[symbol], high_val)
@@ -1163,6 +1168,8 @@ class TradingEngine:
                 del self._position_troughs[symbol]
             if symbol in self._position_initial_stops:
                 del self._position_initial_stops[symbol]
+            if symbol in self._v2_shadow_states and not self._v2_shadow_states[symbol].get("is_shadow_closed"):
+                del self._v2_shadow_states[symbol]
 
         sctx = StrategyContext(position=position, equity=equity, regime=regime, now=now)
         signals = []
@@ -1465,6 +1472,170 @@ class TradingEngine:
             candidate_entries.append((sig, df))
         return candidate_entries
 
+    def _evaluate_v2_shadow_passive(self, symbol: str, position: Any, df: pd.DataFrame, now: datetime) -> None:
+        """PR #271 V2 Adaptive Harvesting: PASSIVE, NON-AUTHORITATIVE SHADOW OBSERVER.
+
+        Hard Safety Invariants:
+        1. NEVER mutates position.stop_loss or self._position_peaks.
+        2. NEVER calls _close_position_guarded() or submits/cancels/replaces broker orders.
+        3. Preserves causality: bar N evaluation uses prior completed-bar state (N-1).
+        4. Excludes ambiguous entry-bar extremes.
+        5. Idempotent: duplicate calls within the same minute index are skipped.
+        6. Once hypothetically hit, the shadow exit state freezes and does not rewrite.
+        7. Exception isolated: fails open without affecting live execution.
+        """
+        try:
+            if position is None or df.empty or len(df) < 2:
+                return
+
+            side = "long" if position.qty > 0 else "short"
+            entry_price = float(position.avg_entry_price)
+
+            # Determine initial stop from order or position or initial stop tracker
+            init_stop = position.stop_loss
+            if init_stop is None:
+                init_stop = self._position_initial_stops.get(symbol)
+
+            # Validate initial risk - if missing or invalid, disable V2 observation cleanly
+            if init_stop is None or init_stop <= 0:
+                return
+            if side == "long" and init_stop >= entry_price:
+                return
+            if side == "short" and init_stop <= entry_price:
+                return
+
+            initial_risk = abs(entry_price - init_stop)
+            if initial_risk <= 1e-6:
+                return
+
+            current_bar_ts = df.index[-1]
+
+            # Get or initialize shadow state
+            if symbol not in self._v2_shadow_states:
+                prior_close = float(df["close"].iloc[0])
+                prior_atr = float(df["atr14"].iloc[0]) if "atr14" in df.columns and pd.notna(df["atr14"].iloc[0]) else (entry_price * 0.01)
+
+                self._v2_shadow_states[symbol] = {
+                    "symbol": symbol,
+                    "side": side,
+                    "entry_price": entry_price,
+                    "initial_stop": init_stop,
+                    "initial_risk": initial_risk,
+                    "policy_version": "v2_giveback_confirmed",
+                    "prior_peak": entry_price,
+                    "prior_close": prior_close,
+                    "prior_atr": prior_atr,
+                    "proposed_stop": init_stop,
+                    "harvest_state": "runner_preserve",
+                    "mfe_r": 0.0,
+                    "mae_r": 0.0,
+                    "winner_capture": 0.0,
+                    "giveback_r": 0.0,
+                    "last_processed_ts": None,
+                    "is_shadow_closed": False,
+                    "shadow_exit_ts": None,
+                    "shadow_exit_price": None,
+                    "shadow_exit_reason": None,
+                    "shadow_realized_r": None,
+                    "state_history": []
+                }
+
+            st = self._v2_shadow_states[symbol]
+
+            # If hypothetical exit already triggered, freeze state
+            if st["is_shadow_closed"]:
+                return
+
+            # Idempotency guard: skip if already evaluated for this exact bar timestamp
+            if st["last_processed_ts"] == current_bar_ts:
+                return
+            st["last_processed_ts"] = current_bar_ts
+
+            bar = df.iloc[-1]
+            close_px = float(bar["close"])
+            high_px = float(bar["high"])
+            low_px = float(bar["low"])
+
+            # Causal state from prior completed bar (N-1)
+            prior_bar = df.iloc[-2]
+            prior_close_px = float(prior_bar["close"])
+            prior_high_px = float(prior_bar["high"])
+            prior_low_px = float(prior_bar["low"])
+            prior_atr_val = float(prior_bar["atr14"]) if "atr14" in df.columns and pd.notna(prior_bar["atr14"]) else (entry_price * 0.01)
+
+            # Update independent V2 peak (excluding ambiguous entry bar extremes if entry bar)
+            if len(df) > 2:
+                if side == "long":
+                    st["prior_peak"] = max(st["prior_peak"], prior_high_px)
+                else:
+                    st["prior_peak"] = min(st["prior_peak"], prior_low_px)
+
+            st["prior_close"] = prior_close_px
+            st["prior_atr"] = max(0.0, prior_atr_val)
+
+            # Compute V2 adaptive stop using prior completed-bar state
+            from app.analytics.adaptive_profit_harvester import HarvestConfig, adaptive_stop
+            decision = adaptive_stop(
+                direction=side,
+                entry_price=entry_price,
+                initial_stop=init_stop,
+                prior_peak=st["prior_peak"],
+                atr=st["prior_atr"],
+                prior_close=st["prior_close"],
+                current_stop=st["proposed_stop"],
+                config=HarvestConfig()  # FROZEN
+            )
+
+            st["proposed_stop"] = decision.stop_price
+            old_state = st["harvest_state"]
+            st["harvest_state"] = decision.state
+            if decision.state != old_state:
+                st["state_history"].append({
+                    "ts": str(current_bar_ts),
+                    "state": decision.state,
+                    "proposed_stop": decision.stop_price,
+                })
+
+            # Update MFE / MAE
+            if side == "long":
+                mfe_r = max(0.0, (high_px - entry_price) / initial_risk)
+                mae_r = max(0.0, (entry_price - low_px) / initial_risk)
+            else:
+                mfe_r = max(0.0, (entry_price - low_px) / initial_risk)
+                mae_r = max(0.0, (high_px - entry_price) / initial_risk)
+
+            st["mfe_r"] = max(st["mfe_r"], mfe_r)
+            st["mae_r"] = max(st["mae_r"], mae_r)
+
+            # Check hypothetical V2 shadow exit condition on current bar
+            hit_shadow_exit = False
+            exit_px = close_px
+            exit_reason = ""
+
+            if side == "long":
+                if low_px <= st["proposed_stop"]:
+                    hit_shadow_exit = True
+                    exit_px = min(float(bar["open"]), st["proposed_stop"]) if float(bar["open"]) < st["proposed_stop"] else st["proposed_stop"]
+                    exit_reason = f"v2_shadow_stop_hit ({st['harvest_state']} @ {st['proposed_stop']:.2f})"
+            else:
+                if high_px >= st["proposed_stop"]:
+                    hit_shadow_exit = True
+                    exit_px = max(float(bar["open"]), st["proposed_stop"]) if float(bar["open"]) > st["proposed_stop"] else st["proposed_stop"]
+                    exit_reason = f"v2_shadow_stop_hit ({st['harvest_state']} @ {st['proposed_stop']:.2f})"
+
+            if hit_shadow_exit:
+                st["is_shadow_closed"] = True
+                st["shadow_exit_ts"] = str(current_bar_ts)
+                st["shadow_exit_price"] = exit_px
+                st["shadow_exit_reason"] = exit_reason
+                sh_pnl = (exit_px - entry_price) if side == "long" else (entry_price - exit_px)
+                st["shadow_realized_r"] = sh_pnl / initial_risk
+                st["giveback_r"] = max(0.0, st["mfe_r"] - st["shadow_realized_r"])
+                st["winner_capture"] = (st["shadow_realized_r"] / st["mfe_r"]) if st["shadow_realized_r"] > 0 and st["mfe_r"] > 0 else 0.0
+
+        except Exception as exc:
+            applog.warning("engine.v2_shadow", f"V2 shadow passive evaluation failed for {symbol}: {exc}")
+
     async def _close_position_guarded(self, symbol: str, reason: str) -> None:
         """Close a position, skipping if a close order is already in-flight for this symbol."""
         if not hasattr(self, "_pending_close_symbols"):
@@ -1528,6 +1699,62 @@ class TradingEngine:
                 risk_manager=self.risk, now=now
             )
             if trade is not None:
+                # PR #271 V2 Shadow Harvest: Finalize counterfactual comparison metadata
+                st = self._v2_shadow_states.pop(symbol, None)
+                if st is not None:
+                    try:
+                        init_r = st.get("initial_risk") or abs(trade.entry_price - (st.get("initial_stop") or trade.entry_price)) or 1.0
+                        actual_r = trade.pnl / (init_r * abs(trade.qty) if trade.qty else init_r)
+                        if trade.r_multiple is not None:
+                            actual_r = trade.r_multiple
+
+                        v2_realized_r = st.get("shadow_realized_r")
+                        if v2_realized_r is None:
+                            v2_exit_px = trade.exit_price
+                            sh_pnl = (v2_exit_px - trade.entry_price) if trade.side == "long" else (trade.entry_price - v2_exit_px)
+                            v2_realized_r = sh_pnl / init_r
+                            v2_exit_ts = str(trade.exit_at)
+                            v2_exit_reason = f"real_trade_closed ({trade.exit_reason})"
+                        else:
+                            v2_exit_px = st.get("shadow_exit_price")
+                            v2_exit_ts = st.get("shadow_exit_ts")
+                            v2_exit_reason = st.get("shadow_exit_reason")
+
+                        delta_r = v2_realized_r - actual_r
+                        mfe_r = st.get("mfe_r", 0.0)
+                        giveback_r = max(0.0, mfe_r - v2_realized_r)
+                        winner_capture = (v2_realized_r / mfe_r) if v2_realized_r > 0 and mfe_r > 0 else 0.0
+
+                        if not hasattr(trade, "metadata") or trade.metadata is None:
+                            trade.metadata = {}
+
+                        trade.metadata["v2_shadow_harvest"] = {
+                            "is_authoritative": False,
+                            "policy_version": "v2_giveback_confirmed",
+                            "symbol": symbol,
+                            "strategy": trade.strategy,
+                            "direction": trade.side,
+                            "entry_price": trade.entry_price,
+                            "entry_at": str(trade.entry_at),
+                            "original_initial_stop": st["initial_stop"],
+                            "initial_risk": init_r,
+                            "v2_final_harvest_state": st.get("harvest_state"),
+                            "v2_final_proposed_stop": st.get("proposed_stop"),
+                            "v2_shadow_exit_price": v2_exit_px,
+                            "v2_shadow_exit_timestamp": v2_exit_ts,
+                            "v2_shadow_exit_reason": v2_exit_reason,
+                            "v2_realized_r": round(v2_realized_r, 4),
+                            "v2_mfe_r": round(mfe_r, 4),
+                            "v2_mae_r": round(st.get("mae_r", 0.0), 4),
+                            "v2_winner_capture_ratio": round(winner_capture, 4),
+                            "v2_giveback_r": round(giveback_r, 4),
+                            "baseline_realized_r": round(actual_r, 4),
+                            "delta_r": round(delta_r, 4),
+                            "v2_state_history": st.get("state_history", []),
+                        }
+                    except Exception as exc:
+                        applog.warning("engine.v2_shadow", f"Failed to attach V2 shadow harvest metadata: {exc}")
+
                 self.perf_tracker.update(trade, now=now)
                 self.db.save_trade(trade, self.mode)
                 self.publish("trade", trade.model_dump(mode="json"))
