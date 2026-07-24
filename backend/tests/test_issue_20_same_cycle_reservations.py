@@ -60,6 +60,22 @@ def test_ambiguous_pending_submission_remains_reserved() -> None:
     assert reservations.positions[0].symbol == "AAA"
 
 
+def test_partially_filled_submission_keeps_full_conservative_reservation() -> None:
+    reservations = SameCycleEntryReservations.from_snapshot(100.0, [])
+
+    assert reservations.reserve(_order("AAA", OrderSide.BUY, 8, OrderStatus.PARTIALLY_FILLED), 10.0)
+    assert reservations.cash == 20.0
+    assert reservations.positions[0].qty == 8
+
+
+def test_immediately_filled_submission_remains_reserved_for_stale_cycle_snapshot() -> None:
+    reservations = SameCycleEntryReservations.from_snapshot(100.0, [])
+
+    assert reservations.reserve(_order("AAA", OrderSide.BUY, 8, OrderStatus.FILLED), 10.0)
+    assert reservations.cash == 20.0
+    assert reservations.positions[0].qty == 8
+
+
 def test_short_reserves_exposure_but_does_not_apply_long_cash_semantics() -> None:
     reservations = SameCycleEntryReservations.from_snapshot(100.0, [])
 
