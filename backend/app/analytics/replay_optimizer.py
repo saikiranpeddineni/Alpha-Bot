@@ -35,13 +35,11 @@ class ReplayOptimizer:
     def _ranking_key(result: dict[str, Any]) -> tuple[float, float, float, float, int]:
         """Rank policies for robust harvesting rather than hindsight peak picking.
 
-        Primary objective remains expectancy (total R).  Winner capture and giveback
-        are used as tie-breakers, while unresolved evidence is penalized.  This avoids
-        selecting a policy merely because it captured one exceptional replayed move.
+        Primary objective remains expectancy (total R). Winner capture and giveback
+        are tie-breakers, while unresolved executed trades reduce the evidence weight.
         """
         resolved = int(result.get("resolved_trades", 0) or 0)
-        insufficient = int(result.get("insufficient_evidence", 0) or 0)
-        evidence_ratio = resolved / max(1, resolved + insufficient)
+        evidence_ratio = float(result.get("evidence_ratio", 0.0) or 0.0)
         return (
             float(result.get("total_realized_r", 0.0)) * evidence_ratio,
             float(result.get("avg_winner_capture_ratio", 0.0)),
@@ -56,21 +54,18 @@ class ReplayOptimizer:
             return {"results": [], "total_signals_evaluated": 0, "best_config": None}
 
         results = []
-
         for ml_thresh in self.ml_thresholds:
             for comp_thresh in self.composite_thresholds:
                 for policy in self.exit_policies:
-                    eval_res = self._evaluate_grid_point(
+                    results.append(self._evaluate_grid_point(
                         signals=signals,
                         ml_thresh=ml_thresh,
                         comp_thresh=comp_thresh,
                         exit_policy=policy,
-                    )
-                    results.append(eval_res)
+                    ))
 
         sorted_results = sorted(results, key=self._ranking_key, reverse=True)
         best_config = sorted_results[0] if sorted_results else None
-
         return {
             "total_signals_evaluated": len(signals),
             "best_config": best_config,
@@ -91,18 +86,17 @@ class ReplayOptimizer:
         insufficient_evidence = 0
         avoided_losses_r = 0.0
         missed_winners_r = 0.0
-
         total_wins = 0
         total_losses = 0
         gross_profit_r = 0.0
         gross_loss_r = 0.0
-
         total_realized_r = 0.0
         total_mfe_r = 0.0
         total_give_back_r = 0.0
+        giveback_observations = 0
         winner_captures: list[float] = []
         winner_mfe_r: list[float] = []
-        winner_realized_r: list[float] = []
+        winner_realized_with_mfe_r: list[float] = []
 
         for s in signals:
             p = s.get("payload") if isinstance(s.get("payload"), dict) else {}
@@ -114,28 +108,17 @@ class ReplayOptimizer:
                     p = {}
 
             gate_ev = s.get("gate_evidence_json") or p.get("gate_evidence_json") or {}
-
             ml_prob = float(
-                s.get("ml_confidence")
-                or s.get("ml_probability")
-                or s.get("ml_prob")
-                or p.get("ml_confidence")
-                or p.get("ml_probability")
-                or p.get("ml_prob")
-                or 0.0
+                s.get("ml_confidence") or s.get("ml_probability") or s.get("ml_prob")
+                or p.get("ml_confidence") or p.get("ml_probability") or p.get("ml_prob") or 0.0
             )
             meta_prob = float(
-                s.get("meta_probability")
-                or s.get("meta_prob")
-                or p.get("meta_probability")
-                or p.get("meta_prob")
-                or 0.0
+                s.get("meta_probability") or s.get("meta_prob")
+                or p.get("meta_probability") or p.get("meta_prob") or 0.0
             )
             trade_score = float(s.get("trade_score") or p.get("trade_score") or 0.0)
-
             portfolio_alignment = (
-                s.get("portfolio_alignment")
-                or p.get("portfolio_alignment")
+                s.get("portfolio_alignment") or p.get("portfolio_alignment")
                 or gate_ev.get("portfolio_alignment")
             )
             risk_factor = s.get("risk_factor") or p.get("risk_factor") or gate_ev.get("risk_factor")
@@ -157,21 +140,16 @@ class ReplayOptimizer:
                 entry_passed = ml_pass
 
             alt_outcomes = (
-                s.get("alternative_exits")
-                or s.get("outcomes")
-                or p.get("alternative_exits")
-                or p.get("outcomes")
-                or {}
+                s.get("alternative_exits") or s.get("outcomes")
+                or p.get("alternative_exits") or p.get("outcomes") or {}
             )
             policy_data = alt_outcomes.get(exit_policy) or {}
-
             realized_r = policy_data.get("realized_r")
             if realized_r is None:
                 sim_pnl = s.get("simulated_pnl")
                 if sim_pnl is not None:
                     realized_r = float(sim_pnl) / 100.0
 
-            # Missing excursion evidence must stay unknown, never silently become 0R.
             mfe_raw = policy_data.get("mfe_r")
             giveback_raw = policy_data.get("gave_back_r")
             capture_raw = policy_data.get("winner_capture_ratio")
@@ -189,34 +167,34 @@ class ReplayOptimizer:
                         total_mfe_r += mfe_r
                     if gave_back_r is not None:
                         total_give_back_r += gave_back_r
+                        giveback_observations += 1
 
                     if realized_r > 0:
                         total_wins += 1
                         gross_profit_r += realized_r
                         if mfe_r is not None:
                             winner_mfe_r.append(mfe_r)
-                        winner_realized_r.append(realized_r)
+                            winner_realized_with_mfe_r.append(realized_r)
                         if capture_ratio is not None and capture_ratio >= 0:
                             winner_captures.append(capture_ratio)
                     elif realized_r < 0:
                         total_losses += 1
                         gross_loss_r += abs(realized_r)
-            else:
-                if realized_r is not None:
-                    realized_r = float(realized_r)
-                    if realized_r < 0:
-                        avoided_losses_r += abs(realized_r)
-                    elif realized_r > 0:
-                        missed_winners_r += realized_r
+            elif realized_r is not None:
+                realized_r = float(realized_r)
+                if realized_r < 0:
+                    avoided_losses_r += abs(realized_r)
+                elif realized_r > 0:
+                    missed_winners_r += realized_r
 
         win_rate_pct = (total_wins / resolved_trades * 100.0) if resolved_trades > 0 else 0.0
         profit_factor = (gross_profit_r / gross_loss_r) if gross_loss_r > 0 else (gross_profit_r if gross_profit_r > 0 else 1.0)
         net_gate_alpha_r = avoided_losses_r - missed_winners_r
         avg_realized_r = (total_realized_r / resolved_trades) if resolved_trades > 0 else 0.0
-        avg_give_back_r = (total_give_back_r / resolved_trades) if resolved_trades > 0 else 0.0
+        avg_give_back_r = (total_give_back_r / giveback_observations) if giveback_observations > 0 else 0.0
         avg_winner_capture = (sum(winner_captures) / len(winner_captures)) if winner_captures else 0.0
         total_winner_mfe_r = sum(winner_mfe_r)
-        total_winner_realized_r = sum(winner_realized_r)
+        total_winner_realized_r = sum(winner_realized_with_mfe_r)
         aggregate_winner_capture = (
             total_winner_realized_r / total_winner_mfe_r if total_winner_mfe_r > 0 else 0.0
         )
