@@ -42,6 +42,19 @@ def test_selection_requires_minimum_sample_and_positive_quality():
     assert evo.select_elites({"tiny":ex})==[]
 
 
+def test_fitness_uses_historical_max_drawdown_not_current_drawdown():
+    settings=EvolutionSettings(max_population=10,elite_count=2,min_trades_for_selection=1,max_drawdown_pct=5.0)
+    evo=SpawnEvolutionEngine(settings); now=datetime.now(timezone.utc)
+    ex=ChildPolicyExecutor(ChildPolicyConfig(policy_id="dd",spawned_at=now-timedelta(days=1)))
+    ex.portfolio.trade_count=3; ex.portfolio.realized_r=3.0
+    ex.portfolio.max_drawdown_pct=7.5
+    ex.portfolio.marked_equity=ex.portfolio.peak_equity
+    assert ex.portfolio.get_drawdown_pct()==0.0
+    score=evo.score(ex)
+    assert score.drawdown_pct==7.5
+    assert score.eligible is False
+
+
 def test_next_generation_is_bounded_and_has_parent_lineage():
     settings=EvolutionSettings(max_population=4,elite_count=1,children_per_cycle=3,min_trades_for_selection=2)
     evo=SpawnEvolutionEngine(settings); now=datetime.now(timezone.utc)
@@ -73,12 +86,43 @@ async def test_persisted_event_prevents_restart_double_mutation(tmp_path):
     await coord._process_observation_out_of_band(obs)
     first_qty=coord.executors["idem"].portfolio.positions["AAPL"].qty
     first_cash=coord.executors["idem"].portfolio.cash
-    # Simulate a fresh coordinator restoring from durable DB state, then replay exact event.
     coord2=SpawnShadowCoordinator(db=db,evolution_settings=EvolutionSettings(bootstrap_population=0,max_population=4,elite_count=1))
     assert coord2.initialize_from_db()==1
     await coord2._process_observation_out_of_band(obs)
     assert coord2.executors["idem"].portfolio.positions["AAPL"].qty==first_qty
     assert coord2.executors["idem"].portfolio.cash==first_cash
+
+
+@pytest.mark.asyncio
+async def test_market_bar_advances_open_position_without_triggering_evolution(tmp_path):
+    db=Database(tmp_path/"bars.db"); now=datetime.now(timezone.utc)
+    cfg=ChildPolicyConfig(policy_id="bar_child",spawned_at=now-timedelta(minutes=1),seed_capital=2500.0)
+    coord=SpawnShadowCoordinator(db=db,evolution_settings=EvolutionSettings(bootstrap_population=0,max_population=4,elite_count=1),evolution_interval=1)
+    assert coord.add_child(cfg,persist=True)
+    port=coord.executors["bar_child"].portfolio
+    port.open_virtual_position("AAPL","long",10,100,95,110,now,"v1")
+    bar={"observation_type":"MARKET_BAR","symbol":"AAPL","open":100.0,"high":101.0,"low":99.0,"close":100.5,"ts":now+timedelta(minutes=1)}
+    await coord._process_observation_out_of_band(bar)
+    assert port.last_prices["AAPL"]==100.5
+    assert coord.market_bars_processed==1
+    assert coord.candidate_observations_processed==0
+    assert coord.evolution_cycles==0
+
+
+@pytest.mark.asyncio
+async def test_market_bar_exit_is_durable_and_restart_idempotent(tmp_path):
+    db=Database(tmp_path/"bar_exit.db"); now=datetime.now(timezone.utc)
+    cfg=ChildPolicyConfig(policy_id="bar_exit",spawned_at=now-timedelta(minutes=1),seed_capital=2500.0)
+    coord=SpawnShadowCoordinator(db=db,evolution_settings=EvolutionSettings(bootstrap_population=0,max_population=4,elite_count=1))
+    assert coord.add_child(cfg,persist=True)
+    coord.executors["bar_exit"].portfolio.open_virtual_position("AAPL","long",10,100,95,110,now,"v1")
+    bar={"observation_type":"MARKET_BAR","symbol":"AAPL","open":100.0,"high":101.0,"low":94.0,"close":96.0,"ts":now+timedelta(minutes=1)}
+    await coord._process_observation_out_of_band(bar)
+    assert coord.executors["bar_exit"].portfolio.trade_count==1
+    coord2=SpawnShadowCoordinator(db=db,evolution_settings=EvolutionSettings(bootstrap_population=0,max_population=4,elite_count=1))
+    assert coord2.initialize_from_db()==1
+    await coord2._process_observation_out_of_band(bar)
+    assert coord2.executors["bar_exit"].portfolio.trade_count==1
 
 
 def test_retirement_uses_last_trusted_mark_not_entry_price(tmp_path):
