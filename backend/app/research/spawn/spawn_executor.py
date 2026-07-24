@@ -49,11 +49,7 @@ class ChildPolicyExecutor:
             return None
 
     def process_market_bar(self, observation: dict[str, Any]) -> dict[str, Any] | None:
-        """Advance an already-open virtual position using one completed 1-minute bar.
-
-        This path never evaluates a new signal.  It exists solely so live shadow
-        positions receive the same causal OHLC lifecycle as offline replay.
-        """
+        """Advance an already-open virtual position using one completed 1-minute bar."""
         ts = observation.get("ts")
         if not isinstance(ts, datetime) or ts.tzinfo is None or not self.is_eligible_at(ts):
             return None
@@ -81,11 +77,16 @@ class ChildPolicyExecutor:
         price = self._finite(observation.get("price"))
         if not symbol or direction not in ("long", "short") or price is None or price <= 0:
             return None
+
         open_px = self._finite(observation.get("open"))
         high_px = self._finite(observation.get("high"))
         low_px = self._finite(observation.get("low"))
         close_px = self._finite(observation.get("close"))
-        if None in (open_px, high_px, low_px, close_px):
+        complete_ohlc = None not in (open_px, high_px, low_px, close_px)
+        # A candidate can be scored without OHLC if no virtual position exists yet.
+        # If a position is already open, however, silently skipping its causal bar
+        # would corrupt stop/target/trailing semantics, so fail closed.
+        if symbol in self.portfolio.positions and not complete_ohlc:
             return None
 
         champion = observation.get("champion_candidate") or {}
@@ -96,7 +97,9 @@ class ChildPolicyExecutor:
         if watermark in self.portfolio.processed_watermarks:
             return None
 
-        exit_record = self.portfolio.update_ohlc_and_check_exits(symbol, open_px, high_px, low_px, close_px, ts)
+        exit_record = None
+        if complete_ohlc:
+            exit_record = self.portfolio.update_ohlc_and_check_exits(symbol, open_px, high_px, low_px, close_px, ts)
 
         signal_generated = True
         min_atr = float(self.config.strategy_overrides.get("min_atr", 0.0))
