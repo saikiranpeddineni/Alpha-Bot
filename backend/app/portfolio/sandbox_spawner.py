@@ -12,6 +12,8 @@ from typing import Any
 
 from app.core.logging import applog
 from app.portfolio.simulator import SimulationConfig, SimulationResult, VirtualPortfolioSimulator
+from app.research.spawn.spawn_config import ChildPolicyConfig
+from app.research.spawn.spawn_executor import ChildPolicyExecutor
 
 
 @dataclass
@@ -25,6 +27,7 @@ class SpawnedChildSandbox:
     virtual_trades: list[dict] = field(default_factory=list)
     equity_curve: list[tuple[datetime, float]] = field(default_factory=list)
     metrics: dict[str, Any] = field(default_factory=dict)
+    executor: ChildPolicyExecutor | None = field(default=None)
 
     def __post_init__(self):
         cfg = SimulationConfig(
@@ -34,9 +37,21 @@ class SpawnedChildSandbox:
             max_open_positions=2,
         )
         self.simulator = VirtualPortfolioSimulator(config=cfg)
+        if self.executor is None:
+            child_cfg = ChildPolicyConfig(
+                policy_id=self.policy_id,
+                spawned_at=self.spawned_at,
+                seed_capital=self.seed_capital,
+                status=self.status
+            )
+            self.executor = ChildPolicyExecutor(child_cfg)
 
     def is_eligible_at(self, ts: datetime) -> bool:
         """Enforce causal spawn boundary: child cannot trade before spawned_at."""
+        if self.status != "ACTIVE":
+            return False
+        if not isinstance(self.spawned_at, datetime):
+            return False
         if self.spawned_at.tzinfo is None and ts.tzinfo is not None:
             spawned_tz = self.spawned_at.replace(tzinfo=ts.tzinfo)
         elif self.spawned_at.tzinfo is not None and ts.tzinfo is None:
@@ -52,6 +67,16 @@ class SpawnedChildSandbox:
             if "timestamp" not in sig_copy:
                 sig_copy["timestamp"] = ts
             self.virtual_signals.append(sig_copy)
+            if self.executor:
+                obs = {
+                    "symbol": signal.get("symbol", "SPY"),
+                    "strategy": signal.get("strategy", "momentum"),
+                    "direction": signal.get("side", "long"),
+                    "price": float(signal.get("price", 0.0)),
+                    "ts": ts,
+                    "champion_candidate": signal
+                }
+                self.executor.evaluate_observation(obs)
 
     def finalize_simulation(self) -> SimulationResult:
         if not self.virtual_signals:
@@ -78,22 +103,27 @@ class SpawnedSandboxExecutor:
                 policy_id = row.get("policy_id")
                 seed_cap = float(row.get("seed_capital", 10000.0))
                 spawned_at_raw = row.get("spawned_at")
+                status = row.get("status", "ACTIVE")
+                
+                # Enforce fail-closed for malformed timestamps
                 if isinstance(spawned_at_raw, str):
                     try:
                         spawned_at = datetime.fromisoformat(spawned_at_raw)
                     except ValueError:
-                        spawned_at = datetime.min
+                        status = "UNAVAILABLE"
+                        spawned_at = None
                 elif isinstance(spawned_at_raw, datetime):
                     spawned_at = spawned_at_raw
                 else:
-                    spawned_at = datetime.min
+                    status = "UNAVAILABLE"
+                    spawned_at = None
 
-                if policy_id:
+                if policy_id and spawned_at is not None:
                     self.children[policy_id] = SpawnedChildSandbox(
                         policy_id=policy_id,
                         spawned_at=spawned_at,
                         seed_capital=seed_cap,
-                        status=row.get("status", "ACTIVE"),
+                        status=status,
                     )
 
     def process_signal_for_children(self, signal: dict, ts: datetime) -> None:
@@ -109,7 +139,7 @@ class SpawnedSandboxExecutor:
             res = child.finalize_simulation()
             results[policy_id] = {
                 "policy_id": policy_id,
-                "spawned_at": child.spawned_at.isoformat(),
+                "spawned_at": child.spawned_at.isoformat() if hasattr(child.spawned_at, "isoformat") else str(child.spawned_at),
                 "seed_capital": child.seed_capital,
                 "final_equity": res.equity_curve[-1][1] if res.equity_curve else child.seed_capital,
                 "metrics": res.metrics,

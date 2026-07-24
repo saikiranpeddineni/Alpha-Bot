@@ -27,6 +27,7 @@ import pandas as pd
 from app.ai.insights import InsightEngine
 from app.ai.gemini_ranker import GeminiShadowRanker
 from app.ai.shadow_bridge import GeminiShadowBridge
+from app.research.spawn import SpawnShadowCoordinator
 from app.ai.model import SignalModel
 from app.ai.regime import detect_regime
 from app.ai.trainer import ContinuousTrainer
@@ -113,6 +114,7 @@ class TradingEngine:
             GeminiShadowRanker(settings.gemini_api_key),
             observation_sink=self._persist_gemini_shadow_observation,
         )
+        self.spawn_coordinator = SpawnShadowCoordinator(db=self.db)
         self._regimes: dict[str, Regime] = {}
         self._position_peaks: dict[str, float] = {}
         self._position_troughs: dict[str, float] = {}
@@ -3982,6 +3984,7 @@ class TradingEngine:
 
     async def shutdown(self) -> None:
         await self.gemini_shadow.shutdown()
+        await self.spawn_coordinator.stop()
         await self.stop(flatten=False)
         if self.data is not None:
             await self.data.close()
