@@ -2,6 +2,7 @@ from datetime import date
 
 from app.config import RiskConfig
 from app.core.clock import MarketClock
+from app.portfolio.tracker import PortfolioTracker
 from app.risk.manager import RiskManager
 
 
@@ -84,3 +85,23 @@ def test_missing_daily_halt_date_fails_closed_on_roll() -> None:
 
     assert risk.daily_halted is True
     assert risk.daily_halt_date is None
+
+
+def test_same_session_restart_must_not_rebase_restored_peak_equity() -> None:
+    """Lock the remaining #22 defect: restart equity must not erase drawdown history."""
+    portfolio = PortfolioTracker()
+    portfolio.restore_checkpoint({
+        "session_date": "2026-07-24",
+        "session_start_equity": 100_000.0,
+        "peak_equity": 105_000.0,
+        "trades": [],
+        "equity_curve": [],
+        "lots": {},
+    })
+
+    # Mirrors TradingEngine.start() on a same-session restart at post-loss equity.
+    portfolio.roll_session(date(2026, 7, 24), 97_000.0)
+    portfolio.peak_equity = 97_000.0
+
+    assert portfolio.session_start_equity == 100_000.0
+    assert portfolio.peak_equity == 105_000.0
