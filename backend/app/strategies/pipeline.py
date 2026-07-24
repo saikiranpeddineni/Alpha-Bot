@@ -81,6 +81,9 @@ class SignalPipeline:
         from app.ai.prediction import MetaLabelEngine
         from app.config import MODELS_DIR
         self.meta_label_engine = MetaLabelEngine(MODELS_DIR)
+        # Target D Shadow Challenger passive observer (non-interfering)
+        from app.ai.target_d_observer import TargetDShadowObserver
+        self.target_d_observer = TargetDShadowObserver()
         # Expose on SignalModel so ContinuousTrainer can invalidate meta cache after promotion
         if not hasattr(model, "_meta_label_engine") or model._meta_label_engine is None:
             model._meta_label_engine = self.meta_label_engine
@@ -312,30 +315,30 @@ class SignalPipeline:
                     mins_et=mins_et,
                 )
 
+                hard_reject_cutoff = getattr(self.trade_score_engine.risk_config, "ml_hard_reject_threshold", 0.48)
                 if ml < self.ml_threshold:
-                    hard_reject_cutoff = getattr(self.trade_score_engine.risk_config, "ml_hard_reject_threshold", 0.48)
                     if self.soft_composite_gating and ml >= hard_reject_cutoff:
                         sig.ml_gate_decision = "GRAY_ZONE_EVALUATION"
-                        applog.info(
-                            "pipeline",
-                            f"{symbol}: ML gray zone active ({ml:.4f} in [{hard_reject_cutoff:.2f}, {self.ml_threshold:.2f}]). Evaluating Meta & TradeScore."
-                        )
                     elif enforce_veto:
                         sig.ml_gate_decision = "REJECT"
-                        rejected.append((
-                            sig,
-                            f"ML confidence {ml:.4f} < threshold {self.ml_threshold:.4f}",
-                        ))
-                        continue
                     else:
                         sig.ml_gate_decision = "BASE_FALLBACK_BYPASS"
-                        applog.info(
-                            "pipeline",
-                            f"{symbol}: RSI2 BASE_FALLBACK ML advisory bypass active: "
-                            f"prob={ml:.4f} < threshold={self.ml_threshold:.4f} (mins_et={mins_et})"
-                        )
                 else:
                     sig.ml_gate_decision = "PASS"
+
+                # Target D Shadow Observer Passive Evaluation (Read-Only Telemetry)
+                if hasattr(self, "target_d_observer") and self.target_d_observer is not None:
+                    td_res = self.target_d_observer.evaluate_passive(features, sig.ml_probability, sig.ml_gate_decision)
+                    sig.target_d_probability = td_res.get("target_d_probability")
+                    sig.target_d_gate_decision = td_res.get("target_d_decision")
+                    sig.target_d_disagreement = td_res.get("disagreement_category")
+
+                if sig.ml_gate_decision == "REJECT":
+                    rejected.append((
+                        sig,
+                        f"ML confidence {ml:.4f} < threshold {self.ml_threshold:.4f}",
+                    ))
+                    continue
 
             # ---- Stage 3: Excursion estimates ----
             # ATR-based fallback

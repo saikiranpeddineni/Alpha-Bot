@@ -1,0 +1,30 @@
+{
+  "generation_id": "target_d_v1_20260528",
+  "model_type": "HistGradientBoostingClassifier",
+  "training_target": "realized_r >= +0.5R",
+  "trained_at_cutoff": "2026-05-28T16:30:00+00:00",
+  "trained_at": "2026-07-24T15:42:12.144632+00:00",
+  "sample_count": 87670,
+  "features": [
+    "ret_1",
+    "ret_5",
+    "ret_15",
+    "rsi14",
+    "rsi2",
+    "macd_hist_norm",
+    "atr_pct",
+    "vol_z",
+    "vwap_dist_pct",
+    "bb_pos",
+    "bb_width",
+    "er20",
+    "minute_sin",
+    "minute_cos",
+    "day_progress"
+  ],
+  "threshold": 0.48,
+  "classes": [
+    0,
+    1
+  ]
+}
