@@ -1,5 +1,7 @@
-from datetime import date
+from datetime import UTC, date, datetime
 
+from app.brokers.base import Fill
+from app.core.domain import OrderSide
 from app.portfolio.tracker import PortfolioTracker
 
 
@@ -88,3 +90,36 @@ def test_checkpoint_keeps_account_identity_with_pdt_history() -> None:
 
     assert checkpoint["account_id"] == "live-account-A"
     assert checkpoint["day_trade_dates"] == ["2026-07-24"]
+
+
+def test_partial_exits_count_one_day_trade_only_when_position_cycle_closes() -> None:
+    tracker = PortfolioTracker()
+    ts = datetime(2026, 7, 24, 14, 0, tzinfo=UTC)
+    tracker.session_date = ts.date()
+
+    tracker.on_fill(Fill("entry", "AAA", OrderSide.BUY, 100, 10.0, ts=ts))
+    tracker.on_fill(Fill("exit-1", "AAA", OrderSide.SELL, 25, 10.5, ts=ts))
+    tracker.on_fill(Fill("exit-2", "AAA", OrderSide.SELL, 25, 10.6, ts=ts))
+
+    assert tracker.day_trades_today == 0
+
+    tracker.on_fill(Fill("exit-3", "AAA", OrderSide.SELL, 50, 10.7, ts=ts))
+
+    assert tracker.day_trades_today == 1
+
+
+def test_partial_exit_day_trade_count_survives_restart() -> None:
+    tracker = PortfolioTracker()
+    ts = datetime(2026, 7, 24, 14, 0, tzinfo=UTC)
+    tracker.session_date = ts.date()
+
+    tracker.on_fill(Fill("entry", "AAA", OrderSide.BUY, 100, 10.0, ts=ts))
+    tracker.on_fill(Fill("exit-1", "AAA", OrderSide.SELL, 40, 10.5, ts=ts))
+    tracker.on_fill(Fill("exit-2", "AAA", OrderSide.SELL, 60, 10.6, ts=ts))
+
+    restored = PortfolioTracker()
+    restored.restore_checkpoint(tracker.checkpoint(account_id="acct-1"))
+
+    assert tracker.day_trades_today == 1
+    assert restored.day_trades_today == 1
+    assert restored.day_trades_in_window(ts.date()) == 1
