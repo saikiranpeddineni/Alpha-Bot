@@ -1491,29 +1491,42 @@ class TradingEngine:
             side = "long" if position.qty > 0 else "short"
             entry_price = float(position.avg_entry_price)
 
-            # Determine initial stop from order or position or initial stop tracker
-            init_stop = position.stop_loss
-            if init_stop is None:
-                init_stop = self._position_initial_stops.get(symbol)
-
-            # Validate initial risk - if missing or invalid, disable V2 observation cleanly
-            if init_stop is None or init_stop <= 0:
-                return
-            if side == "long" and init_stop >= entry_price:
-                return
-            if side == "short" and init_stop <= entry_price:
-                return
-
-            initial_risk = abs(entry_price - init_stop)
-            if initial_risk <= 1e-6:
-                return
-
-            current_bar_ts = df.index[-1]
-
             # Get or initialize shadow state
             if symbol not in self._v2_shadow_states:
+                # FIRST Authority: use original entry stop from _position_initial_stops
+                init_stop = self._position_initial_stops.get(symbol)
+                is_mid_trade_restart = False
+
+                if init_stop is None:
+                    # Fallback to current position.stop_loss ONLY if position was just created
+                    # and position.stop_loss is on the valid side of entry_price
+                    fallback_stop = position.stop_loss
+                    if fallback_stop is not None and fallback_stop > 0:
+                        if side == "long" and fallback_stop < entry_price:
+                            init_stop = fallback_stop
+                        elif side == "short" and fallback_stop > entry_price:
+                            init_stop = fallback_stop
+                    
+                    # If init_stop is still None, this position was discovered mid-trade on restart
+                    if init_stop is None:
+                        init_stop = position.stop_loss if position.stop_loss is not None else (entry_price * (0.985 if side == "long" else 1.015))
+                        is_mid_trade_restart = True
+
+                # Validate initial stop sanity relative to entry price
+                if side == "long" and init_stop >= entry_price:
+                    is_mid_trade_restart = True
+                elif side == "short" and init_stop <= entry_price:
+                    is_mid_trade_restart = True
+
+                initial_risk = abs(entry_price - init_stop)
+                if initial_risk <= 1e-6:
+                    return
+
                 prior_close = float(df["close"].iloc[0])
                 prior_atr = float(df["atr14"].iloc[0]) if "atr14" in df.columns and pd.notna(df["atr14"].iloc[0]) else (entry_price * 0.01)
+
+                obs_complete = not is_mid_trade_restart
+                inc_reason = "mid_trade_restart_no_full_reconstruction" if is_mid_trade_restart else None
 
                 self._v2_shadow_states[symbol] = {
                     "symbol": symbol,
@@ -1522,6 +1535,9 @@ class TradingEngine:
                     "initial_stop": init_stop,
                     "initial_risk": initial_risk,
                     "policy_version": "v2_giveback_confirmed",
+                    "observation_complete": obs_complete,
+                    "observation_started_at": now.isoformat(),
+                    "incomplete_reason": inc_reason,
                     "prior_peak": entry_price,
                     "prior_close": prior_close,
                     "prior_atr": prior_atr,
@@ -1542,9 +1558,15 @@ class TradingEngine:
 
             st = self._v2_shadow_states[symbol]
 
+            # Immutable check: initial_stop & initial_risk must NEVER change once created
+            init_stop = st["initial_stop"]
+            initial_risk = st["initial_risk"]
+
             # If hypothetical exit already triggered, freeze state
             if st["is_shadow_closed"]:
                 return
+
+            current_bar_ts = df.index[-1]
 
             # Idempotency guard: skip if already evaluated for this exact bar timestamp
             if st["last_processed_ts"] == current_bar_ts:
@@ -1703,6 +1725,7 @@ class TradingEngine:
                 st = self._v2_shadow_states.pop(symbol, None)
                 if st is not None:
                     try:
+                        obs_complete = st.get("observation_complete", True)
                         init_r = st.get("initial_risk") or abs(trade.entry_price - (st.get("initial_stop") or trade.entry_price)) or 1.0
                         actual_r = trade.pnl / (init_r * abs(trade.qty) if trade.qty else init_r)
                         if trade.r_multiple is not None:
@@ -1720,10 +1743,10 @@ class TradingEngine:
                             v2_exit_ts = st.get("shadow_exit_ts")
                             v2_exit_reason = st.get("shadow_exit_reason")
 
-                        delta_r = v2_realized_r - actual_r
+                        delta_r = (v2_realized_r - actual_r) if obs_complete and v2_realized_r is not None and actual_r is not None else None
                         mfe_r = st.get("mfe_r", 0.0)
-                        giveback_r = max(0.0, mfe_r - v2_realized_r)
-                        winner_capture = (v2_realized_r / mfe_r) if v2_realized_r > 0 and mfe_r > 0 else 0.0
+                        giveback_r = max(0.0, mfe_r - v2_realized_r) if obs_complete and v2_realized_r is not None else None
+                        winner_capture = ((v2_realized_r / mfe_r) if v2_realized_r > 0 and mfe_r > 0 else 0.0) if obs_complete and v2_realized_r is not None else None
 
                         if not hasattr(trade, "metadata") or trade.metadata is None:
                             trade.metadata = {}
@@ -1731,6 +1754,9 @@ class TradingEngine:
                         trade.metadata["v2_shadow_harvest"] = {
                             "is_authoritative": False,
                             "policy_version": "v2_giveback_confirmed",
+                            "observation_complete": obs_complete,
+                            "observation_started_at": st.get("observation_started_at"),
+                            "incomplete_reason": st.get("incomplete_reason"),
                             "symbol": symbol,
                             "strategy": trade.strategy,
                             "direction": trade.side,
@@ -1743,13 +1769,13 @@ class TradingEngine:
                             "v2_shadow_exit_price": v2_exit_px,
                             "v2_shadow_exit_timestamp": v2_exit_ts,
                             "v2_shadow_exit_reason": v2_exit_reason,
-                            "v2_realized_r": round(v2_realized_r, 4),
+                            "v2_realized_r": round(v2_realized_r, 4) if obs_complete and v2_realized_r is not None else None,
                             "v2_mfe_r": round(mfe_r, 4),
                             "v2_mae_r": round(st.get("mae_r", 0.0), 4),
-                            "v2_winner_capture_ratio": round(winner_capture, 4),
-                            "v2_giveback_r": round(giveback_r, 4),
-                            "baseline_realized_r": round(actual_r, 4),
-                            "delta_r": round(delta_r, 4),
+                            "v2_winner_capture_ratio": round(winner_capture, 4) if obs_complete and winner_capture is not None else None,
+                            "v2_giveback_r": round(giveback_r, 4) if obs_complete and giveback_r is not None else None,
+                            "baseline_realized_r": round(actual_r, 4) if obs_complete and actual_r is not None else None,
+                            "delta_r": round(delta_r, 4) if obs_complete and delta_r is not None else None,
                             "v2_state_history": st.get("state_history", []),
                         }
                     except Exception as exc:
