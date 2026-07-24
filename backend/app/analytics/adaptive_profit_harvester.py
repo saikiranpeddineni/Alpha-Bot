@@ -34,6 +34,16 @@ class HarvestDecision:
     locked_r: float
 
 
+def _validate_initial_risk(side: str, entry_price: float, initial_stop: float) -> float:
+    if entry_price <= 0:
+        raise ValueError("entry_price must be positive")
+    if side == "long" and initial_stop >= entry_price:
+        raise ValueError("long initial_stop must be below entry_price")
+    if side == "short" and initial_stop <= entry_price:
+        raise ValueError("short initial_stop must be above entry_price")
+    return abs(entry_price - initial_stop)
+
+
 def adaptive_stop(*, direction: str, entry_price: float, initial_stop: float,
                   prior_peak: float, atr: float, current_stop: float | None = None,
                   config: HarvestConfig | None = None) -> HarvestDecision:
@@ -42,11 +52,9 @@ def adaptive_stop(*, direction: str, entry_price: float, initial_stop: float,
     side = direction.lower()
     if side not in {"long", "short"}:
         raise ValueError("direction must be 'long' or 'short'")
-    if entry_price <= 0 or atr < 0:
-        raise ValueError("entry_price must be positive and atr cannot be negative")
-    risk = abs(entry_price - initial_stop)
-    if risk <= 1e-12:
-        raise ValueError("initial_stop must define non-zero risk")
+    if atr < 0:
+        raise ValueError("atr cannot be negative")
+    risk = _validate_initial_risk(side, entry_price, initial_stop)
 
     if side == "long":
         favourable = max(0.0, prior_peak - entry_price)
@@ -103,9 +111,10 @@ def replay_adaptive_harvest(df: Any, *, entry_idx: int, direction: str,
     side = direction.lower()
     if side not in {"long", "short"}:
         return {"replay_valid": False, "failure_reason": "invalid_direction"}
-    risk = abs(entry_price - initial_stop)
-    if risk <= 1e-12:
-        return {"replay_valid": False, "failure_reason": "zero_initial_risk"}
+    try:
+        risk = _validate_initial_risk(side, entry_price, initial_stop)
+    except ValueError as exc:
+        return {"replay_valid": False, "failure_reason": str(exc)}
 
     start_idx = entry_idx + 1
     bars = df.iloc[start_idx: start_idx + max_bars]
