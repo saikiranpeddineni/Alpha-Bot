@@ -1,6 +1,6 @@
 """Compatibility adapter from the legacy Spawn rotation hook to SpawnCapitalAllocator.
 
-SpawnVirtualPortfolio historically calls check_rotation_opportunity().  Keeping this
+SpawnVirtualPortfolio historically calls check_rotation_opportunity(). Keeping this
 adapter avoids a risky portfolio rewrite while ensuring the unified allocator is the
 single decision engine used by that path.
 """
@@ -59,6 +59,41 @@ def _allocator_from_config(cfg: Dict[str, Any]) -> SpawnCapitalAllocator:
     )
 
 
+def evaluate_incumbent(position: Any, current_price: float, now: datetime,
+                       profiles: Optional[Dict[str, Any]] = None,
+                       risk_config: Optional[Dict[str, Any]] = None) -> IncumbentEvaluation:
+    """Legacy-compatible incumbent evaluator backed by the unified allocator."""
+    allocator = _allocator_from_config({**(risk_config or {}), "rotation_enabled": True})
+    inc = allocator.evaluate_incumbent(position, float(current_price), now, profiles)
+    return IncumbentEvaluation(
+        symbol=inc.symbol,
+        side=inc.side,
+        entry_price=inc.entry_price,
+        current_price=inc.current_price,
+        current_r=inc.progress_r,
+        holding_mins=inc.holding_mins,
+        profile_quality=inc.profile_quality,
+        incumbent_score=inc.score,
+    )
+
+
+def evaluate_incoming(incoming_observation: Dict[str, Any],
+                      profiles: Optional[Dict[str, Any]] = None,
+                      risk_config: Optional[Dict[str, Any]] = None) -> IncomingEvaluation:
+    """Legacy-compatible candidate evaluator backed by the unified allocator."""
+    cfg = risk_config or {}
+    allocator = _allocator_from_config({**cfg, "rotation_enabled": True})
+    capital = float(incoming_observation.get("capital_dollars", cfg.get("rotation_candidate_capital", 10000.0)) or 10000.0)
+    cand = allocator.evaluate_candidate(incoming_observation, capital, profiles)
+    return IncomingEvaluation(
+        symbol=cand.symbol,
+        side=cand.side,
+        candidate_score=cand.score,
+        profile_quality=cand.profile_quality,
+        incoming_score=cand.score,
+    )
+
+
 def check_rotation_opportunity(
     positions: Dict[str, Any],
     last_prices: Dict[str, float],
@@ -81,7 +116,16 @@ def check_rotation_opportunity(
     incumbent_pos = positions.get(decision.incumbent_symbol)
     if incumbent_pos is None:
         return None
-    px = float(last_prices.get(decision.incumbent_symbol, incumbent_pos.entry_price))
+    raw_px = last_prices.get(decision.incumbent_symbol)
+    if raw_px is None:
+        return None
+    try:
+        px = float(raw_px)
+    except (TypeError, ValueError):
+        return None
+    if px <= 0.0:
+        return None
+
     inc = allocator.evaluate_incumbent(incumbent_pos, px, now, profiles)
     cand = allocator.evaluate_candidate(
         incoming_observation,
