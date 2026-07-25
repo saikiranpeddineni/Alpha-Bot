@@ -49,7 +49,15 @@ class SpawnVirtualPortfolio:
         if res is None:
             return None
         weakest_pos, weakest_eval, incoming_eval, edge_delta = res
-        px = float(self.last_prices.get(weakest_pos.symbol, weakest_pos.entry_price))
+        raw_px = self.last_prices.get(weakest_pos.symbol)
+        if raw_px is None:
+            return None
+        try:
+            px = float(raw_px)
+        except (TypeError, ValueError):
+            return None
+        if px <= 0.0:
+            return None
         rec = self.close_virtual_position(weakest_pos.symbol, px, "OPPORTUNITY_ROTATION_EXIT", now)
         if rec:
             rec["rotation_telemetry"] = {
@@ -62,9 +70,9 @@ class SpawnVirtualPortfolio:
                 "capital_released": weakest_pos.entry_notional,
                 "holding_minutes": weakest_eval.holding_mins,
                 "rotation_reason": "OPPORTUNITY_ROTATION_EDGE",
+                "missing_incumbent_mark": False,
             }
         return rec
-
     def open_virtual_position(self,symbol,side,qty,price,stop,target,now,order_id="",candidate_obs=None,profiles=None):
         sym=symbol.upper()
         if not self.can_open_position(sym) and candidate_obs:
@@ -114,7 +122,8 @@ class SpawnVirtualPortfolio:
         self.cash=float(checkpoint.get("cash",self.seed_capital)); self.marked_equity=float(checkpoint.get("equity",self.seed_capital)); self.realized_equity=self.cash; self.peak_equity=float(checkpoint.get("peak_equity",self.marked_equity)); self.daily_pnl=float(checkpoint.get("daily_pnl",0)); self.realized_r=float(checkpoint.get("realized_r",0)); self.trade_count=int(checkpoint.get("trade_count",0)); self.max_drawdown_pct=float(checkpoint.get("max_drawdown_pct",checkpoint.get("drawdown",0.0))); self.current_capital_deployed=float(checkpoint.get("current_capital_deployed",0.0)); self.peak_capital_deployed=float(checkpoint.get("peak_capital_deployed",0.0)); self.cumulative_entry_notional=float(checkpoint.get("cumulative_entry_notional",0.0)); self.cumulative_initial_risk=float(checkpoint.get("cumulative_initial_risk",0.0)); self.realized_profit_reinvested=float(checkpoint.get("realized_profit_reinvested",0.0)); envelope=checkpoint.get("pending_orders") or {}
         if isinstance(envelope,dict):
             self.pending_orders=list(envelope.get("orders",[])); self.last_prices={str(k):float(v) for k,v in(envelope.get("last_prices") or checkpoint.get("last_prices") or {}).items()}; watermarks=envelope.get("processed_watermarks") or checkpoint.get("processed_watermarks") or []; self.processed_watermarks={str(i):None for i in watermarks[-self.MAX_DURABLE_WATERMARKS:]}; ce=envelope.get("capital_efficiency") or {}; self.peak_capital_deployed=max(self.peak_capital_deployed,float(ce.get("peak_capital_deployed",0.0) or 0.0)); self.cumulative_entry_notional=max(self.cumulative_entry_notional,float(ce.get("cumulative_entry_notional",0.0) or 0.0)); self.cumulative_initial_risk=max(self.cumulative_initial_risk,float(ce.get("cumulative_initial_risk",0.0) or 0.0))
-        else:self.pending_orders=list(envelope); self.last_prices={str(k):float(v) for k,v in(checkpoint.get("last_prices") or {}).items()}; self.processed_watermarks={str(i):None for i in(checkpoint.get("processed_watermarks") or [])[-self.MAX_DURABLE_WATERMARKS:]}
-        self.positions={}
-        for symbol,data in(checkpoint.get("positions") or {}).items():self.positions[symbol]=VirtualPosition(symbol=data["symbol"],side=data["side"],qty=float(data["qty"]),entry_price=float(data["entry_price"]),entry_at=datetime.fromisoformat(data["entry_at"]),initial_stop=float(data["initial_stop"]),initial_target=float(data["initial_target"]) if data.get("initial_target") is not None else None,trailing_stop=float(data["trailing_stop"]) if data.get("trailing_stop") is not None else None,peak_price=float(data.get("peak_price",data["entry_price"])),trough_price=float(data.get("trough_price",data["entry_price"])),virtual_order_id=data.get("virtual_order_id",""))
-        self._refresh_capital_deployed()
+        else:self.pending_orders=list(envelope); self.last_prices={str(k):float(v) for k,v in(checkpoint.get("last_prices") or {}).items()}; self.processed_watermarks={str(i):None for i in(checkpoint.get("processed_watermarks") or [])}; self.peak_capital_deployed=max(self.peak_capital_deployed,float(checkpoint.get("peak_capital_deployed",0.0) or 0.0)); self.cumulative_entry_notional=max(self.cumulative_entry_notional,float(checkpoint.get("cumulative_entry_notional",0.0) or 0.0)); self.cumulative_initial_risk=max(self.cumulative_initial_risk,float(checkpoint.get("cumulative_initial_risk",0.0) or 0.0))
+        self.positions={};
+        for s,d in(checkpoint.get("positions") or {}).items():
+            p=VirtualPosition(d["symbol"],d["side"],d["qty"],d["entry_price"],datetime.fromisoformat(d["entry_at"]),d["initial_stop"],d.get("initial_target"),d.get("trailing_stop"),d.get("peak_price",d["entry_price"]),d.get("trough_price",d["entry_price"]),d.get("virtual_order_id","") ); self.positions[s]=p
+        self._refresh_capital_deployed(); self.mark_to_market(self.last_prices)
