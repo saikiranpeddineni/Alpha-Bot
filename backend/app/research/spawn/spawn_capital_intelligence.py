@@ -1,6 +1,6 @@
 """Causal capital-efficiency intelligence for the SHADOW-ONLY spawn laboratory.
 
-This module never sizes or submits production orders.  It derives research metrics exclusively
+This module never sizes or submits production orders. It derives research metrics exclusively
 from already-closed virtual trades, so all state is causal at the evaluation timestamp.
 """
 from __future__ import annotations
@@ -26,31 +26,22 @@ def _duration_minutes(trade: dict) -> float:
     try:
         start = datetime.fromisoformat(str(trade.get("entry_at")))
         end = datetime.fromisoformat(str(trade.get("exit_at")))
-        return max(1.0 / 60.0, (end - start).total_seconds() / 60.0)
+        seconds = (end - start).total_seconds()
+        return max(1.0 / 60.0, seconds / 60.0) if seconds >= 0 else 0.0
     except (TypeError, ValueError):
         return 0.0
 
 
-def analyze_closed_trades(
-    closed_trades: list[dict],
-    *,
-    min_evidence_trades: int = 5,
-    proven_r: float = 2.0,
-    compound_r: float = 4.0,
-    max_multiplier: float = 1.50,
-) -> CapitalIntelligence:
-    """Derive a BASE -> PROVEN -> COMPOUND -> PROTECT state from realized evidence only.
-
-    PROTECT is entered after a loss once compounding evidence had previously been achieved.
-    The multiplier is deliberately bounded and represents permission to recycle realized profit;
-    it is not leverage and must never be applied to seed capital itself.
-    """
+def analyze_closed_trades(closed_trades: list[dict], *, min_evidence_trades: int = 5, proven_r: float = 2.0, compound_r: float = 4.0, max_multiplier: float = 1.50) -> CapitalIntelligence:
+    """Derive BASE -> PROVEN -> COMPOUND -> PROTECT from realized evidence only."""
     trades = list(closed_trades or [])
     completed = len(trades)
     cumulative_r = sum(float(t.get("realized_r", 0.0) or 0.0) for t in trades)
     realized_pnl = sum(float(t.get("pnl", 0.0) or 0.0) for t in trades)
-    capital_minutes = sum(abs(float(t.get("entry_notional", 0.0) or 0.0)) * _duration_minutes(t) for t in trades)
-    pnl_per_capital_minute = realized_pnl / max(capital_minutes, 1.0)
+    durations = [_duration_minutes(t) for t in trades]
+    valid_time_evidence = completed == 0 or all(d > 0 for d in durations)
+    capital_minutes = sum(abs(float(t.get("entry_notional", 0.0) or 0.0)) * d for t, d in zip(trades, durations)) if valid_time_evidence else 0.0
+    pnl_per_capital_minute = realized_pnl / capital_minutes if capital_minutes > 0 else 0.0
 
     consecutive_wins = 0
     for trade in reversed(trades):
@@ -59,7 +50,7 @@ def analyze_closed_trades(
         else:
             break
 
-    confidence = min(1.0, completed / float(max(1, min_evidence_trades)))
+    confidence = min(1.0, completed / float(max(1, min_evidence_trades))) if valid_time_evidence else 0.0
     had_compound_evidence = False
     running_r = 0.0
     for idx, trade in enumerate(trades):
@@ -68,36 +59,21 @@ def analyze_closed_trades(
             had_compound_evidence = True
 
     last_r = float(trades[-1].get("realized_r", 0.0) or 0.0) if trades else 0.0
-    if completed < min_evidence_trades or cumulative_r < proven_r or realized_pnl <= 0:
-        state = "BASE"
-        multiplier = 1.0
+    if not valid_time_evidence or completed < min_evidence_trades or cumulative_r < proven_r or realized_pnl <= 0:
+        state, multiplier = "BASE", 1.0
     elif had_compound_evidence and last_r <= 0:
-        state = "PROTECT"
-        multiplier = 1.0
+        state, multiplier = "PROTECT", 1.0
     elif cumulative_r >= compound_r and consecutive_wins >= 2:
         state = "COMPOUND"
-        # Evidence unlocks only a bounded multiplier. The portfolio layer still determines the
-        # actual amount of realized profit available for reinvestment.
         multiplier = min(max_multiplier, 1.0 + 0.10 * min(consecutive_wins, 5))
     else:
-        state = "PROVEN"
-        multiplier = 1.0
+        state, multiplier = "PROVEN", 1.0
 
-    return CapitalIntelligence(
-        state=state,
-        completed_trades=completed,
-        consecutive_wins=consecutive_wins,
-        cumulative_r=cumulative_r,
-        realized_pnl=realized_pnl,
-        capital_minutes=capital_minutes,
-        pnl_per_capital_minute=pnl_per_capital_minute,
-        evidence_confidence=confidence,
-        profit_reinvestment_multiplier=multiplier,
-    )
+    return CapitalIntelligence(state, completed, consecutive_wins, cumulative_r, realized_pnl, capital_minutes, pnl_per_capital_minute, confidence, multiplier)
 
 
 def velocity_score(info: CapitalIntelligence) -> float:
-    """Bounded reward for profitable capital-time efficiency; churning cannot dominate."""
-    if info.realized_pnl <= 0 or info.pnl_per_capital_minute <= 0:
+    """Bounded reward for profitable capital-time efficiency; invalid/churning paths get zero."""
+    if info.realized_pnl <= 0 or info.pnl_per_capital_minute <= 0 or info.evidence_confidence <= 0:
         return 0.0
     return info.evidence_confidence * math.log1p(info.pnl_per_capital_minute * 10_000.0)
