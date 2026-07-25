@@ -1,10 +1,17 @@
-"""Opportunity-Cost Rotation Engine for Spawn Virtual Portfolio."""
-from __future__ import annotations
-from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Dict, Any, Optional, Tuple
+"""Compatibility adapter from the legacy Spawn rotation hook to SpawnCapitalAllocator.
 
-from app.research.spawn.spawn_opportunity_intelligence import build_profiles
+SpawnVirtualPortfolio historically calls check_rotation_opportunity().  Keeping this
+adapter avoids a risky portfolio rewrite while ensuring the unified allocator is the
+single decision engine used by that path.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any, Dict, Optional, Tuple
+
+from app.research.spawn.spawn_allocator import SpawnCapitalAllocator
+
 
 @dataclass
 class IncumbentEvaluation:
@@ -17,6 +24,7 @@ class IncumbentEvaluation:
     profile_quality: float
     incumbent_score: float
 
+
 @dataclass
 class IncomingEvaluation:
     symbol: str
@@ -25,63 +33,31 @@ class IncomingEvaluation:
     profile_quality: float
     incoming_score: float
 
-def evaluate_incumbent(
-    position: Any,
-    current_price: float,
-    now: datetime,
-    profiles: Optional[Dict[str, Any]] = None
-) -> IncumbentEvaluation:
-    risk = position.initial_risk_per_share
-    if position.side == "long":
-        current_r = (current_price - position.entry_price) / risk
-    else:
-        current_r = (position.entry_price - current_price) / risk
 
-    holding_mins = max(0.0, (now - position.entry_at).total_seconds() / 60.0)
-    
-    prof_q = 0.0
-    if profiles:
-        sym_p = profiles.get(f"SYMBOL:{position.symbol.upper()}")
-        if sym_p and sym_p.trades >= 5:
-            prof_q += sym_p.quality
+class _PortfolioView:
+    def __init__(self, positions: Dict[str, Any], max_open_positions: int):
+        self.positions = positions
+        self.max_open_positions = max_open_positions
 
-    # Incumbent score rewards current R and profile history, penalizes stagnant duration > 30m
-    incumbent_score = current_r + 0.15 * prof_q - 0.005 * max(0.0, holding_mins - 30.0)
+    def can_open_position(self, symbol: str) -> bool:
+        return symbol.upper() not in self.positions and len(self.positions) < self.max_open_positions
 
-    return IncumbentEvaluation(
-        symbol=position.symbol.upper(),
-        side=position.side.lower(),
-        entry_price=position.entry_price,
-        current_price=current_price,
-        current_r=current_r,
-        holding_mins=holding_mins,
-        profile_quality=prof_q,
-        incumbent_score=incumbent_score,
+
+def _allocator_from_config(cfg: Dict[str, Any]) -> SpawnCapitalAllocator:
+    holding_map = cfg.get("rotation_strategy_holding_mins")
+    return SpawnCapitalAllocator(
+        enabled=bool(cfg.get("rotation_enabled", False)),
+        min_score_delta=float(cfg.get("rotation_min_edge", cfg.get("spawn_min_score_delta", 0.002))),
+        alpha_stagnation_decay=float(cfg.get("rotation_stagnation_decay", 0.001)),
+        beta_strategy_concentration_penalty=float(cfg.get("rotation_strategy_concentration_penalty", 0.005)),
+        gamma_friction_cost_pct=float(cfg.get("rotation_friction_cost_pct", 0.001)),
+        min_incumbent_age_mins=float(cfg.get("rotation_min_incumbent_age_mins", 15.0)),
+        default_holding_mins=float(cfg.get("rotation_default_holding_mins", 30.0)),
+        strategy_holding_mins=holding_map if isinstance(holding_map, dict) else None,
+        reservation_hurdle=float(cfg.get("rotation_reservation_hurdle", 0.003)),
+        free_slot_hurdle=float(cfg.get("rotation_free_slot_hurdle", 0.0)),
     )
 
-def evaluate_incoming(
-    candidate_observation: Dict[str, Any],
-    profiles: Optional[Dict[str, Any]] = None
-) -> IncomingEvaluation:
-    symbol = str(candidate_observation.get("symbol", "")).upper()
-    side = str(candidate_observation.get("side", "short")).lower()
-    raw_score = float(candidate_observation.get("score", candidate_observation.get("edge", 0.50)) or 0.50)
-
-    prof_q = 0.0
-    if profiles and symbol:
-        sym_p = profiles.get(f"SYMBOL:{symbol}")
-        if sym_p and sym_p.trades >= 5:
-            prof_q += sym_p.quality
-
-    incoming_score = raw_score + 0.15 * prof_q
-
-    return IncomingEvaluation(
-        symbol=symbol,
-        side=side,
-        candidate_score=raw_score,
-        profile_quality=prof_q,
-        incoming_score=incoming_score,
-    )
 
 def check_rotation_opportunity(
     positions: Dict[str, Any],
@@ -89,36 +65,45 @@ def check_rotation_opportunity(
     incoming_observation: Dict[str, Any],
     now: datetime,
     profiles: Optional[Dict[str, Any]] = None,
-    risk_config: Optional[Dict[str, Any]] = None
+    risk_config: Optional[Dict[str, Any]] = None,
 ) -> Optional[Tuple[Any, IncumbentEvaluation, IncomingEvaluation, float]]:
-    if not risk_config:
+    cfg = risk_config or {}
+    if not cfg.get("rotation_enabled", False) or not positions:
         return None
 
-    enabled = bool(risk_config.get("rotation_enabled", False))
-    min_edge = float(risk_config.get("rotation_min_edge", 0.0))
-    max_incumbent_q = float(risk_config.get("rotation_max_incumbent_quality", 999.0))
-
-    if not enabled or min_edge <= 0.0 or not positions:
+    allocator = _allocator_from_config(cfg)
+    view = _PortfolioView(positions, int(cfg.get("max_open_positions", len(positions))))
+    candidate_capital = float(incoming_observation.get("capital_dollars", cfg.get("rotation_candidate_capital", 10000.0)) or 10000.0)
+    decision = allocator.evaluate_allocation(view, last_prices, incoming_observation, now, profiles, candidate_capital)
+    if decision.action != "ROTATE_REPLACE" or not decision.incumbent_symbol:
         return None
 
-    incoming_eval = evaluate_incoming(incoming_observation, profiles)
-    if incoming_eval.symbol in positions:
-        # Cannot rotate into a symbol already held
+    incumbent_pos = positions.get(decision.incumbent_symbol)
+    if incumbent_pos is None:
         return None
-
-    evaluations = []
-    for sym, pos in positions.items():
-        px = float(last_prices.get(sym, pos.entry_price))
-        inc_eval = evaluate_incumbent(pos, px, now, profiles)
-        evaluations.append((pos, inc_eval))
-
-    # Find weakest incumbent
-    evaluations.sort(key=lambda item: item[1].incumbent_score)
-    weakest_pos, weakest_eval = evaluations[0]
-
-    score_delta = incoming_eval.incoming_score - weakest_eval.incumbent_score
-
-    if score_delta >= min_edge and weakest_eval.incumbent_score <= max_incumbent_q:
-        return (weakest_pos, weakest_eval, incoming_eval, score_delta)
-
-    return None
+    px = float(last_prices.get(decision.incumbent_symbol, incumbent_pos.entry_price))
+    inc = allocator.evaluate_incumbent(incumbent_pos, px, now, profiles)
+    cand = allocator.evaluate_candidate(
+        incoming_observation,
+        candidate_capital,
+        profiles,
+        [str(getattr(p, "strategy", "unknown")).lower() for p in positions.values()],
+    )
+    legacy_inc = IncumbentEvaluation(
+        symbol=inc.symbol,
+        side=inc.side,
+        entry_price=inc.entry_price,
+        current_price=inc.current_price,
+        current_r=inc.progress_r,
+        holding_mins=inc.holding_mins,
+        profile_quality=inc.profile_quality,
+        incumbent_score=inc.score,
+    )
+    legacy_incoming = IncomingEvaluation(
+        symbol=cand.symbol,
+        side=cand.side,
+        candidate_score=cand.score,
+        profile_quality=cand.profile_quality,
+        incoming_score=cand.score,
+    )
+    return incumbent_pos, legacy_inc, legacy_incoming, decision.score_delta
