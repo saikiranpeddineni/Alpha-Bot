@@ -81,7 +81,6 @@ def test_rotation_chooses_best_pairwise_replacement():
     allocator = SpawnCapitalAllocator(min_score_delta=0.001, reservation_hurdle=0.0)
     vp = MockVirtualPortfolio(2)
     now = datetime.now(timezone.utc)
-    # A has little remaining value; B is still close to its favorable excursion.
     vp.positions["A"] = MockPosition("A", "long", 100, 2, now - timedelta(minutes=40),
                                       strategy="orb", initial_target=100.5, peak_price=100.4)
     vp.positions["B"] = MockPosition("B", "long", 100, 2, now - timedelta(minutes=40),
@@ -99,7 +98,6 @@ def test_low_confidence_fallback_requires_larger_rotation_edge():
     now = datetime.now(timezone.utc)
     vp.positions["A"] = MockPosition("A", "long", 100, 2, now - timedelta(minutes=20),
                                       initial_target=101, peak_price=100)
-    # No calibrated EV => confidence=0.25 and therefore a larger dynamic hurdle.
     obs = {"symbol": "B", "strategy": "momentum", "score": 0.51}
     decision = allocator.evaluate_allocation(vp, {"A": 100}, obs, now)
     assert decision.action in {"WAIT", "ROTATE_REPLACE"}
@@ -118,3 +116,30 @@ def test_rotation_success_with_calibrated_ev():
     decision = allocator.evaluate_allocation(vp, {"COHR": 100.4}, obs, now)
     assert decision.action == "ROTATE_REPLACE"
     assert decision.incumbent_symbol == "COHR"
+
+
+def test_missing_incumbent_mark_never_falls_back_to_entry_price():
+    allocator = SpawnCapitalAllocator(min_score_delta=0.001, reservation_hurdle=0.0)
+    vp = MockVirtualPortfolio(1)
+    now = datetime.now(timezone.utc)
+    vp.positions["A"] = MockPosition("A", "long", 100, 2, now - timedelta(minutes=40),
+                                      initial_target=101, peak_price=100.5)
+    obs = {"symbol": "B", "strategy": "momentum",
+           "calibrated_expected_net_dollars": 500.0, "expectancy_confidence": 1.0}
+    decision = allocator.evaluate_allocation(vp, {}, obs, now)
+    assert decision.action == "NO_ACTION"
+    assert decision.reason == "MISSING_INCUMBENT_MARK"
+
+
+def test_invalid_incumbent_mark_never_triggers_rotation():
+    allocator = SpawnCapitalAllocator(min_score_delta=0.001, reservation_hurdle=0.0)
+    vp = MockVirtualPortfolio(1)
+    now = datetime.now(timezone.utc)
+    vp.positions["A"] = MockPosition("A", "long", 100, 2, now - timedelta(minutes=40))
+    obs = {"symbol": "B", "strategy": "momentum",
+           "calibrated_expected_net_dollars": 500.0, "expectancy_confidence": 1.0}
+    for bad_mark in (None, 0.0, -1.0, "bad"):
+        prices = {} if bad_mark is None else {"A": bad_mark}
+        decision = allocator.evaluate_allocation(vp, prices, obs, now)
+        assert decision.action == "NO_ACTION"
+        assert decision.reason == "MISSING_INCUMBENT_MARK"
