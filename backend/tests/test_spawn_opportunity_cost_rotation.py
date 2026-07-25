@@ -23,24 +23,34 @@ def test_disabled_by_default_preserves_baseline():
     assert "MU" in p.positions
 
 def test_rotation_replaces_weak_incumbent_when_edge_exceeded():
-    p = make_portfolio(rotation_enabled=True, rotation_min_edge=0.40, rotation_max_incumbent_quality=0.20)
+    # Velocity-based rotation: candidate calibrated EV must exceed incumbent remaining EV.
+    p = make_portfolio(rotation_enabled=True, rotation_min_edge=0.002)
     now = datetime(2026, 7, 24, 14, 0, tzinfo=timezone.utc)
-    p.open_virtual_position("MU", "short", 10, 100.0, 102.0, 90.0, now)
-    
-    # After 40 minutes with price stagnant at 100.1 (negative R / duration penalty)
+    # Long MU: entry=100, stop=98, target=102 (only $20 total upside on 10 shares)
+    p.open_virtual_position("MU", "long", 10, 100.0, 98.0, 102.0, now)
+
+    # After 40 minutes: price barely moved (100.2) — only $18 of upside remaining
     now_later = now + timedelta(minutes=40)
-    p.last_prices["MU"] = 100.1
-    cand = {"symbol": "INTC", "side": "short", "score": 0.85}
+    p.last_prices["MU"] = 100.2
+    # Candidate with $500 calibrated EV beats the incumbent's low remaining value
+    cand = {
+        "symbol": "INTC",
+        "side": "long",
+        "strategy": "momentum",
+        "calibrated_expected_net_dollars": 500.0,
+        "expectancy_confidence": 0.9,
+    }
 
     rec = p.check_and_execute_rotation(cand, now_later)
-    assert rec is not None
+    assert rec is not None, f"Expected rotation but got None (incumbent has low remaining EV)"
     assert rec["exit_reason"] == "OPPORTUNITY_ROTATION_EXIT"
     assert "MU" not in p.positions
     assert "rotation_telemetry" in rec
     telemetry = rec["rotation_telemetry"]
     assert telemetry["incumbent_symbol"] == "MU"
     assert telemetry["incoming_symbol"] == "INTC"
-    assert telemetry["score_delta"] >= 0.40
+    # Score delta must be positive: candidate velocity > incumbent velocity
+    assert telemetry["score_delta"] > 0
 
 def test_strong_incumbent_is_protected_from_rotation():
     p = make_portfolio(rotation_enabled=True, rotation_min_edge=0.40, rotation_max_incumbent_quality=0.20)
@@ -68,17 +78,25 @@ def test_stop_loss_takes_priority_over_rotation():
     assert "MU" not in p.positions
 
 def test_rotation_opens_new_position_when_capacity_full():
-    p = make_portfolio(rotation_enabled=True, rotation_min_edge=0.30, rotation_max_incumbent_quality=0.10)
+    # Rotation triggered via open_virtual_position: candidate must beat stalled incumbent.
+    p = make_portfolio(rotation_enabled=True, rotation_min_edge=0.002)
     now = datetime(2026, 7, 24, 14, 0, tzinfo=timezone.utc)
-    p.open_virtual_position("MU", "short", 10, 100.0, 102.0, 90.0, now)
+    # Long MU stalled near entry (only $18 remaining upside on 10 shares)
+    p.open_virtual_position("MU", "long", 10, 100.0, 98.0, 102.0, now)
     assert len(p.positions) == 1
 
     now_later = now + timedelta(minutes=35)
-    p.last_prices["MU"] = 100.2
-    cand = {"symbol": "INTC", "side": "short", "score": 0.85}
+    p.last_prices["MU"] = 100.2  # barely moved, low remaining EV
+    cand = {
+        "symbol": "INTC",
+        "side": "long",
+        "strategy": "momentum",
+        "calibrated_expected_net_dollars": 600.0,
+        "expectancy_confidence": 0.9,
+    }
 
-    # Open INTC position — rotation should displace MU first, then open INTC
-    new_pos = p.open_virtual_position("INTC", "short", 10, 50.0, 51.0, 45.0, now_later, candidate_obs=cand)
+    # Open INTC — rotation should displace MU first, then open INTC
+    new_pos = p.open_virtual_position("INTC", "long", 10, 50.0, 48.0, 54.0, now_later, candidate_obs=cand)
     assert new_pos is not None
     assert "MU" not in p.positions
     assert "INTC" in p.positions
