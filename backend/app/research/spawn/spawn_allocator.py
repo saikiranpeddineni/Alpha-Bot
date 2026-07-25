@@ -1,21 +1,14 @@
-"""Unified Capital-Efficiency Allocator for Spawn Virtual Portfolio (Spawn Allocator V2).
+"""Portfolio-aware capital allocator for the Spawn research sidecar.
 
-Refactored to resolve all dimensional consistency, sunk-cost, and feasibility requirements:
-1. True Dimensionally Consistent Net Dollar Velocity:
-   Score = (Expected_Remaining_Net_Dollars / (Capital_Dollars * Remaining_Holding_Hours)) 
-           - Strategy_Concentration_Penalty - Friction_Cost
-
-2. Sunk-Cost Elimination: Evaluates expected REMAINING future net dollars from current price 
-   to target rather than historical accumulated R. Sunk profit is excluded.
-
-3. Explicit Feasibility Check with Incumbent Release:
-   can_open_after_releasing(virtual_portfolio, candidate_symbol, incumbent_symbol)
+The allocator deliberately remains broker-isolated.  It ranks scarce capital using
+forward value only and exposes calibration hooks so replay/database evidence can
+replace fallbacks without changing allocation mechanics.
 """
 from __future__ import annotations
+
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Dict, Any, Optional, Tuple, List
-from app.core.logging import applog
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
 
 
 @dataclass
@@ -28,8 +21,11 @@ class IncumbentScore:
     holding_mins: float
     capital_dollars: float
     profile_quality: float
-    net_dollar_velocity: float  # $ / capital-hour
+    net_dollar_velocity: float
     score: float
+    expected_holding_mins: float = 30.0
+    progress_r: float = 0.0
+    stagnation_mins: float = 0.0
 
 
 @dataclass
@@ -41,13 +37,15 @@ class CandidateScore:
     capital_dollars: float
     profile_quality: float
     friction_cost_dollars: float
-    net_dollar_velocity: float  # $ / capital-hour
+    net_dollar_velocity: float
     score: float
+    expected_holding_mins: float = 30.0
+    confidence: float = 0.0
 
 
 @dataclass
 class AllocationDecision:
-    action: str  # "SPAWN_NEW", "ROTATE_REPLACE", "NO_ACTION", "INFEASIBLE"
+    action: str  # SPAWN_NEW, ROTATE_REPLACE, WAIT, NO_ACTION, INFEASIBLE
     candidate_symbol: str
     score_delta: float
     incumbent_symbol: Optional[str] = None
@@ -57,17 +55,27 @@ class AllocationDecision:
 
 
 class SpawnCapitalAllocator:
-    """Production-grade capital-efficiency allocator for Spawn Army sidecar (V2)."""
+    """Research-only portfolio commander for the Spawn virtual portfolio."""
+
+    DEFAULT_HOLDING_MINS = {
+        "rsi2_reversion": 12.0,
+        "orb": 18.5,
+        "bb_squeeze": 25.0,
+        "momentum": 42.0,
+    }
 
     def __init__(
         self,
         enabled: bool = True,
-        min_score_delta: float = 0.002,                       # min net dollar-velocity edge ($/cap-hour)
-        alpha_stagnation_decay: float = 0.001,                # decay per stagnant minute > 15m
-        beta_strategy_concentration_penalty: float = 0.005,   # penalty if strategy family matches existing
-        gamma_friction_cost_pct: float = 0.001,               # 0.1% round-trip friction cost
-        min_incumbent_age_mins: float = 15.0,                 # incumbent must be held >= 15m before rotation
-        default_holding_mins: float = 30.0,                   # baseline expected hold time
+        min_score_delta: float = 0.002,
+        alpha_stagnation_decay: float = 0.001,
+        beta_strategy_concentration_penalty: float = 0.005,
+        gamma_friction_cost_pct: float = 0.001,
+        min_incumbent_age_mins: float = 15.0,
+        default_holding_mins: float = 30.0,
+        strategy_holding_mins: Optional[Dict[str, float]] = None,
+        reservation_hurdle: float = 0.003,
+        free_slot_hurdle: float = 0.0,
     ) -> None:
         self.enabled = enabled
         self.min_score_delta = min_score_delta
@@ -76,247 +84,176 @@ class SpawnCapitalAllocator:
         self.gamma_friction_cost_pct = gamma_friction_cost_pct
         self.min_incumbent_age_mins = min_incumbent_age_mins
         self.default_holding_mins = default_holding_mins
+        self.strategy_holding_mins = dict(self.DEFAULT_HOLDING_MINS)
+        if strategy_holding_mins:
+            self.strategy_holding_mins.update({str(k).lower(): float(v) for k, v in strategy_holding_mins.items()})
+        self.reservation_hurdle = max(0.0, reservation_hurdle)
+        self.free_slot_hurdle = max(0.0, free_slot_hurdle)
 
-    def can_open_after_releasing(
-        self,
-        virtual_portfolio: Any,
-        candidate_symbol: str,
-        incumbent_symbol: Optional[str] = None
-    ) -> bool:
-        """Verifies if candidate can open in virtual_portfolio after releasing incumbent."""
-        if not candidate_symbol or not virtual_portfolio:
+    def _holding_mins(self, strategy: str, observation: Optional[Dict[str, Any]] = None) -> float:
+        observation = observation or {}
+        explicit = observation.get("expected_holding_mins")
+        if explicit is not None:
+            return max(1.0, float(explicit))
+        return max(1.0, float(self.strategy_holding_mins.get(str(strategy).lower(), self.default_holding_mins)))
+
+    @staticmethod
+    def _profile_quality(profiles: Optional[Dict[str, Any]], symbol: str) -> float:
+        if not profiles or not symbol:
+            return 0.0
+        profile = profiles.get(f"SYMBOL:{symbol.upper()}")
+        if profile and getattr(profile, "trades", 0) >= 5:
+            return float(getattr(profile, "quality", 0.0) or 0.0)
+        return 0.0
+
+    def can_open_after_releasing(self, virtual_portfolio: Any, candidate_symbol: str, incumbent_symbol: Optional[str] = None) -> bool:
+        if not candidate_symbol or virtual_portfolio is None:
             return False
-        
-        cand_upper = candidate_symbol.upper()
         positions = getattr(virtual_portfolio, "positions", {})
-        
-        # Cannot open if candidate symbol is already held
-        if cand_upper in positions:
+        candidate = candidate_symbol.upper()
+        if candidate in positions:
             return False
-            
-        max_pos = getattr(virtual_portfolio, "max_open_positions", 2)
         open_count = len(positions)
-        
-        if incumbent_symbol:
-            inc_upper = incumbent_symbol.upper()
-            if inc_upper in positions:
-                open_count -= 1  # Releasing incumbent frees 1 position slot
-                
-        return open_count < max_pos
+        if incumbent_symbol and incumbent_symbol.upper() in positions:
+            open_count -= 1
+        return open_count < int(getattr(virtual_portfolio, "max_open_positions", 2))
 
-    def check_feasibility(
-        self,
-        virtual_portfolio: Any,
-        candidate_symbol: str,
-        incumbent_symbol: Optional[str] = None
-    ) -> bool:
-        """Explicit Feasibility Pre-Filter."""
+    def check_feasibility(self, virtual_portfolio: Any, candidate_symbol: str, incumbent_symbol: Optional[str] = None) -> bool:
         return self.can_open_after_releasing(virtual_portfolio, candidate_symbol, incumbent_symbol)
 
-    def evaluate_incumbent(
-        self,
-        position: Any,
-        current_price: float,
-        now: datetime,
-        profiles: Optional[Dict[str, Any]] = None
-    ) -> IncumbentScore:
-        entry = getattr(position, "entry_price", current_price)
+    def _candidate_expected_dollars(self, obs: Dict[str, Any], capital: float) -> Tuple[float, float]:
+        """Prefer causal/calibrated evidence; retain a conservative fallback for old payloads."""
+        for key in ("calibrated_expected_net_dollars", "expected_net_dollars", "replay_expected_net_dollars"):
+            if obs.get(key) is not None:
+                return float(obs[key]), float(obs.get("expectancy_confidence", 1.0) or 1.0)
+        if obs.get("expected_return_pct") is not None:
+            return capital * float(obs["expected_return_pct"]) / 100.0, float(obs.get("expectancy_confidence", 0.75) or 0.75)
+
+        # Backward-compatible fallback only.  It is intentionally bounded because
+        # Jul-23/24 scores clustered tightly and must not masquerade as calibrated EV.
+        raw = float(obs.get("score", obs.get("edge", 0.50)) or 0.50)
+        bounded = min(0.60, max(0.50, raw))
+        multiplier = 0.8 + 2.0 * (bounded - 0.50)  # 0.8..1.0 over discovery density zone
+        return capital * 0.015 * multiplier, 0.25
+
+    def evaluate_candidate(self, candidate_obs: Dict[str, Any], capital_dollars: float = 10000.0,
+                           profiles: Optional[Dict[str, Any]] = None,
+                           existing_strategies: Optional[List[str]] = None) -> CandidateScore:
+        symbol = str(candidate_obs.get("symbol", "")).upper()
+        side = str(candidate_obs.get("side", "long")).lower()
+        strategy = str(candidate_obs.get("strategy", "unknown")).lower()
+        capital = max(1.0, float(capital_dollars))
+        expected_net, confidence = self._candidate_expected_dollars(candidate_obs, capital)
+        friction = max(0.0, capital * self.gamma_friction_cost_pct)
+        hold_mins = self._holding_mins(strategy, candidate_obs)
+        hold_hours = max(0.1, hold_mins / 60.0)
+        velocity = (expected_net - friction) / (capital * hold_hours)
+        quality = self._profile_quality(profiles, symbol)
+        concentration = self.beta_strategy_concentration_penalty if existing_strategies and strategy in existing_strategies else 0.0
+        score = velocity + 0.005 * quality - concentration
+        return CandidateScore(symbol, side, strategy, expected_net, capital, quality, friction, velocity, score, hold_mins, confidence)
+
+    def evaluate_incumbent(self, position: Any, current_price: float, now: datetime,
+                           profiles: Optional[Dict[str, Any]] = None) -> IncumbentScore:
+        entry = float(getattr(position, "entry_price", current_price))
         side = str(getattr(position, "side", "long")).lower()
         qty = float(getattr(position, "qty", 1.0) or 1.0)
         entry_at = getattr(position, "entry_at", now)
         target = getattr(position, "initial_target", None)
-        
-        holding_mins = max(1.0, (now - entry_at).total_seconds() / 60.0)
-        capital_dollars = max(1.0, entry * qty)
-        
-        # Expected REMAINING Future Value From Current Price (Forward-Looking, Sunk Profit Excluded)
-        if target and target > 0:
-            if side == "long":
-                remaining_per_share = max(0.01, target - current_price)
-            else:
-                remaining_per_share = max(0.01, current_price - target)
-            remaining_expected_dollars = remaining_per_share * qty
+        strategy = str(getattr(position, "strategy", "unknown") or "unknown").lower()
+        holding = max(1.0, (now - entry_at).total_seconds() / 60.0)
+        capital = max(1.0, abs(entry * qty))
+        risk = max(0.01, float(getattr(position, "initial_risk_per_share", 1.0) or 1.0))
+        signed_move = current_price - entry if side == "long" else entry - current_price
+        progress_r = signed_move / risk
+
+        if target and float(target) > 0:
+            remaining_per_share = (float(target) - current_price) if side == "long" else (current_price - float(target))
+            upside = max(0.0, remaining_per_share) * qty
         else:
-            remaining_expected_dollars = capital_dollars * 0.015  # Fallback 1.5% target move
+            upside = capital * 0.015
 
-        prof_q = 0.0
-        if profiles:
-            sym_p = profiles.get(f"SYMBOL:{position.symbol.upper()}")
-            if sym_p and getattr(sym_p, "trades", 0) >= 5:
-                prof_q += getattr(sym_p, "quality", 0.0)
+        # If telemetry supplies a causal target probability use it. Otherwise shrink
+        # target-distance value according to current progress instead of assuming 100% hit.
+        hit_prob = getattr(position, "target_hit_probability", None)
+        if hit_prob is None:
+            hit_prob = min(0.80, max(0.20, 0.50 + 0.10 * progress_r))
+        hit_prob = min(1.0, max(0.0, float(hit_prob)))
+        downside = max(0.0, -signed_move * qty)
+        remaining_ev = hit_prob * upside - (1.0 - hit_prob) * downside
 
-        # Baseline expected remaining hold hours
-        expected_hold_hours = max(0.1, self.default_holding_mins / 60.0)
-        
-        # True Dimensionally Consistent Dollar Velocity ($ / capital-hour)
-        net_dollar_velocity = remaining_expected_dollars / (capital_dollars * expected_hold_hours)
-        
-        # Stagnation Decay subtracts for stagnant positions held > 15m
-        stagnant_mins = max(0.0, holding_mins - 15.0)
-        stagnant_decay = self.alpha_stagnation_decay * stagnant_mins
-        
-        score = net_dollar_velocity + 0.005 * prof_q - stagnant_decay
+        hold_mins = self._holding_mins(strategy)
+        remaining_time = max(6.0, hold_mins - min(holding, hold_mins * 0.8))
+        velocity = remaining_ev / (capital * max(0.1, remaining_time / 60.0))
+        quality = self._profile_quality(profiles, str(getattr(position, "symbol", "")))
 
-        return IncumbentScore(
-            symbol=position.symbol.upper(),
-            side=side,
-            entry_price=entry,
-            current_price=current_price,
-            remaining_expected_dollars=remaining_expected_dollars,
-            holding_mins=holding_mins,
-            capital_dollars=capital_dollars,
-            profile_quality=prof_q,
-            net_dollar_velocity=net_dollar_velocity,
-            score=score
-        )
+        # Real stagnation: prefer time-since-MFE telemetry. Age alone is only a weak fallback.
+        last_mfe_at = getattr(position, "last_mfe_at", None)
+        if isinstance(last_mfe_at, datetime):
+            stagnation = max(0.0, (now - last_mfe_at).total_seconds() / 60.0)
+        else:
+            peak = float(getattr(position, "peak_price", entry) or entry)
+            trough = float(getattr(position, "trough_price", entry) or entry)
+            favorable = (peak - entry) if side == "long" else (entry - trough)
+            near_best = favorable > 0 and abs(favorable - signed_move) <= max(0.05 * risk, 0.01)
+            stagnation = 0.0 if near_best else max(0.0, holding - 15.0)
+        decay = self.alpha_stagnation_decay * stagnation
+        score = velocity + 0.005 * quality - decay
+        return IncumbentScore(str(position.symbol).upper(), side, entry, current_price, remaining_ev, holding,
+                              capital, quality, velocity, score, hold_mins, progress_r, stagnation)
 
-    def evaluate_candidate(
-        self,
-        candidate_obs: Dict[str, Any],
-        capital_dollars: float = 10000.0,
-        profiles: Optional[Dict[str, Any]] = None,
-        existing_strategies: Optional[List[str]] = None
-    ) -> CandidateScore:
-        symbol = str(candidate_obs.get("symbol", "")).upper()
-        side = str(candidate_obs.get("side", "short")).lower()
-        strategy = str(candidate_obs.get("strategy", "unknown")).lower()
-        
-        raw_edge = float(candidate_obs.get("score", candidate_obs.get("edge", 0.50)) or 0.50)
-        
-        # Calibrated Expected Outcome Mapping: 1.5% target move * calibrated edge multiplier
-        calibrated_edge_multiplier = max(0.2, raw_edge / 0.50)
-        expected_net_dollars = capital_dollars * 0.015 * calibrated_edge_multiplier
-        
-        prof_q = 0.0
-        if profiles and symbol:
-            sym_p = profiles.get(f"SYMBOL:{symbol}")
-            if sym_p and getattr(sym_p, "trades", 0) >= 5:
-                prof_q += getattr(sym_p, "quality", 0.0)
-
-        # Strategy Concentration Penalty (renamed from correlation)
-        concentration_penalty = 0.0
-        if existing_strategies and strategy in existing_strategies:
-            concentration_penalty = self.beta_strategy_concentration_penalty
-
-        # Round-trip friction cost ($)
-        friction_cost_dollars = capital_dollars * self.gamma_friction_cost_pct
-
-        expected_hold_hours = max(0.1, self.default_holding_mins / 60.0)
-        
-        # True Dimensionally Consistent Dollar Velocity ($ / capital-hour)
-        net_dollar_velocity = (expected_net_dollars - friction_cost_dollars) / (capital_dollars * expected_hold_hours)
-        
-        score = net_dollar_velocity + 0.005 * prof_q - concentration_penalty
-
-        return CandidateScore(
-            symbol=symbol,
-            side=side,
-            strategy=strategy,
-            expected_net_dollars=expected_net_dollars,
-            capital_dollars=capital_dollars,
-            profile_quality=prof_q,
-            friction_cost_dollars=friction_cost_dollars,
-            net_dollar_velocity=net_dollar_velocity,
-            score=score
-        )
-
-    def evaluate_allocation(
-        self,
-        virtual_portfolio: Any,
-        last_prices: Dict[str, float],
-        candidate_obs: Dict[str, Any],
-        now: datetime,
-        profiles: Optional[Dict[str, Any]] = None,
-        candidate_capital: float = 10000.0
-    ) -> AllocationDecision:
+    def evaluate_allocation(self, virtual_portfolio: Any, last_prices: Dict[str, float], candidate_obs: Dict[str, Any],
+                            now: datetime, profiles: Optional[Dict[str, Any]] = None,
+                            candidate_capital: float = 10000.0) -> AllocationDecision:
         if not self.enabled:
-            return AllocationDecision(action="NO_ACTION", candidate_symbol="", score_delta=0.0, reason="ALLOCATOR_DISABLED")
+            return AllocationDecision("NO_ACTION", "", 0.0, reason="ALLOCATOR_DISABLED")
+        symbol = str(candidate_obs.get("symbol", "")).upper()
+        if not symbol:
+            return AllocationDecision("NO_ACTION", "", 0.0, reason="MISSING_CANDIDATE_SYMBOL")
 
-        candidate_symbol = str(candidate_obs.get("symbol", "")).upper()
-        if not candidate_symbol:
-            return AllocationDecision(action="NO_ACTION", candidate_symbol="", score_delta=0.0, reason="MISSING_CANDIDATE_SYMBOL")
+        positions = getattr(virtual_portfolio, "positions", {})
+        existing_strategies = [str(getattr(p, "strategy", "unknown")).lower() for p in positions.values()]
+        candidate = self.evaluate_candidate(candidate_obs, candidate_capital, profiles, existing_strategies)
 
-        # 1. Direct Feasibility: Can virtual portfolio open directly without rotation?
-        has_free_slot = hasattr(virtual_portfolio, "can_open_position") and virtual_portfolio.can_open_position(candidate_symbol)
-        
-        existing_strategies = []
-        if hasattr(virtual_portfolio, "positions"):
-            existing_strategies = [str(getattr(pos, "strategy", "")).lower() for pos in virtual_portfolio.positions.values()]
+        if hasattr(virtual_portfolio, "can_open_position") and virtual_portfolio.can_open_position(symbol):
+            # WAIT/reservation state: weak or low-confidence fallback candidates should not
+            # automatically consume the last scarce slot.
+            remaining_slots = int(getattr(virtual_portfolio, "max_open_positions", 2)) - len(positions)
+            hurdle = self.free_slot_hurdle
+            if remaining_slots <= 1:
+                hurdle = max(hurdle, self.reservation_hurdle)
+            if candidate.score < hurdle:
+                return AllocationDecision("WAIT", symbol, candidate.score - hurdle, candidate_score=candidate.score,
+                                          reason="RESERVE_CAPITAL_FOR_BETTER_OPPORTUNITY")
+            return AllocationDecision("SPAWN_NEW", symbol, candidate.score, candidate_score=candidate.score,
+                                      reason="FREE_SLOT_EDGE_CLEARS_HURDLE")
 
-        cand_eval = self.evaluate_candidate(candidate_obs, candidate_capital, profiles, existing_strategies)
+        if not positions:
+            return AllocationDecision("INFEASIBLE", symbol, 0.0, candidate_score=candidate.score,
+                                      reason="PORTFOLIO_FULL_NO_INCUMBENTS")
 
-        if has_free_slot:
-            return AllocationDecision(
-                action="SPAWN_NEW",
-                candidate_symbol=candidate_symbol,
-                score_delta=cand_eval.score,
-                candidate_score=cand_eval.score,
-                reason="FREE_SLOT_AVAILABLE"
-            )
+        # Evaluate every legal replacement, not just the weakest standalone incumbent.
+        replacement_options: List[Tuple[float, Any, IncumbentScore]] = []
+        for sym, pos in positions.items():
+            if not self.can_open_after_releasing(virtual_portfolio, symbol, sym):
+                continue
+            px = float(last_prices.get(sym, getattr(pos, "entry_price", 0.0)))
+            incumbent = self.evaluate_incumbent(pos, px, now, profiles)
+            if incumbent.holding_mins < self.min_incumbent_age_mins:
+                continue
+            delta = candidate.score - incumbent.score
+            replacement_options.append((delta, pos, incumbent))
 
-        # 2. Portfolio Full -> Evaluate Feasibility with Incumbent Release
-        if not hasattr(virtual_portfolio, "positions") or not virtual_portfolio.positions:
-            return AllocationDecision(
-                action="INFEASIBLE",
-                candidate_symbol=candidate_symbol,
-                score_delta=0.0,
-                candidate_score=cand_eval.score,
-                reason="PORTFOLIO_FULL_NO_INCUMBENTS"
-            )
+        if not replacement_options:
+            return AllocationDecision("NO_ACTION", symbol, 0.0, candidate_score=candidate.score,
+                                      reason="NO_LEGAL_MATURE_REPLACEMENT")
 
-        incumbent_evals: List[Tuple[Any, IncumbentScore]] = []
-        for sym, pos in virtual_portfolio.positions.items():
-            px = float(last_prices.get(sym, getattr(pos, "entry_price", 100.0)))
-            inc_eval = self.evaluate_incumbent(pos, px, now, profiles)
-            incumbent_evals.append((pos, inc_eval))
-
-        # Sort incumbents by expected dollar-velocity score (weakest forward velocity first)
-        incumbent_evals.sort(key=lambda item: item[1].score)
-        weakest_pos, weakest_eval = incumbent_evals[0]
-
-        # Feasibility check: Can candidate open IF weakest incumbent is released?
-        if not self.can_open_after_releasing(virtual_portfolio, candidate_symbol, weakest_eval.symbol):
-            return AllocationDecision(
-                action="INFEASIBLE",
-                candidate_symbol=candidate_symbol,
-                score_delta=0.0,
-                incumbent_symbol=weakest_eval.symbol,
-                incumbent_score=weakest_eval.score,
-                candidate_score=cand_eval.score,
-                reason="CANNOT_OPEN_AFTER_RELEASING_INCUMBENT"
-            )
-
-        # Incumbent Minimum Age Guard
-        if weakest_eval.holding_mins < self.min_incumbent_age_mins:
-            return AllocationDecision(
-                action="NO_ACTION",
-                candidate_symbol=candidate_symbol,
-                score_delta=cand_eval.score - weakest_eval.score,
-                incumbent_symbol=weakest_eval.symbol,
-                incumbent_score=weakest_eval.score,
-                candidate_score=cand_eval.score,
-                reason=f"INCUMBENT_TOO_YOUNG_{weakest_eval.holding_mins:.1f}M"
-            )
-
-        score_delta = cand_eval.score - weakest_eval.score
-
-        if score_delta >= self.min_score_delta:
-            return AllocationDecision(
-                action="ROTATE_REPLACE",
-                candidate_symbol=candidate_symbol,
-                score_delta=score_delta,
-                incumbent_symbol=weakest_eval.symbol,
-                incumbent_score=weakest_eval.score,
-                candidate_score=cand_eval.score,
-                reason="ROTATION_DOLLAR_VELOCITY_EDGE"
-            )
-
-        return AllocationDecision(
-            action="NO_ACTION",
-            candidate_symbol=candidate_symbol,
-            score_delta=score_delta,
-            incumbent_symbol=weakest_eval.symbol,
-            incumbent_score=weakest_eval.score,
-            candidate_score=cand_eval.score,
-            reason="SCORE_DELTA_BELOW_MIN"
-        )
+        delta, _, incumbent = max(replacement_options, key=lambda item: item[0])
+        # Dynamic no-trade hurdle = configured edge + uncertainty/reservation premium.
+        uncertainty = (1.0 - min(1.0, max(0.0, candidate.confidence))) * self.reservation_hurdle
+        required_delta = self.min_score_delta + uncertainty
+        if delta >= required_delta:
+            return AllocationDecision("ROTATE_REPLACE", symbol, delta, incumbent.symbol, incumbent.score,
+                                      candidate.score, "PORTFOLIO_DELTA_EV_CLEARS_DYNAMIC_HURDLE")
+        return AllocationDecision("WAIT", symbol, delta, incumbent.symbol, incumbent.score, candidate.score,
+                                  "DELTA_EV_BELOW_DYNAMIC_HURDLE")
