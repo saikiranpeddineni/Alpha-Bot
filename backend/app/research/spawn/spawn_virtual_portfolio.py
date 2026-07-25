@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 import math
-from typing import Any
 
 
 @dataclass
@@ -59,6 +58,9 @@ class SpawnVirtualPortfolio:
         self.max_position_pct = float(self.risk_config.get("max_position_pct", 25.0))
         self.max_open_positions = int(self.risk_config.get("max_open_positions", 2))
         self.allow_fractional = bool(self.risk_config.get("allow_fractional", False))
+        # Optional SHADOW-ONLY compounding. Starting capital never increases; only a bounded
+        # fraction of already-realized positive P&L may enlarge the sizing base.
+        self.profit_reinvestment_fraction = min(1.0, max(0.0, float(self.risk_config.get("profit_reinvestment_fraction", 0.0))))
         self.positions = {}
         self.last_prices = {}
         self.pending_orders = []
@@ -67,12 +69,11 @@ class SpawnVirtualPortfolio:
         self.trade_count = 0
         self.closed_trades = []
         self.processed_watermarks = {}
-        # Research accounting: measure scarce capital/risk actually consumed rather than
-        # treating seed capital as if it were continuously deployed.
         self.current_capital_deployed = 0.0
         self.peak_capital_deployed = 0.0
         self.cumulative_entry_notional = 0.0
         self.cumulative_initial_risk = 0.0
+        self.realized_profit_reinvested = 0.0
 
     def record_processed_watermark(self, key):
         self.processed_watermarks[key] = None
@@ -85,18 +86,30 @@ class SpawnVirtualPortfolio:
         self.current_capital_deployed = sum(position.entry_notional for position in self.positions.values())
         self.peak_capital_deployed = max(self.peak_capital_deployed, self.current_capital_deployed)
 
+    def _sizing_equity(self):
+        realized_profit = max(0.0, self.realized_equity - self.seed_capital)
+        self.realized_profit_reinvested = realized_profit * self.profit_reinvestment_fraction
+        return self.seed_capital + self.realized_profit_reinvested
+
     def capital_efficiency_metrics(self):
         peak_pct = (self.peak_capital_deployed / self.seed_capital * 100.0) if self.seed_capital > 0 else 0.0
         return_pct = ((self.marked_equity / self.seed_capital) - 1.0) * 100.0 if self.seed_capital > 0 else 0.0
+        capital_turnover = self.cumulative_entry_notional / max(self.peak_capital_deployed, 1.0)
+        risk_efficiency = self.daily_pnl / max(self.cumulative_initial_risk, 1.0)
         return {
             "current_capital_deployed": self.current_capital_deployed,
             "peak_capital_deployed": self.peak_capital_deployed,
             "peak_capital_pct": peak_pct,
             "cumulative_entry_notional": self.cumulative_entry_notional,
             "cumulative_initial_risk": self.cumulative_initial_risk,
+            "capital_turnover": capital_turnover,
+            "risk_efficiency": risk_efficiency,
             "return_pct": return_pct,
             "return_per_peak_capital_pct": return_pct / max(peak_pct, 1.0),
             "pnl_per_peak_dollar": self.daily_pnl / max(self.peak_capital_deployed, 1.0),
+            "profit_reinvestment_fraction": self.profit_reinvestment_fraction,
+            "realized_profit_reinvested": self.realized_profit_reinvested,
+            "sizing_equity": self._sizing_equity(),
         }
 
     def mark_to_market(self, prices):
@@ -123,9 +136,10 @@ class SpawnVirtualPortfolio:
         risk = abs(price - stop)
         if price <= 0 or risk <= 0:
             return 0.0
+        sizing_equity = self._sizing_equity()
         raw = min(
-            self.marked_equity * (self.risk_per_trade_pct / 100.0) / risk,
-            self.marked_equity * (self.max_position_pct / 100.0) / price,
+            sizing_equity * (self.risk_per_trade_pct / 100.0) / risk,
+            sizing_equity * (self.max_position_pct / 100.0) / price,
         )
         return max(0.0, round(raw, 4)) if self.allow_fractional else (float(math.floor(raw)) if raw >= 1 else 0.0)
 
@@ -143,17 +157,11 @@ class SpawnVirtualPortfolio:
         return position
 
     def update_ohlc_and_check_exits(self, symbol, o=None, h=None, l=None, c=None, now=None, **legacy_kwargs):
-        """Apply one causally completed OHLC bar to an open virtual position."""
-        if o is None:
-            o = legacy_kwargs.pop("open_px", None)
-        if h is None:
-            h = legacy_kwargs.pop("high_px", None)
-        if l is None:
-            l = legacy_kwargs.pop("low_px", None)
-        if c is None:
-            c = legacy_kwargs.pop("close_px", None)
-        if now is None:
-            now = legacy_kwargs.pop("ts", None)
+        if o is None: o = legacy_kwargs.pop("open_px", None)
+        if h is None: h = legacy_kwargs.pop("high_px", None)
+        if l is None: l = legacy_kwargs.pop("low_px", None)
+        if c is None: c = legacy_kwargs.pop("close_px", None)
+        if now is None: now = legacy_kwargs.pop("ts", None)
         if legacy_kwargs:
             raise TypeError(f"Unexpected OHLC arguments: {sorted(legacy_kwargs)}")
         if any(value is None for value in (o, h, l, c, now)):
@@ -168,15 +176,11 @@ class SpawnVirtualPortfolio:
         stop = position.trailing_stop if position.trailing_stop is not None else position.initial_stop
         exit_record = None
         if position.side == "long":
-            if l <= stop:
-                exit_record = self.close_virtual_position(sym, stop, "STOP_LOSS", now)
-            elif position.initial_target and h >= position.initial_target:
-                exit_record = self.close_virtual_position(sym, position.initial_target, "TAKE_PROFIT", now)
+            if l <= stop: exit_record = self.close_virtual_position(sym, stop, "STOP_LOSS", now)
+            elif position.initial_target and h >= position.initial_target: exit_record = self.close_virtual_position(sym, position.initial_target, "TAKE_PROFIT", now)
         else:
-            if h >= stop:
-                exit_record = self.close_virtual_position(sym, stop, "STOP_LOSS", now)
-            elif position.initial_target and l <= position.initial_target:
-                exit_record = self.close_virtual_position(sym, position.initial_target, "TAKE_PROFIT", now)
+            if h >= stop: exit_record = self.close_virtual_position(sym, stop, "STOP_LOSS", now)
+            elif position.initial_target and l <= position.initial_target: exit_record = self.close_virtual_position(sym, position.initial_target, "TAKE_PROFIT", now)
         self.record_processed_watermark(bar_watermark)
         if exit_record is not None:
             return exit_record
@@ -207,6 +211,7 @@ class SpawnVirtualPortfolio:
         self.last_prices[sym] = exit_price
         self._refresh_capital_deployed()
         self.mark_to_market({sym: exit_price})
+        self._sizing_equity()
         record = {
             "policy_id": self.policy_id, "symbol": sym, "side": position.side, "qty": position.qty,
             "entry_price": position.entry_price, "exit_price": exit_price,
@@ -225,21 +230,16 @@ class SpawnVirtualPortfolio:
             "trailing_stop": position.trailing_stop, "peak_price": position.peak_price,
             "trough_price": position.trough_price, "virtual_order_id": position.virtual_order_id,
         } for symbol, position in self.positions.items()}
-        envelope = {
-            "schema": 4, "orders": self.pending_orders, "last_prices": dict(self.last_prices),
-            "processed_watermarks": list(self.processed_watermarks), "max_drawdown_pct": self.max_drawdown_pct,
-            "capital_efficiency": self.capital_efficiency_metrics(),
-        }
+        envelope = {"schema": 5, "orders": self.pending_orders, "last_prices": dict(self.last_prices), "processed_watermarks": list(self.processed_watermarks), "max_drawdown_pct": self.max_drawdown_pct, "capital_efficiency": self.capital_efficiency_metrics()}
         return {
             "policy_id": self.policy_id, "cash": self.cash, "equity": self.marked_equity,
             "peak_equity": self.peak_equity, "positions": positions, "last_prices": dict(self.last_prices),
             "processed_watermarks": list(self.processed_watermarks), "pending_orders": envelope,
             "daily_pnl": self.daily_pnl, "realized_r": self.realized_r, "trade_count": self.trade_count,
             "drawdown": self.get_drawdown_pct(), "max_drawdown_pct": self.max_drawdown_pct,
-            "current_capital_deployed": self.current_capital_deployed,
-            "peak_capital_deployed": self.peak_capital_deployed,
-            "cumulative_entry_notional": self.cumulative_entry_notional,
-            "cumulative_initial_risk": self.cumulative_initial_risk,
+            "current_capital_deployed": self.current_capital_deployed, "peak_capital_deployed": self.peak_capital_deployed,
+            "cumulative_entry_notional": self.cumulative_entry_notional, "cumulative_initial_risk": self.cumulative_initial_risk,
+            "realized_profit_reinvested": self.realized_profit_reinvested,
         }
 
     def restore_from_checkpoint(self, checkpoint):
@@ -255,6 +255,7 @@ class SpawnVirtualPortfolio:
         self.peak_capital_deployed = float(checkpoint.get("peak_capital_deployed", 0.0))
         self.cumulative_entry_notional = float(checkpoint.get("cumulative_entry_notional", 0.0))
         self.cumulative_initial_risk = float(checkpoint.get("cumulative_initial_risk", 0.0))
+        self.realized_profit_reinvested = float(checkpoint.get("realized_profit_reinvested", 0.0))
         envelope = checkpoint.get("pending_orders") or {}
         if isinstance(envelope, dict):
             self.pending_orders = list(envelope.get("orders", []))
@@ -271,12 +272,5 @@ class SpawnVirtualPortfolio:
             self.processed_watermarks = {str(item): None for item in (checkpoint.get("processed_watermarks") or [])[-self.MAX_DURABLE_WATERMARKS:]}
         self.positions = {}
         for symbol, data in (checkpoint.get("positions") or {}).items():
-            self.positions[symbol] = VirtualPosition(
-                symbol=data["symbol"], side=data["side"], qty=float(data["qty"]), entry_price=float(data["entry_price"]),
-                entry_at=datetime.fromisoformat(data["entry_at"]), initial_stop=float(data["initial_stop"]),
-                initial_target=float(data["initial_target"]) if data.get("initial_target") is not None else None,
-                trailing_stop=float(data["trailing_stop"]) if data.get("trailing_stop") is not None else None,
-                peak_price=float(data.get("peak_price", data["entry_price"])), trough_price=float(data.get("trough_price", data["entry_price"])),
-                virtual_order_id=data.get("virtual_order_id", ""),
-            )
+            self.positions[symbol] = VirtualPosition(symbol=data["symbol"], side=data["side"], qty=float(data["qty"]), entry_price=float(data["entry_price"]), entry_at=datetime.fromisoformat(data["entry_at"]), initial_stop=float(data["initial_stop"]), initial_target=float(data["initial_target"]) if data.get("initial_target") is not None else None, trailing_stop=float(data["trailing_stop"]) if data.get("trailing_stop") is not None else None, peak_price=float(data.get("peak_price", data["entry_price"])), trough_price=float(data.get("trough_price", data["entry_price"])), virtual_order_id=data.get("virtual_order_id", ""))
         self._refresh_capital_deployed()
