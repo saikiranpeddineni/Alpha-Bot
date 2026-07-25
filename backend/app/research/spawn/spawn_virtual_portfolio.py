@@ -43,8 +43,32 @@ class SpawnVirtualPortfolio:
         risk=abs(price-stop)
         if price<=0 or risk<=0:return 0.0
         eq=self._sizing_equity(); raw=min(eq*(self.risk_per_trade_pct/100)/risk,eq*(self.max_position_pct/100)/price); return max(0.0,round(raw,4)) if self.allow_fractional else (float(math.floor(raw)) if raw>=1 else 0.0)
-    def open_virtual_position(self,symbol,side,qty,price,stop,target,now,order_id=""):
+    def check_and_execute_rotation(self, candidate_obs, now, profiles=None):
+        from app.research.spawn.spawn_opportunity_cost import check_rotation_opportunity
+        res = check_rotation_opportunity(self.positions, self.last_prices, candidate_obs, now, profiles, self.risk_config)
+        if res is None:
+            return None
+        weakest_pos, weakest_eval, incoming_eval, edge_delta = res
+        px = float(self.last_prices.get(weakest_pos.symbol, weakest_pos.entry_price))
+        rec = self.close_virtual_position(weakest_pos.symbol, px, "OPPORTUNITY_ROTATION_EXIT", now)
+        if rec:
+            rec["rotation_telemetry"] = {
+                "incumbent_symbol": weakest_eval.symbol,
+                "incoming_symbol": incoming_eval.symbol,
+                "incumbent_score": weakest_eval.incumbent_score,
+                "incoming_score": incoming_eval.incoming_score,
+                "score_delta": edge_delta,
+                "incumbent_current_r": weakest_eval.current_r,
+                "capital_released": weakest_pos.entry_notional,
+                "holding_minutes": weakest_eval.holding_mins,
+                "rotation_reason": "OPPORTUNITY_ROTATION_EDGE",
+            }
+        return rec
+
+    def open_virtual_position(self,symbol,side,qty,price,stop,target,now,order_id="",candidate_obs=None,profiles=None):
         sym=symbol.upper()
+        if not self.can_open_position(sym) and candidate_obs:
+            self.check_and_execute_rotation(candidate_obs, now, profiles)
         if not self.can_open_position(sym) or qty<=0:return None
         p=VirtualPosition(sym,side.lower(),qty,price,now,stop,target,virtual_order_id=order_id); self.positions[sym]=p; self.last_prices[sym]=price; self.cumulative_entry_notional+=p.entry_notional; self.cumulative_initial_risk+=p.initial_dollar_risk; self._refresh_capital_deployed(); self.mark_to_market({sym:price}); return p
     def _stagnation_exit_price(self,position,close_px,now):

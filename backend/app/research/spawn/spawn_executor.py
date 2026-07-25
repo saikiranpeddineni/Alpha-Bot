@@ -88,7 +88,11 @@ class ChildPolicyExecutor:
             categorical_pipeline_pass = champion.get("final_decision") in ("accepted", "rejected", "bypassed"); meta_pass = categorical_pipeline_pass; meta_decision = "PASS_PRODUCTION_PIPELINE_EVIDENCE" if meta_pass else "UNAVAILABLE"
         raw_score = self._finite(champion.get("trade_score", observation.get("trade_score"))); score_threshold = float(self.config.risk_overrides.get("min_trade_score", 50.0)); score_pass = raw_score is not None and raw_score >= score_threshold; score_decision = ("PASS" if score_pass else "REJECT") if raw_score is not None else "UNAVAILABLE"
 
-        can_enter = self.portfolio.can_open_position(symbol); risk_decision = "PASS" if can_enter else "REJECT_CONCURRENCY"; hypothetical_pass = signal_generated and ml_pass and meta_pass and score_pass and can_enter; final_decision = "ACCEPTED" if hypothetical_pass else "REJECTED"; champion_pass = champion.get("final_decision") in ("accepted", "bypassed")
+        can_enter = self.portfolio.can_open_position(symbol) or bool(self.config.risk_overrides.get("rotation_enabled", False))
+        risk_decision = "PASS" if can_enter else "REJECT_CONCURRENCY"
+        hypothetical_pass = signal_generated and ml_pass and meta_pass and score_pass and can_enter
+        final_decision = "ACCEPTED" if hypothetical_pass else "REJECTED"
+        champion_pass = champion.get("final_decision") in ("accepted", "bypassed")
         disagreement = "BOTH_PASS" if champion_pass and hypothetical_pass else "BOTH_REJECT" if not champion_pass and not hypothetical_pass else "CHAMPION_ONLY" if champion_pass else "CHILD_ONLY"
 
         stop = self._finite(observation.get("stop_loss")); target = self._finite(observation.get("take_profit"))
@@ -99,7 +103,7 @@ class ChildPolicyExecutor:
             qty = self.portfolio.calculate_position_size(price, stop)
             if qty > 0:
                 virtual_order_id = f"virt_{self.policy_id}_{hashlib.sha256(f'{candidate_id}|{ts.isoformat()}'.encode()).hexdigest()[:10]}"
-                if self.portfolio.open_virtual_position(symbol, direction, qty, price, stop, target, ts, virtual_order_id): virtual_fill_price = price
+                if self.portfolio.open_virtual_position(symbol, direction, qty, price, stop, target, ts, virtual_order_id, candidate_obs=observation): virtual_fill_price = price
 
         event_id = hashlib.sha256(f"{self.policy_id}|{candidate_id}|{ts.isoformat()}|EVALUATION".encode()).hexdigest(); self.portfolio.record_processed_watermark(watermark)
         record = {"id":event_id,"policy_id":self.policy_id,"parent_policy_id":self.config.parent_policy_id,"config_fingerprint":self.config_fingerprint,"candidate_id":candidate_id,"ts":ts,"symbol":symbol,"strategy":strategy,"direction":direction,"signal_generated":signal_generated,"ml_probability":raw_ml,"ml_decision":ml_decision,"meta_probability":raw_meta,"meta_decision":meta_decision,"trade_score":raw_score,"trade_score_decision":score_decision,"risk_decision":risk_decision,"hypothetical_final_decision":final_decision,"disagreement_category":disagreement,"entry_price":price,"stop_loss":stop,"take_profit":target,"virtual_order_id":virtual_order_id,"virtual_fill_price":virtual_fill_price,"virtual_exit_price":exit_record["exit_price"] if exit_record else None,"virtual_exit_reason":exit_record["exit_reason"] if exit_record else None,"realized_r":exit_record["realized_r"] if exit_record else None,"mfe_r":exit_record["mfe_r"] if exit_record else None,"mae_r":exit_record["mae_r"] if exit_record else None,"payload_obj":{"checkpoint":self.portfolio.to_checkpoint_dict(),"exit_record":exit_record}}
