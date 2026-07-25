@@ -45,6 +45,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app import __version__
 from app.api.routes import router
+from app.api.replay import router as replay_router
 from app.api.ws import EventHub
 from app.config import FRONTEND_DIST, Settings, get_settings
 from app.core.engine import TradingEngine
@@ -117,6 +118,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
 
     app.include_router(router)
+    app.include_router(replay_router)
 
     @app.websocket("/ws")
     async def ws_endpoint(ws: WebSocket) -> None:
