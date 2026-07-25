@@ -160,7 +160,7 @@ def test_generate_eod_reflection_report(temp_db: Database):
     # Run EOD reflection report
     report = generate_eod_reflection_report(temp_db)
     
-    assert "EOD Policy Performance Reflection Report" in report
+    assert "EOD Policy Performance & Reflection Report" in report
     assert "champion" in report
     assert "challenger_low_ml" in report
     assert "Approved" in report
