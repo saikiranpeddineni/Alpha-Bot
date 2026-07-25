@@ -34,6 +34,14 @@ class VirtualPosition:
     def unrealized_pnl(self, price):
         return ((price - self.entry_price) if self.side == "long" else (self.entry_price - price)) * self.qty
 
+    @property
+    def entry_notional(self):
+        return abs(self.qty * self.entry_price)
+
+    @property
+    def initial_dollar_risk(self):
+        return abs(self.qty * self.initial_risk_per_share)
+
 
 class SpawnVirtualPortfolio:
     MAX_DURABLE_WATERMARKS = 10000
@@ -59,6 +67,12 @@ class SpawnVirtualPortfolio:
         self.trade_count = 0
         self.closed_trades = []
         self.processed_watermarks = {}
+        # Research accounting: measure scarce capital/risk actually consumed rather than
+        # treating seed capital as if it were continuously deployed.
+        self.current_capital_deployed = 0.0
+        self.peak_capital_deployed = 0.0
+        self.cumulative_entry_notional = 0.0
+        self.cumulative_initial_risk = 0.0
 
     def record_processed_watermark(self, key):
         self.processed_watermarks[key] = None
@@ -66,6 +80,24 @@ class SpawnVirtualPortfolio:
         if overflow > 0:
             for old in list(self.processed_watermarks)[:overflow]:
                 self.processed_watermarks.pop(old, None)
+
+    def _refresh_capital_deployed(self):
+        self.current_capital_deployed = sum(position.entry_notional for position in self.positions.values())
+        self.peak_capital_deployed = max(self.peak_capital_deployed, self.current_capital_deployed)
+
+    def capital_efficiency_metrics(self):
+        peak_pct = (self.peak_capital_deployed / self.seed_capital * 100.0) if self.seed_capital > 0 else 0.0
+        return_pct = ((self.marked_equity / self.seed_capital) - 1.0) * 100.0 if self.seed_capital > 0 else 0.0
+        return {
+            "current_capital_deployed": self.current_capital_deployed,
+            "peak_capital_deployed": self.peak_capital_deployed,
+            "peak_capital_pct": peak_pct,
+            "cumulative_entry_notional": self.cumulative_entry_notional,
+            "cumulative_initial_risk": self.cumulative_initial_risk,
+            "return_pct": return_pct,
+            "return_per_peak_capital_pct": return_pct / max(peak_pct, 1.0),
+            "pnl_per_peak_dollar": self.daily_pnl / max(self.peak_capital_deployed, 1.0),
+        }
 
     def mark_to_market(self, prices):
         if prices:
@@ -104,26 +136,14 @@ class SpawnVirtualPortfolio:
         position = VirtualPosition(sym, side.lower(), qty, price, now, stop, target, virtual_order_id=order_id)
         self.positions[sym] = position
         self.last_prices[sym] = price
+        self.cumulative_entry_notional += position.entry_notional
+        self.cumulative_initial_risk += position.initial_dollar_risk
+        self._refresh_capital_deployed()
         self.mark_to_market({sym: price})
         return position
 
-    def update_ohlc_and_check_exits(
-        self,
-        symbol,
-        o=None,
-        h=None,
-        l=None,
-        c=None,
-        now=None,
-        **legacy_kwargs,
-    ):
-        """Apply one causally completed OHLC bar to an open virtual position.
-
-        The effective stop entering the bar is evaluated before any trailing-stop
-        update derived from that bar.  Legacy keyword aliases remain accepted so
-        older safety fixtures exercise the same implementation rather than fail
-        at the call boundary.
-        """
+    def update_ohlc_and_check_exits(self, symbol, o=None, h=None, l=None, c=None, now=None, **legacy_kwargs):
+        """Apply one causally completed OHLC bar to an open virtual position."""
         if o is None:
             o = legacy_kwargs.pop("open_px", None)
         if h is None:
@@ -138,16 +158,13 @@ class SpawnVirtualPortfolio:
             raise TypeError(f"Unexpected OHLC arguments: {sorted(legacy_kwargs)}")
         if any(value is None for value in (o, h, l, c, now)):
             raise ValueError("Complete OHLC values and timestamp are required")
-
         sym = symbol.upper()
         position = self.positions.get(sym)
         if not position:
             return None
-
         bar_watermark = f"BAR|{sym}|{now.isoformat()}"
         if bar_watermark in self.processed_watermarks:
             return None
-
         stop = position.trailing_stop if position.trailing_stop is not None else position.initial_stop
         exit_record = None
         if position.side == "long":
@@ -160,11 +177,9 @@ class SpawnVirtualPortfolio:
                 exit_record = self.close_virtual_position(sym, stop, "STOP_LOSS", now)
             elif position.initial_target and l <= position.initial_target:
                 exit_record = self.close_virtual_position(sym, position.initial_target, "TAKE_PROFIT", now)
-
         self.record_processed_watermark(bar_watermark)
         if exit_record is not None:
             return exit_record
-
         position.peak_price = max(position.peak_price, h)
         position.trough_price = min(position.trough_price, l)
         mult = float(self.risk_config.get("trailing_stop_atr_mult", 0.0))
@@ -190,63 +205,41 @@ class SpawnVirtualPortfolio:
         self.realized_r += realized_r
         self.trade_count += 1
         self.last_prices[sym] = exit_price
+        self._refresh_capital_deployed()
         self.mark_to_market({sym: exit_price})
         record = {
-            "policy_id": self.policy_id,
-            "symbol": sym,
-            "side": position.side,
-            "qty": position.qty,
-            "entry_price": position.entry_price,
-            "exit_price": exit_price,
-            "entry_at": position.entry_at.isoformat(),
-            "exit_at": now.isoformat(),
-            "pnl": pnl,
-            "realized_r": realized_r,
-            "mfe_r": mfe_r,
-            "mae_r": mae_r,
-            "exit_reason": reason,
+            "policy_id": self.policy_id, "symbol": sym, "side": position.side, "qty": position.qty,
+            "entry_price": position.entry_price, "exit_price": exit_price,
+            "entry_at": position.entry_at.isoformat(), "exit_at": now.isoformat(), "pnl": pnl,
+            "realized_r": realized_r, "mfe_r": mfe_r, "mae_r": mae_r, "exit_reason": reason,
+            "entry_notional": position.entry_notional, "initial_dollar_risk": position.initial_dollar_risk,
         }
         self.closed_trades.append(record)
         return record
 
     def to_checkpoint_dict(self):
-        positions = {
-            symbol: {
-                "symbol": position.symbol,
-                "side": position.side,
-                "qty": position.qty,
-                "entry_price": position.entry_price,
-                "entry_at": position.entry_at.isoformat(),
-                "initial_stop": position.initial_stop,
-                "initial_target": position.initial_target,
-                "trailing_stop": position.trailing_stop,
-                "peak_price": position.peak_price,
-                "trough_price": position.trough_price,
-                "virtual_order_id": position.virtual_order_id,
-            }
-            for symbol, position in self.positions.items()
-        }
+        positions = {symbol: {
+            "symbol": position.symbol, "side": position.side, "qty": position.qty,
+            "entry_price": position.entry_price, "entry_at": position.entry_at.isoformat(),
+            "initial_stop": position.initial_stop, "initial_target": position.initial_target,
+            "trailing_stop": position.trailing_stop, "peak_price": position.peak_price,
+            "trough_price": position.trough_price, "virtual_order_id": position.virtual_order_id,
+        } for symbol, position in self.positions.items()}
         envelope = {
-            "schema": 3,
-            "orders": self.pending_orders,
-            "last_prices": dict(self.last_prices),
-            "processed_watermarks": list(self.processed_watermarks),
-            "max_drawdown_pct": self.max_drawdown_pct,
+            "schema": 4, "orders": self.pending_orders, "last_prices": dict(self.last_prices),
+            "processed_watermarks": list(self.processed_watermarks), "max_drawdown_pct": self.max_drawdown_pct,
+            "capital_efficiency": self.capital_efficiency_metrics(),
         }
         return {
-            "policy_id": self.policy_id,
-            "cash": self.cash,
-            "equity": self.marked_equity,
-            "peak_equity": self.peak_equity,
-            "positions": positions,
-            "last_prices": dict(self.last_prices),
-            "processed_watermarks": list(self.processed_watermarks),
-            "pending_orders": envelope,
-            "daily_pnl": self.daily_pnl,
-            "realized_r": self.realized_r,
-            "trade_count": self.trade_count,
-            "drawdown": self.get_drawdown_pct(),
-            "max_drawdown_pct": self.max_drawdown_pct,
+            "policy_id": self.policy_id, "cash": self.cash, "equity": self.marked_equity,
+            "peak_equity": self.peak_equity, "positions": positions, "last_prices": dict(self.last_prices),
+            "processed_watermarks": list(self.processed_watermarks), "pending_orders": envelope,
+            "daily_pnl": self.daily_pnl, "realized_r": self.realized_r, "trade_count": self.trade_count,
+            "drawdown": self.get_drawdown_pct(), "max_drawdown_pct": self.max_drawdown_pct,
+            "current_capital_deployed": self.current_capital_deployed,
+            "peak_capital_deployed": self.peak_capital_deployed,
+            "cumulative_entry_notional": self.cumulative_entry_notional,
+            "cumulative_initial_risk": self.cumulative_initial_risk,
         }
 
     def restore_from_checkpoint(self, checkpoint):
@@ -257,41 +250,33 @@ class SpawnVirtualPortfolio:
         self.daily_pnl = float(checkpoint.get("daily_pnl", 0))
         self.realized_r = float(checkpoint.get("realized_r", 0))
         self.trade_count = int(checkpoint.get("trade_count", 0))
+        self.max_drawdown_pct = float(checkpoint.get("max_drawdown_pct", checkpoint.get("drawdown", 0.0)))
+        self.current_capital_deployed = float(checkpoint.get("current_capital_deployed", 0.0))
+        self.peak_capital_deployed = float(checkpoint.get("peak_capital_deployed", 0.0))
+        self.cumulative_entry_notional = float(checkpoint.get("cumulative_entry_notional", 0.0))
+        self.cumulative_initial_risk = float(checkpoint.get("cumulative_initial_risk", 0.0))
         envelope = checkpoint.get("pending_orders") or {}
-        durable = envelope if isinstance(envelope, dict) and envelope.get("schema") in (2, 3) else {}
-        self.pending_orders = list(durable.get("orders", [])) if durable else (envelope if isinstance(envelope, list) else [])
-        prices = checkpoint.get("last_prices") or durable.get("last_prices") or {}
-        marks = checkpoint.get("processed_watermarks") or durable.get("processed_watermarks") or []
-        self.max_drawdown_pct = float(checkpoint.get("max_drawdown_pct", durable.get("max_drawdown_pct", checkpoint.get("drawdown", 0.0))))
-        self.last_prices = {str(key).upper(): float(value) for key, value in prices.items()}
-        self.processed_watermarks = {str(key): None for key in marks[-self.MAX_DURABLE_WATERMARKS:]}
-        restored = {}
-        for sym, payload in (checkpoint.get("positions") or {}).items():
-            raw = payload.get("entry_at")
-            if isinstance(raw, str):
-                try:
-                    entry = datetime.fromisoformat(raw)
-                except ValueError as exc:
-                    raise ValueError(f"Invalid checkpoint entry_at for {sym}: {raw!r}") from exc
-            elif isinstance(raw, datetime):
-                entry = raw
-            else:
-                raise ValueError(f"Missing checkpoint entry_at for {sym}")
-            if entry.tzinfo is None:
-                raise ValueError(f"Naive checkpoint entry_at for {sym}: {raw!r}")
-            restored[sym.upper()] = VirtualPosition(
-                sym.upper(),
-                payload.get("side", "long"),
-                float(payload.get("qty", 1)),
-                float(payload.get("entry_price", 0)),
-                entry,
-                float(payload.get("initial_stop", 0)),
-                payload.get("initial_target"),
-                payload.get("trailing_stop"),
-                float(payload.get("peak_price", payload.get("entry_price", 0))),
-                float(payload.get("trough_price", payload.get("entry_price", 0))),
-                payload.get("virtual_order_id", ""),
+        if isinstance(envelope, dict):
+            self.pending_orders = list(envelope.get("orders", []))
+            self.last_prices = {str(k): float(v) for k, v in (envelope.get("last_prices") or checkpoint.get("last_prices") or {}).items()}
+            watermarks = envelope.get("processed_watermarks") or checkpoint.get("processed_watermarks") or []
+            self.processed_watermarks = {str(item): None for item in watermarks[-self.MAX_DURABLE_WATERMARKS:]}
+            ce = envelope.get("capital_efficiency") or {}
+            self.peak_capital_deployed = max(self.peak_capital_deployed, float(ce.get("peak_capital_deployed", 0.0) or 0.0))
+            self.cumulative_entry_notional = max(self.cumulative_entry_notional, float(ce.get("cumulative_entry_notional", 0.0) or 0.0))
+            self.cumulative_initial_risk = max(self.cumulative_initial_risk, float(ce.get("cumulative_initial_risk", 0.0) or 0.0))
+        else:
+            self.pending_orders = list(envelope)
+            self.last_prices = {str(k): float(v) for k, v in (checkpoint.get("last_prices") or {}).items()}
+            self.processed_watermarks = {str(item): None for item in (checkpoint.get("processed_watermarks") or [])[-self.MAX_DURABLE_WATERMARKS:]}
+        self.positions = {}
+        for symbol, data in (checkpoint.get("positions") or {}).items():
+            self.positions[symbol] = VirtualPosition(
+                symbol=data["symbol"], side=data["side"], qty=float(data["qty"]), entry_price=float(data["entry_price"]),
+                entry_at=datetime.fromisoformat(data["entry_at"]), initial_stop=float(data["initial_stop"]),
+                initial_target=float(data["initial_target"]) if data.get("initial_target") is not None else None,
+                trailing_stop=float(data["trailing_stop"]) if data.get("trailing_stop") is not None else None,
+                peak_price=float(data.get("peak_price", data["entry_price"])), trough_price=float(data.get("trough_price", data["entry_price"])),
+                virtual_order_id=data.get("virtual_order_id", ""),
             )
-        self.positions = restored
-        for sym, position in restored.items():
-            self.last_prices.setdefault(sym, position.entry_price)
+        self._refresh_capital_deployed()
