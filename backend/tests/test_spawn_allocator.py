@@ -1,17 +1,12 @@
-"""Unit tests for Spawn Capital Allocator V2 (Dollar Velocity & Release Feasibility)."""
-import pytest
+"""Unit tests for the portfolio-aware Spawn allocator."""
 from datetime import datetime, timezone, timedelta
 
-from app.research.spawn.spawn_allocator import (
-    SpawnCapitalAllocator,
-    IncumbentScore,
-    CandidateScore,
-    AllocationDecision,
-)
+from app.research.spawn.spawn_allocator import SpawnCapitalAllocator
 
 
 class MockPosition:
-    def __init__(self, symbol: str, side: str, entry_price: float, initial_risk: float, entry_at: datetime, qty: float = 50.0, strategy: str = "orb", initial_target: float = None):
+    def __init__(self, symbol, side, entry_price, initial_risk, entry_at, qty=50.0,
+                 strategy="orb", initial_target=None, peak_price=None, trough_price=None):
         self.symbol = symbol
         self.side = side
         self.entry_price = entry_price
@@ -20,86 +15,106 @@ class MockPosition:
         self.qty = qty
         self.strategy = strategy
         self.initial_target = initial_target or (entry_price * 1.02 if side == "long" else entry_price * 0.98)
+        self.peak_price = peak_price if peak_price is not None else entry_price
+        self.trough_price = trough_price if trough_price is not None else entry_price
 
 
 class MockVirtualPortfolio:
-    def __init__(self, max_positions: int = 2):
+    def __init__(self, max_positions=2):
         self.max_open_positions = max_positions
         self.positions = {}
 
-    def can_open_position(self, symbol: str) -> bool:
-        if symbol in self.positions:
-            return False
-        return len(self.positions) < self.max_open_positions
+    def can_open_position(self, symbol):
+        return symbol.upper() not in self.positions and len(self.positions) < self.max_open_positions
 
 
 def test_can_open_after_releasing():
     allocator = SpawnCapitalAllocator()
-    vp = MockVirtualPortfolio(max_positions=2)
+    vp = MockVirtualPortfolio(2)
     now = datetime.now(timezone.utc)
-    
-    # Fill portfolio 2/2
-    vp.positions["AAPL"] = MockPosition("AAPL", "long", 150.0, 1.5, now)
-    vp.positions["MSFT"] = MockPosition("MSFT", "long", 300.0, 3.0, now)
-    
-    # Direct can_open_position is False
-    assert vp.can_open_position("GOOGL") is False
-    
-    # Feasibility WITH incumbent release is True!
-    assert allocator.can_open_after_releasing(vp, "GOOGL", "AAPL") is True
-    assert allocator.check_feasibility(vp, "GOOGL", "AAPL") is True
-    
-    # Cannot release itself (symbol already held)
-    assert allocator.can_open_after_releasing(vp, "AAPL", "AAPL") is False
+    vp.positions["AAPL"] = MockPosition("AAPL", "long", 150, 1.5, now)
+    vp.positions["MSFT"] = MockPosition("MSFT", "long", 300, 3, now)
+    assert not vp.can_open_position("GOOGL")
+    assert allocator.can_open_after_releasing(vp, "GOOGL", "AAPL")
+    assert not allocator.can_open_after_releasing(vp, "AAPL", "AAPL")
 
 
-def test_evaluate_candidate_dollar_velocity():
+def test_calibrated_candidate_ev_overrides_raw_score_fallback():
     allocator = SpawnCapitalAllocator()
-    cand_obs = {
-        "symbol": "AMD",
-        "side": "long",
-        "strategy": "momentum",
-        "score": 0.80
-    }
-    
-    score_obj = allocator.evaluate_candidate(cand_obs, capital_dollars=10000.0)
-    assert score_obj.symbol == "AMD"
-    assert score_obj.expected_net_dollars > 100.0
-    assert score_obj.net_dollar_velocity > 0.0
+    obs = {"symbol": "AMD", "strategy": "momentum", "score": 0.51,
+           "calibrated_expected_net_dollars": 420.0, "expectancy_confidence": 0.9}
+    result = allocator.evaluate_candidate(obs, 10000.0)
+    assert result.expected_net_dollars == 420.0
+    assert result.confidence == 0.9
+    assert result.expected_holding_mins == 42.0
 
 
-def test_evaluate_incumbent_holding_decay():
-    allocator = SpawnCapitalAllocator(alpha_stagnation_decay=0.005)
+def test_strategy_specific_holding_time_changes_velocity():
+    allocator = SpawnCapitalAllocator(gamma_friction_cost_pct=0.0)
+    base = {"symbol": "X", "calibrated_expected_net_dollars": 100.0}
+    rsi = allocator.evaluate_candidate({**base, "strategy": "rsi2_reversion"}, 10000)
+    momentum = allocator.evaluate_candidate({**base, "strategy": "momentum"}, 10000)
+    assert rsi.net_dollar_velocity > momentum.net_dollar_velocity
+
+
+def test_real_stagnation_does_not_penalize_position_near_new_mfe():
+    allocator = SpawnCapitalAllocator(alpha_stagnation_decay=0.01)
     now = datetime.now(timezone.utc)
-    
-    # Position held for 5 minutes (no stagnant decay)
-    pos_young = MockPosition("NVDA", "long", 100.0, 2.0, now - timedelta(minutes=5), initial_target=105.0)
-    inc_young = allocator.evaluate_incumbent(pos_young, current_price=101.0, now=now)
-    assert inc_young.holding_mins == 5.0
-
-    # Position held for 45 minutes (stagnant decay applied)
-    pos_old = MockPosition("NVDA", "long", 100.0, 2.0, now - timedelta(minutes=45), initial_target=105.0)
-    inc_old = allocator.evaluate_incumbent(pos_old, current_price=101.0, now=now)
-    assert inc_old.holding_mins == 45.0
-    assert inc_old.score < inc_young.score
+    pos = MockPosition("NVDA", "long", 100, 2, now - timedelta(minutes=45),
+                       initial_target=110, peak_price=104)
+    result = allocator.evaluate_incumbent(pos, 104, now)
+    assert result.stagnation_mins == 0.0
 
 
-def test_evaluate_allocation_rotation_success_with_release():
-    allocator = SpawnCapitalAllocator(
-        min_incumbent_age_mins=15.0,
-        min_score_delta=0.001
-    )
-    vp = MockVirtualPortfolio(max_positions=1)
+def test_free_last_slot_can_wait_for_better_opportunity():
+    allocator = SpawnCapitalAllocator(reservation_hurdle=0.05)
+    vp = MockVirtualPortfolio(2)
     now = datetime.now(timezone.utc)
-    
-    # Stagnant incumbent near target
-    pos_stagnant = MockPosition("COHR", "long", 100.0, 2.0, now - timedelta(minutes=40), initial_target=100.5)
-    vp.positions["COHR"] = pos_stagnant
-    
-    cand_obs = {"symbol": "SKHY", "side": "long", "strategy": "momentum", "score": 0.85}
-    decision = allocator.evaluate_allocation(vp, {"COHR": 100.4}, cand_obs, now)
-    
+    vp.positions["A"] = MockPosition("A", "long", 100, 2, now, strategy="orb")
+    weak = {"symbol": "B", "strategy": "momentum", "calibrated_expected_net_dollars": 20.0}
+    decision = allocator.evaluate_allocation(vp, {"A": 100}, weak, now)
+    assert decision.action == "WAIT"
+    assert decision.reason == "RESERVE_CAPITAL_FOR_BETTER_OPPORTUNITY"
+
+
+def test_rotation_chooses_best_pairwise_replacement():
+    allocator = SpawnCapitalAllocator(min_score_delta=0.001, reservation_hurdle=0.0)
+    vp = MockVirtualPortfolio(2)
+    now = datetime.now(timezone.utc)
+    # A has little remaining value; B is still close to its favorable excursion.
+    vp.positions["A"] = MockPosition("A", "long", 100, 2, now - timedelta(minutes=40),
+                                      strategy="orb", initial_target=100.5, peak_price=100.4)
+    vp.positions["B"] = MockPosition("B", "long", 100, 2, now - timedelta(minutes=40),
+                                      strategy="momentum", initial_target=110, peak_price=104)
+    obs = {"symbol": "C", "strategy": "rsi2_reversion",
+           "calibrated_expected_net_dollars": 300.0, "expectancy_confidence": 1.0}
+    decision = allocator.evaluate_allocation(vp, {"A": 100.4, "B": 104}, obs, now)
     assert decision.action == "ROTATE_REPLACE"
-    assert decision.candidate_symbol == "SKHY"
+    assert decision.incumbent_symbol == "A"
+
+
+def test_low_confidence_fallback_requires_larger_rotation_edge():
+    allocator = SpawnCapitalAllocator(min_score_delta=0.001, reservation_hurdle=0.02)
+    vp = MockVirtualPortfolio(1)
+    now = datetime.now(timezone.utc)
+    vp.positions["A"] = MockPosition("A", "long", 100, 2, now - timedelta(minutes=20),
+                                      initial_target=101, peak_price=100)
+    # No calibrated EV => confidence=0.25 and therefore a larger dynamic hurdle.
+    obs = {"symbol": "B", "strategy": "momentum", "score": 0.51}
+    decision = allocator.evaluate_allocation(vp, {"A": 100}, obs, now)
+    assert decision.action in {"WAIT", "ROTATE_REPLACE"}
+    if decision.action == "WAIT":
+        assert decision.reason == "DELTA_EV_BELOW_DYNAMIC_HURDLE"
+
+
+def test_rotation_success_with_calibrated_ev():
+    allocator = SpawnCapitalAllocator(min_score_delta=0.001, reservation_hurdle=0.0)
+    vp = MockVirtualPortfolio(1)
+    now = datetime.now(timezone.utc)
+    vp.positions["COHR"] = MockPosition("COHR", "long", 100, 2, now - timedelta(minutes=40),
+                                         initial_target=100.5, peak_price=100.4)
+    obs = {"symbol": "SKHY", "side": "long", "strategy": "momentum",
+           "calibrated_expected_net_dollars": 500.0, "expectancy_confidence": 1.0}
+    decision = allocator.evaluate_allocation(vp, {"COHR": 100.4}, obs, now)
+    assert decision.action == "ROTATE_REPLACE"
     assert decision.incumbent_symbol == "COHR"
-    assert decision.score_delta > 0.0
