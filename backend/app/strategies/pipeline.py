@@ -373,10 +373,16 @@ class SignalPipeline:
             # Use regressor-derived values if the signal has no explicit targets
             entry_price = sig.price or (float(df["close"].iloc[-1]) if df is not None and len(df) > 0 else 0.0)
             if entry_price > 0:
-                if sig.take_profit is None:
-                    sig.take_profit = round(entry_price * (1 + excursion.suggested_target_pct / 100.0), 4)
-                if sig.stop_loss is None:
-                    sig.stop_loss = round(entry_price * (1 - excursion.suggested_stop_pct / 100.0), 4)
+                if sig.action == SignalAction.ENTER_SHORT:
+                    if sig.take_profit is None:
+                        sig.take_profit = round(entry_price * (1 - excursion.suggested_target_pct / 100.0), 4)
+                    if sig.stop_loss is None:
+                        sig.stop_loss = round(entry_price * (1 + excursion.suggested_stop_pct / 100.0), 4)
+                else:
+                    if sig.take_profit is None:
+                        sig.take_profit = round(entry_price * (1 + excursion.suggested_target_pct / 100.0), 4)
+                    if sig.stop_loss is None:
+                        sig.stop_loss = round(entry_price * (1 - excursion.suggested_stop_pct / 100.0), 4)
 
                 original_stop = sig.stop_loss
                 original_target = sig.take_profit

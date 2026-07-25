@@ -186,8 +186,65 @@ class SpawnedStrategyRow(Base):
     policy_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     spawned_at: Mapped[datetime]
     seed_capital: Mapped[float]
-    status: Mapped[str] = mapped_column(String(20)) # "ACTIVE", "RETIRED"
-    retired_at: Mapped[datetime | None]
+    status: Mapped[str] = mapped_column(String(20)) # "ACTIVE", "RETIRED", "UNAVAILABLE"
+    retired_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    parent_policy_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    policy_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    config_snapshot_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    config_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_from_candidate: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    spawn_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    execution_mode: Mapped[str | None] = mapped_column(String(20), default="SHADOW_ONLY", nullable=True)
+    code_commit_sha: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    model_manifest_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
+class SpawnShadowEventRow(Base):
+    __tablename__ = "spawn_shadow_events"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    policy_id: Mapped[str] = mapped_column(String(64))
+    parent_policy_id: Mapped[str] = mapped_column(String(64))
+    config_fingerprint: Mapped[str] = mapped_column(String(64))
+    candidate_id: Mapped[str] = mapped_column(String(128))
+    ts: Mapped[datetime]
+    symbol: Mapped[str] = mapped_column(String(20))
+    strategy: Mapped[str] = mapped_column(String(32))
+    direction: Mapped[str] = mapped_column(String(10))
+    signal_generated: Mapped[bool] = mapped_column(default=False)
+    ml_probability: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ml_decision: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    meta_probability: Mapped[float | None] = mapped_column(Float, nullable=True)
+    meta_decision: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    trade_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    risk_decision: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    hypothetical_final_decision: Mapped[str] = mapped_column(String(20))
+    disagreement_category: Mapped[str] = mapped_column(String(20))
+    entry_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    stop_loss: Mapped[float | None] = mapped_column(Float, nullable=True)
+    take_profit: Mapped[float | None] = mapped_column(Float, nullable=True)
+    virtual_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    virtual_fill_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    virtual_exit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    virtual_exit_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    realized_r: Mapped[float | None] = mapped_column(Float, nullable=True)
+    mfe_r: Mapped[float | None] = mapped_column(Float, nullable=True)
+    mae_r: Mapped[float | None] = mapped_column(Float, nullable=True)
+    payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class SpawnPortfolioCheckpointRow(Base):
+    __tablename__ = "spawn_portfolio_checkpoints"
+    policy_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    updated_at: Mapped[datetime]
+    cash: Mapped[float] = mapped_column(Float)
+    equity: Mapped[float] = mapped_column(Float)
+    peak_equity: Mapped[float] = mapped_column(Float)
+    positions_json: Mapped[str] = mapped_column(Text)
+    pending_orders_json: Mapped[str] = mapped_column(Text)
+    daily_pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    realized_r: Mapped[float] = mapped_column(Float, default=0.0)
+    trade_count: Mapped[int] = mapped_column(Integer, default=0)
+    drawdown: Mapped[float] = mapped_column(Float, default=0.0)
 
 
 class PolicyRejectionRow(Base):
@@ -1165,29 +1222,161 @@ class Database:
             val = s.scalar(stmt)
             return float(val) if val is not None else 0.0
 
-    def save_spawned_strategy(self, policy_id: str, seed_capital: float) -> None:
-        """Saves a spawned strategy or sets it to ACTIVE."""
+    def save_spawned_strategy(
+        self,
+        policy_id: str,
+        seed_capital: float,
+        parent_policy_id: str | None = None,
+        policy_version: str | None = None,
+        config_snapshot_json: str | None = None,
+        config_fingerprint: str | None = None,
+        created_from_candidate: str | None = None,
+        spawn_reason: str | None = None,
+        execution_mode: str = "SHADOW_ONLY",
+        code_commit_sha: str | None = None,
+        model_manifest_sha: str | None = None,
+        spawned_at: datetime | None = None
+    ) -> None:
+        """Saves a spawned strategy or sets it to ACTIVE with immutable research metadata and $100k ceiling enforcement."""
+        from datetime import timezone
+        from sqlalchemy import select, func
+        now_utc = datetime.now(timezone.utc)
+        sp_at = spawned_at or now_utc
         with self._session() as s:
             from app.db.database import SpawnedStrategyRow
             row = s.query(SpawnedStrategyRow).filter(SpawnedStrategyRow.policy_id == policy_id).first()
+            
+            # Transactionally calculate current active capital
+            active_stmt = select(func.sum(SpawnedStrategyRow.seed_capital)).where(
+                SpawnedStrategyRow.status == "ACTIVE",
+                SpawnedStrategyRow.policy_id != policy_id
+            )
+            current_active = s.scalar(active_stmt) or 0.0
+            if current_active + seed_capital > 100000.0:
+                raise ValueError(
+                    f"Global spawned capital ceiling ($100,000.00) exceeded: active ({current_active:.2f}) + requested ({seed_capital:.2f}) > 100000.00"
+                )
+
             if row:
                 row.status = "ACTIVE"
                 row.seed_capital = seed_capital
-                row.spawned_at = datetime.utcnow()
                 row.retired_at = None
+                # Provenance Immutability Guard: Do NOT mutate original snapshot/fingerprint if set
+                if not row.config_snapshot_json and config_snapshot_json:
+                    row.config_snapshot_json = config_snapshot_json
+                if not row.config_fingerprint and config_fingerprint:
+                    row.config_fingerprint = config_fingerprint
+                if not row.parent_policy_id and parent_policy_id:
+                    row.parent_policy_id = parent_policy_id
+                if policy_version: row.policy_version = policy_version
+                if created_from_candidate: row.created_from_candidate = created_from_candidate
+                if spawn_reason: row.spawn_reason = spawn_reason
+                row.execution_mode = execution_mode
+                if code_commit_sha: row.code_commit_sha = code_commit_sha
+                if model_manifest_sha: row.model_manifest_sha = model_manifest_sha
             else:
                 row = SpawnedStrategyRow(
                     policy_id=policy_id,
-                    spawned_at=datetime.utcnow(),
+                    spawned_at=sp_at,
                     seed_capital=seed_capital,
                     status="ACTIVE",
-                    retired_at=None
+                    retired_at=None,
+                    parent_policy_id=parent_policy_id,
+                    policy_version=policy_version,
+                    config_snapshot_json=config_snapshot_json,
+                    config_fingerprint=config_fingerprint,
+                    created_from_candidate=created_from_candidate,
+                    spawn_reason=spawn_reason,
+                    execution_mode=execution_mode,
+                    code_commit_sha=code_commit_sha,
+                    model_manifest_sha=model_manifest_sha
                 )
                 s.add(row)
             s.commit()
 
+    def commit_spawn_observation(self, events: list[dict], checkpoints: list[tuple[str, dict]]) -> None:
+        """Atomically persists shadow decision events and portfolio checkpoints in a single SQLite transaction."""
+        import json
+        from datetime import timezone
+        with self._session() as s:
+            from app.db.database import SpawnShadowEventRow, SpawnPortfolioCheckpointRow
+            now_utc = datetime.now(timezone.utc)
+            
+            for event_data in events:
+                ts_val = event_data.get("ts") or now_utc
+                evt_row = SpawnShadowEventRow(
+                    id=event_data["id"],
+                    policy_id=event_data["policy_id"],
+                    parent_policy_id=event_data.get("parent_policy_id", "champion"),
+                    config_fingerprint=event_data.get("config_fingerprint", ""),
+                    candidate_id=event_data.get("candidate_id", ""),
+                    ts=ts_val,
+                    symbol=event_data["symbol"],
+                    strategy=event_data["strategy"],
+                    direction=event_data["direction"],
+                    signal_generated=event_data.get("signal_generated", False),
+                    ml_probability=event_data.get("ml_probability"),
+                    ml_decision=event_data.get("ml_decision"),
+                    meta_probability=event_data.get("meta_probability"),
+                    meta_decision=event_data.get("meta_decision"),
+                    trade_score=event_data.get("trade_score"),
+                    risk_decision=event_data.get("risk_decision"),
+                    hypothetical_final_decision=event_data.get("hypothetical_final_decision", "REJECTED"),
+                    disagreement_category=event_data.get("disagreement_category", "NON_COMPARABLE"),
+                    entry_price=event_data.get("entry_price"),
+                    stop_loss=event_data.get("stop_loss"),
+                    take_profit=event_data.get("take_profit"),
+                    virtual_order_id=event_data.get("virtual_order_id"),
+                    virtual_fill_price=event_data.get("virtual_fill_price"),
+                    virtual_exit_price=event_data.get("virtual_exit_price"),
+                    virtual_exit_reason=event_data.get("virtual_exit_reason"),
+                    realized_r=event_data.get("realized_r"),
+                    mfe_r=event_data.get("mfe_r"),
+                    mae_r=event_data.get("mae_r"),
+                    payload_json=json.dumps(event_data.get("payload_obj")) if event_data.get("payload_obj") else None,
+                )
+                s.merge(evt_row)
+
+            for policy_id, checkpoint_data in checkpoints:
+                pos_json = json.dumps(checkpoint_data.get("positions", {}))
+                pending_json = json.dumps(checkpoint_data.get("pending_orders", []))
+                
+                chk_row = s.query(SpawnPortfolioCheckpointRow).filter(
+                    SpawnPortfolioCheckpointRow.policy_id == policy_id
+                ).first()
+                
+                if chk_row:
+                    chk_row.updated_at = now_utc
+                    chk_row.cash = float(checkpoint_data.get("cash", 10000.0))
+                    chk_row.equity = float(checkpoint_data.get("equity", 10000.0))
+                    chk_row.peak_equity = float(checkpoint_data.get("peak_equity", 10000.0))
+                    chk_row.positions_json = pos_json
+                    chk_row.pending_orders_json = pending_json
+                    chk_row.daily_pnl = float(checkpoint_data.get("daily_pnl", 0.0))
+                    chk_row.realized_r = float(checkpoint_data.get("realized_r", 0.0))
+                    chk_row.trade_count = int(checkpoint_data.get("trade_count", 0))
+                    chk_row.drawdown = float(checkpoint_data.get("drawdown", 0.0))
+                else:
+                    chk_row = SpawnPortfolioCheckpointRow(
+                        policy_id=policy_id,
+                        updated_at=now_utc,
+                        cash=float(checkpoint_data.get("cash", 10000.0)),
+                        equity=float(checkpoint_data.get("equity", 10000.0)),
+                        peak_equity=float(checkpoint_data.get("peak_equity", 10000.0)),
+                        positions_json=pos_json,
+                        pending_orders_json=pending_json,
+                        daily_pnl=float(checkpoint_data.get("daily_pnl", 0.0)),
+                        realized_r=float(checkpoint_data.get("realized_r", 0.0)),
+                        trade_count=int(checkpoint_data.get("trade_count", 0)),
+                        drawdown=float(checkpoint_data.get("drawdown", 0.0)),
+                    )
+                    s.add(chk_row)
+            
+            s.commit()
+
     def retire_spawned_strategy(self, policy_id: str) -> bool:
         """Retires a spawned strategy. Returns True if retired successfully, else False."""
+        from datetime import timezone
         with self._session() as s:
             from app.db.database import SpawnedStrategyRow
             row = s.query(SpawnedStrategyRow).filter(
@@ -1196,25 +1385,137 @@ class Database:
             ).first()
             if row:
                 row.status = "RETIRED"
-                row.retired_at = datetime.utcnow()
+                row.retired_at = datetime.now(timezone.utc)
                 s.commit()
                 return True
             return False
 
     def get_active_spawned_strategies(self) -> list[dict]:
-        """Returns all ACTIVE spawned strategies."""
+        """Returns all ACTIVE spawned strategies with research metadata."""
         with self._session() as s:
             from app.db.database import SpawnedStrategyRow
             rows = s.query(SpawnedStrategyRow).filter(SpawnedStrategyRow.status == "ACTIVE").all()
-            return [
-                {
+            res = []
+            for r in rows:
+                sp_at_str = r.spawned_at.isoformat() if hasattr(r.spawned_at, "isoformat") else str(r.spawned_at)
+                res.append({
                     "policy_id": r.policy_id,
-                    "spawned_at": r.spawned_at.isoformat() if hasattr(r.spawned_at, "isoformat") else str(r.spawned_at),
+                    "spawned_at": sp_at_str,
                     "seed_capital": r.seed_capital,
-                    "status": r.status
-                }
-                for r in rows
-            ]
+                    "status": r.status,
+                    "parent_policy_id": r.parent_policy_id,
+                    "policy_version": r.policy_version,
+                    "config_snapshot_json": r.config_snapshot_json,
+                    "config_fingerprint": r.config_fingerprint,
+                    "created_from_candidate": r.created_from_candidate,
+                    "spawn_reason": r.spawn_reason,
+                    "execution_mode": r.execution_mode or "SHADOW_ONLY",
+                    "code_commit_sha": r.code_commit_sha,
+                    "model_manifest_sha": r.model_manifest_sha,
+                })
+            return res
+
+    def save_spawn_shadow_event(self, event_data: dict) -> None:
+        """Saves a live shadow candidate evaluation event for a spawned child policy."""
+        import json
+        from datetime import timezone
+        with self._session() as s:
+            from app.db.database import SpawnShadowEventRow
+            ts_val = event_data.get("ts") or datetime.now(timezone.utc)
+            row = SpawnShadowEventRow(
+                id=event_data["id"],
+                policy_id=event_data["policy_id"],
+                parent_policy_id=event_data.get("parent_policy_id", "champion"),
+                config_fingerprint=event_data.get("config_fingerprint", ""),
+                candidate_id=event_data.get("candidate_id", ""),
+                ts=ts_val,
+                symbol=event_data["symbol"],
+                strategy=event_data["strategy"],
+                direction=event_data["direction"],
+                signal_generated=event_data.get("signal_generated", False),
+                ml_probability=event_data.get("ml_probability"),
+                ml_decision=event_data.get("ml_decision"),
+                meta_probability=event_data.get("meta_probability"),
+                meta_decision=event_data.get("meta_decision"),
+                trade_score=event_data.get("trade_score"),
+                risk_decision=event_data.get("risk_decision"),
+                hypothetical_final_decision=event_data.get("hypothetical_final_decision", "REJECTED"),
+                disagreement_category=event_data.get("disagreement_category", "NON_COMPARABLE"),
+                entry_price=event_data.get("entry_price"),
+                stop_loss=event_data.get("stop_loss"),
+                take_profit=event_data.get("take_profit"),
+                virtual_order_id=event_data.get("virtual_order_id"),
+                virtual_fill_price=event_data.get("virtual_fill_price"),
+                virtual_exit_price=event_data.get("virtual_exit_price"),
+                virtual_exit_reason=event_data.get("virtual_exit_reason"),
+                realized_r=event_data.get("realized_r"),
+                mfe_r=event_data.get("mfe_r"),
+                mae_r=event_data.get("mae_r"),
+                payload_json=json.dumps(event_data.get("payload_obj")) if event_data.get("payload_obj") else None,
+            )
+            s.merge(row)
+            s.commit()
+
+    def save_spawn_portfolio_checkpoint(self, policy_id: str, checkpoint_data: dict) -> None:
+        """Saves or updates a spawned child's virtual portfolio state checkpoint."""
+        import json
+        from datetime import timezone
+        with self._session() as s:
+            from app.db.database import SpawnPortfolioCheckpointRow
+            row = s.query(SpawnPortfolioCheckpointRow).filter(SpawnPortfolioCheckpointRow.policy_id == policy_id).first()
+            now_utc = datetime.now(timezone.utc)
+            positions_json = json.dumps(checkpoint_data.get("positions", {}))
+            pending_orders_json = json.dumps(checkpoint_data.get("pending_orders", []))
+            
+            if row:
+                row.updated_at = now_utc
+                row.cash = float(checkpoint_data.get("cash", 10000.0))
+                row.equity = float(checkpoint_data.get("equity", 10000.0))
+                row.peak_equity = float(checkpoint_data.get("peak_equity", 10000.0))
+                row.positions_json = positions_json
+                row.pending_orders_json = pending_orders_json
+                row.daily_pnl = float(checkpoint_data.get("daily_pnl", 0.0))
+                row.realized_r = float(checkpoint_data.get("realized_r", 0.0))
+                row.trade_count = int(checkpoint_data.get("trade_count", 0))
+                row.drawdown = float(checkpoint_data.get("drawdown", 0.0))
+            else:
+                row = SpawnPortfolioCheckpointRow(
+                    policy_id=policy_id,
+                    updated_at=now_utc,
+                    cash=float(checkpoint_data.get("cash", 10000.0)),
+                    equity=float(checkpoint_data.get("equity", 10000.0)),
+                    peak_equity=float(checkpoint_data.get("peak_equity", 10000.0)),
+                    positions_json=positions_json,
+                    pending_orders_json=pending_orders_json,
+                    daily_pnl=float(checkpoint_data.get("daily_pnl", 0.0)),
+                    realized_r=float(checkpoint_data.get("realized_r", 0.0)),
+                    trade_count=int(checkpoint_data.get("trade_count", 0)),
+                    drawdown=float(checkpoint_data.get("drawdown", 0.0)),
+                )
+                s.add(row)
+            s.commit()
+
+    def get_spawn_portfolio_checkpoint(self, policy_id: str) -> dict | None:
+        """Loads a spawned child's virtual portfolio state checkpoint."""
+        import json
+        with self._session() as s:
+            from app.db.database import SpawnPortfolioCheckpointRow
+            row = s.query(SpawnPortfolioCheckpointRow).filter(SpawnPortfolioCheckpointRow.policy_id == policy_id).first()
+            if not row:
+                return None
+            return {
+                "policy_id": row.policy_id,
+                "updated_at": row.updated_at.isoformat(),
+                "cash": row.cash,
+                "equity": row.equity,
+                "peak_equity": row.peak_equity,
+                "positions": json.loads(row.positions_json) if row.positions_json else {},
+                "pending_orders": json.loads(row.pending_orders_json) if row.pending_orders_json else [],
+                "daily_pnl": row.daily_pnl,
+                "realized_r": row.realized_r,
+                "trade_count": row.trade_count,
+                "drawdown": row.drawdown,
+            }
 
     def get_active_spawned_capital(self) -> float:
         """Returns the sum of seed capital of all ACTIVE spawned strategies."""
