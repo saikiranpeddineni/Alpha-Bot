@@ -13,6 +13,7 @@ import random
 from typing import Iterable
 from app.research.spawn.spawn_config import ChildPolicyConfig
 from app.research.spawn.spawn_executor import ChildPolicyExecutor
+from app.research.spawn.spawn_capital_intelligence import analyze_closed_trades, velocity_score
 
 
 @dataclass(frozen=True)
@@ -31,6 +32,7 @@ class EvolutionSettings:
     drawdown_quadratic_penalty: float = 0.02
     edge_density_weight: float = 1.25
     capital_velocity_weight: float = 0.06
+    capital_time_weight: float = 0.08
 
 
 @dataclass(frozen=True)
@@ -47,6 +49,9 @@ class FitnessSnapshot:
     capital_efficiency: float = 0.0
     risk_efficiency: float = 0.0
     capital_turnover: float = 0.0
+    capital_minutes: float = 0.0
+    pnl_per_capital_minute: float = 0.0
+    compounding_state: str = "BASE"
 
 
 class SpawnEvolutionEngine:
@@ -56,7 +61,6 @@ class SpawnEvolutionEngine:
         ("risk", "risk_per_trade_pct"): (0.10, 2.0),
         ("risk", "max_position_pct"): (5.0, 45.0),
         ("risk", "trailing_stop_atr_mult"): (0.0, 4.0),
-        # Only already-earned positive P&L may be recycled. This never increases seed capital.
         ("risk", "profit_reinvestment_fraction"): (0.0, 0.75),
     }
 
@@ -86,6 +90,7 @@ class SpawnEvolutionEngine:
         capital_efficiency = float(metrics.get("return_per_peak_capital_pct", equity_return_pct / max(peak_capital_pct, 1.0)))
         risk_efficiency = float(metrics.get("risk_efficiency", 0.0))
         capital_turnover = float(metrics.get("capital_turnover", 0.0))
+        intelligence = analyze_closed_trades(p.closed_trades, min_evidence_trades=max(5, self.settings.min_trades_for_selection // 2))
         eligible = executor.status == "ACTIVE" and trades >= self.settings.min_trades_for_selection and drawdown_pct <= self.settings.max_drawdown_pct
 
         confidence = min(1.0, trades / float(self.settings.confidence_trade_count)) if trades else 0.0
@@ -94,15 +99,14 @@ class SpawnEvolutionEngine:
         evidence_adjusted_edge = confidence * expectancy_r
         efficiency_score = confidence * capital_efficiency * 4.0
         edge_density_score = confidence * max(-5.0, min(5.0, risk_efficiency)) * self.settings.edge_density_weight
-        # Turnover only receives a small reward when the child has positive expectancy. This
-        # prevents churning capital from gaming fitness.
-        velocity_score = confidence * math.log1p(max(0.0, capital_turnover)) * self.settings.capital_velocity_weight if expectancy_r > 0 else 0.0
+        turnover_score = confidence * math.log1p(max(0.0, capital_turnover)) * self.settings.capital_velocity_weight if expectancy_r > 0 else 0.0
+        capital_time_score = velocity_score(intelligence) * self.settings.capital_time_weight if expectancy_r > 0 else 0.0
         drawdown_penalty = self.settings.drawdown_linear_penalty * drawdown_pct + self.settings.drawdown_quadratic_penalty * drawdown_pct * drawdown_pct
         capital_penalty = self.settings.capital_intensity_penalty * (peak_capital_pct / 100.0)
-        fitness = evidence_adjusted_edge + growth_score + efficiency_score + edge_density_score + velocity_score - drawdown_penalty - capital_penalty
+        fitness = evidence_adjusted_edge + growth_score + efficiency_score + edge_density_score + turnover_score + capital_time_score - drawdown_penalty - capital_penalty
         if not eligible:
             fitness = -1_000_000.0 + fitness
-        return FitnessSnapshot(executor.policy_id, trades, realized_r, expectancy_r, drawdown_pct, equity_return_pct, fitness, eligible, peak_capital_pct, capital_efficiency, risk_efficiency, capital_turnover)
+        return FitnessSnapshot(executor.policy_id, trades, realized_r, expectancy_r, drawdown_pct, equity_return_pct, fitness, eligible, peak_capital_pct, capital_efficiency, risk_efficiency, capital_turnover, intelligence.capital_minutes, intelligence.pnl_per_capital_minute, intelligence.state)
 
     def rank(self, executors: Iterable[ChildPolicyExecutor]) -> list[FitnessSnapshot]:
         return sorted((self.score(e) for e in executors), key=lambda x: (x.fitness, x.capital_efficiency, x.risk_efficiency, x.expectancy_r, x.trades, x.policy_id), reverse=True)
@@ -112,8 +116,6 @@ class SpawnEvolutionEngine:
 
     def bootstrap_configs(self, now: datetime | None = None) -> list[ChildPolicyConfig]:
         now = now or datetime.now(timezone.utc)
-        # Keep scarce-capital cohorts and independently vary earned-profit recycling. This lets
-        # replay distinguish genuine compounding from merely larger initial exposure.
         seeds = [
             (0.48, 45.0, 0.35, 0.0, 8.0, 0.00),
             (0.50, 50.0, 0.50, 0.5, 12.0, 0.15),
@@ -187,7 +189,7 @@ class SpawnEvolutionEngine:
         weak = [x.policy_id for x in sampled if x.drawdown_pct > self.settings.max_drawdown_pct or x.expectancy_r < -0.20 or x.risk_efficiency < -0.25]
         score_by_id = {x.policy_id: x for x in scored}
         for ids in self.behavior_clone_groups(executors, self.settings.min_trades_for_selection).values():
-            ordered = sorted(ids, key=lambda pid: (score_by_id[pid].fitness, score_by_id[pid].capital_efficiency, score_by_id[pid].risk_efficiency, score_by_id[pid].trades, pid), reverse=True)
+            ordered = sorted(ids, key=lambda pid: (score_by_id[pid].fitness, score_by_id[pid].capital_efficiency, score_by_id[pid].risk_efficiency, score_by_id[pid].pnl_per_capital_minute, score_by_id[pid].trades, pid), reverse=True)
             weak.extend(ordered[1:])
         overflow = max(0, sum(e.status == "ACTIVE" for e in executors.values()) - self.settings.max_population)
         if overflow:
