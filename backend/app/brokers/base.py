@@ -104,7 +104,9 @@ def make_broker(broker_name: str, settings: Settings) -> Broker:
     """
     name = broker_name.lower().strip()
     if name == "alpaca":
-        from app.brokers.alpaca import AlpacaBroker
+        # Production instances use the hardened adapter. It subclasses the
+        # original AlpacaBroker so the public broker contract remains stable.
+        from app.brokers.alpaca_hardened import AlpacaBroker
         return AlpacaBroker(
             api_key=settings.alpaca_api_key,
             api_secret=settings.alpaca_api_secret,

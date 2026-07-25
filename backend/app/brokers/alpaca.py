@@ -516,8 +516,9 @@ class AlpacaBroker(Broker):
         db = Database.active()
         # fix(#47): start recovery from the forward reconciliation cursor in DB if available
         after = datetime.now(UTC) - timedelta(days=30)
-        if db and self.account_id:
-            cursor_ts = db.get_fill_recovery_cursor_timestamp(self._broker_mode, self.account_id)
+        account_id = getattr(self, "account_id", None)
+        if db and account_id:
+            cursor_ts = db.get_fill_recovery_cursor_timestamp(self._broker_mode, account_id)
             if cursor_ts is not None:
                 after = cursor_ts - timedelta(minutes=15)
 
