@@ -75,3 +75,15 @@ coverage.xml
 
 # Local utility scripts
 update_bot.cmd
+
+# Scratch and analysis reports
+scratch/
+validation_reports/
+analysis_results.md
+full_session_forensic_audit_*.md
+spawn_*_forensic.md
+run_oos_validation.py
+scan.py
+pyrefly.toml
+CHANGES.md
+
