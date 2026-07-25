@@ -129,11 +129,11 @@ class SpawnCapitalAllocator:
         if obs.get("expected_return_pct") is not None:
             return capital * float(obs["expected_return_pct"]) / 100.0, float(obs.get("expectancy_confidence", 0.75) or 0.75)
 
-        # Backward-compatible fallback only.  It is intentionally bounded because
+        # Backward-compatible fallback only. It is intentionally bounded because
         # Jul-23/24 scores clustered tightly and must not masquerade as calibrated EV.
         raw = float(obs.get("score", obs.get("edge", 0.50)) or 0.50)
         bounded = min(0.60, max(0.50, raw))
-        multiplier = 0.8 + 2.0 * (bounded - 0.50)  # 0.8..1.0 over discovery density zone
+        multiplier = 0.8 + 2.0 * (bounded - 0.50)
         return capital * 0.015 * multiplier, 0.25
 
     def evaluate_candidate(self, candidate_obs: Dict[str, Any], capital_dollars: float = 10000.0,
@@ -173,8 +173,6 @@ class SpawnCapitalAllocator:
         else:
             upside = capital * 0.015
 
-        # If telemetry supplies a causal target probability use it. Otherwise shrink
-        # target-distance value according to current progress instead of assuming 100% hit.
         hit_prob = getattr(position, "target_hit_probability", None)
         if hit_prob is None:
             hit_prob = min(0.80, max(0.20, 0.50 + 0.10 * progress_r))
@@ -187,7 +185,6 @@ class SpawnCapitalAllocator:
         velocity = remaining_ev / (capital * max(0.1, remaining_time / 60.0))
         quality = self._profile_quality(profiles, str(getattr(position, "symbol", "")))
 
-        # Real stagnation: prefer time-since-MFE telemetry. Age alone is only a weak fallback.
         last_mfe_at = getattr(position, "last_mfe_at", None)
         if isinstance(last_mfe_at, datetime):
             stagnation = max(0.0, (now - last_mfe_at).total_seconds() / 60.0)
@@ -216,8 +213,6 @@ class SpawnCapitalAllocator:
         candidate = self.evaluate_candidate(candidate_obs, candidate_capital, profiles, existing_strategies)
 
         if hasattr(virtual_portfolio, "can_open_position") and virtual_portfolio.can_open_position(symbol):
-            # WAIT/reservation state: weak or low-confidence fallback candidates should not
-            # automatically consume the last scarce slot.
             remaining_slots = int(getattr(virtual_portfolio, "max_open_positions", 2)) - len(positions)
             hurdle = self.free_slot_hurdle
             if remaining_slots <= 1:
@@ -232,12 +227,25 @@ class SpawnCapitalAllocator:
             return AllocationDecision("INFEASIBLE", symbol, 0.0, candidate_score=candidate.score,
                                       reason="PORTFOLIO_FULL_NO_INCUMBENTS")
 
-        # Evaluate every legal replacement, not just the weakest standalone incumbent.
+        # A rotation requires a real current mark for the incumbent. Entry price is not
+        # a valid substitute: it can materially distort remaining EV and replacement rank.
         replacement_options: List[Tuple[float, Any, IncumbentScore]] = []
+        missing_marks = False
         for sym, pos in positions.items():
             if not self.can_open_after_releasing(virtual_portfolio, symbol, sym):
                 continue
-            px = float(last_prices.get(sym, getattr(pos, "entry_price", 0.0)))
+            raw_px = last_prices.get(sym)
+            if raw_px is None:
+                missing_marks = True
+                continue
+            try:
+                px = float(raw_px)
+            except (TypeError, ValueError):
+                missing_marks = True
+                continue
+            if px <= 0.0:
+                missing_marks = True
+                continue
             incumbent = self.evaluate_incumbent(pos, px, now, profiles)
             if incumbent.holding_mins < self.min_incumbent_age_mins:
                 continue
@@ -245,11 +253,10 @@ class SpawnCapitalAllocator:
             replacement_options.append((delta, pos, incumbent))
 
         if not replacement_options:
-            return AllocationDecision("NO_ACTION", symbol, 0.0, candidate_score=candidate.score,
-                                      reason="NO_LEGAL_MATURE_REPLACEMENT")
+            reason = "MISSING_INCUMBENT_MARK" if missing_marks else "NO_LEGAL_MATURE_REPLACEMENT"
+            return AllocationDecision("NO_ACTION", symbol, 0.0, candidate_score=candidate.score, reason=reason)
 
         delta, _, incumbent = max(replacement_options, key=lambda item: item[0])
-        # Dynamic no-trade hurdle = configured edge + uncertainty/reservation premium.
         uncertainty = (1.0 - min(1.0, max(0.0, candidate.confidence))) * self.reservation_hurdle
         required_delta = self.min_score_delta + uncertainty
         if delta >= required_delta:
