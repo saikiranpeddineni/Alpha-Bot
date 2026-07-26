@@ -6,13 +6,18 @@ on:
     paths:
       - scripts/issue276_engine_cutover.py
       - .github/workflows/issue276-cutover.yml
+  pull_request:
+    branches: [master]
+    paths:
+      - scripts/issue276_engine_cutover.py
+      - .github/workflows/issue276-cutover.yml
 
 permissions:
   contents: write
 
 jobs:
   cutover:
-    if: ${{ !contains(github.event.head_commit.message, '[issue276-cutover]') }}
+    if: ${{ github.event_name != 'push' || !contains(github.event.head_commit.message, '[issue276-cutover]') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
