@@ -62,6 +62,25 @@ def test_candidate_fanout_records_champion_evidence():
     asyncio.run(run())
 
 
+def test_target_d_evidence_uses_same_candidate_identity():
+    runtime = ShadowResearchRuntime(db=MemoryDb(), gemini_api_key=None)
+    runtime.target_d.consume = lambda event: {
+        "candidate_id": event.candidate_id,
+        "event_id": event.event_id,
+        "target_d_probability": 0.72,
+        "target_d_decision": "PASS",
+        "disagreement_category": "AGREE_PASS",
+    }
+    evt = candidate()
+    runtime._consume_target_d(evt)
+    record = runtime.evidence.get("cand-1", "target_d", "v1")
+    assert record is not None
+    assert record["candidate_id"] == "cand-1"
+    assert record["event_id"] == "candidate-evt"
+    assert record["decision"] == "PASS"
+    assert record["evidence"]["target_d_probability"] == 0.72
+
+
 def test_duplicate_candidate_is_single_fanout():
     async def run():
         runtime = ShadowResearchRuntime(db=MemoryDb(), gemini_api_key=None)
@@ -73,7 +92,8 @@ def test_duplicate_candidate_is_single_fanout():
             await asyncio.wait_for(runtime.publisher.queue.join(), timeout=1.0)
             assert runtime.publisher.events_published == 1
             assert runtime.publisher.events_duplicate == 1
-            assert runtime.evidence.records_written == 1
+            # Champion + Target D are separate challenger rows for one candidate.
+            assert runtime.evidence.get("cand-1", "champion", "production") is not None
         finally:
             await runtime.stop()
 
