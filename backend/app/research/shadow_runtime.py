@@ -81,8 +81,6 @@ class ShadowResearchRuntime:
     async def start(self) -> None:
         if self._started:
             return
-        # Start the bounded dispatcher first. Individual research consumers may
-        # fail independently without becoming a prerequisite for Champion.
         try:
             await self.publisher.start()
         except Exception as exc:
@@ -96,8 +94,6 @@ class ShadowResearchRuntime:
         self._started = True
 
     async def stop(self) -> None:
-        # Every cleanup is isolated so one broken research component cannot
-        # prevent the production engine from completing shutdown.
         for name, cleanup in (
             ("publisher", self.publisher.stop),
             ("gemini", self.gemini.shutdown),
@@ -120,6 +116,7 @@ class ShadowResearchRuntime:
 
     def telemetry(self) -> dict[str, Any]:
         return {"publisher": self.publisher.telemetry(), "spawn": self.spawn.telemetry(),
+                "spawn_adapter": self.spawn_adapter.telemetry(),
                 "evidence": self.evidence.telemetry(), "outcomes": self.outcomes.telemetry(),
                 "exit_challengers": self.exits.telemetry(), "started": self._started,
                 "lifecycle_errors": self._lifecycle_errors}
