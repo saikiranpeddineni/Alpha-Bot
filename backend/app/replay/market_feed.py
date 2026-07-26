@@ -11,10 +11,18 @@ import pandas as pd
 
 from app.config import DATA_DIR
 from app.core.domain import Quote
-from app.data.base import empty_bars, resample_bars
+from app.data.base import empty_bars, normalize_bars, resample_bars
 
 
 def _bar_frame(rows: list[dict[str, Any]]) -> pd.DataFrame:
+    """Build the same canonical OHLCV shape production DataManager exposes.
+
+    Historical artifacts can contain repeated records for the same symbol/minute
+    (for example when cache/export windows overlap). Pandas consumers in the live
+    strategy/scanner path require a unique DatetimeIndex. Production's canonical
+    normalize_bars() already defines duplicate handling as keep-last, so replay
+    deliberately uses that exact rule rather than inventing replay-only behavior.
+    """
     if not rows:
         return empty_bars()
     records, indexes = [], []
@@ -29,7 +37,9 @@ def _bar_frame(rows: list[dict[str, Any]]) -> pd.DataFrame:
             "close": float(close), "volume": float(row.get("volume", row.get("v", 0.0))),
         })
         indexes.append(pd.Timestamp(row["ts_dt"]))
-    return pd.DataFrame(records, index=pd.DatetimeIndex(indexes, name="timestamp")).sort_index()
+    if not records:
+        return empty_bars()
+    return normalize_bars(pd.DataFrame(records, index=pd.DatetimeIndex(indexes, name="timestamp")))
 
 
 class ReplayMarketFeed:
@@ -67,16 +77,20 @@ class ReplayMarketFeed:
                     raise ValueError(f"Unsupported timestamp at line {line_no}: {raw_ts!r}")
                 if dt.tzinfo is None:
                     dt = dt.replace(tzinfo=timezone.utc)
-                # Keep all historical rows present in the immutable artifact up
-                # to end_date. ReplayRuntime selects which timestamps are ticks;
-                # earlier rows are warmup/scanner history only.
                 if dt.strftime("%Y-%m-%d") > end_date:
                     continue
                 normalized = dict(row, ts_dt=dt, symbol=symbol)
                 normalized["in_replay_window"] = start_date <= dt.strftime("%Y-%m-%d") <= end_date
                 rows.append(normalized)
                 self.symbols.add(symbol)
-        rows.sort(key=lambda r: (r["ts_dt"], r["symbol"]))
+
+        # Canonical production semantics are one OHLCV record per symbol/timestamp,
+        # with the last observed record winning. Deduplicate here as well as in
+        # _bar_frame so the broker and DataManager see the identical event stream.
+        deduped: dict[tuple[str, datetime], dict[str, Any]] = {}
+        for row in rows:
+            deduped[(row["symbol"], row["ts_dt"])] = row
+        rows = sorted(deduped.values(), key=lambda r: (r["ts_dt"], r["symbol"]))
         if not any(r["in_replay_window"] for r in rows):
             raise ValueError(f"No replay bars inside {start_date}..{end_date} symbols={symbols or 'ALL'}")
         return rows
