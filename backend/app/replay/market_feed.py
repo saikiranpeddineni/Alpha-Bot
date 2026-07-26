@@ -37,9 +37,6 @@ def _bar_frame(rows: list[dict[str, Any]]) -> pd.DataFrame:
 
 class ReplayMarketFeed:
     def __init__(self, data_path: Path | None = None) -> None:
-        # Only the implicit/default replay source may use the legacy July-24 fallback.
-        # An explicitly supplied path is an isolation contract: if it is absent, replay
-        # must fail closed instead of silently substituting some other historical file.
         self._explicit_data_path = data_path is not None
         self.data_path = data_path or (DATA_DIR / "replay_bars.jsonl")
         self.symbols: set[str] = set()
@@ -109,11 +106,16 @@ class ReplayDataManager:
         self.max_rows = max_rows
         self.cache_policy = "immutable_replay"
         self.provenance: dict[str, dict[str, Any]] = {}
-        self._pending_by_ts: dict[datetime, dict[str, list[dict[str, Any]]]] = {}
         grouped: dict[str, list[dict[str, Any]]] = {}
-        for bar in bars: grouped.setdefault(bar["symbol"], []).append(bar)
+        for bar in bars:
+            grouped.setdefault(bar["symbol"].upper(), []).append(bar)
         self._bars = {symbol: sorted(items, key=lambda x: x["ts_dt"]) for symbol, items in grouped.items()}
         self._now = min(bar["ts_dt"] for bar in bars)
+        self._last_polled_ts: dict[str, datetime] = {}
+
+    @property
+    def is_synthetic(self) -> bool:
+        return False
 
     def set_time(self, ts: datetime) -> None:
         self._now = ts
@@ -122,24 +124,57 @@ class ReplayDataManager:
         symbol = symbol.upper()
         if symbol == "VIX" and "VIX" not in self._bars and "^VIX" in self._bars:
             return "^VIX"
+        if symbol == "^VIX" and "^VIX" not in self._bars and "VIX" in self._bars:
+            return "VIX"
         return symbol
 
     def _visible(self, symbol: str) -> list[dict[str, Any]]:
         return [row for row in self._bars.get(self._symbol(symbol), []) if row["ts_dt"] <= self._now]
 
     def frame(self, symbol: str, timeframe: str = "1Min", limit: int | None = None) -> pd.DataFrame:
-        """Production DataManager.frame parity over the strict as-of replay view.
+        """Return the production-compatible rolling frame as of the replay clock."""
+        canonical = self._symbol(symbol)
+        df = _bar_frame(self._visible(canonical))
 
-        Only bars at or before the replay clock are exposed, so callers such as scanner,
-        market-risk and quote payload code can use their normal production data path
-        without introducing lookahead.
-        """
-        df = _bar_frame(self._visible(symbol))
+        # VIX is an external market-risk observation in production and can update less
+        # frequently than the equity clock. Carry the last known observation forward to
+        # replay-now without exposing a future observation. Mark the synthetic minute
+        # with zero volume so it cannot be mistaken for an actual market print.
+        if canonical in ("VIX", "^VIX") and not df.empty:
+            now_ts = pd.Timestamp(self._now)
+            if df.index[-1] < now_ts:
+                last = df.iloc[-1].copy()
+                last["volume"] = 0.0
+                carried = pd.DataFrame([last], index=pd.DatetimeIndex([now_ts], name=df.index.name))
+                df = pd.concat([df, carried])
+
         if timeframe != "1Min":
             df = resample_bars(df, timeframe)
         if limit:
             df = df.iloc[-limit:]
         return df
+
+    async def poll(self, symbols: list[str]) -> dict[str, pd.DataFrame]:
+        """Expose bars newly closed at replay-now without network access or lookahead."""
+        extended = [s.upper() for s in symbols]
+        if "^VIX" not in extended and "VIX" not in extended:
+            extended.append("^VIX")
+        new_closed: dict[str, pd.DataFrame] = {}
+        for requested in extended:
+            canonical = self._symbol(requested)
+            rows = self._visible(canonical)
+            if not rows:
+                continue
+            last_seen = self._last_polled_ts.get(canonical)
+            fresh_rows = [row for row in rows if last_seen is None or row["ts_dt"] > last_seen]
+            if not fresh_rows:
+                continue
+            fresh = _bar_frame(fresh_rows)
+            if fresh.empty:
+                continue
+            self._last_polled_ts[canonical] = fresh_rows[-1]["ts_dt"]
+            new_closed[requested] = fresh
+        return new_closed
 
     def last_price(self, symbol: str) -> float | None:
         df = self.frame(symbol, "1Min", limit=1)
@@ -155,13 +190,21 @@ class ReplayDataManager:
                 out[symbol.upper()] = price
         return out
 
+    async def quotes(self, symbols: list[str]) -> dict[str, Quote]:
+        out: dict[str, Quote] = {}
+        for symbol in symbols:
+            price = self.last_price(symbol)
+            if price is not None:
+                out[symbol.upper()] = Quote(symbol=symbol.upper(), price=round(price, 2))
+        return out
+
     def latest_quote(self, symbol: str) -> Quote | None:
         price = self.last_price(symbol)
         if price is None:
             return None
-        return Quote(symbol=symbol, bid=price, ask=price, last=price, timestamp=self._now)
+        return Quote(symbol=symbol, price=price)
 
-    async def history(self, symbol: str, timeframe: str, start: datetime, end: datetime) -> pd.DataFrame:
+    async def history(self, symbol: str, timeframe: str, start: datetime, end: datetime, prefer_cache: bool = True, cache_policy: str | None = None) -> pd.DataFrame:
         rows = [row for row in self._visible(symbol) if start <= row["ts_dt"] <= min(end, self._now)]
         frame = _bar_frame(rows)
         if timeframe.lower() not in {"1min", "1m", "1minute"}:
