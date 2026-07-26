@@ -17,7 +17,6 @@ class _ExitReplayState:
     candidate: TradingObservationEvent
     rows: list[dict[str, Any]] = field(default_factory=list)
     index: list[Any] = field(default_factory=list)
-    emitted: bool = False
 
 
 class CanonicalExitChallengerConsumer:
@@ -47,17 +46,28 @@ class CanonicalExitChallengerConsumer:
         if event.candidate_id in self._states:
             return
         state = _ExitReplayState(candidate=event)
-        # Entry row is retained only as replay anchor; no future information is present.
         state.index.append(event.ts)
         state.rows.append({"open": event.price, "high": event.price, "low": event.price,
                            "close": event.price, "atr14": event.atr})
         self._states[event.candidate_id] = state
         self._by_symbol.setdefault(event.symbol.upper(), set()).add(event.candidate_id)
 
+    def _remove(self, state: _ExitReplayState) -> None:
+        candidate_id = state.candidate.candidate_id
+        if not candidate_id:
+            return
+        self._states.pop(candidate_id, None)
+        symbol = state.candidate.symbol.upper()
+        symbol_ids = self._by_symbol.get(symbol)
+        if symbol_ids is not None:
+            symbol_ids.discard(candidate_id)
+            if not symbol_ids:
+                self._by_symbol.pop(symbol, None)
+
     def _bar(self, bar: TradingObservationEvent) -> None:
         for candidate_id in tuple(self._by_symbol.get(bar.symbol.upper(), ())):
             state = self._states.get(candidate_id)
-            if state is None or state.emitted:
+            if state is None:
                 continue
             if bar.ts <= state.candidate.ts:
                 self.out_of_order_bars += 1
@@ -75,25 +85,23 @@ class CanonicalExitChallengerConsumer:
         event = state.candidate
         initial_atr = event.atr
         if initial_atr is None or initial_atr <= 0:
-            # Do not invent ATR. The challenger is unavailable for this candidate.
             self.skipped_missing_risk += 1
-            state.emitted = True
+            self._remove(state)
             return
-        df = pd.DataFrame(state.rows, index=pd.DatetimeIndex(state.index))
-        side = "short" if (event.side or "").lower() in {"short", "enter_short", "sell"} else "long"
-        results = ExitCounterfactualEngine.replay_all_policies(
-            df=df,
-            entry_idx=0,
-            entry_price=float(event.price),
-            side=side,
-            initial_stop=float(event.stop_loss),
-            initial_atr=float(initial_atr),
-        )
-        for policy, evidence in results.items():
-            self.sink(event, policy, evidence)
-        state.emitted = True
-        self.replays += 1
+        try:
+            df = pd.DataFrame(state.rows, index=pd.DatetimeIndex(state.index))
+            side = "short" if (event.side or "").lower() in {"short", "enter_short", "sell"} else "long"
+            results = ExitCounterfactualEngine.replay_all_policies(
+                df=df, entry_idx=0, entry_price=float(event.price), side=side,
+                initial_stop=float(event.stop_loss), initial_atr=float(initial_atr),
+            )
+            for policy, evidence in results.items():
+                self.sink(event, policy, evidence)
+            self.replays += 1
+        finally:
+            # Research state must remain bounded even when a challenger or evidence sink fails.
+            self._remove(state)
 
     def telemetry(self) -> dict[str, Any]:
-        return {"active": sum(not s.emitted for s in self._states.values()), "replays": self.replays,
+        return {"active": len(self._states), "replays": self.replays,
                 "skipped_missing_risk": self.skipped_missing_risk, "out_of_order_bars": self.out_of_order_bars}
