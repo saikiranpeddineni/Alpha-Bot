@@ -11,7 +11,7 @@ from app.replay.broker import ReplayBroker
 from app.replay.clock import ReplayClock
 from app.replay.determinism import DeterministicUUIDProxy
 from app.replay.ledger import ReplayLedger
-from app.replay.market_feed import ReplayDataManager
+from app.replay.market_feed import ReplayDataManager, ReplayMarketFeed
 from app.replay.parity_validator import ProductionParityValidator
 from app.replay.runtime import ReplayRuntime
 from app.replay.session import ReplaySessionManager
@@ -32,7 +32,7 @@ def _write_fixture(path: Path) -> None:
     rows = []
     for i in range(3):
         ts = start + timedelta(minutes=i)
-        for symbol, px in (("SPY", 630.0), ("QQQ", 560.0), ("NVDA", 180.0)):
+        for symbol, px in (("SPY", 630.0), ("QQQ", 560.0), ("NVDA", 180.0), ("^VIX", 17.5)):
             rows.append({"kind": "bar", "symbol": symbol, "ts": ts.isoformat(), "open": px, "high": px + 0.2,
                          "low": px - 0.2, "close": px + i * 0.01, "volume": 100000})
     path.write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
@@ -68,6 +68,26 @@ async def test_replay_data_manager_is_strictly_asof():
     hist = await data.history("NVDA", "1Min", t0 - timedelta(days=1), t0 + timedelta(days=1))
     assert len(hist) == 1
     assert float(hist.iloc[-1]["close"]) == 100.0
+
+
+def test_vix_alias_is_historical_not_synthetic():
+    t0 = datetime(2026, 7, 24, 13, 0, tzinfo=timezone.utc)
+    bars = [{"symbol": "^VIX", "ts_dt": t0, "open": 17.5, "high": 17.6, "low": 17.4,
+             "close": 17.55, "volume": 10, "in_replay_window": True}]
+    data = ReplayDataManager(bars)
+    data.set_time(t0)
+    assert data.last_price("^VIX") == 17.55
+    assert data.last_price("VIX") == 17.55
+    assert data.fidelity_diagnostics()["has_vix"] is True
+
+
+def test_symbol_filter_does_not_remove_production_context(tmp_path: Path):
+    path = tmp_path / "bars.jsonl"
+    _write_fixture(path)
+    feed = ReplayMarketFeed(path)
+    bars = feed.load_bars("2026-07-24", "2026-07-24", symbols=["NVDA"])
+    present = {row["symbol"] for row in bars}
+    assert {"NVDA", "SPY", "QQQ", "^VIX"}.issubset(present)
 
 
 @pytest.mark.asyncio
