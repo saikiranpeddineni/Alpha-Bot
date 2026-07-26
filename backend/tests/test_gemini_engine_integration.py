@@ -31,11 +31,16 @@ def test_shadow_observation_persistence_is_bounded_and_telemetry_is_exposed(tmp_
     assert len(stored) == 200
     assert stored[0] == {"index": 5}
     assert stored[-1] == {"index": 204}
-    assert engine.status()["gemini_shadow"] == {
-        "calls_today": 0,
-        "candidates_ranked": 0,
-        "cache_hits": 0,
-        "failures": 0,
-        "budget_remaining": 10,
-    }
+    # Issue #276: single-model "gemini_shadow" key replaced by the unified
+    # ShadowResearchRuntime.telemetry() dict under "shadow_research".
+    shadow_tel = engine.status()["shadow_research"]
+    assert isinstance(shadow_tel, dict)
+    # Top-level structural keys must be present; runtime was never started so
+    # started=False and lifecycle_errors=0.
+    assert shadow_tel["started"] is False
+    assert shadow_tel["lifecycle_errors"] == 0
+    assert "publisher" in shadow_tel
+    assert "spawn" in shadow_tel
+    assert "evidence" in shadow_tel
     db.close()
+

@@ -30,7 +30,15 @@ replace_once(
 )
 
 replace_once("        await self.spawn_coordinator.start()\n", "        await self.shadow_research.start()\n")
-replace_once("        await self.spawn_coordinator.stop()\n", "        await self.shadow_research.stop()\n")
+# stop() method: use minimal unique surrounding context (flatten_all + state check) to disambiguate
+replace_once(
+    "                applog.error(\"engine\", f\"flatten on stop failed: {exc}\")\n"
+    "        await self.spawn_coordinator.stop()\n"
+    "        if self.state != EngineState.HALTED:\n",
+    "                applog.error(\"engine\", f\"flatten on stop failed: {exc}\")\n"
+    "        await self.shadow_research.stop()\n"
+    "        if self.state != EngineState.HALTED:\n",
+)
 
 old_bar = '''                    # Publish closed bar to shadow spawn army (non-blocking, fail-open)\n                    try:\n                        bar_df = new_closed[sym_upper]\n                        last_row = bar_df.iloc[-1]\n                        bar_ts = bar_df.index[-1].to_pydatetime()\n                        if bar_ts.tzinfo is None:\n                            from datetime import timezone as _tz\n                            bar_ts = bar_ts.replace(tzinfo=_tz.utc)\n                        self.spawn_coordinator.publish_market_bar(\n                            sym_upper,\n                            float(last_row.get("open", last_row.get("close", 0))),\n                            float(last_row.get("high", last_row.get("close", 0))),\n                            float(last_row.get("low", last_row.get("close", 0))),\n                            float(last_row.get("close", 0)),\n                            bar_ts,\n                        )\n                    except Exception:\n                        pass  # fail-open: shadow bar loss never blocks Champion\n'''
 new_bar = '''                    # Mirror the exact completed market bar through the canonical\n                    # non-blocking research boundary. Never manufacture missing OHLC.\n                    try:\n                        bar_df = new_closed[sym_upper]\n                        last_row = bar_df.iloc[-1]\n                        bar_ts = bar_df.index[-1].to_pydatetime()\n                        if bar_ts.tzinfo is None:\n                            bar_ts = bar_ts.replace(tzinfo=timezone.utc)\n                        required = ("open", "high", "low", "close")\n                        if all(name in last_row and pd.notna(last_row[name]) for name in required):\n                            self.shadow_research.publish(market_bar_event(\n                                symbol=sym_upper,\n                                ts=bar_ts,\n                                open_=float(last_row["open"]),\n                                high=float(last_row["high"]),\n                                low=float(last_row["low"]),\n                                close=float(last_row["close"]),\n                                atr=float(last_row["atr14"]) if "atr14" in last_row and pd.notna(last_row["atr14"]) else None,\n                                rsi=float(last_row["rsi2"]) if "rsi2" in last_row and pd.notna(last_row["rsi2"]) else None,\n                            ))\n                    except Exception as exc:\n                        applog.debug("shadow_research", f"market-bar mirror failed open for {sym_upper}: {exc}")\n'''
@@ -45,6 +53,12 @@ replace_once(old_candidate, new_candidate)
 replace_once(
     '''    async def shutdown(self) -> None:\n        await self.gemini_shadow.shutdown()\n        await self.spawn_coordinator.stop()\n        await self.stop(flatten=False)\n''',
     '''    async def shutdown(self) -> None:\n        await self.stop(flatten=False)\n''',
+)
+
+# Replace the single status() telemetry call that still references gemini_shadow directly.
+replace_once(
+    '            "gemini_shadow": self.gemini_shadow.ranker.telemetry(),\n',
+    '            "shadow_research": self.shadow_research.telemetry(),\n',
 )
 
 # The engine must no longer know concrete Gemini/Spawn implementations.
