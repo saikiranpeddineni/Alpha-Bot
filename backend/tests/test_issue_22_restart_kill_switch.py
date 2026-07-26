@@ -1,5 +1,7 @@
 from datetime import date
 
+import pytest
+
 from app.config import RiskConfig
 from app.core.clock import MarketClock
 from app.portfolio.tracker import PortfolioTracker
@@ -123,3 +125,61 @@ def test_peak_equity_increases_when_restart_equity_exceeds_restored_peak() -> No
     portfolio.peak_equity = max(portfolio.peak_equity, 110_000.0)
 
     assert portfolio.peak_equity == 110_000.0
+
+
+@pytest.mark.asyncio
+async def test_trading_engine_start_preserves_restored_peak_equity(tmp_path) -> None:
+    """Integration test verifying TradingEngine.start() directly preserves restored peak_equity."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from app.config import Settings
+    from app.core.engine import TradingEngine
+    from app.db.database import Database
+
+    from app.brokers.alpaca import AlpacaBroker
+
+    db_path = tmp_path / "test_engine.db"
+    settings = Settings(
+        ALPHADESK_MODE="paper",
+        DATA_PROVIDER="synthetic",
+        ALPHADESK_DB_PATH=str(db_path),
+        ENABLE_LIVE_TRADING=False,
+    )
+    db = Database(db_path)
+
+    checkpoint = {
+        "account_id": "test_acc",
+        "realized_pnl": 0.0,
+        "day_realized_pnl": 0.0,
+        "session_date": date.today().isoformat(),
+        "session_start_equity": 100_000.0,
+        "peak_equity": 105_000.0,
+        "day_trade_dates": [],
+        "day_trades_today": 0,
+        "trades": [],
+        "equity_curve": [],
+        "lots": {},
+        "risk_state": {},
+    }
+    db.save_portfolio_checkpoint("paper", checkpoint)
+
+    engine = TradingEngine(settings, db)
+
+    mock_broker = MagicMock(spec=AlpacaBroker)
+    mock_broker.name = "alpaca"
+    mock_broker.account_id = "test_acc"
+    mock_account = MagicMock()
+    mock_account.equity = 97_000.0
+    mock_broker.account = AsyncMock(return_value=mock_account)
+    mock_broker.connect = AsyncMock()
+    mock_broker.positions = AsyncMock(return_value=[])
+
+    with patch("app.core.engine.make_broker", return_value=mock_broker):
+        await engine.start("paper")
+        try:
+            assert engine.portfolio is not None
+            assert engine.portfolio.peak_equity == 105_000.0
+            assert engine.portfolio.session_start_equity == 100_000.0
+        finally:
+            await engine.stop()
+
