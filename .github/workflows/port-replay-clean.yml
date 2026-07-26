@@ -1,0 +1,121 @@
+name: Port Replay Clean
+
+on:
+  push:
+    branches: [agent/replay-clean-master-integration]
+
+permissions:
+  contents: write
+
+jobs:
+  port-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fetch validated replay source
+        run: git fetch origin agent/replay-production-parity-hardening-v2
+      - name: Port replay-scoped implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC=origin/agent/replay-production-parity-hardening-v2
+          git checkout "$SRC" -- \
+            backend/app/replay \
+            backend/app/api/replay.py \
+            backend/app/core/runtime.py \
+            backend/app/core/time_utils.py \
+            backend/app/core/shadow_replay_eligibility.py \
+            backend/tests/test_datetime_contract.py \
+            backend/tests/test_deterministic_production_replay.py \
+            backend/tests/test_replay_parity_hardening.py \
+            frontend/src/components/ReplayModal.tsx
+      - name: Apply minimal behavior-neutral integration hooks
+        shell: python
+        run: |
+          from pathlib import Path
+
+          def once(path, old, new):
+              p = Path(path); s = p.read_text(encoding='utf-8')
+              if new in s: return
+              if old not in s: raise SystemExit(f'expected integration anchor missing: {path}: {old[:80]!r}')
+              p.write_text(s.replace(old, new, 1), encoding='utf-8')
+
+          once('backend/app/core/engine.py',
+               'def __init__(self, settings: Settings, db: Database) -> None:',
+               'def __init__(self, settings: Settings, db: Database, runtime: Any | None = None) -> None:')
+          once('backend/app/core/engine.py',
+               '        self.db = db\n        self.publish:',
+               '        self.db = db\n        self.runtime = runtime\n        self.publish:')
+          once('backend/app/core/engine.py',
+               '        # Built by start() / ensure_data()\n        self.clock = MarketClock(always_open=(self.mode == "demo"))\n        self.data: DataManager | None = None\n        self.broker: Broker | None = None\n',
+               '        # Built by start() / ensure_data(); replay may inject isolated runtime services.\n        self.clock = runtime.clock if runtime is not None and runtime.clock is not None else MarketClock(always_open=(self.mode == "demo"))\n        self.data: DataManager | None = runtime.data if runtime is not None else None\n        self.broker: Broker | None = runtime.broker if runtime is not None else None\n        self.runtime_ledger: Any | None = runtime.ledger if runtime is not None else None\n')
+
+          once('backend/app/main.py',
+               'from app.api.routes import router\n',
+               'from app.api.routes import router\nfrom app.api.replay import router as replay_router\n')
+          once('backend/app/main.py',
+               '    app.include_router(router)\n',
+               '    app.include_router(router)\n    app.include_router(replay_router)\n')
+
+          once('frontend/src/App.tsx',
+               'import { BacktestModal } from "./components/BacktestModal";\n',
+               'import { BacktestModal } from "./components/BacktestModal";\nimport { ReplayModal } from "./components/ReplayModal";\n')
+          once('frontend/src/App.tsx',
+               '  const [showBacktest, setShowBacktest] = useState(false);\n',
+               '  const [showBacktest, setShowBacktest] = useState(false);\n  const [showReplay, setShowReplay] = useState(false);\n')
+          once('frontend/src/App.tsx',
+               'onBacktest={() => setShowBacktest(true)} onSettings=',
+               'onBacktest={() => setShowBacktest(true)} onReplay={() => setShowReplay(true)} onSettings=')
+          once('frontend/src/App.tsx',
+               '{showBacktest && <BacktestModal onClose={() => setShowBacktest(false)} />}',
+               '{showBacktest && <BacktestModal onClose={() => setShowBacktest(false)} />}\n    {showReplay && <ReplayModal onClose={() => setShowReplay(false)} />}')
+
+          p = Path('frontend/src/components/TopBar.tsx'); s = p.read_text(encoding='utf-8')
+          if 'onReplay: () => void' not in s:
+              s = s.replace('onBacktest: () => void; onSettings: () => void', 'onBacktest: () => void; onReplay: () => void; onSettings: () => void', 1)
+          if 'onClick={props.onReplay}' not in s:
+              anchor = '<button className="btn" onClick={props.onBacktest}>Backtest</button>'
+              replacement = anchor + '<button className="btn" onClick={props.onReplay}>Replay</button>'
+              if anchor not in s: raise SystemExit('TopBar replay button anchor missing')
+              s = s.replace(anchor, replacement, 1)
+          p.write_text(s, encoding='utf-8')
+      - name: Reject unrelated production/UI drift
+        shell: bash
+        run: |
+          set -euo pipefail
+          forbidden=$(git diff --name-only origin/master...HEAD -- frontend/src/styles.css || true)
+          test -z "$forbidden"
+          git diff --check
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - name: Install backend
+        working-directory: backend
+        run: pip install -r requirements.txt pytest pytest-asyncio
+      - name: Replay focused tests
+        working-directory: backend
+        run: python -m pytest tests/test_datetime_contract.py tests/test_deterministic_production_replay.py tests/test_replay_parity_hardening.py -q
+      - name: Full backend suite
+        working-directory: backend
+        run: python -m pytest tests -q
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Frontend build
+        working-directory: frontend
+        run: npm ci && npm run build
+      - name: Commit validated port
+        shell: bash
+        run: |
+          if git diff --quiet && git diff --cached --quiet; then exit 0; fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add backend frontend
+          git commit -m 'feat(replay): clean production-parity integration on current master'
+          git push
