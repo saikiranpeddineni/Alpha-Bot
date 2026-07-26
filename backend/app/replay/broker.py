@@ -72,6 +72,36 @@ class ReplayBroker(Broker):
             if order: out.append(order)
         return out
 
+    @staticmethod
+    def _is_protective_exit(order: Order) -> bool:
+        strategy = str(getattr(order, "strategy", "") or "").lower()
+        reason = str(getattr(order, "reason", "") or "").lower()
+        client_id = str(getattr(order, "client_order_id", "") or "").lower()
+        return strategy == "emergency_protection" or client_id.startswith("protect-") or "protective stop" in reason
+
+    def _cancel_stale_protection(self, symbol: str) -> None:
+        """Cancel replay-only protective exits once their protected position is flat.
+
+        A broker-side protective stop is position-reducing protection, not permission to
+        create a new position after another exit has already flattened the symbol.  Without
+        this replay broker guard a stale stop can fire on a later bar and manufacture the
+        opposite position, which is not an economic trade from the production strategy.
+        """
+        symbol = symbol.upper()
+        for oid in list(self._resting):
+            order = self._orders.get(oid)
+            if order is None or order.symbol != symbol or not self._is_protective_exit(order):
+                continue
+            self._resting.remove(oid)
+            if order.status in (OrderStatus.SUBMITTED, OrderStatus.PENDING, OrderStatus.PARTIALLY_FILLED):
+                order.status = OrderStatus.CANCELED
+            if self._ledger:
+                self._ledger.record_event("ORDER_CANCELED", self._now, symbol, {
+                    "order_id": order.id,
+                    "reason": "protected position already flat",
+                    "strategy": order.strategy,
+                })
+
     def _execute_fill(self, order: Order, qty: float, price: float) -> None:
         qty=min(float(qty),order.remaining_qty)
         if qty<=0:return
@@ -95,6 +125,8 @@ class ReplayBroker(Broker):
         elif old_qty*new_qty>0: pos.qty=new_qty; pos.market_price=price
         else:self._positions[sym]=Position(symbol=sym,qty=new_qty,avg_entry_price=price,market_price=price,strategy=order.strategy,opened_at=self._now)
         self.cash += -qty*price if order.side==OrderSide.BUY else qty*price
+        if sym not in self._positions:
+            self._cancel_stale_protection(sym)
 
     def process_ohlc(self,symbol:str,open_px:float,high_px:float,low_px:float,close_px:float,ts:datetime)->None:
         symbol=symbol.upper();self.set_time(ts);self._last_price[symbol]=close_px
@@ -102,6 +134,11 @@ class ReplayBroker(Broker):
         for oid in list(self._resting):
             order=self._orders.get(oid)
             if order is None or order.symbol!=symbol:continue
+            # A protective exit is reduce-only by intent. If another exit flattened the
+            # position before this bar, cancel it rather than allowing a synthetic reversal.
+            if self._is_protective_exit(order) and symbol not in self._positions:
+                self._cancel_stale_protection(symbol)
+                continue
             fill_px=None
             if self.fill_model=="next_open":fill_px=open_px
             elif order.order_type==OrderType.LIMIT:
