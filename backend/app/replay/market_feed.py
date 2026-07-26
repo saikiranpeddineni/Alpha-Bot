@@ -15,14 +15,7 @@ from app.data.base import empty_bars, normalize_bars, resample_bars
 
 
 def _bar_frame(rows: list[dict[str, Any]]) -> pd.DataFrame:
-    """Build the same canonical OHLCV shape production DataManager exposes.
-
-    Historical artifacts can contain repeated records for the same symbol/minute
-    (for example when cache/export windows overlap). Pandas consumers in the live
-    strategy/scanner path require a unique DatetimeIndex. Production's canonical
-    normalize_bars() already defines duplicate handling as keep-last, so replay
-    deliberately uses that exact rule rather than inventing replay-only behavior.
-    """
+    """Build the same canonical OHLCV shape production DataManager exposes."""
     if not rows:
         return empty_bars()
     records, indexes = [], []
@@ -55,7 +48,12 @@ class ReplayMarketFeed:
                 self.data_path = alt
         if not self.data_path.exists():
             raise FileNotFoundError(f"Replay market data not found: {self.data_path}")
-        wanted = {s.upper() for s in symbols} if symbols else None
+
+        # Production fidelity requires the complete historical context.  A UI
+        # symbol selection may narrow what the operator wants to inspect, but it
+        # must never remove SPY/QQQ/VIX/breadth/event-monitor symbols from the
+        # decision input.  Therefore replay loads every bar present in the
+        # immutable artifact and treats `symbols` as report metadata only.
         with self.data_path.open("r", encoding="utf-8") as handle:
             for line_no, line in enumerate(handle, 1):
                 if not line.strip():
@@ -67,7 +65,7 @@ class ReplayMarketFeed:
                 if row.get("kind") != "bar" and "open" not in row:
                     continue
                 symbol = str(row.get("symbol", "")).upper()
-                if not symbol or (wanted and symbol not in wanted):
+                if not symbol:
                     continue
                 raw_ts = row.get("ts") or row.get("t")
                 if not raw_ts:
@@ -84,9 +82,6 @@ class ReplayMarketFeed:
                 rows.append(normalized)
                 self.symbols.add(symbol)
 
-        # Canonical production semantics are one OHLCV record per symbol/timestamp,
-        # with the last observed record winning. Deduplicate here as well as in
-        # _bar_frame so the broker and DataManager see the identical event stream.
         deduped: dict[tuple[str, datetime], dict[str, Any]] = {}
         for row in rows:
             deduped[(row["symbol"], row["ts_dt"])] = row
@@ -113,12 +108,34 @@ class ReplayDataManager:
             if bar.get("in_replay_window", True):
                 self._pending_by_ts.setdefault(ts, {}).setdefault(symbol, []).append(bar)
         self._all_frames = {symbol: _bar_frame(rows) for symbol, rows in grouped.items()}
+        # VIX vendors use both names.  Production heartbeat explicitly checks
+        # ^VIX then VIX, so expose a deterministic alias when the artifact has
+        # only one representation; no prices are synthesized.
+        if "^VIX" in self._all_frames and "VIX" not in self._all_frames:
+            self._all_frames["VIX"] = self._all_frames["^VIX"]
+        elif "VIX" in self._all_frames and "^VIX" not in self._all_frames:
+            self._all_frames["^VIX"] = self._all_frames["VIX"]
         self._current_ts: datetime | None = None
         self._delivered_ts: set[datetime] = set()
 
     @property
     def is_synthetic(self) -> bool:
         return False
+
+    @property
+    def available_symbols(self) -> set[str]:
+        return set(self._all_frames)
+
+    def fidelity_diagnostics(self) -> dict[str, Any]:
+        symbols = self.available_symbols
+        has_vix = "^VIX" in symbols or "VIX" in symbols
+        return {
+            "has_spy": "SPY" in symbols,
+            "has_qqq": "QQQ" in symbols,
+            "has_vix": has_vix,
+            "symbol_count": len(symbols - {"VIX", "^VIX"}),
+            "available_symbols": sorted(symbols),
+        }
 
     async def warmup(self, symbols: list[str], lookback_bars: int = 800) -> None:
         return None
