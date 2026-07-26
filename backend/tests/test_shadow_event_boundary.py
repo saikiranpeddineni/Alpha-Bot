@@ -59,19 +59,32 @@ def test_calibrated_source_requires_calibrated_value():
         _candidate(expectancy_source="CALIBRATED", calibrated_expected_net_dollars=None)
 
 
+def test_calibrated_value_cannot_hide_without_source_tag():
+    with pytest.raises(ValidationError):
+        _candidate(calibrated_expected_net_dollars=12.0)
+
+
 def test_calibrated_expectancy_requires_strictly_pre_cutoff_provenance():
     with pytest.raises(ValidationError):
-        _candidate(expectancy_source="CALIBRATED", calibrated_expected_net_dollars=12.0,
+        _candidate(expectancy_source="CALIBRATED", calibrated_expected_net_dollars=12.0, expectancy_confidence=0.8,
                    provenance=EvidenceProvenance(calibration_version="v4", calibration_sample_size=100,
                                                  calibration_cutoff_utc=datetime(2026, 7, 24, 14, 30, tzinfo=UTC)))
 
 
+def test_calibrated_expectancy_requires_confidence():
+    with pytest.raises(ValidationError):
+        _candidate(expectancy_source="CALIBRATED", calibrated_expected_net_dollars=12.0,
+                   provenance=EvidenceProvenance(calibration_version="v4", calibration_sample_size=100,
+                                                 calibration_cutoff_utc=datetime(2026, 7, 23, 20, 0, tzinfo=UTC)))
+
+
 def test_valid_pre_cutoff_calibration_is_preserved():
-    event = _candidate(expectancy_source="CALIBRATED", calibrated_expected_net_dollars=12.0,
+    event = _candidate(expectancy_source="CALIBRATED", calibrated_expected_net_dollars=12.0, expectancy_confidence=0.8,
                        provenance=EvidenceProvenance(calibration_version="v4", calibration_sample_size=100,
                                                      calibration_cutoff_utc=datetime(2026, 7, 23, 20, 0, tzinfo=UTC)))
     payload = event.legacy_spawn_payload()
     assert payload["calibrated_expected_net_dollars"] == 12.0
+    assert payload["expectancy_confidence"] == 0.8
     assert payload["provenance"]["calibration_version"] == "v4"
     assert payload["provenance"]["calibration_sample_size"] == 100
 
