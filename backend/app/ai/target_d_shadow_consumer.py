@@ -18,9 +18,9 @@ class TargetDShadowConsumer:
         self.observer = observer
         self.observation_sink = observation_sink
 
-    def consume(self, event: TradingObservationEvent) -> None:
+    def consume(self, event: TradingObservationEvent) -> dict[str, Any] | None:
         if event.event_type != ShadowEventType.CANDIDATE:
-            return
+            return None
         result = self.observer.evaluate_passive(
             dict(event.features) if event.features else None,
             event.ml_probability,
@@ -40,3 +40,4 @@ class TargetDShadowConsumer:
                 self.observation_sink(observation)
             except Exception as exc:
                 applog.warning("target_d_shadow", f"Target D observation sink failed open: {exc}")
+        return observation
