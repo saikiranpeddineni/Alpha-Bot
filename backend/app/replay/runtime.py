@@ -108,9 +108,9 @@ class ReplayRuntime:
                     value = clock.now_utc()
                     return value.astimezone(tz) if tz else value.replace(tzinfo=None)
 
-            # Same seed for A/B. Patch only legacy module bindings used by the
-            # production path; production source code and decision rules are not
-            # modified. ReplayBroker already owns deterministic broker IDs.
+            # Same seed for A/B. Patch only module bindings that actually exist
+            # in production code. engine.py has no uuid import; attempting to
+            # patch a nonexistent attribute fails before the first replay tick.
             deterministic_uuid = DeterministicUUIDProxy(
                 f"{self.replay_id.split(':', 1)[0]}|{replay_bars[0]['ts_dt'].isoformat()}|{replay_bars[-1]['ts_dt'].isoformat()}"
             )
@@ -118,7 +118,6 @@ class ReplayRuntime:
                 stack.enter_context(patch("app.core.engine.utcnow", clock.now_utc))
                 stack.enter_context(patch("app.core.engine.datetime", FrozenDateTime))
                 stack.enter_context(patch("app.core.scanner.datetime", FrozenDateTime))
-                stack.enter_context(patch("app.core.engine.uuid", deterministic_uuid))
                 stack.enter_context(patch("app.core.shadow_ledger.uuid", deterministic_uuid))
                 stack.enter_context(patch("app.core.domain.uuid", deterministic_uuid))
                 for idx, ts in enumerate(sorted(by_ts)):
