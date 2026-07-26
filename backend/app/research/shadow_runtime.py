@@ -12,6 +12,7 @@ from app.ai.target_d_observer import TargetDShadowObserver
 from app.ai.target_d_shadow_consumer import TargetDShadowConsumer
 from app.db.database import Database
 from app.research.evidence_store import UnifiedEvidenceStore
+from app.research.outcome_joiner import CanonicalOutcomeJoiner
 from app.research.shadow_event import TradingObservationEvent
 from app.research.shadow_event_publisher import ShadowEventPublisher
 from app.research.spawn.shadow_event_adapter import SpawnShadowEventAdapter
@@ -34,6 +35,7 @@ class ShadowResearchRuntime:
         self.evidence = UnifiedEvidenceStore(db)
         self.spawn = SpawnShadowCoordinator(db=db)
         self.spawn_adapter = SpawnShadowEventAdapter(self.spawn)
+        self.outcomes = CanonicalOutcomeJoiner(self._record_outcome)
 
         def gemini_sink(observation: dict[str, Any]) -> None:
             if gemini_observation_sink is not None:
@@ -46,30 +48,29 @@ class ShadowResearchRuntime:
         self.gemini = GeminiShadowBridge(GeminiShadowRanker(gemini_api_key or ""), observation_sink=gemini_sink)
         self.target_d = TargetDShadowConsumer(TargetDShadowObserver(), observation_sink=target_d_sink)
         self.publisher.register("evidence_champion", self._record_champion)
+        self.publisher.register("outcomes", self.outcomes.consume)
         self.publisher.register("spawn", self.spawn_adapter.consume)
         self.publisher.register("gemini", self.gemini.consume)
         self.publisher.register("target_d", self._consume_target_d)
 
     def _record_champion(self, event: TradingObservationEvent) -> None:
         if event.candidate_id:
-            self.evidence.record(
-                event,
-                challenger_id="champion",
-                challenger_version="production",
-                decision=event.champion_final_decision,
-            )
+            self.evidence.record(event, challenger_id="champion", challenger_version="production",
+                                 decision=event.champion_final_decision)
+
+    def _record_outcome(self, event: TradingObservationEvent, horizon: str, outcome: dict[str, Any]) -> None:
+        if not event.candidate_id:
+            return
+        self.evidence.record(event, challenger_id="outcome", challenger_version=horizon,
+                             decision="STOPPED" if outcome.get("stopped") else "MARK_TO_MARKET",
+                             evidence=outcome)
 
     def _consume_target_d(self, event: TradingObservationEvent) -> None:
         observation = self.target_d.consume(event)
         if observation is None or not event.candidate_id:
             return
-        self.evidence.record(
-            event,
-            challenger_id="target_d",
-            challenger_version="v1",
-            decision=observation.get("target_d_decision"),
-            evidence=observation,
-        )
+        self.evidence.record(event, challenger_id="target_d", challenger_version="v1",
+                             decision=observation.get("target_d_decision"), evidence=observation)
 
     async def start(self) -> None:
         await self.spawn.start()
@@ -88,4 +89,5 @@ class ShadowResearchRuntime:
             "publisher": self.publisher.telemetry(),
             "spawn": self.spawn.telemetry(),
             "evidence": self.evidence.telemetry(),
+            "outcomes": self.outcomes.telemetry(),
         }
