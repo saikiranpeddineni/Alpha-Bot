@@ -80,6 +80,17 @@ def test_missing_stop_never_fabricates_r_multiple():
     assert emitted[0]["realized_r"] is None
 
 
+def test_wrong_side_stop_is_unavailable_and_never_triggers_shadow_exit():
+    emitted = []
+    joiner = CanonicalOutcomeJoiner(lambda event, horizon, outcome: emitted.append(outcome))
+    joiner.consume(candidate(stop=101.0))
+    joiner.consume(bar(1, open_=100.0, high=101.5, low=99.0, close=100.5))
+    assert emitted[0]["stop_is_synthetic"] is True
+    assert emitted[0]["stopped"] is False
+    assert emitted[0]["realized_r"] is None
+    assert emitted[0]["fwd_return"] == 0.005
+
+
 def test_horizons_emit_once_each():
     emitted = []
     joiner = CanonicalOutcomeJoiner(lambda event, horizon, outcome: emitted.append(horizon))
