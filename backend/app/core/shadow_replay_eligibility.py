@@ -7,10 +7,12 @@ shared between the replay scheduler, telemetry calculations, and Python evaluati
 from __future__ import annotations
 
 from enum import StrEnum
-from datetime import datetime, UTC
+from datetime import datetime, UTC, timedelta
 from zoneinfo import ZoneInfo
 from typing import Any
 from sqlalchemy import or_, and_, ColumnElement
+
+from app.core.time_utils import ensure_utc, parse_utc, utc_now
 
 ET_ZONE = ZoneInfo("America/New_York")
 
@@ -30,10 +32,11 @@ _CANDIDATE_ID_TS_REGEX = re.compile(r"(\d{8})_(\d{6})")
 
 
 def parse_datetime_to_utc(dt_val: Any, candidate_id: str | None = None) -> datetime | None:
-    """Helper to parse datetime values into aware UTC datetime.
-    
-    If candidate_id is provided, cross-validates against candidate_id timestamp
-    pattern (YYYYMMDD_HHMMSS) to prevent timezone double-conversion +4h shifts (#244).
+    """Parse persisted datetime values into timezone-aware UTC.
+
+    Candidate IDs encode the historical UTC signal timestamp.  They are used only to
+    repair the known legacy +4h/+5h double-ET conversion; current aware timestamps are
+    otherwise normalized without reinterpretation.
     """
     candidate_dt = None
     if candidate_id and isinstance(candidate_id, str):
@@ -41,31 +44,18 @@ def parse_datetime_to_utc(dt_val: Any, candidate_id: str | None = None) -> datet
         if m:
             date_str, time_str = m.groups()
             try:
-                candidate_dt = datetime.strptime(f"{date_str}_{time_str}", "%Y%m%d_%H%M%S").replace(tzinfo=UTC)
-            except Exception:
-                pass
+                candidate_dt = datetime.strptime(
+                    f"{date_str}_{time_str}", "%Y%m%d_%H%M%S"
+                ).replace(tzinfo=UTC)
+            except (TypeError, ValueError):
+                candidate_dt = None
 
-    dt = None
-    if dt_val is not None:
-        if isinstance(dt_val, str):
-            try:
-                dt = datetime.fromisoformat(dt_val.replace("Z", "+00:00"))
-            except Exception:
-                dt = None
-        elif isinstance(dt_val, datetime):
-            dt = dt_val
+    dt = parse_utc(dt_val)
 
-    if dt is not None:
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=UTC)
-        else:
-            dt = dt.astimezone(UTC)
-
-    # If candidate_dt exists, check if stored dt has a positive +4h or +5h shift relative to candidate_dt
     if candidate_dt and dt:
         signed_diff = (dt - candidate_dt).total_seconds()
-        # Stored timestamp dt was shifted ahead of candidate_dt by +4h (14400s, EDT) or +5h (18000s, EST)
-        # due to legacy double ET timezone conversion. Tight ±60s tolerance window.
+        # Legacy rows could be double-converted from UTC to ET and then persisted as
+        # though the result were UTC. Repair only the exact DST offsets with tolerance.
         if abs(signed_diff - 14400) <= 60 or abs(signed_diff - 18000) <= 60:
             return candidate_dt
 
@@ -78,11 +68,8 @@ def classify_shadow_replay_status(
     min_delay_seconds: float = 3600.0,
     max_age_seconds: float = 86400.0 * 7.0,
 ) -> ReplayEligibilityState:
-    """Classify in-memory shadow record into authoritative ReplayEligibilityState (#244)."""
-    if now is None:
-        now = datetime.now(UTC)
-    else:
-        now = parse_datetime_to_utc(now) or datetime.now(UTC)
+    """Classify an in-memory shadow record using one aware-UTC time domain."""
+    now_utc = ensure_utc(now) if now is not None else utc_now()
 
     replayed = bool(record.get("replayed", False))
     replay_failed = bool(record.get("replay_failed", False))
@@ -94,22 +81,18 @@ def classify_shadow_replay_status(
 
     final_decision = str(record.get("final_decision", "")).lower()
     if final_decision != "rejected":
-        # Non-rejected signals are not shadow replay candidates
         return ReplayEligibilityState.PENDING_NOT_ELIGIBLE
 
     ts_val = record.get("ts") or record.get("timestamp")
-    dt_ts = parse_datetime_to_utc(ts_val)
-
+    dt_ts = parse_datetime_to_utc(ts_val, record.get("candidate_id"))
     if dt_ts is None:
         return ReplayEligibilityState.PENDING_NOT_ELIGIBLE
 
-    age_seconds = (now - dt_ts).total_seconds()
-
+    age_seconds = (now_utc - dt_ts).total_seconds()
     if age_seconds > max_age_seconds:
         return ReplayEligibilityState.EXPIRED_UNREPLAYED
     if age_seconds < min_delay_seconds:
         return ReplayEligibilityState.PENDING_NOT_ELIGIBLE
-
     return ReplayEligibilityState.ELIGIBLE
 
 
@@ -121,11 +104,15 @@ def get_replay_eligibility_sql_filter(
     mode: str = "demo",
     state: ReplayEligibilityState = ReplayEligibilityState.ELIGIBLE,
 ) -> ColumnElement[bool]:
-    """Generate authoritative SQL filter expression for a given ReplayEligibilityState (#244)."""
-    if now is None:
-        now = datetime.now(UTC)
+    """Generate the SQL predicate for a replay eligibility state.
 
-    # Base un-replayed, non-failed rejected condition
+    SQLite stores legacy timestamps without offsets, so the aware UTC boundary is made
+    naive *after* normalization solely at the persistence boundary.  No local timezone
+    conversion is performed.
+    """
+    now_utc = ensure_utc(now) if now is not None else utc_now()
+    sql_now = now_utc.replace(tzinfo=None)
+
     rejected_cond = table_class.final_decision == "rejected"
     mode_cond = table_class.mode == mode
     not_replayed_cond = or_(table_class.replayed == None, table_class.replayed == False)  # noqa: E711
@@ -133,24 +120,17 @@ def get_replay_eligibility_sql_filter(
 
     if state == ReplayEligibilityState.SUCCESSFULLY_REPLAYED:
         return and_(mode_cond, table_class.replayed == True, not_failed_cond)  # noqa: E712
-
     if state == ReplayEligibilityState.FAILED:
         return and_(mode_cond, table_class.replay_failed == True)  # noqa: E712
 
     base_pending = and_(mode_cond, rejected_cond, not_replayed_cond, not_failed_cond)
-
-    # Cutoff timestamps: ts <= min_delay_cutoff for min delay; ts >= max_age_cutoff for max age
-    from datetime import timedelta
-    min_delay_cutoff = now - timedelta(seconds=min_delay_seconds)
-    max_age_cutoff = now - timedelta(seconds=max_age_seconds)
+    min_delay_cutoff = sql_now - timedelta(seconds=min_delay_seconds)
+    max_age_cutoff = sql_now - timedelta(seconds=max_age_seconds)
 
     if state == ReplayEligibilityState.ELIGIBLE:
         return and_(base_pending, table_class.ts <= min_delay_cutoff, table_class.ts >= max_age_cutoff)
-
     if state == ReplayEligibilityState.PENDING_NOT_ELIGIBLE:
         return and_(base_pending, table_class.ts > min_delay_cutoff, table_class.ts >= max_age_cutoff)
-
     if state == ReplayEligibilityState.EXPIRED_UNREPLAYED:
         return and_(base_pending, table_class.ts < max_age_cutoff)
-
     return base_pending
