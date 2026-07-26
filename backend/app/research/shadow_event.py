@@ -96,6 +96,8 @@ class TradingObservationEvent(BaseModel):
             raise ValueError("candidate events require candidate_id")
         if self.event_type == ShadowEventType.MARKET_BAR and self.candidate_id is not None:
             raise ValueError("market-bar events must not invent candidate_id")
+        if self.calibrated_expected_net_dollars is not None and self.expectancy_source != "CALIBRATED":
+            raise ValueError("calibrated expectancy value must be explicitly tagged CALIBRATED")
         if self.expectancy_source == "CALIBRATED":
             if self.calibrated_expected_net_dollars is None:
                 raise ValueError("CALIBRATED expectancy requires calibrated_expected_net_dollars")
@@ -108,6 +110,8 @@ class TradingObservationEvent(BaseModel):
                 raise ValueError("CALIBRATED expectancy requires calibration version")
             if self.provenance.calibration_sample_size is None:
                 raise ValueError("CALIBRATED expectancy requires calibration sample size")
+            if self.expectancy_confidence is None:
+                raise ValueError("CALIBRATED expectancy requires confidence")
         return self
 
     def legacy_spawn_payload(self) -> dict[str, Any]:
@@ -119,7 +123,7 @@ class TradingObservationEvent(BaseModel):
         return {
             "observation_type": "CANDIDATE", "schema_version": self.schema_version, "event_id": self.event_id,
             "candidate_id": self.candidate_id, "symbol": self.symbol.upper(), "strategy": self.strategy,
-            "direction": self.side, "price": self.price, "open": self.open, "high": self.high, "low": self.low,
+            "direction": self.side, "side": self.side, "price": self.price, "open": self.open, "high": self.high, "low": self.low,
             "close": self.close, "atr": self.atr, "rsi": self.rsi, "features": dict(self.features),
             "stop_loss": self.stop_loss, "take_profit": self.take_profit, "ts": self.ts,
             "decision_bar_timestamp_utc": self.decision_bar_timestamp_utc,
