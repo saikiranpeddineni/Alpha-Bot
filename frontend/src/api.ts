@@ -15,8 +15,6 @@ import type {
   StrategyInfo,
   TradeRow,
   TrainerStatus,
-  ShadowAnalyticsResponse,
-  GateAlphaResponse,
 } from "./types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -102,9 +100,4 @@ export const api = {
   backtests: () => request<BacktestSummary[]>("/api/backtests"),
   backtest: (id: string) => request<BacktestResult>(`/api/backtests/${id}`),
   runScanner: () => request<{ status: string; watchlist: string[] }>("/api/scanner/run", { method: "POST" }),
-  shadowLedgerAnalytics: () => request<ShadowAnalyticsResponse>("/api/shadow-ledger/analytics"),
-  shadowLedgerGateAlpha: () =>
-    request<{ gates: GateAlphaResponse; population_meta: unknown }>("/api/shadow-ledger/gate-alpha")
-      .then((r) => r.gates),
-  shadowLedgerCandidates: (limit = 100) => request<any[]>(`/api/shadow-ledger?limit=${limit}`),
 };
