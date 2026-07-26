@@ -20,14 +20,46 @@ class ProductionParityValidator:
         ("equity_hash", "equity_curve"),
     )
 
-    @staticmethod
-    def _first_sequence_diff(a: list[Any], b: list[Any]) -> dict[str, Any] | None:
+    @classmethod
+    def _first_value_diff(cls, a: Any, b: Any, path: str = "$") -> dict[str, Any] | None:
+        """Return the exact first differing canonical field for forensic diagnosis."""
+        if type(a) is not type(b):
+            return {"field_path": path, "value_a": a, "value_b": b,
+                    "type_a": type(a).__name__, "type_b": type(b).__name__}
+        if isinstance(a, dict):
+            keys_a, keys_b = set(a), set(b)
+            if keys_a != keys_b:
+                missing_a = sorted(keys_b - keys_a)
+                missing_b = sorted(keys_a - keys_b)
+                return {"field_path": path, "value_a": a, "value_b": b,
+                        "missing_in_a": missing_a, "missing_in_b": missing_b}
+            for key in sorted(keys_a):
+                diff = cls._first_value_diff(a[key], b[key], f"{path}.{key}")
+                if diff:
+                    return diff
+            return None
+        if isinstance(a, list):
+            if len(a) != len(b):
+                return {"field_path": path, "value_a": a, "value_b": b,
+                        "count_a": len(a), "count_b": len(b)}
+            for idx, (va, vb) in enumerate(zip(a, b)):
+                diff = cls._first_value_diff(va, vb, f"{path}[{idx}]")
+                if diff:
+                    return diff
+            return None
+        if a != b:
+            return {"field_path": path, "value_a": a, "value_b": b}
+        return None
+
+    @classmethod
+    def _first_sequence_diff(cls, a: list[Any], b: list[Any]) -> dict[str, Any] | None:
         limit = min(len(a), len(b))
         for idx in range(limit):
             sa = ReplayLedger._sanitize(a[idx])
             sb = ReplayLedger._sanitize(b[idx])
             if sa != sb:
-                return {"index": idx, "pass_a": sa, "pass_b": sb}
+                field_diff = cls._first_value_diff(sa, sb) or {}
+                return {"index": idx, "pass_a": sa, "pass_b": sb, **field_diff}
         if len(a) != len(b):
             return {
                 "index": limit,
@@ -35,6 +67,9 @@ class ProductionParityValidator:
                 "pass_b": ReplayLedger._sanitize(b[limit]) if limit < len(b) else None,
                 "count_a": len(a),
                 "count_b": len(b),
+                "field_path": "$[sequence_length]",
+                "value_a": len(a),
+                "value_b": len(b),
             }
         return None
 
@@ -62,6 +97,9 @@ class ProductionParityValidator:
                 "stage": "production_ticks",
                 "pass_a": pass_a_ledger.production_ticks,
                 "pass_b": pass_b_ledger.production_ticks,
+                "field_path": "$.production_ticks",
+                "value_a": pass_a_ledger.production_ticks,
+                "value_b": pass_b_ledger.production_ticks,
             }
 
         return {
