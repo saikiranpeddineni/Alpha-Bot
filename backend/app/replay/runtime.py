@@ -42,13 +42,27 @@ class ReplayRuntime:
         self.session_manager.create_session(self.replay_id, start_date, end_date, config)
         self.session_manager.update_session(self.replay_id, status="RUNNING", progress_pct=2.0)
         parity: dict[str, Any] | None = None
+        run_snapshot = Path(tempfile.mkdtemp(prefix="alpha_replay_run_snapshot_"))
         try:
             bars = self.feed.load_bars(start_date, end_date, symbols)
+            snapshot_db = run_snapshot / "source.db"
+            self._snapshot_source_database(snapshot_db)
+            snapshot_models = run_snapshot / "models"
+            if MODELS_DIR.exists():
+                shutil.copytree(MODELS_DIR, snapshot_models, dirs_exist_ok=True)
+            else:
+                snapshot_models.mkdir(parents=True, exist_ok=True)
+            snapshot_fingerprint = self._snapshot_fingerprint(snapshot_db, snapshot_models)
             manifest = self._build_manifest(config, bars)
+            manifest.update({
+                "run_snapshot_fingerprint": snapshot_fingerprint,
+                "database_policy": "single_immutable_run_snapshot_cloned_per_pass",
+                "model_policy": "single_immutable_run_snapshot_cloned_per_pass",
+            })
             self.session_manager.update_session(self.replay_id, manifest=manifest)
-            a = await self._execute_single_pass(bars, fill_model, slippage_bps, "A")
+            a = await self._execute_single_pass(bars, fill_model, slippage_bps, "A", snapshot_db, snapshot_models)
             self.session_manager.update_session(self.replay_id, progress_pct=50.0)
-            b = await self._execute_single_pass(bars, fill_model, slippage_bps, "B") if verify_parity_pass else a
+            b = await self._execute_single_pass(bars, fill_model, slippage_bps, "B", snapshot_db, snapshot_models) if verify_parity_pass else a
             parity = ProductionParityValidator.validate_passes(a, b)
             self._assert_meaningful_execution(a)
             if verify_parity_pass and not parity["overall_match"]:
@@ -73,8 +87,11 @@ class ReplayRuntime:
                 failed_summary.update({"parity_verdict": parity.get("determinism_verdict"), "stage_matches": parity.get("stage_matches"), "first_divergence": parity.get("first_divergence")})
             self.session_manager.update_session(self.replay_id, status="FAILED", progress_pct=100.0, summary=failed_summary)
             raise
+        finally:
+            shutil.rmtree(run_snapshot, ignore_errors=True)
 
-    async def _execute_single_pass(self, bars: list[dict[str, Any]], fill_model: str, slippage_bps: float, pass_name: str) -> ReplayLedger:
+    async def _execute_single_pass(self, bars: list[dict[str, Any]], fill_model: str, slippage_bps: float,
+                                   pass_name: str, snapshot_db: Path, snapshot_models: Path) -> ReplayLedger:
         replay_bars = [b for b in bars if b.get("in_replay_window", True)]
         if not replay_bars:
             raise RuntimeError("No bars in requested replay window")
@@ -86,12 +103,13 @@ class ReplayRuntime:
         replay_db: Database | None = None
         engine: TradingEngine | None = None
         try:
-            replay_db = self._clone_database(tmp_path / "replay.db")
+            replay_db_path = tmp_path / "replay.db"
+            shutil.copy2(snapshot_db, replay_db_path)
+            replay_db = Database(replay_db_path)
             self._ensure_replay_schema_parity(replay_db)
             self._clear_mutable_replay_tables(replay_db)
             replay_models = tmp_path / "models"
-            if MODELS_DIR.exists(): shutil.copytree(MODELS_DIR, replay_models, dirs_exist_ok=True)
-            else: replay_models.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(snapshot_models, replay_models, dirs_exist_ok=True)
             engine = TradingEngine(self.settings, replay_db, runtime=TradingRuntime(clock=clock, broker=broker, data=data, ledger=ledger))
             engine.model = SignalModel(replay_models)
             await self._initialize_engine(engine, clock, broker, data, ledger)
@@ -114,9 +132,6 @@ class ReplayRuntime:
                 stack.enter_context(patch("app.risk.manager.datetime", FrozenDateTime))
                 stack.enter_context(patch("app.core.shadow_ledger.uuid", deterministic_uuid))
                 stack.enter_context(patch("app.core.domain.uuid", deterministic_uuid))
-                # Engine imports this function from app.strategies at EOD, so patch
-                # the exported symbol itself. This freezes the pass-start memory
-                # snapshot without changing production memory behavior.
                 stack.enter_context(patch("app.strategies.refresh_contextual_memory", lambda _db: None))
                 stack.enter_context(patch("app.strategies.memory.refresh_contextual_memory", lambda _db: None))
                 for idx, ts in enumerate(sorted(by_ts)):
@@ -164,9 +179,6 @@ class ReplayRuntime:
         engine.pipeline = SignalPipeline(engine.model, ml)
         engine.evidence_evaluator = ParallelEvidenceEvaluator(model=engine.model, ml_threshold=ml, meta_label_engine=engine.pipeline.meta_label_engine, trade_score_engine=engine.pipeline.trade_score_engine)
 
-        # Replay-only observational wrappers: record canonical production strategy
-        # outputs and risk decisions without changing arguments, return values or
-        # production classes. This makes strategy/risk hashes meaningful again.
         for strategy in engine.strategies:
             strategy.reset()
             original_on_bar = strategy.on_bar
@@ -193,14 +205,25 @@ class ReplayRuntime:
         engine.state = EngineState.RUNNING; engine.publish = ledger.capture_publish
         await engine.spawn_coordinator.start()
 
-    def _clone_database(self, target: Path) -> Database:
+    def _snapshot_source_database(self, target: Path) -> None:
+        """Take one transactionally consistent DB snapshot for the entire A/B replay run."""
         import sqlite3
         source = self.source_db.engine.raw_connection(); dest = sqlite3.connect(target)
         try:
-            driver = getattr(source, "driver_connection", None) or getattr(source, "connection", source); driver.backup(dest)
+            driver = getattr(source, "driver_connection", None) or getattr(source, "connection", source)
+            driver.backup(dest)
         finally:
             dest.close(); source.close()
-        return Database(target)
+
+    @staticmethod
+    def _snapshot_fingerprint(db_path: Path, models_path: Path) -> str:
+        h = hashlib.sha256()
+        h.update(db_path.read_bytes())
+        if models_path.exists():
+            for path in sorted(p for p in models_path.rglob("*") if p.is_file()):
+                h.update(str(path.relative_to(models_path)).encode())
+                h.update(path.read_bytes())
+        return h.hexdigest()
 
     @staticmethod
     def _ensure_replay_schema_parity(db: Database) -> None:
@@ -245,7 +268,7 @@ class ReplayRuntime:
         try: commit = subprocess.check_output(["git","rev-parse","HEAD"],text=True,stderr=subprocess.DEVNULL).strip()
         except Exception: commit = os.getenv("GIT_COMMIT_SHA","unknown")
         window=[b for b in bars if b.get("in_replay_window",True)]; syms=sorted({b["symbol"] for b in bars})
-        return {"replay_id":self.replay_id,"engine_commit":commit,"config_hash":hashlib.sha256(json.dumps(config,sort_keys=True).encode()).hexdigest(),"data_hash":digest,"bar_count_total":len(bars),"bar_count_replay_window":len(window),"symbols":syms,"first_timestamp":bars[0]["ts_dt"].isoformat(),"last_timestamp":bars[-1]["ts_dt"].isoformat(),"decision_path":"TradingEngine._tick","lookahead_policy":"strict_as_of","database_policy":"sqlite_snapshot_isolated","model_policy":"copied_snapshot_isolated","spawn_policy":"production_coordinator_queue_drained_per_timestamp","clock_policy":"ReplayClock + engine/scanner/risk datetime binding","identity_policy":"deterministic replay-only UUID binding","context_memory_policy":"immutable_pass_start_snapshot_no_replay_feedback","market_risk_policy":"historical SPY+QQQ+VIX required; no UNKNOWN substitution","strategy_observation_policy":"replay-only wrapper around production on_bar","risk_observation_policy":"replay-only wrapper around production evaluate_entry","fill_model":config["fill_model"],"slippage_bps":config["slippage_bps"]}
+        return {"replay_id":self.replay_id,"engine_commit":commit,"config_hash":hashlib.sha256(json.dumps(config,sort_keys=True).encode()).hexdigest(),"data_hash":digest,"bar_count_total":len(bars),"bar_count_replay_window":len(window),"symbols":syms,"first_timestamp":bars[0]["ts_dt"].isoformat(),"last_timestamp":bars[-1]["ts_dt"].isoformat(),"decision_path":"TradingEngine._tick","lookahead_policy":"strict_as_of","database_policy":"single_immutable_run_snapshot_cloned_per_pass","model_policy":"single_immutable_run_snapshot_cloned_per_pass","spawn_policy":"production_coordinator_queue_drained_per_timestamp","clock_policy":"ReplayClock + engine/scanner/risk datetime binding","identity_policy":"deterministic replay-only UUID binding","context_memory_policy":"immutable_run_start_snapshot_no_replay_feedback","market_risk_policy":"historical SPY+QQQ+VIX required; no UNKNOWN substitution","strategy_observation_policy":"replay-only wrapper around production on_bar","risk_observation_policy":"replay-only wrapper around production evaluate_entry","fill_model":config["fill_model"],"slippage_bps":config["slippage_bps"]}
 
     @staticmethod
     def _assert_meaningful_execution(ledger: ReplayLedger) -> None:
