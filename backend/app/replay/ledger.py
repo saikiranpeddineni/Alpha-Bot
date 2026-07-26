@@ -1,27 +1,16 @@
-"""ReplayLedger -- Multi-stage telemetry & audit event recorder for replay.
-
-Captures un-truncated events across every stage of the decision path:
-  - Scanner candidates
-  - Strategy signals
-  - ML & Meta probabilities
-  - Spawn decisions
-  - Portfolio allocations
-  - Risk decisions
-  - Orders & fills
-  - Position state transitions
-  - Multi-stage state hashes
-"""
+"""Replay audit ledger with deterministic, stage-specific hashes."""
 from __future__ import annotations
 
-import json
 import hashlib
-from datetime import datetime, timezone
+import json
+from datetime import datetime
 from typing import Any
 
 
 class ReplayLedger:
     def __init__(self, replay_id: str) -> None:
         self.replay_id = replay_id
+        self.production_ticks = 0
         self.candidates: list[dict[str, Any]] = []
         self.signals: list[dict[str, Any]] = []
         self.ml_decisions: list[dict[str, Any]] = []
@@ -34,66 +23,75 @@ class ReplayLedger:
         self.timeline: list[dict[str, Any]] = []
 
     def record_event(self, event_type: str, timestamp: datetime, symbol: str, details: dict[str, Any]) -> None:
-        ts_iso = timestamp.isoformat() if isinstance(timestamp, datetime) else str(timestamp)
-        event = {
-            "replay_id": self.replay_id,
-            "timestamp": ts_iso,
-            "event_type": event_type,
-            "symbol": symbol,
-            "details": details,
-        }
+        event = {"replay_id": self.replay_id, "timestamp": timestamp.isoformat() if isinstance(timestamp, datetime) else str(timestamp),
+                 "event_type": event_type, "symbol": symbol, "details": details}
         self.timeline.append(event)
+        mapping = {
+            "SCANNER_CANDIDATE": self.candidates, "STRATEGY_SIGNAL": self.signals,
+            "ML_DECISION": self.ml_decisions, "SPAWN_DECISION": self.spawn_decisions,
+            "RISK_DECISION": self.risk_decisions, "ORDER_SUBMITTED": self.orders,
+            "FILL_EXECUTED": self.fills, "TRADE_CLOSED": self.trades,
+        }
+        if event_type in mapping:
+            mapping[event_type].append(event)
 
-        if event_type == "SCANNER_CANDIDATE":
-            self.candidates.append(event)
-        elif event_type == "STRATEGY_SIGNAL":
-            self.signals.append(event)
-        elif event_type == "ML_DECISION":
-            self.ml_decisions.append(event)
-        elif event_type == "SPAWN_DECISION":
-            self.spawn_decisions.append(event)
-        elif event_type == "RISK_DECISION":
-            self.risk_decisions.append(event)
-        elif event_type == "ORDER_SUBMITTED":
-            self.orders.append(event)
-        elif event_type == "FILL_EXECUTED":
-            self.fills.append(event)
-        elif event_type == "TRADE_CLOSED":
-            self.trades.append(event)
+    def capture_publish(self, topic: str, payload: Any) -> None:
+        """Capture production broadcasts without influencing engine decisions."""
+        # Broadcast payloads are retained as timeline diagnostics. Dedicated
+        # order/fill events come from ReplayBroker to avoid duplicate counting.
+        ts = None
+        if isinstance(payload, dict):
+            raw = payload.get("ts") or payload.get("timestamp")
+            if isinstance(raw, str):
+                try:
+                    ts = datetime.fromisoformat(raw)
+                except ValueError:
+                    pass
+        if ts is None:
+            return
+        symbol = payload.get("symbol", "") if isinstance(payload, dict) else ""
+        if topic == "insight" and isinstance(payload, dict):
+            detail = str(payload.get("detail", ""))
+            title = str(payload.get("title", ""))
+            lower = f"{title} {detail}".lower()
+            event_type = "STRATEGY_SIGNAL" if "signal" in lower else "TELEMETRY"
+            self.record_event(event_type, ts, symbol, payload)
 
     def record_equity(self, timestamp: datetime, equity: float, cash: float, buying_power: float, open_positions: int) -> None:
-        ts_iso = timestamp.isoformat() if isinstance(timestamp, datetime) else str(timestamp)
-        self.equity_curve.append({
-            "timestamp": ts_iso,
-            "equity": round(equity, 2),
-            "cash": round(cash, 2),
-            "buying_power": round(buying_power, 2),
-            "open_positions": open_positions,
-        })
+        self.equity_curve.append({"timestamp": timestamp.isoformat(), "equity": round(float(equity), 8),
+                                  "cash": round(float(cash), 8), "buying_power": round(float(buying_power), 8),
+                                  "open_positions": int(open_positions)})
+
+    @staticmethod
+    def _sanitize(item: Any) -> Any:
+        if isinstance(item, dict):
+            # replay id differs between passes by design. IDs generated outside
+            # replay can also be nondeterministic, so hashes focus on economic
+            # and decision state, not transport identity.
+            ignored = {"replay_id", "id", "order_id", "client_order_id", "broker_fill_key"}
+            return {k: ReplayLedger._sanitize(v) for k, v in sorted(item.items()) if k not in ignored}
+        if isinstance(item, list):
+            return [ReplayLedger._sanitize(v) for v in item]
+        if isinstance(item, datetime):
+            return item.isoformat()
+        return item
+
+    @classmethod
+    def _hash(cls, data: Any) -> str:
+        return hashlib.sha256(json.dumps(cls._sanitize(data), sort_keys=True, default=str, separators=(",", ":")).encode()).hexdigest()
 
     def compute_stage_hashes(self) -> dict[str, str]:
-        """Compute SHA256 hashes for each stage of the decision path."""
-        def sanitize_item(item: Any) -> Any:
-            if isinstance(item, dict):
-                return {k: sanitize_item(v) for k, v in item.items() if k != "replay_id"}
-            if isinstance(item, list):
-                return [sanitize_item(i) for i in item]
-            return item
-
-        def hash_list(data: list) -> str:
-            sanitized = sanitize_item(data)
-            payload = json.dumps(sanitized, sort_keys=True, default=str)
-            return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-        return {
-            "scanner_hash": hash_list(self.candidates),
-            "strategy_hash": hash_list(self.signals),
-            "ml_hash": hash_list(self.ml_decisions),
-            "spawn_hash": hash_list(self.spawn_decisions),
-            "risk_hash": hash_list(self.risk_decisions),
-            "order_hash": hash_list(self.orders),
-            "fill_hash": hash_list(self.fills),
-            "trade_hash": hash_list(self.trades),
-            "equity_hash": hash_list(self.equity_curve),
-            "overall_state_hash": hash_list(self.timeline),
+        stages = {
+            "scanner_hash": self.candidates, "strategy_hash": self.signals, "ml_hash": self.ml_decisions,
+            "spawn_hash": self.spawn_decisions, "risk_hash": self.risk_decisions, "order_hash": self.orders,
+            "fill_hash": self.fills, "trade_hash": self.trades, "equity_hash": self.equity_curve,
         }
+        hashes = {name: self._hash(value) for name, value in stages.items()}
+        hashes["overall_state_hash"] = self._hash({"ticks": self.production_ticks, "stages": hashes, "equity": self.equity_curve})
+        return hashes
+
+    def to_payload(self) -> dict[str, Any]:
+        return {"production_ticks": self.production_ticks, "candidates": self.candidates, "signals": self.signals,
+                "ml_decisions": self.ml_decisions, "spawn_decisions": self.spawn_decisions,
+                "risk_decisions": self.risk_decisions, "orders": self.orders, "fills": self.fills,
+                "trades": self.trades, "equity_curve": self.equity_curve, "timeline": self.timeline}
