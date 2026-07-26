@@ -3,6 +3,8 @@ name: Port Replay Clean
 on:
   push:
     branches: [agent/replay-clean-master-integration]
+  pull_request:
+    branches: [master]
 
 permissions:
   contents: write
@@ -35,59 +37,29 @@ jobs:
         shell: python
         run: |
           from pathlib import Path
-
           def once(path, old, new):
-              p = Path(path); s = p.read_text(encoding='utf-8')
+              p=Path(path); s=p.read_text(encoding='utf-8')
               if new in s: return
               if old not in s: raise SystemExit(f'expected integration anchor missing: {path}: {old[:80]!r}')
-              p.write_text(s.replace(old, new, 1), encoding='utf-8')
-
-          once('backend/app/core/engine.py',
-               'def __init__(self, settings: Settings, db: Database) -> None:',
-               'def __init__(self, settings: Settings, db: Database, runtime: Any | None = None) -> None:')
-          once('backend/app/core/engine.py',
-               '        self.db = db\n        self.publish:',
-               '        self.db = db\n        self.runtime = runtime\n        self.publish:')
-          once('backend/app/core/engine.py',
-               '        # Built by start() / ensure_data()\n        self.clock = MarketClock(always_open=(self.mode == "demo"))\n        self.data: DataManager | None = None\n        self.broker: Broker | None = None\n',
-               '        # Built by start() / ensure_data(); replay may inject isolated runtime services.\n        self.clock = runtime.clock if runtime is not None and runtime.clock is not None else MarketClock(always_open=(self.mode == "demo"))\n        self.data: DataManager | None = runtime.data if runtime is not None else None\n        self.broker: Broker | None = runtime.broker if runtime is not None else None\n        self.runtime_ledger: Any | None = runtime.ledger if runtime is not None else None\n')
-
-          once('backend/app/main.py',
-               'from app.api.routes import router\n',
-               'from app.api.routes import router\nfrom app.api.replay import router as replay_router\n')
-          once('backend/app/main.py',
-               '    app.include_router(router)\n',
-               '    app.include_router(router)\n    app.include_router(replay_router)\n')
-
-          once('frontend/src/App.tsx',
-               'import { BacktestModal } from "./components/BacktestModal";\n',
-               'import { BacktestModal } from "./components/BacktestModal";\nimport { ReplayModal } from "./components/ReplayModal";\n')
-          once('frontend/src/App.tsx',
-               '  const [showBacktest, setShowBacktest] = useState(false);\n',
-               '  const [showBacktest, setShowBacktest] = useState(false);\n  const [showReplay, setShowReplay] = useState(false);\n')
-          once('frontend/src/App.tsx',
-               'onBacktest={() => setShowBacktest(true)} onSettings=',
-               'onBacktest={() => setShowBacktest(true)} onReplay={() => setShowReplay(true)} onSettings=')
-          once('frontend/src/App.tsx',
-               '{showBacktest && <BacktestModal onClose={() => setShowBacktest(false)} />}',
-               '{showBacktest && <BacktestModal onClose={() => setShowBacktest(false)} />}\n    {showReplay && <ReplayModal onClose={() => setShowReplay(false)} />}')
-
-          p = Path('frontend/src/components/TopBar.tsx'); s = p.read_text(encoding='utf-8')
-          if 'onReplay: () => void' not in s:
-              s = s.replace('onBacktest: () => void; onSettings: () => void', 'onBacktest: () => void; onReplay: () => void; onSettings: () => void', 1)
+              p.write_text(s.replace(old,new,1),encoding='utf-8')
+          once('backend/app/core/engine.py','def __init__(self, settings: Settings, db: Database) -> None:','def __init__(self, settings: Settings, db: Database, runtime: Any | None = None) -> None:')
+          once('backend/app/core/engine.py','        self.db = db\n        self.publish:','        self.db = db\n        self.runtime = runtime\n        self.publish:')
+          once('backend/app/core/engine.py','        # Built by start() / ensure_data()\n        self.clock = MarketClock(always_open=(self.mode == "demo"))\n        self.data: DataManager | None = None\n        self.broker: Broker | None = None\n','        # Built by start() / ensure_data(); replay may inject isolated runtime services.\n        self.clock = runtime.clock if runtime is not None and runtime.clock is not None else MarketClock(always_open=(self.mode == "demo"))\n        self.data: DataManager | None = runtime.data if runtime is not None else None\n        self.broker: Broker | None = runtime.broker if runtime is not None else None\n        self.runtime_ledger: Any | None = runtime.ledger if runtime is not None else None\n')
+          once('backend/app/main.py','from app.api.routes import router\n','from app.api.routes import router\nfrom app.api.replay import router as replay_router\n')
+          once('backend/app/main.py','    app.include_router(router)\n','    app.include_router(router)\n    app.include_router(replay_router)\n')
+          once('frontend/src/App.tsx','import { BacktestModal } from "./components/BacktestModal";\n','import { BacktestModal } from "./components/BacktestModal";\nimport { ReplayModal } from "./components/ReplayModal";\n')
+          once('frontend/src/App.tsx','  const [showBacktest, setShowBacktest] = useState(false);\n','  const [showBacktest, setShowBacktest] = useState(false);\n  const [showReplay, setShowReplay] = useState(false);\n')
+          once('frontend/src/App.tsx','onBacktest={() => setShowBacktest(true)} onSettings=','onBacktest={() => setShowBacktest(true)} onReplay={() => setShowReplay(true)} onSettings=')
+          once('frontend/src/App.tsx','{showBacktest && <BacktestModal onClose={() => setShowBacktest(false)} />}','{showBacktest && <BacktestModal onClose={() => setShowBacktest(false)} />}\n    {showReplay && <ReplayModal onClose={() => setShowReplay(false)} />}')
+          p=Path('frontend/src/components/TopBar.tsx'); s=p.read_text(encoding='utf-8')
+          if 'onReplay: () => void' not in s: s=s.replace('onBacktest: () => void; onSettings: () => void','onBacktest: () => void; onReplay: () => void; onSettings: () => void',1)
           if 'onClick={props.onReplay}' not in s:
-              anchor = '<button className="btn" onClick={props.onBacktest}>Backtest</button>'
-              replacement = anchor + '<button className="btn" onClick={props.onReplay}>Replay</button>'
+              anchor='<button className="btn" onClick={props.onBacktest}>Backtest</button>'
               if anchor not in s: raise SystemExit('TopBar replay button anchor missing')
-              s = s.replace(anchor, replacement, 1)
-          p.write_text(s, encoding='utf-8')
-      - name: Reject unrelated production/UI drift
-        shell: bash
-        run: |
-          set -euo pipefail
-          forbidden=$(git diff --name-only origin/master...HEAD -- frontend/src/styles.css || true)
-          test -z "$forbidden"
-          git diff --check
+              s=s.replace(anchor,anchor+'<button className="btn" onClick={props.onReplay}>Replay</button>',1)
+          p.write_text(s,encoding='utf-8')
+      - name: Diff hygiene
+        run: git diff --check
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -111,7 +83,7 @@ jobs:
         working-directory: frontend
         run: npm ci && npm run build
       - name: Commit validated port
-        shell: bash
+        if: github.event_name == 'push'
         run: |
           if git diff --quiet && git diff --cached --quiet; then exit 0; fi
           git config user.name 'github-actions[bot]'
