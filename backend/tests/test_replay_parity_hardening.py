@@ -4,6 +4,10 @@ import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
+from app.core.domain import OrderRequest, OrderSide, OrderStatus, OrderType
+from app.replay.broker import ReplayBroker
 from app.replay.market_feed import ReplayDataManager
 from app.replay.runtime import ReplayRuntime
 
@@ -108,3 +112,53 @@ def test_model_asof_excludes_future_artifacts_and_keeps_historical_ones(tmp_path
         "meta/meta_momentum_long.joblib",
         "specialists/NBIS.pkl",
     }
+
+
+@pytest.mark.asyncio
+async def test_replay_protective_stop_cannot_reverse_position_after_other_exit() -> None:
+    t0 = datetime(2026, 7, 24, 14, 0, tzinfo=timezone.utc)
+    broker = ReplayBroker(100_000.0, 0.0, "ohlc_touch")
+    broker.process_ohlc("AMZN", 200.0, 201.0, 199.0, 200.0, t0)
+
+    entry = await broker.submit(OrderRequest(
+        symbol="AMZN", side=OrderSide.BUY, qty=10, order_type=OrderType.MARKET,
+        strategy="momentum", reason="entry",
+    ))
+    assert entry.status == OrderStatus.FILLED
+
+    protective = await broker.submit(OrderRequest(
+        symbol="AMZN", side=OrderSide.SELL, qty=10, order_type=OrderType.STOP,
+        stop_price=190.0, client_order_id="protect-AMZN-20000-19000",
+        strategy="emergency_protection", reason="protective stop recovery",
+    ))
+    assert protective.status == OrderStatus.SUBMITTED
+
+    close = await broker.close_position("AMZN", reason="strategy exit")
+    assert close is not None and close.status == OrderStatus.FILLED
+    assert await broker.positions() == []
+    assert protective.status == OrderStatus.CANCELED
+    assert await broker.open_orders() == []
+
+    # A later bar trading through the old stop must not manufacture a short.
+    broker.process_ohlc("AMZN", 189.0, 191.0, 185.0, 188.0, t0 + timedelta(minutes=1))
+    assert await broker.positions() == []
+
+
+@pytest.mark.asyncio
+async def test_replay_protective_stop_still_closes_live_position_when_touched() -> None:
+    t0 = datetime(2026, 7, 24, 14, 0, tzinfo=timezone.utc)
+    broker = ReplayBroker(100_000.0, 0.0, "ohlc_touch")
+    broker.process_ohlc("AMZN", 200.0, 201.0, 199.0, 200.0, t0)
+    await broker.submit(OrderRequest(
+        symbol="AMZN", side=OrderSide.BUY, qty=10, order_type=OrderType.MARKET,
+        strategy="momentum", reason="entry",
+    ))
+    protective = await broker.submit(OrderRequest(
+        symbol="AMZN", side=OrderSide.SELL, qty=10, order_type=OrderType.STOP,
+        stop_price=190.0, client_order_id="protect-AMZN-20000-19000",
+        strategy="emergency_protection", reason="protective stop recovery",
+    ))
+
+    broker.process_ohlc("AMZN", 195.0, 196.0, 189.0, 190.0, t0 + timedelta(minutes=1))
+    assert protective.status == OrderStatus.FILLED
+    assert await broker.positions() == []
