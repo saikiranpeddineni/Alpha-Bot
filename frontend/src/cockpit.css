@@ -24,6 +24,32 @@
 [data-theme="cockpit"] .dot.open, [data-theme="cockpit"] .dot.connected { box-shadow: 0 0 10px currentColor; }
 [data-theme="cockpit"] .halt-banner { position: relative; z-index: 30; box-shadow: 0 0 28px rgba(255, 77, 109, 0.34); }
 [data-theme="cockpit"] .dot.disconnected { box-shadow: 0 0 12px rgba(255, 77, 109, 0.8); }
+
+/* Replay is part of AlphaDesk, not a separate visual product. Every replay surface
+   inherits the active cockpit palette, border language, radius and glow system. */
+[data-theme="cockpit"] .replay-backdrop { background: rgba(1, 5, 12, 0.82); }
+[data-theme="cockpit"] .replay-cockpit { background: linear-gradient(145deg, rgba(10, 24, 43, 0.98), rgba(4, 12, 24, 0.98)); border-color: rgba(69, 226, 255, 0.22); border-radius: calc(var(--radius) + 5px); box-shadow: 0 28px 90px rgba(0, 0, 0, 0.58), 0 0 0 1px rgba(69, 226, 255, 0.05) inset; }
+[data-theme="cockpit"] .replay-head { background: linear-gradient(90deg, rgba(69, 226, 255, 0.055), transparent 48%); border-bottom-color: rgba(69, 226, 255, 0.15); }
+[data-theme="cockpit"] .replay-mark { color: var(--accent); background: rgba(69, 226, 255, 0.06); border-color: rgba(69, 226, 255, 0.38); border-radius: var(--radius); box-shadow: 0 0 18px rgba(69, 226, 255, 0.08) inset; text-shadow: 0 0 12px var(--accent); }
+[data-theme="cockpit"] .replay-eyebrow { color: var(--accent); }
+[data-theme="cockpit"] .replay-id, [data-theme="cockpit"] .replay-controls, [data-theme="cockpit"] .replay-tabs, [data-theme="cockpit"] .replay-toolbar { border-color: var(--border); }
+[data-theme="cockpit"] .replay-controls { background: rgba(3, 10, 20, 0.42); }
+[data-theme="cockpit"] .replay-run { background: rgba(69, 226, 255, 0.12); border-color: rgba(69, 226, 255, 0.5); color: var(--text); box-shadow: 0 0 18px rgba(69, 226, 255, 0.07) inset; }
+[data-theme="cockpit"] .replay-run:hover:not(:disabled) { background: rgba(69, 226, 255, 0.18); border-color: var(--accent); }
+[data-theme="cockpit"] .replay-empty-orbit { border-color: rgba(69, 226, 255, 0.28); }
+[data-theme="cockpit"] .replay-empty-orbit::after { border-color: rgba(69, 226, 255, 0.14); }
+[data-theme="cockpit"] .replay-empty-orbit span, [data-theme="cockpit"] .replay-stage-count, [data-theme="cockpit"] .replay-stage-arrow { color: var(--accent); }
+[data-theme="cockpit"] .replay-live-dot, [data-theme="cockpit"] .replay-stage-meter span, [data-theme="cockpit"] .replay-entry-dot { background: var(--accent); box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 75%, transparent); }
+[data-theme="cockpit"] .replay-kpi, [data-theme="cockpit"] .replay-stage, [data-theme="cockpit"] .replay-manifest-cards > div, [data-theme="cockpit"] .replay-panel { background: linear-gradient(145deg, rgba(11, 27, 48, 0.88), rgba(4, 12, 24, 0.84)); border-color: rgba(69, 226, 255, 0.14); border-radius: var(--radius); }
+[data-theme="cockpit"] .replay-kpi, [data-theme="cockpit"] .replay-stage { box-shadow: 0 12px 30px rgba(0, 0, 0, 0.18); }
+[data-theme="cockpit"] .replay-stage.active { border-color: rgba(69, 226, 255, 0.34); box-shadow: 0 0 24px rgba(69, 226, 255, 0.045) inset; }
+[data-theme="cockpit"] .replay-tabs button.active { color: var(--text); border-bottom-color: var(--accent); }
+[data-theme="cockpit"] .replay-event:hover { background: rgba(69, 226, 255, 0.035); }
+[data-theme="cockpit"] .replay-event-type.info { color: var(--accent); }
+[data-theme="cockpit"] .replay-parity-hero, [data-theme="cockpit"] .replay-hash-list, [data-theme="cockpit"] .replay-manifest details { border-radius: var(--radius); }
+[data-theme="cockpit"] .btn.replay-entry { background: rgba(69, 226, 255, 0.06); border-color: rgba(69, 226, 255, 0.32); color: var(--accent); }
+[data-theme="cockpit"] .btn.replay-entry:hover:not(:disabled) { background: rgba(69, 226, 255, 0.12); border-color: rgba(69, 226, 255, 0.5); }
+
 @media (prefers-reduced-motion: no-preference) { [data-theme="cockpit"] .theme-selector-orb { animation: cockpit-pulse 2.8s ease-in-out infinite; } @keyframes cockpit-pulse { 50% { opacity: 0.55; transform: scale(0.8); } } }
 @media (prefers-reduced-motion: reduce) { [data-theme="cockpit"] *, [data-theme="cockpit"] *::before, [data-theme="cockpit"] *::after { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; } }
 @media (max-width: 1023px) { [data-theme="cockpit"] .main { padding: 8px; } [data-theme="cockpit"] .panel { backdrop-filter: blur(8px); } }
