@@ -1,17 +1,16 @@
-"""Unit and integration test suite for Deterministic Production Replay System."""
-
+"""Deterministic production replay invariants."""
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
 import pytest
 
 from app.config import Settings
-from app.core.engine import TradingEngine
-from app.core.runtime import TradingRuntime
 from app.db.database import Database
 from app.replay.broker import ReplayBroker
 from app.replay.clock import ReplayClock
 from app.replay.ledger import ReplayLedger
+from app.replay.market_feed import ReplayDataManager
 from app.replay.parity_validator import ProductionParityValidator
 from app.replay.runtime import ReplayRuntime
 from app.replay.session import ReplaySessionManager
@@ -19,76 +18,96 @@ from app.replay.session import ReplaySessionManager
 
 @pytest.fixture
 def tmp_db(tmp_path: Path) -> Database:
-    db_path = tmp_path / "test_replay.db"
-    return Database(db_path)
+    return Database(tmp_path / "test_replay.db")
 
 
 @pytest.fixture
 def test_settings(tmp_path: Path) -> Settings:
-    return Settings(
-        mode="paper",
-        db_path=str(tmp_path / "test_replay.db"),
-    )
+    return Settings(mode="paper", db_path=str(tmp_path / "test_replay.db"))
+
+
+def _write_fixture(path: Path) -> None:
+    # 09:00 ET on Jul-24 is 13:00 UTC. Premarket ticks exercise scanner timing
+    # while avoiding any accidental live-session entry expectation in this unit fixture.
+    start = datetime(2026, 7, 24, 13, 0, tzinfo=timezone.utc)
+    rows = []
+    for i in range(3):
+        ts = start + timedelta(minutes=i)
+        for symbol, px in (("SPY", 630.0), ("QQQ", 560.0), ("NVDA", 180.0)):
+            rows.append({"kind": "bar", "symbol": symbol, "ts": ts.isoformat(), "open": px, "high": px + 0.2,
+                         "low": px - 0.2, "close": px + i * 0.01, "volume": 100000})
+    path.write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
 
 
 def test_replay_clock_advancement():
-    t0 = datetime(2026, 7, 24, 9, 30, 0, tzinfo=timezone.utc)
-    clock = ReplayClock(start_dt=t0)
+    t0 = datetime(2026, 7, 24, 13, 0, tzinfo=timezone.utc)
+    clock = ReplayClock(t0)
     assert clock.now_utc() == t0
-
-    t1 = datetime(2026, 7, 24, 9, 31, 0, tzinfo=timezone.utc)
+    t1 = t0 + timedelta(minutes=1)
     clock.set_time(t1)
     assert clock.now_utc() == t1
 
 
 @pytest.mark.asyncio
-async def test_replay_broker_order_lifecycle():
-    t0 = datetime(2026, 7, 24, 9, 30, 0, tzinfo=timezone.utc)
-    broker = ReplayBroker(starting_cash=100_000.0, slippage_bps=0.0, fill_model="ohlc_touch")
-    broker.set_time(t0)
+async def test_replay_data_manager_is_strictly_asof():
+    t0 = datetime(2026, 7, 24, 13, 0, tzinfo=timezone.utc)
+    bars = [
+        {"symbol": "NVDA", "ts_dt": t0, "open": 100, "high": 101, "low": 99, "close": 100, "volume": 10, "in_replay_window": True},
+        {"symbol": "NVDA", "ts_dt": t0 + timedelta(minutes=1), "open": 200, "high": 201, "low": 199, "close": 200, "volume": 10, "in_replay_window": True},
+    ]
+    data = ReplayDataManager(bars)
+    data.set_time(t0)
+    assert data.last_price("NVDA") == 100.0
+    hist = await data.history("NVDA", "1Min", t0 - timedelta(days=1), t0 + timedelta(days=1))
+    assert len(hist) == 1
+    assert float(hist.iloc[-1]["close"]) == 100.0
 
+
+@pytest.mark.asyncio
+async def test_replay_broker_order_lifecycle():
+    t0 = datetime(2026, 7, 24, 13, 0, tzinfo=timezone.utc)
+    broker = ReplayBroker(100_000.0, 0.0, "ohlc_touch")
+    broker.process_ohlc("NVDA", 200.0, 205.0, 195.0, 202.0, t0)
     account = await broker.account()
     assert account.equity == 100_000.0
     assert account.cash == 100_000.0
 
-    # Process OHLC tick
-    broker.process_ohlc("NVDA", 200.0, 205.0, 195.0, 202.0, t0)
-    acct_after = await broker.account()
-    assert acct_after.equity == 100_000.0
-
 
 def test_replay_session_cancellation(tmp_path: Path):
-    sess_mgr = ReplaySessionManager(db_path=tmp_path / "replay_sessions.db")
-    session = sess_mgr.create_session("rpl_test_123", "2026-07-24", "2026-07-24", {"mode": "paper"})
-    assert session["status"] == "CREATED"
-
-    sess_mgr.request_cancel("rpl_test_123")
-    assert sess_mgr.is_cancelled("rpl_test_123")
-    updated = sess_mgr.get_session("rpl_test_123")
-    assert updated["status"] == "CANCELLED"
+    mgr = ReplaySessionManager(db_path=tmp_path / "sessions.db")
+    mgr.create_session("rpl_test", "2026-07-24", "2026-07-24", {})
+    mgr.request_cancel("rpl_test")
+    assert mgr.is_cancelled("rpl_test")
+    assert mgr.get_session("rpl_test")["status"] == "CANCELLED"
 
 
-def test_replay_parity_validator_hashes():
-    ledger_a = ReplayLedger("rpl_a")
-    ledger_b = ReplayLedger("rpl_b")
-
-    t0 = datetime(2026, 7, 24, 9, 30, 0, tzinfo=timezone.utc)
-    ledger_a.record_event("SCANNER_CANDIDATE", t0, "NVDA", {"score": 85.0})
-    ledger_b.record_event("SCANNER_CANDIDATE", t0, "NVDA", {"score": 85.0})
-
-    ledger_a.record_equity(t0, 100000.0, 100000.0, 200000.0, 0)
-    ledger_b.record_equity(t0, 100000.0, 100000.0, 200000.0, 0)
-
-    report = ProductionParityValidator.validate_passes(ledger_a, ledger_b)
-    assert report["overall_match"] is True
-    assert report["determinism_verdict"] == "BIT_FOR_BIT_IDENTICAL_PARITY"
+def test_parity_validator_detects_real_divergence():
+    a, b = ReplayLedger("a"), ReplayLedger("b")
+    t0 = datetime(2026, 7, 24, 13, 0, tzinfo=timezone.utc)
+    a.production_ticks = b.production_ticks = 1
+    a.record_equity(t0, 100000, 100000, 200000, 0)
+    b.record_equity(t0, 99999, 99999, 199998, 0)
+    report = ProductionParityValidator.validate_passes(a, b)
+    assert report["overall_match"] is False
+    assert report["determinism_verdict"] == "DIVERGENCE_DETECTED"
 
 
-def test_replay_runtime_2_pass_determinism(test_settings: Settings, tmp_db: Database, tmp_path: Path):
-    sess_mgr = ReplaySessionManager(db_path=tmp_path / "replay_sessions.db")
-    runtime = ReplayRuntime(test_settings, tmp_db, replay_id="rpl_det_test", session_manager=sess_mgr)
-    
-    res = runtime.run_replay("2026-07-24", "2026-07-24", symbols=["NVDA"], verify_parity_pass=True)
-    assert res["session"]["status"] == "COMPLETED"
-    assert res["parity"]["overall_match"] is True
-    assert res["parity"]["determinism_verdict"] == "BIT_FOR_BIT_IDENTICAL_PARITY"
+def test_replay_runtime_executes_real_production_ticks(test_settings: Settings, tmp_db: Database, tmp_path: Path):
+    data_path = tmp_path / "bars.jsonl"
+    _write_fixture(data_path)
+    mgr = ReplaySessionManager(db_path=tmp_path / "sessions.db")
+    runtime = ReplayRuntime(test_settings, tmp_db, replay_id="rpl_det", session_manager=mgr, data_path=data_path)
+    result = runtime.run_replay("2026-07-24", "2026-07-24", symbols=["SPY", "QQQ", "NVDA"], verify_parity_pass=True)
+    assert result["session"]["status"] == "COMPLETED"
+    assert result["session"]["production_ticks"] == 3
+    assert result["parity"]["overall_match"] is True
+    assert result["manifest"]["decision_path"] == "TradingEngine._tick"
+    assert result["manifest"]["lookahead_policy"] == "strict_as_of"
+
+
+def test_missing_market_data_fails_closed(test_settings: Settings, tmp_db: Database, tmp_path: Path):
+    mgr = ReplaySessionManager(db_path=tmp_path / "sessions.db")
+    runtime = ReplayRuntime(test_settings, tmp_db, replay_id="rpl_missing", session_manager=mgr, data_path=tmp_path / "missing.jsonl")
+    with pytest.raises(FileNotFoundError):
+        runtime.run_replay("2026-07-24", "2026-07-24")
+    assert mgr.get_session("rpl_missing")["status"] == "FAILED"
