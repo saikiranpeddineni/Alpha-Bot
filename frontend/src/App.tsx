@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "./api";
+import "./replay.css";
 import { BacktestModal } from "./components/BacktestModal";
 import { ReplayModal } from "./components/ReplayModal";
 import { BottomTabs } from "./components/BottomTabs";
