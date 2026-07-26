@@ -65,10 +65,12 @@ class ReplayLedger:
     @staticmethod
     def _sanitize(item: Any) -> Any:
         if isinstance(item, dict):
-            # replay id differs between passes by design. IDs generated outside
-            # replay can also be nondeterministic, so hashes focus on economic
-            # and decision state, not transport identity.
-            ignored = {"replay_id", "id", "order_id", "client_order_id", "broker_fill_key"}
+            # Replay/transport identities are deliberately excluded from parity.
+            # candidate_id has a random UUID suffix in production and is used as
+            # a persistence/queue correlation key; the economic scanner decision
+            # is represented by timestamp/symbol/strategy/direction/prices/gates.
+            # Never exclude decision, price, sizing, score, regime, or outcome data.
+            ignored = {"replay_id", "id", "candidate_id", "order_id", "client_order_id", "broker_fill_key"}
             return {k: ReplayLedger._sanitize(v) for k, v in sorted(item.items()) if k not in ignored}
         if isinstance(item, list):
             return [ReplayLedger._sanitize(v) for v in item]
