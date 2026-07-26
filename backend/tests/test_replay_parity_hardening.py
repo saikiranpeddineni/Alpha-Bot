@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -64,3 +65,46 @@ def test_snapshot_fingerprint_is_stable_and_content_sensitive(tmp_path: Path) ->
 
     (specialists / "spy.pkl").write_bytes(b"model-v2")
     assert ReplayRuntime._snapshot_fingerprint(db_path, models) != first
+
+
+def test_model_asof_excludes_future_artifacts_and_keeps_historical_ones(tmp_path: Path) -> None:
+    cutoff = datetime(2026, 7, 24, 13, 30, tzinfo=timezone.utc)
+    models = tmp_path / "models"
+    meta = models / "meta"
+    specialists = models / "specialists"
+    meta.mkdir(parents=True)
+    specialists.mkdir(parents=True)
+
+    historical = [
+        models / "signal_model.current.json",
+        meta / "meta_momentum.joblib",
+        specialists / "SPY.pkl",
+    ]
+    future = [
+        models / "signal_model_long_adaptive.joblib",
+        models / "signal_model_short_adaptive.joblib",
+        meta / "meta_momentum_long.joblib",
+        specialists / "NBIS.pkl",
+    ]
+    for path in historical + future:
+        path.write_bytes(b"artifact")
+
+    historical_epoch = (cutoff - timedelta(days=1)).timestamp()
+    future_epoch = (cutoff + timedelta(days=1)).timestamp()
+    for path in historical:
+        os.utime(path, (historical_epoch, historical_epoch))
+    for path in future:
+        os.utime(path, (future_epoch, future_epoch))
+
+    report = ReplayRuntime._enforce_model_asof(models, cutoff)
+
+    assert all(path.exists() for path in historical)
+    assert all(not path.exists() for path in future)
+    assert report["kept_count"] == len(historical)
+    assert report["excluded_future_count"] == len(future)
+    assert {item["path"] for item in report["excluded_future"]} == {
+        "signal_model_long_adaptive.joblib",
+        "signal_model_short_adaptive.joblib",
+        "meta/meta_momentum_long.joblib",
+        "specialists/NBIS.pkl",
+    }
