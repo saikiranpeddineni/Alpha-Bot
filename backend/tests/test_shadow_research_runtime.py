@@ -92,9 +92,57 @@ def test_duplicate_candidate_is_single_fanout():
             await asyncio.wait_for(runtime.publisher.queue.join(), timeout=1.0)
             assert runtime.publisher.events_published == 1
             assert runtime.publisher.events_duplicate == 1
-            # Champion + Target D are separate challenger rows for one candidate.
             assert runtime.evidence.get("cand-1", "champion", "production") is not None
         finally:
             await runtime.stop()
 
     asyncio.run(run())
+
+
+def test_spawn_start_failure_is_contained():
+    async def run():
+        runtime = ShadowResearchRuntime(db=MemoryDb(), gemini_api_key=None)
+
+        async def broken_start():
+            raise RuntimeError("spawn unavailable")
+
+        runtime.spawn.start = broken_start
+        await runtime.start()
+        try:
+            # Dispatcher remains usable and Champion evidence is still accepted.
+            assert runtime.publish(candidate()) is True
+            await asyncio.wait_for(runtime.publisher.queue.join(), timeout=1.0)
+            assert runtime.evidence.get("cand-1", "champion", "production") is not None
+            assert runtime.telemetry()["lifecycle_errors"] == 1
+        finally:
+            await runtime.stop()
+
+    asyncio.run(run())
+
+
+def test_shutdown_failures_are_all_contained():
+    async def run():
+        runtime = ShadowResearchRuntime(db=MemoryDb(), gemini_api_key=None)
+        await runtime.start()
+
+        async def broken_shutdown():
+            raise RuntimeError("research cleanup failed")
+
+        runtime.gemini.shutdown = broken_shutdown
+        runtime.spawn.stop = broken_shutdown
+        await runtime.stop()
+        assert runtime.telemetry()["started"] is False
+        assert runtime.telemetry()["lifecycle_errors"] == 2
+
+    asyncio.run(run())
+
+
+def test_publish_exception_is_contained():
+    runtime = ShadowResearchRuntime(db=MemoryDb(), gemini_api_key=None)
+
+    def broken_publish(_event):
+        raise RuntimeError("queue failure")
+
+    runtime.publisher.publish = broken_publish
+    assert runtime.publish(candidate()) is False
+    assert runtime.telemetry()["lifecycle_errors"] == 1
