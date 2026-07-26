@@ -55,7 +55,13 @@ class ReplayRuntime:
                 divergence = parity.get("first_divergence") or {}
                 stage = divergence.get("stage", "unknown")
                 idx = divergence.get("index", "?")
-                raise RuntimeError(f"Replay determinism failure: Pass A != Pass B; first divergence stage={stage} index={idx}")
+                field = divergence.get("field_path", "unknown")
+                value_a = divergence.get("value_a")
+                value_b = divergence.get("value_b")
+                raise RuntimeError(
+                    f"Replay determinism failure: Pass A != Pass B; first divergence "
+                    f"stage={stage} index={idx} field={field} A={value_a!r} B={value_b!r}"
+                )
             summary = {"replay_id": self.replay_id, "status": "COMPLETED", "production_ticks": a.production_ticks,
                        "total_candidates": len(a.candidates), "total_signals": len(a.signals), "total_trades": len(a.trades),
                        "total_orders": len(a.orders), "total_fills": len(a.fills), "final_equity": a.equity_curve[-1]["equity"],
@@ -108,9 +114,6 @@ class ReplayRuntime:
                     value = clock.now_utc()
                     return value.astimezone(tz) if tz else value.replace(tzinfo=None)
 
-            # Same seed for A/B. Patch only module bindings that actually exist
-            # in production code. engine.py has no uuid import; attempting to
-            # patch a nonexistent attribute fails before the first replay tick.
             deterministic_uuid = DeterministicUUIDProxy(
                 f"{self.replay_id.split(':', 1)[0]}|{replay_bars[0]['ts_dt'].isoformat()}|{replay_bars[-1]['ts_dt'].isoformat()}"
             )
@@ -120,6 +123,13 @@ class ReplayRuntime:
                 stack.enter_context(patch("app.core.scanner.datetime", FrozenDateTime))
                 stack.enter_context(patch("app.core.shadow_ledger.uuid", deterministic_uuid))
                 stack.enter_context(patch("app.core.domain.uuid", deterministic_uuid))
+                # Contextual memory is decision-bearing state.  A replay pass must
+                # see the immutable as-of snapshot cloned at pass start; EOD/shadow
+                # analysis produced by the replay must not feed back into later
+                # authoritative decisions in the same pass.  This is replay-only
+                # isolation: production refresh behavior is untouched.
+                stack.enter_context(patch("app.strategies.memory.refresh_contextual_memory", lambda _db: None))
+                stack.enter_context(patch("app.core.engine.refresh_contextual_memory", lambda _db: None, create=True))
                 for idx, ts in enumerate(sorted(by_ts)):
                     if self.session_manager.is_cancelled(self.replay_id):
                         raise RuntimeError("Replay cancelled")
@@ -259,6 +269,7 @@ class ReplayRuntime:
                 "decision_path": "TradingEngine._tick", "lookahead_policy": "strict_as_of", "database_policy": "sqlite_snapshot_isolated",
                 "model_policy": "copied_snapshot_isolated", "spawn_policy": "production_coordinator_queue_drained_per_timestamp",
                 "clock_policy": "ReplayClock + legacy datetime binding", "identity_policy": "deterministic replay-only UUID binding",
+                "context_memory_policy": "immutable_pass_start_snapshot_no_replay_feedback",
                 "fill_model": config["fill_model"], "slippage_bps": config["slippage_bps"]}
 
     @staticmethod
