@@ -76,10 +76,9 @@ _HALT_KEY = "hard_halt_state:{mode}"
 
 
 class TradingEngine:
-    def __init__(self, settings: Settings, db: Database, runtime: Any | None = None) -> None:
+    def __init__(self, settings: Settings, db: Database) -> None:
         self.settings = settings
         self.db = db
-        self.runtime = runtime
         self.publish: Callable[[str, Any], None] = lambda _t, _d: None
 
         self.state: EngineState = EngineState.STOPPED
@@ -101,15 +100,10 @@ class TradingEngine:
         stored_risk = db.get_setting("risk_config") or {}
         self.risk_config = RiskConfig(**{**settings.risk_config().model_dump(), **stored_risk})
 
-        # Built by start() / ensure_data() or injected via runtime
-        if runtime is not None and getattr(runtime, "clock", None) is not None:
-            self.clock = runtime.clock
-        else:
-            self.clock = MarketClock(always_open=(self.mode == "demo"))
-
-        self.data: DataManager | None = runtime.data if runtime is not None else None
-        self.broker: Broker | None = runtime.broker if runtime is not None else None
-        self.runtime_ledger: Any | None = runtime.ledger if runtime is not None else None
+        # Built by start() / ensure_data()
+        self.clock = MarketClock(always_open=(self.mode == "demo"))
+        self.data: DataManager | None = None
+        self.broker: Broker | None = None
         self.risk: RiskManager | None = None
         self.portfolio: PortfolioTracker | None = None
         self.pipeline: SignalPipeline | None = None
@@ -411,7 +405,7 @@ class TradingEngine:
 
         account = await self.broker.account()
         self.portfolio.roll_session(self.clock.session_date(), account.equity)
-        self.portfolio.peak_equity = account.equity
+        self.portfolio.peak_equity = max(self.portfolio.peak_equity, account.equity)
         self.portfolio.mark_equity(account.equity, utcnow())
 
         self.trainer = ContinuousTrainer(
