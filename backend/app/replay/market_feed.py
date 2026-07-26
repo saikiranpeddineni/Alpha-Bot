@@ -127,12 +127,33 @@ class ReplayDataManager:
     def _visible(self, symbol: str) -> list[dict[str, Any]]:
         return [row for row in self._bars.get(self._symbol(symbol), []) if row["ts_dt"] <= self._now]
 
+    def frame(self, symbol: str, timeframe: str = "1Min", limit: int | None = None) -> pd.DataFrame:
+        """Production DataManager.frame parity over the strict as-of replay view.
+
+        Only bars at or before the replay clock are exposed, so callers such as scanner,
+        market-risk and quote payload code can use their normal production data path
+        without introducing lookahead.
+        """
+        df = _bar_frame(self._visible(symbol))
+        if timeframe != "1Min":
+            df = resample_bars(df, timeframe)
+        if limit:
+            df = df.iloc[-limit:]
+        return df
+
     def last_price(self, symbol: str) -> float | None:
-        rows = self._visible(symbol)
-        if not rows:
+        df = self.frame(symbol, "1Min", limit=1)
+        if df.empty:
             return None
-        row = rows[-1]
-        return float(row.get("close", row.get("c")))
+        return float(df["close"].iloc[-1])
+
+    def last_prices(self, symbols: list[str]) -> dict[str, float]:
+        out: dict[str, float] = {}
+        for symbol in symbols:
+            price = self.last_price(symbol)
+            if price is not None:
+                out[symbol.upper()] = price
+        return out
 
     def latest_quote(self, symbol: str) -> Quote | None:
         price = self.last_price(symbol)
