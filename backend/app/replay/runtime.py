@@ -72,54 +72,74 @@ class ReplayRuntime:
         broker = ReplayBroker(float(getattr(self.settings, "paper_starting_cash", 100000.0)), slippage_bps, fill_model)
         ledger = ReplayLedger(f"{self.replay_id}:{pass_name}"); broker.attach_ledger(ledger)
 
-        with tempfile.TemporaryDirectory(prefix="alpha_replay_") as tmp:
-            tmp_path = Path(tmp)
+        # Do not use TemporaryDirectory's implicit cleanup while SQLAlchemy/worker
+        # objects may still hold Windows file handles. Replay owns this directory
+        # explicitly and tears resources down before deleting it.
+        tmp_path = Path(tempfile.mkdtemp(prefix="alpha_replay_"))
+        replay_db: Database | None = None
+        engine: TradingEngine | None = None
+        try:
             replay_db = self._clone_database(tmp_path / "replay.db")
+            self._ensure_replay_schema_parity(replay_db)
             self._clear_mutable_replay_tables(replay_db)
             replay_models = tmp_path / "models"
             if MODELS_DIR.exists(): shutil.copytree(MODELS_DIR, replay_models, dirs_exist_ok=True)
             else: replay_models.mkdir(parents=True, exist_ok=True)
-            try:
-                engine = TradingEngine(self.settings, replay_db, runtime=TradingRuntime(clock=clock, broker=broker, data=data, ledger=ledger))
-                engine.model = SignalModel(replay_models)  # identical snapshot, replay writes isolated
-                await self._initialize_engine(engine, clock, broker, data, ledger)
-                by_ts: dict[datetime, list[dict[str, Any]]] = defaultdict(list)
-                for bar in replay_bars: by_ts[bar["ts_dt"]].append(bar)
 
-                class FrozenDateTime(datetime):
-                    @classmethod
-                    def now(cls, tz=None):
-                        value = clock.now_utc()
-                        return value.astimezone(tz) if tz else value.replace(tzinfo=None)
+            engine = TradingEngine(self.settings, replay_db, runtime=TradingRuntime(clock=clock, broker=broker, data=data, ledger=ledger))
+            engine.model = SignalModel(replay_models)  # identical snapshot, replay writes isolated
+            await self._initialize_engine(engine, clock, broker, data, ledger)
+            by_ts: dict[datetime, list[dict[str, Any]]] = defaultdict(list)
+            for bar in replay_bars: by_ts[bar["ts_dt"]].append(bar)
 
-                with ExitStack() as stack:
-                    stack.enter_context(patch("app.core.engine.utcnow", clock.now_utc))
-                    stack.enter_context(patch("app.core.engine.datetime", FrozenDateTime))
-                    stack.enter_context(patch("app.core.scanner.datetime", FrozenDateTime))
-                    for idx, ts in enumerate(sorted(by_ts)):
-                        if self.session_manager.is_cancelled(self.replay_id): raise RuntimeError("Replay cancelled")
-                        clock.set_time(ts); data.set_time(ts)
-                        for bar in sorted(by_ts[ts], key=lambda b: b["symbol"]):
-                            close = float(bar.get("close", bar.get("c")))
-                            broker.process_ohlc(bar["symbol"], float(bar.get("open", bar.get("o", close))),
-                                float(bar.get("high", bar.get("h", close))), float(bar.get("low", bar.get("l", close))), close, ts)
-                        await engine._tick()
-                        # Spawn is intentionally out-of-band in production. Replay
-                        # drains its queue before advancing simulated time so every
-                        # observation is processed in the same chronological order.
-                        if engine.spawn_coordinator.running:
-                            await engine.spawn_coordinator.queue.join()
-                        ledger.production_ticks += 1
-                        acct, positions = await broker.account(), await broker.positions()
-                        ledger.record_equity(ts, acct.equity, acct.cash, acct.buying_power, len(positions))
-                        if idx % 100 == 0:
-                            self.session_manager.update_session(self.replay_id, progress_pct=min(49.0, 5.0 + 44.0 * idx / max(1, len(by_ts))))
-                await engine.spawn_coordinator.stop()
-                self._hydrate_db_ledger(replay_db, ledger)
-            finally:
-                import app.db.database as db_module
-                db_module._ACTIVE_DATABASE = self.source_db
-        return ledger
+            class FrozenDateTime(datetime):
+                @classmethod
+                def now(cls, tz=None):
+                    value = clock.now_utc()
+                    return value.astimezone(tz) if tz else value.replace(tzinfo=None)
+
+            with ExitStack() as stack:
+                stack.enter_context(patch("app.core.engine.utcnow", clock.now_utc))
+                stack.enter_context(patch("app.core.engine.datetime", FrozenDateTime))
+                stack.enter_context(patch("app.core.scanner.datetime", FrozenDateTime))
+                for idx, ts in enumerate(sorted(by_ts)):
+                    if self.session_manager.is_cancelled(self.replay_id): raise RuntimeError("Replay cancelled")
+                    clock.set_time(ts); data.set_time(ts)
+                    for bar in sorted(by_ts[ts], key=lambda b: b["symbol"]):
+                        close = float(bar.get("close", bar.get("c")))
+                        broker.process_ohlc(bar["symbol"], float(bar.get("open", bar.get("o", close))),
+                            float(bar.get("high", bar.get("h", close))), float(bar.get("low", bar.get("l", close))), close, ts)
+                    await engine._tick()
+                    if engine.spawn_coordinator.running:
+                        await engine.spawn_coordinator.queue.join()
+                    ledger.production_ticks += 1
+                    acct, positions = await broker.account(), await broker.positions()
+                    ledger.record_equity(ts, acct.equity, acct.cash, acct.buying_power, len(positions))
+                    if idx % 100 == 0:
+                        self.session_manager.update_session(self.replay_id, progress_pct=min(49.0, 5.0 + 44.0 * idx / max(1, len(by_ts))))
+            await self._stop_replay_engine(engine)
+            self._hydrate_db_ledger(replay_db, ledger)
+            return ledger
+        finally:
+            # Restore the process-global DB pointer first, then synchronously close
+            # replay workers/connections. This is replay-only resource hygiene and
+            # does not alter the production engine's shutdown semantics.
+            import app.db.database as db_module
+            db_module._ACTIVE_DATABASE = self.source_db
+            if engine is not None:
+                await self._stop_replay_engine(engine)
+            if replay_db is not None:
+                replay_db.engine.dispose(close=True)
+            shutil.rmtree(tmp_path, ignore_errors=False)
+
+    @staticmethod
+    async def _stop_replay_engine(engine: TradingEngine) -> None:
+        coordinator = getattr(engine, "spawn_coordinator", None)
+        if coordinator is not None and getattr(coordinator, "running", False):
+            await coordinator.stop()
+        # Give cancelled/finished asyncio worker tasks one scheduling turn to
+        # release any context-managed SQLAlchemy sessions before DB disposal.
+        await asyncio.sleep(0)
 
     async def _initialize_engine(self, engine: TradingEngine, clock: ReplayClock, broker: ReplayBroker, data: ReplayDataManager, ledger: ReplayLedger) -> None:
         from app.portfolio.allocator import CapitalAllocationOptimizer, PortfolioAIGate
@@ -153,11 +173,36 @@ class ReplayRuntime:
         return Database(target)
 
     @staticmethod
+    def _ensure_replay_schema_parity(db: Database) -> None:
+        """Bring only the isolated DB snapshot up to the ORM schema expected by this commit.
+
+        SQLite create_all() does not add columns to existing tables. The live DB may
+        legitimately predate newer Spawn lineage fields, so replay repairs its clone
+        instead of mutating the source/production database.
+        """
+        required_columns: dict[str, dict[str, str]] = {
+            "spawned_strategies": {
+                "parent_policy_id": "VARCHAR(64)", "policy_version": "VARCHAR(20)",
+                "config_snapshot_json": "TEXT", "config_fingerprint": "VARCHAR(64)",
+                "created_from_candidate": "VARCHAR(64)", "spawn_reason": "TEXT",
+                "execution_mode": "VARCHAR(20)", "code_commit_sha": "VARCHAR(40)",
+                "model_manifest_sha": "VARCHAR(64)",
+            },
+        }
+        with db.engine.begin() as conn:
+            for table, columns in required_columns.items():
+                existing = {row[1] for row in conn.exec_driver_sql(f"PRAGMA table_info({table})").fetchall()}
+                if not existing:
+                    raise RuntimeError(f"Replay database missing required production table: {table}")
+                for name, sql_type in columns.items():
+                    if name not in existing:
+                        conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}")
+
+    @staticmethod
     def _clear_mutable_replay_tables(db: Database) -> None:
         with db.engine.begin() as conn:
             for table in ("orders", "trades", "equity_snapshots", "shadow_ledger", "spawn_shadow_events"):
                 conn.exec_driver_sql(f"DELETE FROM {table}")
-            # Never inherit ambiguous in-flight live submissions into a historical replay.
             conn.exec_driver_sql("DELETE FROM app_settings WHERE key IN ('pending_reconciliation_orders','heartbeat_write_check')")
 
     @staticmethod
