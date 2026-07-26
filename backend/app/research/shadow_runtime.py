@@ -11,6 +11,7 @@ from app.ai.shadow_bridge import GeminiShadowBridge
 from app.ai.target_d_observer import TargetDShadowObserver
 from app.ai.target_d_shadow_consumer import TargetDShadowConsumer
 from app.db.database import Database
+from app.research.evidence_store import UnifiedEvidenceStore
 from app.research.shadow_event import TradingObservationEvent
 from app.research.shadow_event_publisher import ShadowEventPublisher
 from app.research.spawn.shadow_event_adapter import SpawnShadowEventAdapter
@@ -30,26 +31,40 @@ class ShadowResearchRuntime:
         max_queue_size: int = 2000,
     ) -> None:
         self.publisher = ShadowEventPublisher(max_queue_size=max_queue_size)
+        self.evidence = UnifiedEvidenceStore(db)
         self.spawn = SpawnShadowCoordinator(db=db)
         self.spawn_adapter = SpawnShadowEventAdapter(self.spawn)
-        self.gemini = GeminiShadowBridge(
-            GeminiShadowRanker(gemini_api_key or ""),
-            observation_sink=gemini_observation_sink,
-        )
-        self.target_d = TargetDShadowConsumer(
-            TargetDShadowObserver(),
-            observation_sink=target_d_observation_sink,
-        )
+
+        def gemini_sink(observation: dict[str, Any]) -> None:
+            if gemini_observation_sink is not None:
+                gemini_observation_sink(observation)
+
+        def target_d_sink(observation: dict[str, Any]) -> None:
+            if target_d_observation_sink is not None:
+                target_d_observation_sink(observation)
+
+        self.gemini = GeminiShadowBridge(GeminiShadowRanker(gemini_api_key or ""), observation_sink=gemini_sink)
+        self.target_d = TargetDShadowConsumer(TargetDShadowObserver(), observation_sink=target_d_sink)
+        self.publisher.register("evidence_champion", self._record_champion)
         self.publisher.register("spawn", self.spawn_adapter.consume)
         self.publisher.register("gemini", self.gemini.consume)
-        self.publisher.register("target_d", self.target_d.consume)
+        self.publisher.register("target_d", self._consume_target_d)
+
+    def _record_champion(self, event: TradingObservationEvent) -> None:
+        if event.candidate_id:
+            self.evidence.record(event, challenger_id="champion", challenger_version="production",
+                                 decision=event.champion_final_decision)
+
+    def _consume_target_d(self, event: TradingObservationEvent) -> None:
+        self.target_d.consume(event)
+        # Target D result persistence is handled by its sink when configured; the
+        # canonical Champion event itself is already persisted above.
 
     async def start(self) -> None:
         await self.spawn.start()
         await self.publisher.start()
 
     async def stop(self) -> None:
-        # Stop ingress first, then cancel consumer-owned background work.
         await self.publisher.stop()
         await self.gemini.shutdown()
         await self.spawn.stop()
@@ -58,7 +73,4 @@ class ShadowResearchRuntime:
         return self.publisher.publish(event)
 
     def telemetry(self) -> dict[str, Any]:
-        return {
-            "publisher": self.publisher.telemetry(),
-            "spawn": self.spawn.telemetry(),
-        }
+        return {"publisher": self.publisher.telemetry(), "spawn": self.spawn.telemetry(), "evidence": self.evidence.telemetry()}
