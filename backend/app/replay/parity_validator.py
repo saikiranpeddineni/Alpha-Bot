@@ -55,16 +55,21 @@ class ProductionParityValidator:
     def _first_sequence_diff(cls, a: list[Any], b: list[Any]) -> dict[str, Any] | None:
         limit = min(len(a), len(b))
         for idx in range(limit):
-            sa = ReplayLedger._sanitize(a[idx])
-            sb = ReplayLedger._sanitize(b[idx])
+            # Use the exact same canonicalization contract as stage hashing.  This
+            # prevents diagnostics from reporting fields deliberately normalized by
+            # the replay ledger while keeping every economic decision field strict.
+            sa = ReplayLedger._canonicalize_stage_event(a[idx]) if isinstance(a[idx], dict) else ReplayLedger._sanitize(a[idx])
+            sb = ReplayLedger._canonicalize_stage_event(b[idx]) if isinstance(b[idx], dict) else ReplayLedger._sanitize(b[idx])
             if sa != sb:
                 field_diff = cls._first_value_diff(sa, sb) or {}
                 return {"index": idx, "pass_a": sa, "pass_b": sb, **field_diff}
         if len(a) != len(b):
+            va = a[limit] if limit < len(a) else None
+            vb = b[limit] if limit < len(b) else None
             return {
                 "index": limit,
-                "pass_a": ReplayLedger._sanitize(a[limit]) if limit < len(a) else None,
-                "pass_b": ReplayLedger._sanitize(b[limit]) if limit < len(b) else None,
+                "pass_a": ReplayLedger._canonicalize_stage_event(va) if isinstance(va, dict) else ReplayLedger._sanitize(va),
+                "pass_b": ReplayLedger._canonicalize_stage_event(vb) if isinstance(vb, dict) else ReplayLedger._sanitize(vb),
                 "count_a": len(a),
                 "count_b": len(b),
                 "field_path": "$[sequence_length]",
