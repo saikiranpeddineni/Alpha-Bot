@@ -10,6 +10,7 @@ from app.ai.gemini_ranker import GeminiShadowRanker
 from app.ai.shadow_bridge import GeminiShadowBridge
 from app.ai.target_d_observer import TargetDShadowObserver
 from app.ai.target_d_shadow_consumer import TargetDShadowConsumer
+from app.core.logging import applog
 from app.db.database import Database
 from app.research.evidence_store import UnifiedEvidenceStore
 from app.research.exit_challenger_consumer import CanonicalExitChallengerConsumer
@@ -21,7 +22,11 @@ from app.research.spawn.spawn_shadow_coordinator import SpawnShadowCoordinator
 
 
 class ShadowResearchRuntime:
-    """Owns the one-way production-to-research event boundary."""
+    """Owns the one-way production-to-research event boundary.
+
+    Lifecycle failures are deliberately contained here: research must never be
+    able to prevent Champion startup, shutdown, or event processing.
+    """
 
     def __init__(self, *, db: Database, gemini_api_key: str | None,
                  gemini_observation_sink=None, target_d_observation_sink=None,
@@ -32,6 +37,8 @@ class ShadowResearchRuntime:
         self.spawn_adapter = SpawnShadowEventAdapter(self.spawn)
         self.outcomes = CanonicalOutcomeJoiner(self._record_outcome)
         self.exits = CanonicalExitChallengerConsumer(self._record_exit)
+        self._started = False
+        self._lifecycle_errors = 0
 
         def gemini_sink(observation: dict[str, Any]) -> None:
             if gemini_observation_sink is not None:
@@ -72,18 +79,47 @@ class ShadowResearchRuntime:
                                  decision=observation.get("target_d_decision"), evidence=observation)
 
     async def start(self) -> None:
-        await self.spawn.start()
-        await self.publisher.start()
+        if self._started:
+            return
+        # Start the bounded dispatcher first. Individual research consumers may
+        # fail independently without becoming a prerequisite for Champion.
+        try:
+            await self.publisher.start()
+        except Exception as exc:
+            self._lifecycle_errors += 1
+            applog.error("shadow_research", f"publisher startup failed (fail-open): {exc}")
+        try:
+            await self.spawn.start()
+        except Exception as exc:
+            self._lifecycle_errors += 1
+            applog.error("shadow_research", f"spawn startup failed (fail-open): {exc}")
+        self._started = True
 
     async def stop(self) -> None:
-        await self.publisher.stop()
-        await self.gemini.shutdown()
-        await self.spawn.stop()
+        # Every cleanup is isolated so one broken research component cannot
+        # prevent the production engine from completing shutdown.
+        for name, cleanup in (
+            ("publisher", self.publisher.stop),
+            ("gemini", self.gemini.shutdown),
+            ("spawn", self.spawn.stop),
+        ):
+            try:
+                await cleanup()
+            except Exception as exc:
+                self._lifecycle_errors += 1
+                applog.error("shadow_research", f"{name} shutdown failed (fail-open): {exc}")
+        self._started = False
 
     def publish(self, event: TradingObservationEvent) -> bool:
-        return self.publisher.publish(event)
+        try:
+            return self.publisher.publish(event)
+        except Exception as exc:
+            self._lifecycle_errors += 1
+            applog.error("shadow_research", f"event publish failed (fail-open): {exc}")
+            return False
 
     def telemetry(self) -> dict[str, Any]:
         return {"publisher": self.publisher.telemetry(), "spawn": self.spawn.telemetry(),
                 "evidence": self.evidence.telemetry(), "outcomes": self.outcomes.telemetry(),
-                "exit_challengers": self.exits.telemetry()}
+                "exit_challengers": self.exits.telemetry(), "started": self._started,
+                "lifecycle_errors": self._lifecycle_errors}
