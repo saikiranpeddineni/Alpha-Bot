@@ -106,7 +106,9 @@ class CanonicalOutcomeJoiner:
         high = float(bar.high)
         low = float(bar.low)
         close = float(bar.close)
-        stop = state.event.stop_loss
+        # A missing, equal, or wrong-side stop is unavailable evidence. Never use
+        # the raw invalid value to create a synthetic stop event.
+        stop = state.event.stop_loss if state.initial_risk is not None else None
 
         if not state.stopped:
             if state.direction == "long":
