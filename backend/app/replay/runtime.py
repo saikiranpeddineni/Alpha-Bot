@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio, hashlib, json, os, shutil, subprocess, tempfile, uuid
 from collections import defaultdict
 from contextlib import ExitStack
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -45,6 +45,10 @@ class ReplayRuntime:
         run_snapshot = Path(tempfile.mkdtemp(prefix="alpha_replay_run_snapshot_"))
         try:
             bars = self.feed.load_bars(start_date, end_date, symbols)
+            replay_bars = [b for b in bars if b.get("in_replay_window", True)]
+            if not replay_bars:
+                raise RuntimeError("No bars in requested replay window")
+            model_asof = replay_bars[0]["ts_dt"]
             snapshot_db = run_snapshot / "source.db"
             self._snapshot_source_database(snapshot_db)
             snapshot_models = run_snapshot / "models"
@@ -52,12 +56,15 @@ class ReplayRuntime:
                 shutil.copytree(MODELS_DIR, snapshot_models, dirs_exist_ok=True)
             else:
                 snapshot_models.mkdir(parents=True, exist_ok=True)
+            model_asof_report = self._enforce_model_asof(snapshot_models, model_asof)
             snapshot_fingerprint = self._snapshot_fingerprint(snapshot_db, snapshot_models)
             manifest = self._build_manifest(config, bars)
             manifest.update({
                 "run_snapshot_fingerprint": snapshot_fingerprint,
                 "database_policy": "single_immutable_run_snapshot_cloned_per_pass",
-                "model_policy": "single_immutable_run_snapshot_cloned_per_pass",
+                "model_policy": "immutable_asof_snapshot_cloned_per_pass",
+                "model_asof": model_asof.isoformat(),
+                "model_asof_report": model_asof_report,
             })
             self.session_manager.update_session(self.replay_id, manifest=manifest)
             a = await self._execute_single_pass(bars, fill_model, slippage_bps, "A", snapshot_db, snapshot_models)
@@ -110,9 +117,13 @@ class ReplayRuntime:
             self._clear_mutable_replay_tables(replay_db)
             replay_models = tmp_path / "models"
             shutil.copytree(snapshot_models, replay_models, dirs_exist_ok=True)
-            engine = TradingEngine(self.settings, replay_db, runtime=TradingRuntime(clock=clock, broker=broker, data=data, ledger=ledger))
-            engine.model = SignalModel(replay_models)
-            await self._initialize_engine(engine, clock, broker, data, ledger)
+            # TradingEngine and SignalPipeline import MODELS_DIR as production globals.
+            # Bind those globals only while constructing replay components so every ML,
+            # meta-label and trainer reference resolves to the historical as-of snapshot.
+            with patch("app.core.engine.MODELS_DIR", replay_models), patch("app.config.MODELS_DIR", replay_models):
+                engine = TradingEngine(self.settings, replay_db, runtime=TradingRuntime(clock=clock, broker=broker, data=data, ledger=ledger))
+                engine.model = SignalModel(replay_models)
+                await self._initialize_engine(engine, clock, broker, data, ledger, replay_models)
             by_ts: dict[datetime, list[dict[str, Any]]] = defaultdict(list)
             for bar in replay_bars: by_ts[bar["ts_dt"]].append(bar)
 
@@ -134,6 +145,7 @@ class ReplayRuntime:
                 stack.enter_context(patch("app.core.domain.uuid", deterministic_uuid))
                 stack.enter_context(patch("app.strategies.refresh_contextual_memory", lambda _db: None))
                 stack.enter_context(patch("app.strategies.memory.refresh_contextual_memory", lambda _db: None))
+                stack.enter_context(patch("app.config.MODELS_DIR", replay_models))
                 for idx, ts in enumerate(sorted(by_ts)):
                     if self.session_manager.is_cancelled(self.replay_id): raise RuntimeError("Replay cancelled")
                     clock.set_time(ts); data.set_time(ts)
@@ -163,7 +175,7 @@ class ReplayRuntime:
         if coordinator is not None and getattr(coordinator, "running", False): await coordinator.stop()
         await asyncio.sleep(0)
 
-    async def _initialize_engine(self, engine: TradingEngine, clock: ReplayClock, broker: ReplayBroker, data: ReplayDataManager, ledger: ReplayLedger) -> None:
+    async def _initialize_engine(self, engine: TradingEngine, clock: ReplayClock, broker: ReplayBroker, data: ReplayDataManager, ledger: ReplayLedger, replay_models: Path) -> None:
         from app.portfolio.allocator import CapitalAllocationOptimizer, PortfolioAIGate
         from app.portfolio.tracker import PortfolioTracker
         from app.risk.manager import RiskManager
@@ -176,7 +188,8 @@ class ReplayRuntime:
         active = engine.db.get_setting("active_policy_snapshot")
         ml = float(active["ml_threshold"]) if active and "ml_threshold" in active else float(engine.db.get_setting("ml_threshold") or engine.risk_config.ml_confidence_threshold)
         engine.risk_config.ml_confidence_threshold = ml
-        engine.pipeline = SignalPipeline(engine.model, ml)
+        with patch("app.config.MODELS_DIR", replay_models):
+            engine.pipeline = SignalPipeline(engine.model, ml)
         engine.evidence_evaluator = ParallelEvidenceEvaluator(model=engine.model, ml_threshold=ml, meta_label_engine=engine.pipeline.meta_label_engine, trade_score_engine=engine.pipeline.trade_score_engine)
 
         for strategy in engine.strategies:
@@ -214,6 +227,37 @@ class ReplayRuntime:
             driver.backup(dest)
         finally:
             dest.close(); source.close()
+
+    @staticmethod
+    def _enforce_model_asof(models_path: Path, cutoff: datetime) -> dict[str, Any]:
+        """Remove replay-visible artifacts that did not exist at the replay start.
+
+        This is replay-only isolation. Production model loading is untouched. File mtime is
+        used as the conservative availability boundary because legacy specialist/adaptive
+        artifacts do not all carry a machine-readable trained_at manifest. copytree/copy2
+        preserve mtimes, so the boundary survives creation of the immutable run snapshot.
+        """
+        cutoff_utc = cutoff if cutoff.tzinfo else cutoff.replace(tzinfo=timezone.utc)
+        cutoff_epoch = cutoff_utc.timestamp()
+        kept: list[str] = []
+        excluded: list[dict[str, str]] = []
+        for path in sorted(p for p in models_path.rglob("*") if p.is_file()):
+            rel = str(path.relative_to(models_path)).replace("\\", "/")
+            mtime = path.stat().st_mtime
+            if mtime > cutoff_epoch:
+                excluded.append({"path": rel, "available_at": datetime.fromtimestamp(mtime, timezone.utc).isoformat()})
+                path.unlink()
+            else:
+                kept.append(rel)
+        # Empty future-generation/candidate directories are irrelevant and can confuse
+        # artifact discovery/debugging, so remove only empty directories from the snapshot.
+        for directory in sorted((p for p in models_path.rglob("*") if p.is_dir()), key=lambda p: len(p.parts), reverse=True):
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
+        applog.info("replay_runtime", f"Model as-of {cutoff_utc.isoformat()}: kept={len(kept)} excluded_future={len(excluded)}")
+        return {"cutoff": cutoff_utc.isoformat(), "kept_count": len(kept), "excluded_future_count": len(excluded), "excluded_future": excluded}
 
     @staticmethod
     def _snapshot_fingerprint(db_path: Path, models_path: Path) -> str:
@@ -268,7 +312,7 @@ class ReplayRuntime:
         try: commit = subprocess.check_output(["git","rev-parse","HEAD"],text=True,stderr=subprocess.DEVNULL).strip()
         except Exception: commit = os.getenv("GIT_COMMIT_SHA","unknown")
         window=[b for b in bars if b.get("in_replay_window",True)]; syms=sorted({b["symbol"] for b in bars})
-        return {"replay_id":self.replay_id,"engine_commit":commit,"config_hash":hashlib.sha256(json.dumps(config,sort_keys=True).encode()).hexdigest(),"data_hash":digest,"bar_count_total":len(bars),"bar_count_replay_window":len(window),"symbols":syms,"first_timestamp":bars[0]["ts_dt"].isoformat(),"last_timestamp":bars[-1]["ts_dt"].isoformat(),"decision_path":"TradingEngine._tick","lookahead_policy":"strict_as_of","database_policy":"single_immutable_run_snapshot_cloned_per_pass","model_policy":"single_immutable_run_snapshot_cloned_per_pass","spawn_policy":"production_coordinator_queue_drained_per_timestamp","clock_policy":"ReplayClock + engine/scanner/risk datetime binding","identity_policy":"deterministic replay-only UUID binding","context_memory_policy":"immutable_run_start_snapshot_no_replay_feedback","market_risk_policy":"historical SPY+QQQ+VIX required; no UNKNOWN substitution","strategy_observation_policy":"replay-only wrapper around production on_bar","risk_observation_policy":"replay-only wrapper around production evaluate_entry","fill_model":config["fill_model"],"slippage_bps":config["slippage_bps"]}
+        return {"replay_id":self.replay_id,"engine_commit":commit,"config_hash":hashlib.sha256(json.dumps(config,sort_keys=True).encode()).hexdigest(),"data_hash":digest,"bar_count_total":len(bars),"bar_count_replay_window":len(window),"symbols":syms,"first_timestamp":bars[0]["ts_dt"].isoformat(),"last_timestamp":bars[-1]["ts_dt"].isoformat(),"decision_path":"TradingEngine._tick","lookahead_policy":"strict_as_of","database_policy":"single_immutable_run_snapshot_cloned_per_pass","model_policy":"immutable_asof_snapshot_cloned_per_pass","spawn_policy":"production_coordinator_queue_drained_per_timestamp","clock_policy":"ReplayClock + engine/scanner/risk datetime binding","identity_policy":"deterministic replay-only UUID binding","context_memory_policy":"immutable_run_start_snapshot_no_replay_feedback","market_risk_policy":"historical SPY+QQQ+VIX required; no UNKNOWN substitution","strategy_observation_policy":"replay-only wrapper around production on_bar","risk_observation_policy":"replay-only wrapper around production evaluate_entry","fill_model":config["fill_model"],"slippage_bps":config["slippage_bps"]}
 
     @staticmethod
     def _assert_meaningful_execution(ledger: ReplayLedger) -> None:
