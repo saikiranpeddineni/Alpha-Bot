@@ -49,11 +49,9 @@ class ReplayMarketFeed:
         if not self.data_path.exists():
             raise FileNotFoundError(f"Replay market data not found: {self.data_path}")
 
-        # Production fidelity requires the complete historical context.  A UI
-        # symbol selection may narrow what the operator wants to inspect, but it
-        # must never remove SPY/QQQ/VIX/breadth/event-monitor symbols from the
-        # decision input.  Therefore replay loads every bar present in the
-        # immutable artifact and treats `symbols` as report metadata only.
+        # Production fidelity requires the complete historical context. A UI
+        # symbol selection is inspection metadata only and must never remove
+        # market-risk, breadth or event-monitor inputs from the decision path.
         with self.data_path.open("r", encoding="utf-8") as handle:
             for line_no, line in enumerate(handle, 1):
                 if not line.strip():
@@ -88,6 +86,21 @@ class ReplayMarketFeed:
         rows = sorted(deduped.values(), key=lambda r: (r["ts_dt"], r["symbol"]))
         if not any(r["in_replay_window"] for r in rows):
             raise ValueError(f"No replay bars inside {start_date}..{end_date} symbols={symbols or 'ALL'}")
+
+        # Do not silently claim production fidelity when the historical artifact
+        # cannot drive production's systemic-risk heartbeat.  These are genuine
+        # historical inputs, not replay defaults; VIX may be stored under either
+        # vendor symbol.  Breadth coverage remains visible to MarketRiskAggregator
+        # and will fail closed naturally if the artifact is too sparse.
+        present = {r["symbol"] for r in rows}
+        missing = [s for s in ("SPY", "QQQ") if s not in present]
+        if "VIX" not in present and "^VIX" not in present:
+            missing.append("VIX/^VIX")
+        if missing:
+            raise ValueError(
+                "Replay production-fidelity input incomplete: missing historical "
+                f"market-risk series {', '.join(missing)}. Refusing conservative/UNKNOWN substitution."
+            )
         return rows
 
 
@@ -108,9 +121,6 @@ class ReplayDataManager:
             if bar.get("in_replay_window", True):
                 self._pending_by_ts.setdefault(ts, {}).setdefault(symbol, []).append(bar)
         self._all_frames = {symbol: _bar_frame(rows) for symbol, rows in grouped.items()}
-        # VIX vendors use both names.  Production heartbeat explicitly checks
-        # ^VIX then VIX, so expose a deterministic alias when the artifact has
-        # only one representation; no prices are synthesized.
         if "^VIX" in self._all_frames and "VIX" not in self._all_frames:
             self._all_frames["VIX"] = self._all_frames["^VIX"]
         elif "VIX" in self._all_frames and "^VIX" not in self._all_frames:
@@ -128,11 +138,10 @@ class ReplayDataManager:
 
     def fidelity_diagnostics(self) -> dict[str, Any]:
         symbols = self.available_symbols
-        has_vix = "^VIX" in symbols or "VIX" in symbols
         return {
             "has_spy": "SPY" in symbols,
             "has_qqq": "QQQ" in symbols,
-            "has_vix": has_vix,
+            "has_vix": "^VIX" in symbols or "VIX" in symbols,
             "symbol_count": len(symbols - {"VIX", "^VIX"}),
             "available_symbols": sorted(symbols),
         }
