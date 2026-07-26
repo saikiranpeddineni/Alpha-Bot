@@ -49,9 +49,6 @@ class ReplayMarketFeed:
         if not self.data_path.exists():
             raise FileNotFoundError(f"Replay market data not found: {self.data_path}")
 
-        # Production fidelity requires the complete historical context. A UI
-        # symbol selection is inspection metadata only and must never remove
-        # market-risk, breadth or event-monitor inputs from the decision path.
         with self.data_path.open("r", encoding="utf-8") as handle:
             for line_no, line in enumerate(handle, 1):
                 if not line.strip():
@@ -87,11 +84,6 @@ class ReplayMarketFeed:
         if not any(r["in_replay_window"] for r in rows):
             raise ValueError(f"No replay bars inside {start_date}..{end_date} symbols={symbols or 'ALL'}")
 
-        # Do not silently claim production fidelity when the historical artifact
-        # cannot drive production's systemic-risk heartbeat.  These are genuine
-        # historical inputs, not replay defaults; VIX may be stored under either
-        # vendor symbol.  Breadth coverage remains visible to MarketRiskAggregator
-        # and will fail closed naturally if the artifact is too sparse.
         present = {r["symbol"] for r in rows}
         missing = [s for s in ("SPY", "QQQ") if s not in present]
         if "VIX" not in present and "^VIX" not in present:
@@ -122,9 +114,30 @@ class ReplayDataManager:
                 self._pending_by_ts.setdefault(ts, {}).setdefault(symbol, []).append(bar)
         self._all_frames = {symbol: _bar_frame(rows) for symbol, rows in grouped.items()}
         if "^VIX" in self._all_frames and "VIX" not in self._all_frames:
-            self._all_frames["VIX"] = self._all_frames["^VIX"]
+            self._all_frames["VIX"] = self._all_frames["^VIX"].copy()
         elif "VIX" in self._all_frames and "^VIX" not in self._all_frames:
-            self._all_frames["^VIX"] = self._all_frames["VIX"]
+            self._all_frames["^VIX"] = self._all_frames["VIX"].copy()
+
+        # Historical artifacts often store VIX less frequently than equities.  Production
+        # consumes the latest known index value continuously; replay must model that same
+        # as-of contract rather than declaring the feed unavailable after 30 minutes.
+        # Carry-forward is strictly backward-looking: no future VIX observation is exposed.
+        market_indexes = [df.index for sym, df in self._all_frames.items() if sym not in {"VIX", "^VIX"} and not df.empty]
+        if market_indexes and "VIX" in self._all_frames and not self._all_frames["VIX"].empty:
+            timeline = market_indexes[0]
+            for idx in market_indexes[1:]:
+                timeline = timeline.union(idx)
+            for vix_sym in ("VIX", "^VIX"):
+                source = self._all_frames[vix_sym]
+                expanded_index = source.index.union(timeline).sort_values()
+                expanded = source.reindex(expanded_index).ffill().dropna(subset=["close"])
+                # Carried observations have no new traded volume; price fields remain the
+                # last actually observed VIX value, matching an as-of market-data cache.
+                carried = ~expanded.index.isin(source.index)
+                if "volume" in expanded.columns:
+                    expanded.loc[carried, "volume"] = 0.0
+                self._all_frames[vix_sym] = normalize_bars(expanded)
+
         self._current_ts: datetime | None = None
         self._delivered_ts: set[datetime] = set()
 
