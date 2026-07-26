@@ -405,7 +405,7 @@ class TradingEngine:
 
         account = await self.broker.account()
         self.portfolio.roll_session(self.clock.session_date(), account.equity)
-        self.portfolio.peak_equity = account.equity
+        self.portfolio.peak_equity = max(self.portfolio.peak_equity, account.equity)
         self.portfolio.mark_equity(account.equity, utcnow())
 
         self.trainer = ContinuousTrainer(
