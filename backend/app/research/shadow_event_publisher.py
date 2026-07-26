@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -20,22 +21,23 @@ class ShadowConsumerRegistration:
 
 
 class ShadowEventPublisher:
-    """Bounded, fail-open event fan-out with no result channel to Champion.
+    """Bounded fail-open fan-out with no result channel to Champion."""
 
-    ``publish`` is synchronous and uses ``put_nowait``. Slow/broken research can
-    drop observations or record errors, but can never block a production tick.
-    """
-
-    def __init__(self, *, max_queue_size: int = 2000) -> None:
+    def __init__(self, *, max_queue_size: int = 2000, dedupe_window: int = 10000) -> None:
         self.queue: asyncio.Queue[TradingObservationEvent] = asyncio.Queue(maxsize=max_queue_size)
         self._consumers: list[ShadowConsumerRegistration] = []
         self._worker_task: asyncio.Task | None = None
+        self._seen_ids: set[str] = set()
+        self._seen_order: deque[str] = deque()
+        self._dedupe_window = max(1, dedupe_window)
         self.running = False
         self.events_published = 0
         self.events_processed = 0
         self.events_dropped = 0
+        self.events_duplicate = 0
         self.consumer_errors = 0
         self.last_processed_at: datetime | None = None
+        self.last_event_timestamp: datetime | None = None
 
     def register(self, name: str, consumer: ShadowConsumer) -> None:
         if self.running:
@@ -60,11 +62,22 @@ class ShadowEventPublisher:
                 pass
             self._worker_task = None
 
+    def _remember(self, event_id: str) -> None:
+        self._seen_ids.add(event_id)
+        self._seen_order.append(event_id)
+        while len(self._seen_order) > self._dedupe_window:
+            self._seen_ids.discard(self._seen_order.popleft())
+
     def publish(self, event: TradingObservationEvent) -> bool:
+        """Queue without awaiting research. Duplicate event IDs are successful no-ops."""
         if not self.running:
             return False
+        if event.event_id in self._seen_ids:
+            self.events_duplicate += 1
+            return True
         try:
             self.queue.put_nowait(event)
+            self._remember(event.event_id)
             self.events_published += 1
             return True
         except asyncio.QueueFull:
@@ -87,11 +100,9 @@ class ShadowEventPublisher:
                                 await result
                         except Exception as exc:
                             self.consumer_errors += 1
-                            applog.warning(
-                                "shadow_event_publisher",
-                                f"Consumer {registration.name} failed open: {exc}",
-                            )
+                            applog.warning("shadow_event_publisher", f"Consumer {registration.name} failed open: {exc}")
                     self.events_processed += 1
+                    self.last_event_timestamp = event.ts
                     self.last_processed_at = datetime.now(timezone.utc)
                 finally:
                     self.queue.task_done()
@@ -102,13 +113,15 @@ class ShadowEventPublisher:
                 applog.warning("shadow_event_publisher", f"Worker failed open: {exc}")
 
     def telemetry(self) -> dict[str, Any]:
+        now = datetime.now(timezone.utc)
+        lag_seconds = None
+        if self.last_event_timestamp is not None:
+            lag_seconds = max(0.0, (now - self.last_event_timestamp).total_seconds())
         return {
-            "running": self.running,
-            "queue_size": self.queue.qsize(),
-            "events_published": self.events_published,
-            "events_processed": self.events_processed,
-            "events_dropped": self.events_dropped,
-            "consumer_errors": self.consumer_errors,
-            "consumer_count": len(self._consumers),
+            "running": self.running, "queue_size": self.queue.qsize(), "events_published": self.events_published,
+            "events_processed": self.events_processed, "events_dropped": self.events_dropped,
+            "events_duplicate": self.events_duplicate, "consumer_errors": self.consumer_errors,
+            "consumer_count": len(self._consumers), "lag_seconds": lag_seconds,
             "last_processed_at": self.last_processed_at.isoformat() if self.last_processed_at else None,
+            "last_event_timestamp": self.last_event_timestamp.isoformat() if self.last_event_timestamp else None,
         }
