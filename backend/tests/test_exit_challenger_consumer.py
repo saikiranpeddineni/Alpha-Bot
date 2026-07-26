@@ -1,5 +1,7 @@
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from app.research.exit_challenger_consumer import CanonicalExitChallengerConsumer
 from app.research.shadow_event import ShadowEventType, TradingObservationEvent
 
@@ -27,6 +29,7 @@ def test_exit_policies_emit_under_same_candidate_after_60m():
     assert emitted
     assert all(item[0] == "cand-1" for item in emitted)
     assert {item[1] for item in emitted} >= {"fixed_1_2", "trail_2_atr", "hold_to_close"}
+    assert consumer.telemetry()["active"] == 0
 
 
 def test_future_replay_is_not_possible_without_future_bar():
@@ -36,15 +39,27 @@ def test_future_replay_is_not_possible_without_future_bar():
     consumer.consume(bar(59))
     assert emitted == []
     assert consumer.telemetry()["replays"] == 0
+    assert consumer.telemetry()["active"] == 1
 
 
-def test_missing_atr_is_unavailable_not_fabricated():
+def test_missing_atr_is_unavailable_not_fabricated_and_state_is_released():
     emitted=[]
     consumer=CanonicalExitChallengerConsumer(lambda *args: emitted.append(args))
     consumer.consume(candidate(atr=None))
     consumer.consume(bar(60))
     assert emitted == []
     assert consumer.telemetry()["skipped_missing_risk"] == 1
+    assert consumer.telemetry()["active"] == 0
+
+
+def test_sink_failure_still_releases_replay_state():
+    def broken_sink(*_args):
+        raise RuntimeError("persistence unavailable")
+    consumer=CanonicalExitChallengerConsumer(broken_sink)
+    consumer.consume(candidate())
+    with pytest.raises(RuntimeError):
+        consumer.consume(bar(60))
+    assert consumer.telemetry()["active"] == 0
 
 
 def test_out_of_order_bar_is_ignored():
