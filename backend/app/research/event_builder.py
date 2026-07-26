@@ -15,15 +15,35 @@ def candidate_event_from_signal(
     final_decision: str,
     rejection_reason: str | None = None,
     features: Mapping[str, float | int | None] | None = None,
+    open_: float | None = None,
+    high: float | None = None,
+    low: float | None = None,
+    close: float | None = None,
+    atr: float | None = None,
+    rsi: float | None = None,
     meta_probability: float | None = None,
     meta_decision: str | None = None,
     trade_score_decision: str | None = None,
     portfolio_decision: str | None = None,
     risk_decision: str | None = None,
+    vix: float | None = None,
+    vix_status: str | None = None,
+    equity: float | None = None,
+    cash: float | None = None,
+    buying_power: float | None = None,
+    calibrated_expected_net_dollars: float | None = None,
+    expected_holding_mins: float | None = None,
+    expectancy_confidence: float | None = None,
+    expectancy_source: str | None = None,
     provenance: EvidenceProvenance | None = None,
     ordinal: int = 0,
 ) -> TradingObservationEvent:
-    """Build a canonical candidate snapshot without mutating Champion decisions."""
+    """Build a canonical candidate snapshot without mutating Champion decisions.
+
+    Values are copied exactly from the decision context. Callers must pass ``None``
+    when evidence is unavailable; this builder never manufactures ATR, RSI, capital,
+    or expectancy fallbacks.
+    """
     candidate_id = signal.candidate_id or canonical_candidate_id(
         symbol=signal.symbol,
         strategy=signal.strategy,
@@ -43,6 +63,8 @@ def candidate_event_from_signal(
         side=signal.side,
         strategy=signal.strategy,
         price=signal.price,
+        open=open_, high=high, low=low, close=close,
+        atr=atr, rsi=rsi,
         features=dict(features or {}),
         discovery_source=signal.discovery_source,
         scanner_score=signal.scanner_score,
@@ -60,6 +82,15 @@ def candidate_event_from_signal(
         stop_loss=signal.stop_loss,
         take_profit=signal.take_profit,
         regime=signal.regime.value if signal.regime is not None else None,
+        vix=vix,
+        vix_status=vix_status,
+        equity=equity,
+        cash=cash,
+        buying_power=buying_power,
+        calibrated_expected_net_dollars=calibrated_expected_net_dollars,
+        expected_holding_mins=expected_holding_mins,
+        expectancy_confidence=expectancy_confidence,
+        expectancy_source=expectancy_source,
         provenance=provenance or EvidenceProvenance(),
     )
 
