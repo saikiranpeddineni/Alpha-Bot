@@ -52,13 +52,24 @@ class ShadowResearchRuntime:
 
     def _record_champion(self, event: TradingObservationEvent) -> None:
         if event.candidate_id:
-            self.evidence.record(event, challenger_id="champion", challenger_version="production",
-                                 decision=event.champion_final_decision)
+            self.evidence.record(
+                event,
+                challenger_id="champion",
+                challenger_version="production",
+                decision=event.champion_final_decision,
+            )
 
     def _consume_target_d(self, event: TradingObservationEvent) -> None:
-        self.target_d.consume(event)
-        # Target D result persistence is handled by its sink when configured; the
-        # canonical Champion event itself is already persisted above.
+        observation = self.target_d.consume(event)
+        if observation is None or not event.candidate_id:
+            return
+        self.evidence.record(
+            event,
+            challenger_id="target_d",
+            challenger_version="v1",
+            decision=observation.get("target_d_decision"),
+            evidence=observation,
+        )
 
     async def start(self) -> None:
         await self.spawn.start()
@@ -73,4 +84,8 @@ class ShadowResearchRuntime:
         return self.publisher.publish(event)
 
     def telemetry(self) -> dict[str, Any]:
-        return {"publisher": self.publisher.telemetry(), "spawn": self.spawn.telemetry(), "evidence": self.evidence.telemetry()}
+        return {
+            "publisher": self.publisher.telemetry(),
+            "spawn": self.spawn.telemetry(),
+            "evidence": self.evidence.telemetry(),
+        }
