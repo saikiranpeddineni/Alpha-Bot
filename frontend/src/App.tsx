@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "./api";
 import { BacktestModal } from "./components/BacktestModal";
+import { ReplayModal } from "./components/ReplayModal";
 import { BottomTabs } from "./components/BottomTabs";
 import { PriceChart } from "./components/PriceChart";
 import { SettingsModal } from "./components/SettingsModal";
@@ -17,6 +18,7 @@ export default function App() {
   const status = useStore((s) => s.status);
   const toast = useStore((s) => s.toast);
   const [showBacktest, setShowBacktest] = useState(false);
+  const [showReplay, setShowReplay] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [isMobile, setIsMobile] = useState(window.innerWidth < 1024);
   const [mobileTab, setMobileTab] = useState<"monitor" | "chart" | "watchlist" | "config" | "activity">("monitor");
@@ -58,12 +60,15 @@ export default function App() {
   }
 
   return <div className="app">
-    <TopBar theme={theme} onThemeChange={changeTheme} onBacktest={() => setShowBacktest(true)} onSettings={() => setShowSettings(true)} />
+    <TopBar theme={theme} onThemeChange={changeTheme} onBacktest={() => setShowBacktest(true)} onReplay={() => setShowReplay(true)} onSettings={() => setShowSettings(true)} />
     <div style={{ display: "flex", flexDirection: "column", minHeight: 0 }}>
       {halted && <div className="halt-banner">⛔ KILL SWITCH — {status?.risk?.hard_halt_reason || "max drawdown breached"}<button className="btn sm danger" onClick={() => api.resetHalt().then((s) => useStore.getState().setStatus(s)).catch(() => undefined)}>Reset halt</button></div>}
       <div className="main" style={{ flex: 1, minHeight: 0 }}><div className="left-col"><Watchlist /><TrainerPanel /></div><div className="center"><PriceChart /><BottomTabs /></div><SidePanel /></div>
     </div>
-    {showBacktest && <BacktestModal onClose={() => setShowBacktest(false)} />}{showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}{toast && <div className={`toast ${toast.kind}`}>{toast.text}</div>}
+    {showBacktest && <BacktestModal onClose={() => setShowBacktest(false)} />}
+    {showReplay && <ReplayModal onClose={() => setShowReplay(false)} />}
+    {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
+    {toast && <div className={`toast ${toast.kind}`}>{toast.text}</div>}
   </div>;
 }
 
