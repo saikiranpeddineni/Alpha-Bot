@@ -36,9 +36,16 @@ class ReplayLedger:
             mapping[event_type].append(event)
 
     def capture_publish(self, topic: str, payload: Any) -> None:
-        """Capture production broadcasts without influencing engine decisions."""
-        # Broadcast payloads are retained as timeline diagnostics. Dedicated
-        # order/fill events come from ReplayBroker to avoid duplicate counting.
+        """Capture production broadcasts as diagnostics only.
+
+        Production ``insight`` broadcasts are presentation/telemetry messages, not
+        a canonical strategy decision boundary.  Older replay code classified an
+        insight as STRATEGY_SIGNAL merely when its free-form text contained the
+        word ``signal``.  That made strategy parity depend on logging text and
+        asynchronous presentation ordering.  Keep broadcasts in the timeline,
+        while canonical decision collections are populated from durable/runtime
+        decision sources.
+        """
         ts = None
         if isinstance(payload, dict):
             raw = payload.get("ts") or payload.get("timestamp")
@@ -50,12 +57,7 @@ class ReplayLedger:
         if ts is None:
             return
         symbol = payload.get("symbol", "") if isinstance(payload, dict) else ""
-        if topic == "insight" and isinstance(payload, dict):
-            detail = str(payload.get("detail", ""))
-            title = str(payload.get("title", ""))
-            lower = f"{title} {detail}".lower()
-            event_type = "STRATEGY_SIGNAL" if "signal" in lower else "TELEMETRY"
-            self.record_event(event_type, ts, symbol, payload)
+        self.record_event("TELEMETRY", ts, symbol, {"topic": topic, "payload": payload})
 
     def record_equity(self, timestamp: datetime, equity: float, cash: float, buying_power: float, open_positions: int) -> None:
         self.equity_curve.append({"timestamp": timestamp.isoformat(), "equity": round(float(equity), 8),
