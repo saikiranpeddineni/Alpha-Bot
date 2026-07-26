@@ -25,9 +25,8 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from app.ai.insights import InsightEngine
-from app.ai.gemini_ranker import GeminiShadowRanker
-from app.ai.shadow_bridge import GeminiShadowBridge
-from app.research.spawn import SpawnShadowCoordinator
+from app.research.event_builder import candidate_event_from_signal, market_bar_event
+from app.research.shadow_runtime import ShadowResearchRuntime
 from app.ai.model import SignalModel
 from app.ai.regime import detect_regime
 from app.ai.trainer import ContinuousTrainer
@@ -110,11 +109,13 @@ class TradingEngine:
         self.strategies: list[Strategy] = create_strategies(db.get_setting("strategies"))
 
         self.recent_orders: deque[Order] = deque(maxlen=200)
-        self.gemini_shadow = GeminiShadowBridge(
-            GeminiShadowRanker(settings.gemini_api_key),
-            observation_sink=self._persist_gemini_shadow_observation,
+        # One explicit production-to-research boundary. Research receives only
+        # immutable value snapshots and has no execution-result channel.
+        self.shadow_research = ShadowResearchRuntime(
+            db=self.db,
+            gemini_api_key=settings.gemini_api_key,
+            gemini_observation_sink=self._persist_gemini_shadow_observation,
         )
-        self.spawn_coordinator = SpawnShadowCoordinator(db=self.db)
         self._regimes: dict[str, Regime] = {}
         self._position_peaks: dict[str, float] = {}
         self._position_troughs: dict[str, float] = {}
@@ -413,7 +414,7 @@ class TradingEngine:
         )
         self._last_train_date = None
         self.state = EngineState.RUNNING
-        await self.spawn_coordinator.start()
+        await self.shadow_research.start()
         self._task = asyncio.create_task(self._run_loop(), name="trading-engine")
         applog.info(
             "engine",
@@ -447,7 +448,7 @@ class TradingEngine:
                 await self._drain_fills(utcnow())
             except Exception as exc:  # noqa: BLE001
                 applog.error("engine", f"flatten on stop failed: {exc}")
-        await self.spawn_coordinator.stop()
+        await self.shadow_research.stop()
         if self.state != EngineState.HALTED:
             self.state = EngineState.STOPPED
         applog.info("engine", "Engine stopped")
@@ -768,24 +769,28 @@ class TradingEngine:
                     # Fresh bar arrived — clear gap flag
                     self._last_data_bar_ts[sym_upper] = now
                     self._data_gap_symbols.discard(sym_upper)
-                    # Publish closed bar to shadow spawn army (non-blocking, fail-open)
+                    # Mirror the exact completed market bar through the canonical
+                    # non-blocking research boundary. Never manufacture missing OHLC.
                     try:
                         bar_df = new_closed[sym_upper]
                         last_row = bar_df.iloc[-1]
                         bar_ts = bar_df.index[-1].to_pydatetime()
                         if bar_ts.tzinfo is None:
-                            from datetime import timezone as _tz
-                            bar_ts = bar_ts.replace(tzinfo=_tz.utc)
-                        self.spawn_coordinator.publish_market_bar(
-                            sym_upper,
-                            float(last_row.get("open", last_row.get("close", 0))),
-                            float(last_row.get("high", last_row.get("close", 0))),
-                            float(last_row.get("low", last_row.get("close", 0))),
-                            float(last_row.get("close", 0)),
-                            bar_ts,
-                        )
-                    except Exception:
-                        pass  # fail-open: shadow bar loss never blocks Champion
+                            bar_ts = bar_ts.replace(tzinfo=timezone.utc)
+                        required = ("open", "high", "low", "close")
+                        if all(name in last_row and pd.notna(last_row[name]) for name in required):
+                            self.shadow_research.publish(market_bar_event(
+                                symbol=sym_upper,
+                                ts=bar_ts,
+                                open_=float(last_row["open"]),
+                                high=float(last_row["high"]),
+                                low=float(last_row["low"]),
+                                close=float(last_row["close"]),
+                                atr=float(last_row["atr14"]) if "atr14" in last_row and pd.notna(last_row["atr14"]) else None,
+                                rsi=float(last_row["rsi2"]) if "rsi2" in last_row and pd.notna(last_row["rsi2"]) else None,
+                            ))
+                    except Exception as exc:
+                        applog.debug("shadow_research", f"market-bar mirror failed open for {sym_upper}: {exc}")
                 elif sym_upper in self._last_data_bar_ts:
                     elapsed = (now - self._last_data_bar_ts[sym_upper]).total_seconds()
                     if elapsed > _DATA_GAP_THRESHOLD_SECS and sym_upper not in self._data_gap_symbols:
@@ -960,51 +965,38 @@ class TradingEngine:
                     portfolio_allocator=self.portfolio_allocator,
                 )
 
-                # Shadow research observes only deterministic post-allocation candidates.
-                # The bridge has no return channel into risk, order construction, or submission.
-                self.gemini_shadow.schedule(
-                    [sig for sig, _ in decision_outcome.approved_entries],
-                    session=session,
-                )
-                
-                # Publish immutable candidate observations to SpawnShadowCoordinator out-of-band
-                for sig, df in candidates:
+                # Mirror every post-allocation candidate once through the typed bus.
+                # This preserves Champion behavior: publishing is put_nowait/fail-open and
+                # no research result is read by portfolio, risk, or broker code.
+                approved_ids = {getattr(sig, "candidate_id", None) for sig, _ in decision_outcome.approved_entries}
+                gated_reasons = {getattr(sig, "candidate_id", None): reason for sig, reason in decision_outcome.gated_entries}
+                for ordinal, (sig, df) in enumerate(candidates):
                     try:
                         latest_row = df.iloc[-1] if not df.empty else None
-                        open_px = float(latest_row["open"]) if latest_row is not None and "open" in latest_row else float(sig.price)
-                        high_px = float(latest_row["high"]) if latest_row is not None and "high" in latest_row else float(sig.price)
-                        low_px = float(latest_row["low"]) if latest_row is not None and "low" in latest_row else float(sig.price)
-                        close_px = float(latest_row["close"]) if latest_row is not None and "close" in latest_row else float(sig.price)
-                        
-                        cand_id = getattr(sig, "candidate_id", f"{sig.symbol}_{sig.strategy}_{int(now.timestamp())}")
-                        is_approved = any(getattr(s, "candidate_id", None) == getattr(sig, "candidate_id", None) for s, _ in decision_outcome.approved_entries)
-                        champ_decision = "accepted" if is_approved else "rejected"
-                        
-                        obs = {
-                            "symbol": sig.symbol,
-                            "strategy": sig.strategy,
-                            "direction": sig.side,
-                            "price": sig.price,
-                            "open": open_px,
-                            "high": high_px,
-                            "low": low_px,
-                            "close": close_px,
-                            "atr": float(latest_row.get("atr", 1.0)) if latest_row is not None and "atr" in latest_row else 1.0,
-                            "rsi": float(latest_row.get("rsi", 50.0)) if latest_row is not None and "rsi" in latest_row else None,
-                            "stop_loss": sig.stop_loss,
-                            "take_profit": sig.take_profit,
-                            "ts": now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc),
-                            "champion_candidate": {
-                                "id": cand_id,
-                                "ml_probability": getattr(sig, "ml_confidence", None),
-                                "meta_probability": getattr(sig, "meta_probability", None),
-                                "trade_score": getattr(sig, "trade_score", None),
-                                "final_decision": champ_decision,
-                            }
-                        }
-                        self.spawn_coordinator.publish_observation(obs)
-                    except Exception as spawn_pub_err:
-                        applog.warning("engine", f"Failed publishing shadow observation: {spawn_pub_err}")
+                        cid = getattr(sig, "candidate_id", None)
+                        approved = cid in approved_ids
+                        event = candidate_event_from_signal(
+                            sig,
+                            final_decision="accepted" if approved else "rejected",
+                            rejection_reason=None if approved else gated_reasons.get(cid, "portfolio/allocation rejected"),
+                            open_=float(latest_row["open"]) if latest_row is not None and "open" in latest_row and pd.notna(latest_row["open"]) else None,
+                            high=float(latest_row["high"]) if latest_row is not None and "high" in latest_row and pd.notna(latest_row["high"]) else None,
+                            low=float(latest_row["low"]) if latest_row is not None and "low" in latest_row and pd.notna(latest_row["low"]) else None,
+                            close=float(latest_row["close"]) if latest_row is not None and "close" in latest_row and pd.notna(latest_row["close"]) else None,
+                            atr=float(latest_row["atr14"]) if latest_row is not None and "atr14" in latest_row and pd.notna(latest_row["atr14"]) else None,
+                            rsi=float(latest_row["rsi2"]) if latest_row is not None and "rsi2" in latest_row and pd.notna(latest_row["rsi2"]) else None,
+                            meta_probability=getattr(sig, "meta_probability", None),
+                            portfolio_decision="PASS" if approved else "REJECT",
+                            equity=float(account.equity),
+                            cash=float(account.cash),
+                            buying_power=float(account.buying_power),
+                            vix=self._last_vix_value,
+                            vix_status=self._last_vix_status,
+                            ordinal=ordinal,
+                        )
+                        self.shadow_research.publish(event)
+                    except Exception as exc:
+                        applog.debug("shadow_research", f"candidate mirror failed open for {sig.symbol}: {exc}")
 
                 # Process gated/rejected entries
                 for sig, reason in decision_outcome.gated_entries:
@@ -2111,7 +2103,7 @@ class TradingEngine:
             "trainer": self.trainer.status if self.trainer else {"training_in_progress": False, "last_trained": None, "last_result": {}},
             "live_trading_enabled": self.settings.enable_live_trading,
             "has_alpaca_keys": self.settings.has_alpaca_keys,
-            "gemini_shadow": self.gemini_shadow.ranker.telemetry(),
+            "shadow_research": self.shadow_research.telemetry(),
             "tick": self._tick_count,
             "last_error": self.last_error,
             "reconciliation_failed": getattr(self, "reconciliation_failed", False),
@@ -4043,8 +4035,6 @@ class TradingEngine:
             applog.error("engine.heartbeat", f"Failed sector leadership heartbeat check: {exc}")
 
     async def shutdown(self) -> None:
-        await self.gemini_shadow.shutdown()
-        await self.spawn_coordinator.stop()
         await self.stop(flatten=False)
         if self.data is not None:
             await self.data.close()
