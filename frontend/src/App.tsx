@@ -29,11 +29,16 @@ export default function App() {
   useEffect(() => {
     connectWebSocket();
     api.strategies().then((s) => useStore.getState().setStrategies(s)).catch(() => undefined);
-    api.trades().then((t) => useStore.getState().setTrades(t)).catch(() => undefined);
-    api.positions().then((p) => useStore.getState().setPositions(p)).catch(() => undefined);
+    const refreshExecutionViews = () => {
+      void Promise.all([api.positions(), api.orders(), api.trades()])
+        .then(([positions, orders, trades]) => useStore.getState().setExecutionSnapshot(positions, orders, trades))
+        .catch(() => undefined);
+    };
+    refreshExecutionViews();
+    const executionRefresh = window.setInterval(refreshExecutionViews, 15000);
     const handleResize = () => setIsMobile(window.innerWidth < 1024);
     window.addEventListener("resize", handleResize);
-    return () => window.removeEventListener("resize", handleResize);
+    return () => { window.removeEventListener("resize", handleResize); window.clearInterval(executionRefresh); };
   }, []);
 
   function changeTheme(nextTheme: AppTheme) { persistTheme(nextTheme); setTheme(nextTheme); }
