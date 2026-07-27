@@ -63,7 +63,8 @@ class ShadowAlphaBotRuntime:
         research = self.research.telemetry()
         publisher = research.get("publisher", {})
         spawn = research.get("spawn", {})
-        harvest = research.get("harvest_v2", {})
+        exits = research.get("exit_challengers", {})
+        harvest = {"replays": exits.get("harvest_replays", 0), "shared_path": True}
         return {
             "name": "ShadowAlphaBot",
             "started": bool(research.get("started")),
@@ -71,8 +72,7 @@ class ShadowAlphaBotRuntime:
             "stopped_at": self.stopped_at.isoformat() if self.stopped_at else None,
             "capabilities": self.capabilities.__dict__.copy(),
             "health": {
-                "queue_depth": publisher.get("queue_size", 0),
-                "lag_seconds": publisher.get("lag_seconds"),
+                "queue_depth": publisher.get("queue_size", 0), "lag_seconds": publisher.get("lag_seconds"),
                 "events_published": publisher.get("events_published", 0),
                 "events_processed": publisher.get("events_processed", 0),
                 "events_dropped": publisher.get("events_dropped", 0),
@@ -86,17 +86,12 @@ class ShadowAlphaBotRuntime:
                 "evidence_records": research.get("evidence", {}).get("records", 0),
                 "audit_records": research.get("audit", {}).get("records_written", 0),
                 "outcomes_emitted": research.get("outcomes", {}).get("outcomes_emitted", 0),
-                "exit_replays": research.get("exit_challengers", {}).get("replays", 0),
-                "harvest_v2_replays": harvest.get("replays", 0),
+                "exit_replays": exits.get("replays", 0),
+                "harvest_v2_replays": exits.get("harvest_replays", 0),
             },
-            "target_d": research.get("target_d", {}),
-            "gemini": research.get("gemini", {}),
-            "spawn": spawn,
-            "discovery": {"persisted": True},
-            "harvest_v2": harvest,
-            "audit": research.get("audit", {}),
-            "evidence": research.get("evidence", {}),
-            "outcomes": research.get("outcomes", {}),
-            "exit_challengers": research.get("exit_challengers", {}),
+            "target_d": research.get("target_d", {}), "gemini": research.get("gemini", {}),
+            "spawn": spawn, "discovery": {"persisted": True}, "harvest_v2": harvest,
+            "audit": research.get("audit", {}), "evidence": research.get("evidence", {}),
+            "outcomes": research.get("outcomes", {}), "exit_challengers": exits,
             "lifecycle_errors": research.get("lifecycle_errors", 0),
         }
