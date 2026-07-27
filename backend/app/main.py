@@ -71,9 +71,21 @@ def _json_safe(value):
     return value
 
 
+# Some routes intentionally construct JSONResponse directly, which bypasses
+# FastAPI's default_response_class. Patch the shared Starlette response class at
+# the serialization boundary so those explicit responses receive the same safe
+# normalization. Keep the original renderer to avoid recursion and preserve all
+# normal JSONResponse behavior.
+_json_response_render = JSONResponse.render
+
+def _safe_json_response_render(self, content) -> bytes:
+    return _json_response_render(self, _json_safe(content))
+
+JSONResponse.render = _safe_json_response_render
+
+
 class SafeJSONResponse(JSONResponse):
-    def render(self, content) -> bytes:
-        return super().render(_json_safe(content))
+    """Default response class; JSONResponse itself is normalized above too."""
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
