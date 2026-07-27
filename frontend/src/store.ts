@@ -21,7 +21,17 @@ import type {
 
 const MAX_LOGS = 400;
 const MAX_INSIGHTS = 60;
-const MAX_TRADES = 300;
+const MAX_TRADES = 2000;
+const MAX_ORDERS = 1000;
+
+function mergeOrders(incoming: OrderRow[], existing: OrderRow[]): OrderRow[] {
+  const byId = new Map<string, OrderRow>();
+  for (const order of existing) byId.set(order.id, order);
+  for (const order of incoming) byId.set(order.id, order);
+  return Array.from(byId.values())
+    .sort((a, b) => new Date(b.submitted_at).getTime() - new Date(a.submitted_at).getTime())
+    .slice(0, MAX_ORDERS);
+}
 
 interface AppState {
   connected: boolean;
@@ -84,7 +94,7 @@ export const useStore = create<AppState>((set, get) => ({
     set({
       status: b.status,
       quotes: b.quotes ?? [],
-      orders: b.orders ?? [],
+      orders: mergeOrders(b.orders ?? [], get().orders),
       insights: (b.insights ?? []).slice(-MAX_INSIGHTS).reverse(),
       logs: (b.logs ?? []).slice(-MAX_LOGS).reverse(),
       metrics: b.metrics ?? null,
@@ -112,11 +122,13 @@ export const useStore = create<AppState>((set, get) => ({
         set({ positions: msg.data });
         break;
       case "orders":
-        set({ orders: msg.data });
+        set({ orders: mergeOrders(msg.data, get().orders) });
         break;
-      case "trade":
-        set({ trades: [msg.data, ...get().trades].slice(0, MAX_TRADES) });
+      case "trade": {
+        const current = get().trades.filter((t) => t.id !== msg.data.id);
+        set({ trades: [msg.data, ...current].slice(0, MAX_TRADES) });
         break;
+      }
       case "log":
         set({ logs: [msg.data, ...get().logs].slice(0, MAX_LOGS) });
         break;
@@ -141,10 +153,14 @@ export const useStore = create<AppState>((set, get) => ({
   selectSymbol: (symbol) => set({ selectedSymbol: symbol }),
   setStatus: (s) => set({ status: s }),
   setStrategies: (s) => set({ strategies: s }),
-  setTrades: (t) => set({ trades: t }),
+  setTrades: (t) => set({ trades: t.slice(0, MAX_TRADES) }),
   setPositions: (p) => set({ positions: p }),
-  setOrders: (o) => set({ orders: o }),
-  setExecutionSnapshot: (positions, orders, trades) => set({ positions, orders, trades }),
+  setOrders: (o) => set({ orders: mergeOrders(o, []) }),
+  setExecutionSnapshot: (positions, orders, trades) => set({
+    positions,
+    orders: mergeOrders(orders, get().orders),
+    trades: trades.slice(0, MAX_TRADES),
+  }),
   setHeartbeatStyle: (style) => {
     localStorage.setItem("alphadesk_heartbeat_style", style);
     set({ heartbeatStyle: style });
