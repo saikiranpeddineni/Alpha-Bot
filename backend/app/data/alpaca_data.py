@@ -88,7 +88,7 @@ class AlpacaDataProvider(DataProvider):
             start = end - timedelta(days=days)
 
         retries = 5
-        backoff = 0.5
+        backoff = 1.0
         for attempt in range(retries):
             try:
                 df = await asyncio.to_thread(self._fetch_bars, symbol.upper(), timeframe, start, end)
@@ -97,10 +97,31 @@ class AlpacaDataProvider(DataProvider):
                 return df
             except Exception as exc:
                 exc_str = str(exc).lower()
-                if "too many requests" in exc_str or "429" in exc_str:
-                    if attempt < retries - 1:
-                        await asyncio.sleep(backoff * (2 ** attempt))
-                        continue
+                # Transient transport/DNS errors that are worth retrying.
+                _is_transient = (
+                    "too many requests" in exc_str
+                    or "429" in exc_str
+                    or "getaddrinfo" in exc_str          # DNS lookup failure
+                    or "nameresolutionerror" in exc_str
+                    or "remote end closed" in exc_str    # RemoteDisconnected
+                    or "remotedisconnected" in exc_str
+                    or "connection aborted" in exc_str
+                    or "connection reset" in exc_str
+                    or "connection refused" in exc_str
+                    or "max retries exceeded" in exc_str # urllib3 retry budget
+                    or "timed out" in exc_str
+                    or "timeout" in exc_str
+                    or "ssl" in exc_str                  # transient TLS handshake drops
+                )
+                if _is_transient and attempt < retries - 1:
+                    wait = backoff * (2 ** attempt)  # 1 s, 2 s, 4 s, 8 s
+                    applog.warning(
+                        "data.alpaca",
+                        f"{symbol}: bars transient error (attempt {attempt + 1}/{retries},"
+                        f" retry in {wait:.0f}s): {exc}",
+                    )
+                    await asyncio.sleep(wait)
+                    continue
                 applog.error("data.alpaca", f"{symbol}: bars failed: {exc}")
                 break
         return empty_bars()
