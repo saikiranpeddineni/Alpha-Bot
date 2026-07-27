@@ -36,6 +36,7 @@ class ShadowEventPublisher:
         self.events_dropped = 0
         self.events_duplicate = 0
         self.consumer_errors = 0
+        self.shutdown_undrained = 0
         self.last_processed_at: datetime | None = None
         self.last_event_timestamp: datetime | None = None
 
@@ -53,6 +54,14 @@ class ShadowEventPublisher:
         self._worker_task = asyncio.create_task(self._worker(), name="shadow-event-publisher")
 
     async def stop(self) -> None:
+        if self._worker_task is not None and self.running:
+            # Preserve queued evidence on normal shutdown, but never let research hold
+            # production teardown indefinitely.
+            try:
+                await asyncio.wait_for(self.queue.join(), timeout=2.0)
+            except asyncio.TimeoutError:
+                self.shutdown_undrained += self.queue.qsize()
+                applog.warning("shadow_event_publisher", f"Shutdown with {self.queue.qsize()} undrained shadow events")
         self.running = False
         if self._worker_task is not None:
             self._worker_task.cancel()
@@ -69,7 +78,6 @@ class ShadowEventPublisher:
             self._seen_ids.discard(self._seen_order.popleft())
 
     def publish(self, event: TradingObservationEvent) -> bool:
-        """Queue without awaiting research. Duplicate event IDs are successful no-ops."""
         if not self.running:
             return False
         if event.event_id in self._seen_ids:
@@ -117,11 +125,11 @@ class ShadowEventPublisher:
         lag_seconds = None
         if self.last_event_timestamp is not None:
             lag_seconds = max(0.0, (now - self.last_event_timestamp).total_seconds())
-        return {
-            "running": self.running, "queue_size": self.queue.qsize(), "events_published": self.events_published,
-            "events_processed": self.events_processed, "events_dropped": self.events_dropped,
-            "events_duplicate": self.events_duplicate, "consumer_errors": self.consumer_errors,
-            "consumer_count": len(self._consumers), "lag_seconds": lag_seconds,
-            "last_processed_at": self.last_processed_at.isoformat() if self.last_processed_at else None,
-            "last_event_timestamp": self.last_event_timestamp.isoformat() if self.last_event_timestamp else None,
-        }
+        return {"running": self.running, "queue_size": self.queue.qsize(),
+                "queue_capacity": self.queue.maxsize, "events_published": self.events_published,
+                "events_processed": self.events_processed, "events_dropped": self.events_dropped,
+                "events_duplicate": self.events_duplicate, "consumer_errors": self.consumer_errors,
+                "shutdown_undrained": self.shutdown_undrained, "consumer_count": len(self._consumers),
+                "lag_seconds": lag_seconds,
+                "last_processed_at": self.last_processed_at.isoformat() if self.last_processed_at else None,
+                "last_event_timestamp": self.last_event_timestamp.isoformat() if self.last_event_timestamp else None}
