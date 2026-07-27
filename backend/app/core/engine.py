@@ -120,6 +120,8 @@ class TradingEngine:
         self._position_peaks: dict[str, float] = {}
         self._position_troughs: dict[str, float] = {}
         self._position_initial_stops: dict[str, float | None] = {}
+        # Original strategy target survives broker protection repair/reconciliation.
+        self._position_take_profits: dict[str, float] = {}
         # PR #271 V2 Adaptive Harvesting: Isolated Shadow State Store (NON-AUTHORITATIVE)
         self._v2_shadow_states: dict[str, dict] = {}
         self._last_scan_date = None
@@ -1185,7 +1187,27 @@ class TradingEngine:
 
             # PR #271 V2 Adaptive Harvesting: PASSIVE OBSERVER (NON-AUTHORITATIVE)
             self._evaluate_v2_shadow_passive(symbol, position, df, now)
-            
+
+            # Safety-net for the ORIGINAL strategy target. Broker TP remains preferred;
+            # this only prevents protection repair from silently turning a bracket into
+            # an unlimited hold if its TP leg disappears.
+            target = self._position_take_profits.get(symbol)
+            if target is None:
+                broker_target = getattr(position, "take_profit", None)
+                if broker_target is not None and float(broker_target) > 0:
+                    target = float(broker_target)
+                    self._position_take_profits[symbol] = target
+            if target is not None:
+                target_hit = (position.qty > 0 and high_val >= target) or (position.qty < 0 and low_val <= target)
+                if target_hit:
+                    applog.info("engine", f"{symbol}: original strategy take-profit triggered @ {target:.4f}")
+                    await self._close_position_guarded(symbol, reason=f"original strategy take-profit triggered ({target:.4f})")
+                    self._position_peaks.pop(symbol, None)
+                    self._position_troughs.pop(symbol, None)
+                    self._position_initial_stops.pop(symbol, None)
+                    self._position_take_profits.pop(symbol, None)
+                    return []
+
             if position.qty > 0:
                 self._position_peaks[symbol] = max(self._position_peaks[symbol], high_val)
                 self._position_troughs[symbol] = min(self._position_troughs[symbol], low_val)
@@ -1230,6 +1252,7 @@ class TradingEngine:
                 del self._position_troughs[symbol]
             if symbol in self._position_initial_stops:
                 del self._position_initial_stops[symbol]
+            self._position_take_profits.pop(symbol, None)
             if symbol in self._v2_shadow_states and not self._v2_shadow_states[symbol].get("is_shadow_closed"):
                 del self._v2_shadow_states[symbol]
 
@@ -2143,20 +2166,35 @@ class TradingEngine:
         for p in positions:
             strat = "manual"
             if hasattr(self.broker, "_symbol_strategies"):
-                db_strat = self.db.get_latest_order_strategy(p.symbol, self.mode)
+                db_strat = self.db.get_latest_entry_order_strategy(p.symbol, self.mode)
                 if db_strat:
                     self.broker._symbol_strategies[p.symbol] = db_strat
                     strat = db_strat
                     applog.info("engine", f"Restored strategy '{db_strat}' for active position {p.symbol}")
 
-            order_payload = self.db.get_latest_order_payload(p.symbol, self.mode)
+            # Position ownership comes from the latest true ENTRY, never from a
+            # newer emergency/protective order.  This keeps UI attribution and
+            # strategy-specific exit management bound to the strategy that opened
+            # the surviving position.
+            entry_payload = self.db.get_latest_entry_order_payload(p.symbol, self.mode)
+            order_payload = entry_payload or self.db.get_latest_order_payload(p.symbol, self.mode)
+            if entry_payload and entry_payload.get("strategy"):
+                strat = str(entry_payload["strategy"])
+                p.strategy = strat
+                if hasattr(self.broker, "_symbol_strategies"):
+                    self.broker._symbol_strategies[p.symbol] = strat
             stop_loss = None
+            take_profit = None
             initial_risk = None
             opened_at = p.opened_at if hasattr(p, "opened_at") and p.opened_at else utcnow()
             if order_payload:
                 stop_loss = order_payload.get("stop_loss")
+                take_profit = order_payload.get("take_profit")
                 if stop_loss:
                     initial_risk = abs(p.avg_entry_price - stop_loss)
+                if take_profit is not None and float(take_profit) > 0:
+                    self._position_take_profits[p.symbol] = float(take_profit)
+                    p.take_profit = float(take_profit)
                 submitted_at_str = order_payload.get("submitted_at")
                 if submitted_at_str:
                     try:
@@ -2455,6 +2493,11 @@ class TradingEngine:
                             and not is_stop_order
                             and not is_take_profit
                         )
+
+                        if is_take_profit and limit_px is not None:
+                            # Preserve target before any repair cancellation.
+                            self._position_take_profits[p.symbol] = float(limit_px)
+                            p.take_profit = float(limit_px)
 
                         if is_bracket_or_oco_parent:
                             applog.warning(
