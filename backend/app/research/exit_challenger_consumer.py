@@ -6,6 +6,7 @@ from typing import Any, Callable
 
 import pandas as pd
 
+from app.analytics.adaptive_profit_harvester import replay_adaptive_harvest
 from app.core.counterfactual import ExitCounterfactualEngine
 from app.research.shadow_event import ShadowEventType, TradingObservationEvent
 
@@ -20,13 +21,15 @@ class _ExitReplayState:
 
 
 class CanonicalExitChallengerConsumer:
-    """Runs existing alternative exit policies after a causal 60-minute path is observed."""
+    """Runs all existing exit challengers over one causal post-candidate path."""
 
     def __init__(self, sink: ExitEvidenceSink) -> None:
         self.sink = sink
         self._states: dict[str, _ExitReplayState] = {}
         self._by_symbol: dict[str, set[str]] = {}
         self.replays = 0
+        self.harvest_replays = 0
+        self.replay_errors = 0
         self.skipped_missing_risk = 0
         self.out_of_order_bars = 0
 
@@ -43,12 +46,19 @@ class CanonicalExitChallengerConsumer:
         side = (event.side or "").lower()
         if side not in {"long", "short", "enter_long", "enter_short", "buy", "sell"}:
             return
+        entry = float(event.price)
+        stop = float(event.stop_loss)
+        direction = "short" if side in {"short", "enter_short", "sell"} else "long"
+        # Invalid/wrong-side risk must remain unavailable instead of being silently
+        # repaired differently by individual challenger implementations.
+        if entry <= 0 or stop == entry or (direction == "long" and stop >= entry) or (direction == "short" and stop <= entry):
+            self.skipped_missing_risk += 1
+            return
         if event.candidate_id in self._states:
             return
         state = _ExitReplayState(candidate=event)
         state.index.append(event.ts)
-        state.rows.append({"open": event.price, "high": event.price, "low": event.price,
-                           "close": event.price, "atr14": event.atr})
+        state.rows.append({"open": entry, "high": entry, "low": entry, "close": entry, "atr14": event.atr})
         self._states[event.candidate_id] = state
         self._by_symbol.setdefault(event.symbol.upper(), set()).add(event.candidate_id)
 
@@ -74,6 +84,10 @@ class CanonicalExitChallengerConsumer:
                 continue
             if None in (bar.open, bar.high, bar.low, bar.close):
                 continue
+            # Do not append the same bar twice under duplicate provider delivery.
+            if state.index and bar.ts <= state.index[-1]:
+                self.out_of_order_bars += 1
+                continue
             state.index.append(bar.ts)
             state.rows.append({"open": bar.open, "high": bar.high, "low": bar.low,
                                "close": bar.close, "atr14": bar.atr})
@@ -97,11 +111,24 @@ class CanonicalExitChallengerConsumer:
             )
             for policy, evidence in results.items():
                 self.sink(event, policy, evidence)
+
+            # Harvest V2 uses the exact same causal path and immutable initial risk as
+            # every other exit challenger; it is no longer an unpersisted engine island.
+            harvest = replay_adaptive_harvest(
+                df, entry_idx=0, direction=side, entry_price=float(event.price),
+                initial_stop=float(event.stop_loss), max_bars=60,
+            )
+            self.sink(event, "harvest_v2_giveback_confirmed", harvest)
+            self.harvest_replays += 1
             self.replays += 1
+        except Exception:
+            self.replay_errors += 1
+            raise
         finally:
-            # Research state must remain bounded even when a challenger or evidence sink fails.
             self._remove(state)
 
     def telemetry(self) -> dict[str, Any]:
         return {"active": len(self._states), "replays": self.replays,
-                "skipped_missing_risk": self.skipped_missing_risk, "out_of_order_bars": self.out_of_order_bars}
+                "harvest_replays": self.harvest_replays, "replay_errors": self.replay_errors,
+                "skipped_missing_risk": self.skipped_missing_risk,
+                "out_of_order_bars": self.out_of_order_bars}
