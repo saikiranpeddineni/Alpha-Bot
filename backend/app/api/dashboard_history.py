@@ -13,7 +13,7 @@ import json
 from fastapi import APIRouter, Query, Request
 from sqlalchemy import select
 
-from app.db.database import OrderRow, TradeRow
+from app.db.database import OrderRow
 
 router = APIRouter(prefix="/api")
 
@@ -35,7 +35,7 @@ def durable_orders(db, mode: str, limit: int = 200) -> list[dict]:  # noqa: ANN0
     return [json.loads(row.payload) for row in rows]
 
 
-def durable_trades(db, mode: str, limit: int = 300) -> list[dict]:  # noqa: ANN001
+def durable_trades(db, mode: str, limit: int = 2000) -> list[dict]:  # noqa: ANN001
     """Return newest persisted closed trades for one execution mode."""
     return db.recent_trades(mode=mode, limit=limit)
 
@@ -51,6 +51,6 @@ async def get_durable_orders(
 @router.get("/trades")
 async def get_durable_trades(
     request: Request,
-    limit: int = Query(default=300, ge=1, le=2000),
+    limit: int = Query(default=2000, ge=1, le=5000),
 ) -> list[dict]:
     return durable_trades(request.app.state.db, _mode(request), limit)
