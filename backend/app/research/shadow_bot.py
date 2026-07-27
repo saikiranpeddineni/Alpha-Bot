@@ -50,13 +50,20 @@ class ShadowAlphaBotRuntime:
         self.stopped_at = datetime.now(UTC)
 
     def publish(self, event: TradingObservationEvent) -> bool:
-        """One-way PROD -> SHADOW observation mirror."""
         return self.research.publish(event)
+
+    def record_external_module(self, module: str, payload: dict[str, Any], *, identity: str | None = None,
+                               ts: datetime | None = None) -> bool:
+        return self.research.record_external_module(module, payload, identity=identity, ts=ts)
+
+    def record_discovery_session(self, session: str, evidence: dict[str, Any]) -> bool:
+        return self.research.record_discovery_session(session, evidence)
 
     def telemetry(self) -> dict[str, Any]:
         research = self.research.telemetry()
         publisher = research.get("publisher", {})
         spawn = research.get("spawn", {})
+        harvest = research.get("harvest_v2", {})
         return {
             "name": "ShadowAlphaBot",
             "started": bool(research.get("started")),
@@ -80,12 +87,13 @@ class ShadowAlphaBotRuntime:
                 "audit_records": research.get("audit", {}).get("records_written", 0),
                 "outcomes_emitted": research.get("outcomes", {}).get("outcomes_emitted", 0),
                 "exit_replays": research.get("exit_challengers", {}).get("replays", 0),
-                "harvest_v2_replays": research.get("exit_challengers", {}).get("harvest_replays", 0),
+                "harvest_v2_replays": harvest.get("replays", 0),
             },
             "target_d": research.get("target_d", {}),
             "gemini": research.get("gemini", {}),
             "spawn": spawn,
             "discovery": {"persisted": True},
+            "harvest_v2": harvest,
             "audit": research.get("audit", {}),
             "evidence": research.get("evidence", {}),
             "outcomes": research.get("outcomes", {}),
