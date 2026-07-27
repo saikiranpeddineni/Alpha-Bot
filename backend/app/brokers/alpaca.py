@@ -266,7 +266,20 @@ class AlpacaBroker(Broker):
             GetOrdersRequest(status="open", limit=200),
             label="get_orders/open",
         )
-        return [self._to_order(o) for o in raw]
+        normalized: list[Order] = []
+        for raw_order in raw:
+            parent = self._to_order(raw_order)
+            normalized.append(parent)
+            parent_strategy, parent_reason = self._meta.get(
+                str(getattr(raw_order, "id", "")),
+                (parent.strategy, parent.reason),
+            )
+            for child in (getattr(raw_order, "legs", None) or []):
+                child_id = str(getattr(child, "id", ""))
+                if child_id and child_id not in self._meta:
+                    self._meta[child_id] = (parent_strategy, parent_reason)
+                normalized.append(self._to_order(child))
+        return normalized
 
     def _to_order(self, o) -> Order:  # noqa: ANN001
         type_map = {
@@ -301,7 +314,11 @@ class AlpacaBroker(Broker):
         )
         order_status = status_map.get(raw_status, OrderStatus.SUBMITTED)
 
-        strategy, reason = self._meta.get(str(o.id), ("alpaca", ""))
+        symbol_key = str(getattr(o, "symbol", "") or "").upper()
+        strategy, reason = self._meta.get(
+            str(o.id),
+            (self._symbol_strategies.get(symbol_key, "alpaca"), ""),
+        )
         stop_price = (
             float(o.stop_price)
             if getattr(o, "stop_price", None) is not None
@@ -454,7 +471,8 @@ class AlpacaBroker(Broker):
                 applog.error("broker.alpaca", msg)
                 raise BrokerTimeoutError(msg) from exc
         self._meta[str(raw.id)] = (req.strategy, req.reason)
-        self._symbol_strategies[req.symbol.upper()] = req.strategy
+        if req.strategy != "emergency_protection":
+            self._symbol_strategies[req.symbol.upper()] = req.strategy
         order = self._to_order(raw)
         order.stop_loss = req.stop_loss
         order.take_profit = req.take_profit
@@ -577,8 +595,6 @@ class AlpacaBroker(Broker):
             else:
                 delta_price = cum_avg_price
 
-            self._processed_fill_notional[oid] = cum_notional
-
             self._fills.append(
                 Fill(
                     order_id=oid,
@@ -595,8 +611,20 @@ class AlpacaBroker(Broker):
                     broker_account_id=self.account_id,
                 )
             )
-            self._processed_fill_qty[oid] = cumulative
+            # local_watermarks prevents duplicates within this poll only. Durable/in-memory
+            # acknowledgement happens after PortfolioTracker atomically commits the fill.
             local_watermarks[oid] = cumulative
+
+
+    def ack_fill_processed(self, fill: Fill) -> None:
+        """Advance volatile fill bookkeeping only after durable processing succeeds."""
+        oid = str(fill.broker_fill_key or fill.order_id or "")
+        if not oid:
+            return
+        cumulative = float(fill.cumulative_qty or 0.0)
+        if cumulative > 0:
+            self._processed_fill_qty[oid] = max(self._processed_fill_qty.get(oid, 0.0), cumulative)
+        self._processed_fill_notional[oid] = self._processed_fill_notional.get(oid, 0.0) + float(fill.qty) * float(fill.price)
 
 
     def drain_fills(self) -> list[Fill]:

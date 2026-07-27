@@ -1033,6 +1033,10 @@ class TradingEngine:
 
 
                         for sig, kelly_val in decision_outcome.approved_entries:
+                            # Defense in depth: reference/risk symbols can never reach broker submission.
+                            if sig.symbol.upper() in {s.upper() for s in self._vix_symbols()}:
+                                applog.error("engine", f"Blocked non-tradable reference symbol at submission boundary: {sig.symbol}")
+                                continue
                             # Attach risk_multiplier from SafetyDecision
                             decision_safety = getattr(self, "last_safety_decision", None)
                             sig.risk_multiplier = decision_safety.risk_multiplier if decision_safety is not None else 1.0
@@ -1155,6 +1159,11 @@ class TradingEngine:
 
     async def _evaluate_symbol(self, symbol: str, position, equity: float, now: datetime) -> list[tuple[Signal, pd.DataFrame]]:  # noqa: ANN001
         assert self.data and self.broker and self.risk and self.pipeline
+        symbol = symbol.upper()
+        # Reference volatility feeds are risk inputs only and must never enter the tradable pipeline.
+        if symbol in {s.upper() for s in self._vix_symbols()}:
+            applog.debug("engine", f"{symbol}: reference/risk symbol excluded from strategy evaluation")
+            return []
         df = enrich(self.data.frame(symbol, "1Min", limit=600))
         if df.empty or len(df) < 30:
             return []
@@ -1482,7 +1491,11 @@ class TradingEngine:
         _resurrection_enabled = getattr(self.broker, "is_paper", False) is True
         for sig, reason in rejected:
             applog.debug("pipeline", f"{symbol} {sig.strategy} {sig.action}: rejected -- {reason}")
-            if sig.action != SignalAction.EXIT and _resurrection_enabled:
+            if (
+                sig.action != SignalAction.EXIT
+                and _resurrection_enabled
+                and sig.symbol.upper() not in {s.upper() for s in self._vix_symbols()}
+            ):
                 in_queue = any(
                     q["symbol"] == sig.symbol and q["strategy"] == sig.strategy
                     for q in self.resurrection_queue
@@ -1785,6 +1798,9 @@ class TradingEngine:
                 fill, peak_price=peak, trough_price=trough, initial_stop=init_stop,
                 risk_manager=self.risk, now=now
             )
+            ack_fill = getattr(self.broker, "ack_fill_processed", None)
+            if ack_fill is not None:
+                ack_fill(fill)
             if trade is not None:
                 # PR #271 V2 Shadow Harvest: Finalize counterfactual comparison metadata
                 st = self._v2_shadow_states.pop(symbol, None)
@@ -2328,8 +2344,19 @@ class TradingEngine:
                 verified_stop_price = matching_stop.stop_price or 0.0
                 protection_status[sym] = True
                 self._protection_state[sym] = ProtectionState.PROTECTED
+                p.stop_loss = verified_stop_price
                 if self.portfolio and sym in self.portfolio._lots:
                     self.portfolio._lots[sym].stop_loss = verified_stop_price
+                # Populate broker-confirmed take-profit when an active exit limit exists.
+                for exit_order in symbol_exit_orders:
+                    limit_px = getattr(exit_order, "limit_price", None)
+                    if (
+                        exit_order.order_type == OrderType.LIMIT
+                        and limit_px is not None
+                        and ((p.qty > 0 and limit_px > p.avg_entry_price) or (p.qty < 0 and limit_px < p.avg_entry_price))
+                    ):
+                        p.take_profit = limit_px
+                        break
                 stop_str = f"{verified_stop_price:.4f}" if verified_stop_price else "N/A"
                 applog.info(
                     "engine.protection",
@@ -2362,6 +2389,9 @@ class TradingEngine:
                     ProtectionState.AWAITING_CANCEL_CONFIRMATION,
                     ProtectionState.AWAITING_STOP_CONFIRMATION,
                     ProtectionState.AMBIGUOUS,
+                    # A rejected recovery remains fail-closed until broker state changes or restart;
+                    # do not hammer Alpaca every tick while quantity is held by an existing exit.
+                    ProtectionState.RECOVERY_REJECTED,
                 }:
                     applog.info(
                         "engine.protection",
@@ -2485,6 +2515,12 @@ class TradingEngine:
                         applog.info("engine.protection", f"#41: Recovery stop {existing.id} already active for {p.symbol}")
                         continue
 
+                    recovery_strategy = getattr(p, "strategy", None) or "reconciled"
+                    if self.portfolio and p.symbol in self.portfolio._lots:
+                        recovery_strategy = getattr(self.portfolio._lots[p.symbol], "strategy", None) or recovery_strategy
+                    if recovery_strategy in {"alpaca", "emergency_protection", ""}:
+                        recovery_strategy = "reconciled"
+
                     req = OrderRequest(
                         symbol=p.symbol,
                         side=side,
@@ -2492,8 +2528,8 @@ class TradingEngine:
                         order_type=OrderType.STOP,
                         stop_price=stop_px,
                         client_order_id=client_order_id,
-                        strategy="emergency_protection",
-                        reason=f"fix(#41) protective stop recovery source={stop_source}",
+                        strategy=recovery_strategy,
+                        reason=f"emergency_protection: fix(#41) protective stop recovery source={stop_source}",
                     )
                     applog.info(
                         "engine.protection",
@@ -3281,8 +3317,11 @@ class TradingEngine:
                 applog.info("engine.resurrection", f"Resurrected candidate {item['symbol']} reached max retries ({MAX_RETRIES}).")
                 continue
 
-            symbol = item["symbol"]
+            symbol = item["symbol"].upper()
             strategy_name = item["strategy"]
+            if symbol in {s.upper() for s in self._vix_symbols()}:
+                applog.warning("engine.resurrection", f"Dropping non-tradable reference symbol {symbol} from resurrection queue")
+                continue
 
             # Find the originating strategy
             strat = None
