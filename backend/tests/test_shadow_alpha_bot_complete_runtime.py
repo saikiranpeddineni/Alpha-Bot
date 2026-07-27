@@ -62,7 +62,7 @@ def test_all_module_audit_is_durable_in_policy_evidence(tmp_path):
     asyncio.run(run())
 
 
-def test_harvest_v2_runs_from_canonical_event_stream_and_persists(tmp_path):
+def test_harvest_v2_runs_on_shared_causal_exit_path_and_persists(tmp_path):
     async def run():
         db = Database(tmp_path / "shadow.db")
         runtime = ShadowResearchRuntime(db=db, gemini_api_key=None)
@@ -75,7 +75,7 @@ def test_harvest_v2_runs_from_canonical_event_stream_and_persists(tmp_path):
             record = runtime.evidence.get("c1", "harvest_v2", "v2_giveback_confirmed")
             assert record is not None
             assert record["decision"] in {"REPLAYED", "UNAVAILABLE"}
-            assert runtime.telemetry()["harvest_v2"]["replays"] == 1
+            assert runtime.telemetry()["exit_challengers"]["harvest_replays"] == 1
             assert _audit_rows(db, "shadow:harvest_v2")
         finally:
             await runtime.stop()
