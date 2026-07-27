@@ -5,6 +5,7 @@ consumer is one-way, fail-open, and receives immutable value snapshots only.
 """
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 from app.ai.gemini_ranker import GeminiShadowRanker
@@ -15,6 +16,7 @@ from app.core.logging import applog
 from app.db.database import Database
 from app.research.evidence_store import UnifiedEvidenceStore
 from app.research.exit_challenger_consumer import CanonicalExitChallengerConsumer
+from app.research.harvest_v2_consumer import CanonicalHarvestV2Consumer
 from app.research.module_audit_store import ShadowModuleAuditStore
 from app.research.outcome_joiner import CanonicalOutcomeJoiner
 from app.research.shadow_event import ShadowEventType, TradingObservationEvent
@@ -23,8 +25,8 @@ from app.research.spawn.shadow_event_adapter import SpawnShadowEventAdapter
 from app.research.spawn.spawn_shadow_coordinator import SpawnShadowCoordinator
 
 
-class ShadowResearchRuntime:
-    """Single one-way production-to-research boundary for ShadowAlphaBot."""
+class ShadowAlphaBotRuntime:
+    """Single one-way production-to-research boundary for all existing shadow research."""
 
     def __init__(self, *, db: Database, gemini_api_key: str | None,
                  gemini_observation_sink=None, target_d_observation_sink=None,
@@ -36,6 +38,7 @@ class ShadowResearchRuntime:
         self.spawn_adapter = SpawnShadowEventAdapter(self.spawn)
         self.outcomes = CanonicalOutcomeJoiner(self._record_outcome)
         self.exits = CanonicalExitChallengerConsumer(self._record_exit)
+        self.harvest_v2 = CanonicalHarvestV2Consumer(self._record_harvest_v2)
         self._started = False
         self._lifecycle_errors = 0
 
@@ -59,6 +62,7 @@ class ShadowResearchRuntime:
         self.publisher.register("discovery", self._record_discovery)
         self.publisher.register("outcomes", self.outcomes.consume)
         self.publisher.register("exit_challengers", self.exits.consume)
+        self.publisher.register("harvest_v2", self.harvest_v2.consume)
         self.publisher.register("spawn", self._consume_spawn)
         self.publisher.register("gemini", self.gemini.consume)
         self.publisher.register("target_d", self._consume_target_d)
@@ -71,6 +75,13 @@ class ShadowResearchRuntime:
         if event.candidate_id:
             self.evidence.record(event, challenger_id="champion", challenger_version="production",
                                  decision=event.champion_final_decision)
+            self.audit.record("champion", {
+                "candidate_id": event.candidate_id, "event_id": event.event_id,
+                "decision": event.champion_final_decision, "rejection_reason": event.rejection_reason,
+                "ml_decision": event.ml_decision, "meta_decision": event.meta_decision,
+                "trade_score_decision": event.trade_score_decision,
+                "portfolio_decision": event.portfolio_decision, "risk_decision": event.risk_decision,
+            }, identity=event.event_id, ts=event.ts)
 
     def _record_discovery(self, event: TradingObservationEvent) -> None:
         if event.event_type != ShadowEventType.CANDIDATE or not event.candidate_id:
@@ -81,11 +92,16 @@ class ShadowResearchRuntime:
                              decision=event.discovery_source or "UNAVAILABLE", evidence=evidence)
         self.audit.record("discovery", evidence, identity=event.candidate_id, ts=event.ts)
 
+    def record_discovery_session(self, session: str, evidence: dict[str, Any]) -> bool:
+        """Persist fixed-vs-dynamic discovery comparison output in the common DB audit."""
+        return self.audit.record("discovery_session", {"session": session, **evidence}, identity=session)
+
     def _record_outcome(self, event: TradingObservationEvent, horizon: str, outcome: dict[str, Any]) -> None:
         if event.candidate_id:
+            decision = "STOPPED" if outcome.get("stopped") else "MARK_TO_MARKET"
             self.evidence.record(event, challenger_id="outcome", challenger_version=horizon,
-                                 decision="STOPPED" if outcome.get("stopped") else "MARK_TO_MARKET", evidence=outcome)
-            self.audit.record("outcome", outcome, identity=f"{event.candidate_id}:{horizon}")
+                                 decision=decision, evidence=outcome)
+            self.audit.record("outcome", outcome, identity=f"{event.candidate_id}:{horizon}", ts=event.ts)
 
     def _record_exit(self, event: TradingObservationEvent, policy: str, evidence: dict[str, Any]) -> None:
         if event.candidate_id:
@@ -94,18 +110,33 @@ class ShadowResearchRuntime:
             self.evidence.record(event, challenger_id="exit_policy", challenger_version=policy,
                                  decision=decision, evidence=evidence)
             self.audit.record("exit_policy", {"policy": policy, **evidence},
-                              identity=f"{event.candidate_id}:{policy}")
+                              identity=f"{event.candidate_id}:{policy}", ts=event.ts)
+
+    def _record_harvest_v2(self, event: TradingObservationEvent, evidence: dict[str, Any]) -> None:
+        if event.candidate_id:
+            decision = "REPLAYED" if evidence.get("replay_valid") else "UNAVAILABLE"
+            version = str(evidence.get("policy_version") or "v2_giveback_confirmed")
+            self.evidence.record(event, challenger_id="harvest_v2", challenger_version=version,
+                                 decision=decision, evidence=evidence)
+            self.audit.record("harvest_v2", evidence,
+                              identity=f"{event.candidate_id}:{version}", ts=event.ts)
 
     def _consume_spawn(self, event: TradingObservationEvent) -> None:
-        self.spawn_adapter.consume(event)
+        queued = self.spawn_adapter.consume(event)
         self.audit.record("spawn", {"event_id": event.event_id, "candidate_id": event.candidate_id,
-                                    "telemetry": self.spawn.telemetry()}, identity=event.event_id, ts=event.ts)
+                                    "queued": queued, "telemetry": self.spawn.telemetry()},
+                          identity=event.event_id, ts=event.ts)
 
     def _consume_target_d(self, event: TradingObservationEvent) -> None:
         observation = self.target_d.consume(event)
         if observation is not None and event.candidate_id:
             self.evidence.record(event, challenger_id="target_d", challenger_version="v1",
                                  decision=observation.get("target_d_decision"), evidence=observation)
+
+    def record_external_module(self, module: str, payload: dict[str, Any], *, identity: str | None = None,
+                               ts: datetime | None = None) -> bool:
+        """Bridge legacy ShadowLedger/replay/rotation producers into the same DB audit plane."""
+        return self.audit.record(module, payload, identity=identity, ts=ts)
 
     async def start(self) -> None:
         if self._started:
@@ -121,7 +152,6 @@ class ShadowResearchRuntime:
             self._lifecycle_errors += 1
             applog.error("shadow_research", f"spawn startup failed (fail-open): {exc}")
         self._started = True
-        # No fixed identity: each process lifecycle must remain independently auditable.
         self.audit.record("runtime", {"event": "START", "telemetry": self.telemetry()})
 
     async def stop(self) -> None:
@@ -143,9 +173,17 @@ class ShadowResearchRuntime:
             return False
 
     def telemetry(self) -> dict[str, Any]:
-        return {"publisher": self.publisher.telemetry(), "spawn": self.spawn.telemetry(),
-                "spawn_adapter": self.spawn_adapter.telemetry(), "audit": self.audit.telemetry(),
-                "evidence": self.evidence.telemetry(), "outcomes": self.outcomes.telemetry(),
-                "exit_challengers": self.exits.telemetry(), "target_d": {"enabled": True},
-                "gemini": self.gemini.ranker.telemetry(), "started": self._started,
-                "lifecycle_errors": self._lifecycle_errors}
+        return {
+            "publisher": self.publisher.telemetry(), "spawn": self.spawn.telemetry(),
+            "spawn_adapter": self.spawn_adapter.telemetry(), "audit": self.audit.telemetry(),
+            "evidence": self.evidence.telemetry(), "outcomes": self.outcomes.telemetry(),
+            "exit_challengers": self.exits.telemetry(), "harvest_v2": self.harvest_v2.telemetry(),
+            "target_d": {"enabled": True, "generation_id": self.target_d.observer.generation_id,
+                         "model_available": self.target_d.observer.model is not None},
+            "gemini": self.gemini.ranker.telemetry(), "started": self._started,
+            "lifecycle_errors": self._lifecycle_errors,
+        }
+
+
+# Compatibility alias avoids touching the production orchestration path.
+ShadowResearchRuntime = ShadowAlphaBotRuntime
