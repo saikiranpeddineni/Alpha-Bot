@@ -95,6 +95,14 @@ class AlpacaBroker(legacy.AlpacaBroker):
     """Production Alpaca adapter with conservative broker-side safety semantics."""
 
     def _to_order(self, raw) -> Order:  # noqa: ANN001
+        # Conversion is also used during recovery/tests where an adapter can be
+        # instantiated without running the network-owning constructor. Strategy
+        # attribution is optional metadata, so absence must fall back to Alpaca
+        # rather than make otherwise valid broker order state unparseable.
+        if not hasattr(self, "_meta"):
+            self._meta = {}
+        if not hasattr(self, "_symbol_strategies"):
+            self._symbol_strategies = {}
         order = super()._to_order(raw)
         order.status = normalize_order_status(getattr(raw, "status", None))
         return order

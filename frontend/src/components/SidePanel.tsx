@@ -67,8 +67,15 @@ export function InsightsPanel() {
 
 export function PerformancePanel() {
   const metrics = useStore((s) => s.metrics);
-  const stats = metrics?.stats as Record<string, number | null> | undefined;
+  const trades = useStore((s) => s.trades);
   const m = metrics?.metrics ?? {};
+  const wins = trades.filter((t) => t.pnl > 0);
+  const losses = trades.filter((t) => t.pnl <= 0);
+  const grossWin = wins.reduce((sum, t) => sum + t.pnl, 0);
+  const grossLoss = Math.abs(losses.reduce((sum, t) => sum + t.pnl, 0));
+  const realizedPnl = trades.reduce((sum, t) => sum + t.pnl, 0);
+  const winRate = trades.length ? (wins.length / trades.length) * 100 : 0;
+  const profitFactor = grossLoss > 0 ? grossWin / grossLoss : null;
 
   return (
     <div className="panel" style={{ flexShrink: 0 }}>
@@ -77,21 +84,21 @@ export function PerformancePanel() {
       <div className="kv-grid">
         <div className="kv">
           <div className="k">Trades</div>
-          <div className="v num">{stats?.total_trades ?? 0}</div>
+          <div className="v num">{trades.length}</div>
         </div>
         <div className="kv">
           <div className="k">Win rate</div>
-          <div className="v num">{stats?.win_rate != null ? `${stats.win_rate}%` : "—"}</div>
+          <div className="v num">{trades.length ? `${winRate.toFixed(1)}%` : "—"}</div>
         </div>
         <div className="kv">
-          <div className="k">Realized P&L</div>
-          <div className={`v num ${pnlClass(stats?.realized_pnl as number | null)}`}>
-            {fmtSigned(stats?.realized_pnl as number | null)}
+          <div className="k">Realized P&amp;L</div>
+          <div className={`v num ${pnlClass(realizedPnl)}`}>
+            {trades.length ? fmtSigned(realizedPnl) : "—"}
           </div>
         </div>
         <div className="kv">
           <div className="k">Profit factor</div>
-          <div className="v num">{stats?.profit_factor ?? "—"}</div>
+          <div className="v num">{profitFactor != null ? profitFactor.toFixed(2) : "—"}</div>
         </div>
         <div className="kv">
           <div className="k">Max drawdown</div>
@@ -255,4 +262,3 @@ export function StrategiesPanel() {
     </div>
   );
 }
-
