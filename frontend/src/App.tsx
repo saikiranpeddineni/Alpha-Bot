@@ -4,9 +4,10 @@ import "./replay.css";
 import { BacktestModal } from "./components/BacktestModal";
 import { ReplayModal } from "./components/ReplayModal";
 import { BottomTabs } from "./components/BottomTabs";
+import { MobileHome } from "./components/MobileHome";
 import { PriceChart } from "./components/PriceChart";
 import { SettingsModal } from "./components/SettingsModal";
-import { SidePanel, InsightsPanel, PerformancePanel, StrategiesPanel } from "./components/SidePanel";
+import { SidePanel, StrategiesPanel } from "./components/SidePanel";
 import { ThemeSelector } from "./components/ThemeSelector";
 import { TopBar } from "./components/TopBar";
 import { TrainerPanel } from "./components/TrainerPanel";
@@ -15,6 +16,8 @@ import { useStore } from "./store";
 import { AppTheme, applyTheme, persistTheme, readTheme } from "./theme";
 import { connectWebSocket } from "./ws";
 
+type MobileTab = "home" | "markets" | "trade" | "activity" | "more";
+
 export default function App() {
   const status = useStore((s) => s.status);
   const toast = useStore((s) => s.toast);
@@ -22,7 +25,7 @@ export default function App() {
   const [showReplay, setShowReplay] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [isMobile, setIsMobile] = useState(window.innerWidth < 1024);
-  const [mobileTab, setMobileTab] = useState<"monitor" | "chart" | "watchlist" | "config" | "activity">("monitor");
+  const [mobileTab, setMobileTab] = useState<MobileTab>("home");
   const [theme, setTheme] = useState<AppTheme>(() => readTheme());
 
   useEffect(() => { applyTheme(theme); }, [theme]);
@@ -40,23 +43,27 @@ export default function App() {
   const halted = status?.state === "halted" || status?.risk?.hard_halted;
 
   if (isMobile) {
-    return <div className="app mobile">
+    return <div className="app mobile premium-mobile">
       <MobileHeader theme={theme} onThemeChange={changeTheme} onSettings={() => setShowSettings(true)} />
-      {halted && <div className="halt-banner">⛔ KILL SWITCH ACTIVE — {status?.risk?.hard_halt_reason || "max drawdown breached"}<button className="btn sm danger" onClick={() => api.resetHalt().then((s) => useStore.getState().setStatus(s)).catch(() => undefined)} style={{ marginLeft: "8px" }}>Reset halt</button></div>}
-      <div className="main">
-        {mobileTab === "monitor" && <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}><PerformancePanel /><InsightsPanel /></div>}
-        {mobileTab === "chart" && <PriceChart />}{mobileTab === "watchlist" && <Watchlist />}
-        {mobileTab === "config" && <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}><StrategiesPanel /><TrainerPanel /></div>}
-        {mobileTab === "activity" && <BottomTabs />}
-      </div>
-      <div className="mobile-nav">
-        <button className={`mobile-nav-btn ${mobileTab === "monitor" ? "active" : ""}`} onClick={() => setMobileTab("monitor")}><span className="icon">📊</span><span>Monitor</span></button>
-        <button className={`mobile-nav-btn ${mobileTab === "chart" ? "active" : ""}`} onClick={() => setMobileTab("chart")}><span className="icon">📈</span><span>Chart</span></button>
-        <button className={`mobile-nav-btn ${mobileTab === "watchlist" ? "active" : ""}`} onClick={() => setMobileTab("watchlist")}><span className="icon">📋</span><span>Watch</span></button>
-        <button className={`mobile-nav-btn ${mobileTab === "config" ? "active" : ""}`} onClick={() => setMobileTab("config")}><span className="icon">⚙️</span><span>Config</span></button>
-        <button className={`mobile-nav-btn ${mobileTab === "activity" ? "active" : ""}`} onClick={() => setMobileTab("activity")}><span className="icon">📜</span><span>Activity</span></button>
-      </div>
-      {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}{toast && <div className={`toast ${toast.kind}`}>{toast.text}</div>}
+      {halted && <div className="halt-banner">KILL SWITCH ACTIVE — {status?.risk?.hard_halt_reason || "max drawdown breached"}<button className="btn sm danger" onClick={() => api.resetHalt().then((s) => useStore.getState().setStatus(s)).catch(() => undefined)}>Reset</button></div>}
+      <main className="mobile-content">
+        {mobileTab === "home" && <MobileHome onOpenActivity={() => setMobileTab("activity")} onOpenChart={() => setMobileTab("trade")} />}
+        {mobileTab === "markets" && <div className="mobile-page"><div className="mobile-page-title"><span>Markets</span><small>Your live universe</small></div><Watchlist /></div>}
+        {mobileTab === "trade" && <div className="mobile-page mobile-trade-page"><PriceChart /></div>}
+        {mobileTab === "activity" && <div className="mobile-page"><div className="mobile-page-title"><span>Activity</span><small>Positions, orders, research & pipeline</small></div><BottomTabs /></div>}
+        {mobileTab === "more" && <MobileMore onSettings={() => setShowSettings(true)} onBacktest={() => setShowBacktest(true)} onReplay={() => setShowReplay(true)} />}
+      </main>
+      <nav className="mobile-nav premium-mobile-nav" aria-label="Primary navigation">
+        <MobileNavButton active={mobileTab === "home"} label="Home" icon="⌂" onClick={() => setMobileTab("home")} />
+        <MobileNavButton active={mobileTab === "markets"} label="Markets" icon="◫" onClick={() => setMobileTab("markets")} />
+        <MobileNavButton active={mobileTab === "trade"} label="Trade" icon="↗" onClick={() => setMobileTab("trade")} />
+        <MobileNavButton active={mobileTab === "activity"} label="Activity" icon="≋" onClick={() => setMobileTab("activity")} />
+        <MobileNavButton active={mobileTab === "more"} label="More" icon="•••" onClick={() => setMobileTab("more")} />
+      </nav>
+      {showBacktest && <BacktestModal onClose={() => setShowBacktest(false)} />}
+      {showReplay && <ReplayModal onClose={() => setShowReplay(false)} />}
+      {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
+      {toast && <div className={`toast ${toast.kind}`}>{toast.text}</div>}
     </div>;
   }
 
@@ -73,8 +80,16 @@ export default function App() {
   </div>;
 }
 
+function MobileNavButton({ active, label, icon, onClick }: { active: boolean; label: string; icon: string; onClick: () => void }) {
+  return <button className={`mobile-nav-btn ${active ? "active" : ""}`} onClick={onClick}><span className="icon">{icon}</span><span>{label}</span></button>;
+}
+
+function MobileMore({ onSettings, onBacktest, onReplay }: { onSettings: () => void; onBacktest: () => void; onReplay: () => void }) {
+  return <div className="mobile-page"><div className="mobile-page-title"><span>More</span><small>Research and configuration</small></div><div className="mobile-more-grid"><button onClick={onSettings}><b>Settings</b><span>Risk, broker and app preferences</span></button><button onClick={onBacktest}><b>Backtest</b><span>Historical strategy research</span></button><button onClick={onReplay}><b>Replay</b><span>Deterministic session replay</span></button></div><div className="mobile-more-stack"><StrategiesPanel /><TrainerPanel /></div></div>;
+}
+
 function MobileHeader({ theme, onThemeChange, onSettings }: { theme: AppTheme; onThemeChange: (theme: AppTheme) => void; onSettings: () => void }) {
   const status = useStore((s) => s.status); const running = status?.state === "running"; const market = status?.market; const showToast = useStore((s) => s.showToast); const [busy, setBusy] = useState(false);
   async function handleStartStop() { setBusy(true); try { if (running) { const s = await api.stopEngine(); useStore.getState().setStatus(s); showToast("info", "Engine stopped"); } else { const currentMode = status?.mode ?? "demo"; const s = await api.startEngine(currentMode); useStore.getState().setStatus(s); showToast("info", `Engine started (${currentMode} mode)`); } } catch (e) { showToast("error", (e as Error).message); } finally { setBusy(false); } }
-  return <div className="mobile-header"><div className="brand" style={{ display: "flex", alignItems: "center", gap: "6px" }}><span className="bolt">⚡</span> AlphaDesk <span className={`badge ${status?.mode ?? "demo"}`} style={{ fontSize: "9px", padding: "1px 5px", textTransform: "uppercase" }}>{status?.mode ?? "demo"}</span></div><div className="actions" style={{ display: "flex", alignItems: "center", gap: "8px" }}><ThemeSelector theme={theme} onThemeChange={onThemeChange} compact /><span className={`dot ${market?.is_open ? "open" : ""}`} aria-label={market?.is_open ? "Market open" : "Market closed"} /><button className={`btn sm ${running ? "danger" : "success"}`} onClick={handleStartStop} disabled={busy || status?.state === "halted"} style={{ padding: "4px 10px", height: "26px", fontSize: "11px" }}>{busy ? "…" : running ? "Stop" : "Start"}</button><button className="btn sm icon" onClick={onSettings} style={{ padding: "4px 8px", height: "26px", fontSize: "11px" }} title="Settings">⚙</button></div></div>;
+  return <header className="mobile-header premium-mobile-header"><div className="mobile-brand"><span className="mobile-logo">A</span><div><b>AlphaDesk</b><small><span className={`mobile-status-dot ${market?.is_open ? "live" : ""}`} />{market?.is_open ? "Market open" : "Market closed"}</small></div></div><div className="actions"><ThemeSelector theme={theme} onThemeChange={onThemeChange} compact /><button className={`mobile-engine-btn ${running ? "running" : ""}`} onClick={handleStartStop} disabled={busy || status?.state === "halted"}>{busy ? "…" : running ? "Live" : "Start"}</button><button className="mobile-icon-btn" onClick={onSettings} aria-label="Settings">⋮</button></div></header>;
 }
