@@ -13,6 +13,7 @@ const usd0 = new Intl.NumberFormat("en-US", {
 });
 
 const num = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 });
+const MARKET_TIME_ZONE = "America/New_York";
 
 export const fmtMoney = (v: number | null | undefined): string =>
   v == null ? "—" : usd.format(v);
@@ -44,6 +45,7 @@ export const fmtTime = (iso: string | null | undefined): string => {
   if (!iso) return "—";
   const d = new Date(iso);
   return d.toLocaleTimeString("en-US", {
+    timeZone: MARKET_TIME_ZONE,
     hour12: false,
     hour: "2-digit",
     minute: "2-digit",
@@ -55,6 +57,7 @@ export const fmtDateTime = (iso: string | null | undefined): string => {
   if (!iso) return "—";
   const d = new Date(iso);
   return d.toLocaleString("en-US", {
+    timeZone: MARKET_TIME_ZONE,
     month: "short",
     day: "numeric",
     hour12: false,
