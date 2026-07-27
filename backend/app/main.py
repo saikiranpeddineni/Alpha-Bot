@@ -39,6 +39,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import __version__
+from app.api.dashboard_history import durable_orders, router as dashboard_history_router
 from app.api.routes import router
 from app.api.replay import router as replay_router
 from app.api.ws import EventHub
@@ -136,6 +137,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_headers=["*"],
     )
 
+    # Dashboard history is deliberately registered before the legacy runtime
+    # routes so GET /orders and GET /trades resolve to the durable ledger.
+    app.include_router(dashboard_history_router)
     app.include_router(router)
     app.include_router(replay_router)
 
@@ -146,7 +150,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         bootstrap = {
             "status": engine.status(),
             "quotes": engine.quotes_payload(),
-            "orders": engine.orders_payload(),
+            "orders": durable_orders(db, engine.mode, limit=200),
             "insights": [i.model_dump(mode="json") for i in engine.insights.recent(30)],
             "logs": [e.model_dump(mode="json") for e in applog.recent(100)],
             "metrics": engine.metrics_payload(),
