@@ -1,9 +1,4 @@
-"""Causal outcome joiner for canonical shadow candidates and subsequent market bars.
-
-The joiner consumes only immutable TradingObservationEvent values. It never fetches
-future bars and never has broker/execution authority. Outcomes are keyed by the same
-candidate_id emitted by Champion.
-"""
+"""Causal outcome joiner for canonical shadow candidates and subsequent market bars."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -13,7 +8,6 @@ from typing import Any, Callable
 from app.research.shadow_event import ShadowEventType, TradingObservationEvent
 
 OutcomeSink = Callable[[TradingObservationEvent, str, dict[str, Any]], None]
-
 HORIZONS_MINUTES: tuple[int, ...] = (1, 5, 15, 30, 60)
 
 
@@ -26,6 +20,9 @@ class _CandidateState:
     mfe: float = 0.0
     mae: float = 0.0
     stopped: bool = False
+    stopped_pnl: float | None = None
+    stop_fill_price: float | None = None
+    last_bar_ts: datetime | None = None
     completed_horizons: set[int] = field(default_factory=set)
 
 
@@ -69,7 +66,7 @@ class CanonicalOutcomeJoiner:
             self._consume_bar(event)
 
     def _register_candidate(self, event: TradingObservationEvent) -> None:
-        if not event.candidate_id or event.price is None:
+        if not event.candidate_id or event.price is None or float(event.price) <= 0:
             return
         if event.candidate_id in self._active:
             self.duplicate_candidates += 1
@@ -77,56 +74,56 @@ class CanonicalOutcomeJoiner:
         direction = self._direction(event)
         if direction is None:
             return
-        state = _CandidateState(
-            event=event,
-            entry_price=float(event.price),
-            direction=direction,
-            initial_risk=self._initial_risk(event, direction, float(event.price)),
-        )
+        state = _CandidateState(event=event, entry_price=float(event.price), direction=direction,
+                                initial_risk=self._initial_risk(event, direction, float(event.price)))
         self._active[event.candidate_id] = state
         self._by_symbol.setdefault(event.symbol.upper(), set()).add(event.candidate_id)
         self.candidates_seen += 1
 
     def _consume_bar(self, bar: TradingObservationEvent) -> None:
         self.bars_seen += 1
-        symbol = bar.symbol.upper()
-        for candidate_id in tuple(self._by_symbol.get(symbol, ())):
+        for candidate_id in tuple(self._by_symbol.get(bar.symbol.upper(), ())):
             state = self._active.get(candidate_id)
             if state is None:
                 continue
-            if bar.ts <= state.event.ts:
+            # Per-candidate monotonicity prevents duplicate/late provider bars from
+            # contaminating MFE/MAE after a newer bar has already been consumed.
+            if bar.ts <= state.event.ts or (state.last_bar_ts is not None and bar.ts <= state.last_bar_ts):
                 self.out_of_order_bars += 1
                 continue
             if bar.high is None or bar.low is None or bar.close is None:
                 continue
+            state.last_bar_ts = bar.ts
             self._apply_bar(state, bar)
 
     def _apply_bar(self, state: _CandidateState, bar: TradingObservationEvent) -> None:
-        entry = state.entry_price
-        high = float(bar.high)
-        low = float(bar.low)
-        close = float(bar.close)
-        # A missing, equal, or wrong-side stop is unavailable evidence. Never use
-        # the raw invalid value to create a synthetic stop event.
+        entry, high, low, close = state.entry_price, float(bar.high), float(bar.low), float(bar.close)
         stop = state.event.stop_loss if state.initial_risk is not None else None
 
         if not state.stopped:
             if state.direction == "long":
                 if stop is not None and low <= stop:
                     state.stopped = True
-                    state.mae = max(state.mae, entry - float(stop))
-                    # Conservative intrabar ordering: do not credit high after stop.
+                    open_px = float(bar.open) if bar.open is not None else float(stop)
+                    fill = min(float(stop), open_px)  # gap-through stop realism
+                    state.stop_fill_price = fill
+                    state.stopped_pnl = fill - entry
+                    state.mae = max(state.mae, entry - fill)
                     if bar.open is not None:
-                        state.mfe = max(state.mfe, max(0.0, float(bar.open) - entry))
+                        state.mfe = max(state.mfe, max(0.0, open_px - entry))
                 else:
                     state.mfe = max(state.mfe, max(0.0, high - entry))
                     state.mae = max(state.mae, max(0.0, entry - low))
             else:
                 if stop is not None and high >= stop:
                     state.stopped = True
-                    state.mae = max(state.mae, float(stop) - entry)
+                    open_px = float(bar.open) if bar.open is not None else float(stop)
+                    fill = max(float(stop), open_px)
+                    state.stop_fill_price = fill
+                    state.stopped_pnl = entry - fill
+                    state.mae = max(state.mae, fill - entry)
                     if bar.open is not None:
-                        state.mfe = max(state.mfe, max(0.0, entry - float(bar.open)))
+                        state.mfe = max(state.mfe, max(0.0, entry - open_px))
                 else:
                     state.mfe = max(state.mfe, max(0.0, entry - low))
                     state.mae = max(state.mae, max(0.0, high - entry))
@@ -153,40 +150,28 @@ class CanonicalOutcomeJoiner:
 
     @staticmethod
     def _pnl(state: _CandidateState, close: float) -> float:
-        if state.stopped and state.initial_risk is not None:
-            return -state.initial_risk
-        if state.direction == "long":
-            return close - state.entry_price
-        return state.entry_price - close
+        if state.stopped and state.stopped_pnl is not None:
+            return state.stopped_pnl
+        return close - state.entry_price if state.direction == "long" else state.entry_price - close
 
     @staticmethod
     def _outcome_payload(state: _CandidateState, bar_ts: datetime, horizon: int, pnl: float) -> dict[str, Any]:
         risk = state.initial_risk
-        mfe_r = state.mfe / risk if risk else None
-        mae_r = state.mae / risk if risk else None
-        realized_r = pnl / risk if risk else None
-        return {
-            "candidate_id": state.event.candidate_id,
-            "horizon": f"{horizon}m",
-            "as_of_ts": bar_ts.isoformat(),
-            "entry_price": state.entry_price,
-            "direction": state.direction,
-            "stop_is_synthetic": risk is None,
-            "stopped": state.stopped,
-            "mfe": round(state.mfe, 6),
-            "mae": round(state.mae, 6),
-            "mfe_r": round(mfe_r, 6) if mfe_r is not None else None,
-            "mae_r": round(mae_r, 6) if mae_r is not None else None,
-            "realized_r": round(realized_r, 6) if realized_r is not None else None,
-            "fwd_return": round(pnl / state.entry_price, 8) if state.entry_price > 0 else None,
-        }
+        mfe_r, mae_r, realized_r = (state.mfe / risk if risk else None,
+                                    state.mae / risk if risk else None,
+                                    pnl / risk if risk else None)
+        return {"candidate_id": state.event.candidate_id, "horizon": f"{horizon}m",
+                "as_of_ts": bar_ts.isoformat(), "entry_price": state.entry_price,
+                "direction": state.direction, "stop_is_synthetic": risk is None,
+                "stopped": state.stopped, "stop_fill_price": state.stop_fill_price,
+                "mfe": round(state.mfe, 6), "mae": round(state.mae, 6),
+                "mfe_r": round(mfe_r, 6) if mfe_r is not None else None,
+                "mae_r": round(mae_r, 6) if mae_r is not None else None,
+                "realized_r": round(realized_r, 6) if realized_r is not None else None,
+                "fwd_return": round(pnl / state.entry_price, 8) if state.entry_price > 0 else None}
 
     def telemetry(self) -> dict[str, Any]:
-        return {
-            "active_candidates": len(self._active),
-            "candidates_seen": self.candidates_seen,
-            "bars_seen": self.bars_seen,
-            "outcomes_emitted": self.outcomes_emitted,
-            "duplicate_candidates": self.duplicate_candidates,
-            "out_of_order_bars": self.out_of_order_bars,
-        }
+        return {"active_candidates": len(self._active), "candidates_seen": self.candidates_seen,
+                "bars_seen": self.bars_seen, "outcomes_emitted": self.outcomes_emitted,
+                "duplicate_candidates": self.duplicate_candidates,
+                "out_of_order_bars": self.out_of_order_bars}
