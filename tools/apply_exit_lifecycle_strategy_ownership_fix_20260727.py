@@ -20,12 +20,10 @@ engine = replace_once(
     engine,
     '        self._position_initial_stops: dict[str, float | None] = {}\n',
     '        self._position_initial_stops: dict[str, float | None] = {}\n'
-    '        # Authoritative original strategy take-profit. This survives broker protection repair\n'
-    '        # so a recovered stop can never silently convert a bracket trade into an unlimited hold.\n'
+    '        # Original strategy target survives broker protection repair/reconciliation.\n'
     '        self._position_take_profits: dict[str, float] = {}\n',
     "take-profit state",
 )
-
 engine = replace_once(
     engine,
     '            # PR #271 V2 Adaptive Harvesting: PASSIVE OBSERVER (NON-AUTHORITATIVE)\n'
@@ -35,9 +33,9 @@ engine = replace_once(
     '            # PR #271 V2 Adaptive Harvesting: PASSIVE OBSERVER (NON-AUTHORITATIVE)\n'
     '            self._evaluate_v2_shadow_passive(symbol, position, df, now)\n'
     '\n'
-    '            # The original strategy target remains authoritative even if broker-side protection\n'
-    '            # reconciliation had to replace/cancel an exit leg. This is a safety-net, not a new\n'
-    '            # harvesting policy: broker TP remains preferred when present.\n'
+    '            # Safety-net for the ORIGINAL strategy target. Broker TP remains preferred;\n'
+    '            # this only prevents protection repair from silently turning a bracket into\n'
+    '            # an unlimited hold if its TP leg disappears.\n'
     '            target = self._position_take_profits.get(symbol)\n'
     '            if target is None:\n'
     '                broker_target = getattr(position, "take_profit", None)\n'
@@ -56,9 +54,8 @@ engine = replace_once(
     '                    return []\n'
     '\n'
     '            if position.qty > 0:\n',
-    "authoritative software TP safety-net",
+    "software TP safety-net",
 )
-
 engine = replace_once(
     engine,
     '            if symbol in self._position_initial_stops:\n'
@@ -70,24 +67,47 @@ engine = replace_once(
     '            if symbol in self._v2_shadow_states and not self._v2_shadow_states[symbol].get("is_shadow_closed"):\n',
     "TP cleanup",
 )
+# Ownership patch may already be present locally. The existing get_latest_order_strategy API
+# is entry-only after the DB patch, so either form is safe.
+if 'db_strat = self.db.get_latest_entry_order_strategy(p.symbol, self.mode)' not in engine:
+    engine = replace_once(
+        engine,
+        '                db_strat = self.db.get_latest_order_strategy(p.symbol, self.mode)\n',
+        '                db_strat = self.db.get_latest_entry_order_strategy(p.symbol, self.mode)\n',
+        "entry-only strategy restore",
+    )
 
-engine = replace_once(
-    engine,
-    '                db_strat = self.db.get_latest_order_strategy(p.symbol, self.mode)\n',
-    '                db_strat = self.db.get_latest_entry_order_strategy(p.symbol, self.mode)\n',
-    "entry-only strategy restore",
-)
-engine = replace_once(
-    engine,
-    '            order_payload = self.db.get_latest_order_payload(p.symbol, self.mode)\n'
-    '            stop_loss = None\n'
-    '            initial_risk = None\n',
-    '            order_payload = self.db.get_latest_entry_order_payload(p.symbol, self.mode)\n'
-    '            stop_loss = None\n'
-    '            take_profit = None\n'
-    '            initial_risk = None\n',
-    "entry-only payload restore",
-)
+# Handle both pristine and already-applied ownership reconciliation blocks.
+old_pristine = ('            order_payload = self.db.get_latest_order_payload(p.symbol, self.mode)\n'
+                '            stop_loss = None\n'
+                '            initial_risk = None\n')
+old_owned = ('            entry_payload = self.db.get_latest_entry_order_payload(p.symbol, self.mode)\n'
+             '            order_payload = entry_payload or self.db.get_latest_order_payload(p.symbol, self.mode)\n'
+             '            if entry_payload and entry_payload.get("strategy"):\n'
+             '                strat = str(entry_payload["strategy"])\n'
+             '                p.strategy = strat\n'
+             '                if hasattr(self.broker, "_symbol_strategies"):\n'
+             '                    self.broker._symbol_strategies[p.symbol] = strat\n'
+             '            stop_loss = None\n'
+             '            initial_risk = None\n')
+new_owned = ('            entry_payload = self.db.get_latest_entry_order_payload(p.symbol, self.mode)\n'
+             '            order_payload = entry_payload or self.db.get_latest_order_payload(p.symbol, self.mode)\n'
+             '            if entry_payload and entry_payload.get("strategy"):\n'
+             '                strat = str(entry_payload["strategy"])\n'
+             '                p.strategy = strat\n'
+             '                if hasattr(self.broker, "_symbol_strategies"):\n'
+             '                    self.broker._symbol_strategies[p.symbol] = strat\n'
+             '            stop_loss = None\n'
+             '            take_profit = None\n'
+             '            initial_risk = None\n')
+if new_owned not in engine:
+    if old_owned in engine:
+        engine = engine.replace(old_owned, new_owned, 1)
+    elif old_pristine in engine:
+        engine = engine.replace(old_pristine, new_owned, 1)
+    else:
+        raise RuntimeError("anchor not found for ownership-compatible payload restore")
+
 engine = replace_once(
     engine,
     '                stop_loss = order_payload.get("stop_loss")\n'
@@ -102,7 +122,6 @@ engine = replace_once(
     '                    p.take_profit = float(take_profit)\n',
     "restore original TP",
 )
-
 engine = replace_once(
     engine,
     '                        is_bracket_or_oco_parent = (\n'
@@ -117,24 +136,29 @@ engine = replace_once(
     '                        )\n'
     '\n'
     '                        if is_take_profit and limit_px is not None:\n'
-    '                            # Preserve the strategy target before any broker repair. Alpaca may\n'
-    '                            # require cancellation to free held quantity for the replacement stop;\n'
-    '                            # the engine therefore keeps the exact target authoritative in software.\n'
+    '                            # Preserve target before any repair cancellation.\n'
     '                            self._position_take_profits[p.symbol] = float(limit_px)\n'
     '                            p.take_profit = float(limit_px)\n',
     "preserve TP before protection repair",
 )
-
 ENGINE.write_text(engine, encoding="utf-8")
 
-
+# Upgrade DB ownership resolver only if the earlier ownership patch has not already done so.
 db = DB.read_text(encoding="utf-8")
-anchor = '''    def get_latest_order_strategy(self, symbol: str, mode: str) -> str | None:\n        with self._session() as s:\n            stmt = select(OrderRow).where(OrderRow.mode == mode).order_by(OrderRow.ts.desc())\n            for row in s.scalars(stmt):\n                try:\n                    payload = json.loads(row.payload)\n                    if payload.get("symbol") == symbol.upper():\n                        return payload.get("strategy")\n                except Exception:\n                    pass\n        return None\n\n    def get_latest_order_payload(self, symbol: str, mode: str) -> dict | None:\n'''
-replacement = '''    @staticmethod\n    def _is_entry_order_payload(payload: dict, symbol: str) -> bool:\n        if payload.get("symbol") != symbol.upper():\n            return False\n        strategy = str(payload.get("strategy") or "").lower()\n        reason = str(payload.get("reason") or "").lower()\n        order_type = str(payload.get("order_type") or "").split(".")[-1].lower()\n        # Recovery/protection orders are lifecycle infrastructure, never strategy ownership.\n        if strategy in {"emergency_protection", "reconciled", "alpaca", ""}:\n            return False\n        if "emergency_protection" in reason or "protective stop recovery" in reason:\n            return False\n        if order_type in {"stop", "stop_limit"}:\n            return False\n        return True\n\n    def get_latest_entry_order_payload(self, symbol: str, mode: str) -> dict | None:\n        with self._session() as s:\n            stmt = select(OrderRow).where(OrderRow.mode == mode).order_by(OrderRow.ts.desc())\n            for row in s.scalars(stmt):\n                try:\n                    payload = json.loads(row.payload)\n                    if self._is_entry_order_payload(payload, symbol):\n                        return payload\n                except Exception:\n                    pass\n        return None\n\n    def get_latest_entry_order_strategy(self, symbol: str, mode: str) -> str | None:\n        payload = self.get_latest_entry_order_payload(symbol, mode)\n        return payload.get("strategy") if payload else None\n\n    def get_latest_order_strategy(self, symbol: str, mode: str) -> str | None:\n        # Backward-compatible API, but strategy ownership must come from an entry order.\n        return self.get_latest_entry_order_strategy(symbol, mode)\n\n    def get_latest_order_payload(self, symbol: str, mode: str) -> dict | None:\n'''
-db = replace_once(db, anchor, replacement, "DB entry ownership resolver")
+if 'def get_latest_entry_order_strategy(' not in db:
+    if 'def get_latest_entry_order_payload(' in db:
+        marker = '    def get_latest_order_strategy(self, symbol: str, mode: str) -> str | None:\n'
+        addition = ('    def get_latest_entry_order_strategy(self, symbol: str, mode: str) -> str | None:\n'
+                    '        payload = self.get_latest_entry_order_payload(symbol, mode)\n'
+                    '        return payload.get("strategy") if payload else None\n\n')
+        if marker not in db:
+            raise RuntimeError("DB strategy marker missing")
+        db = db.replace(marker, addition + marker, 1)
+    else:
+        raise RuntimeError("DB ownership patch missing: run apply_position_strategy_ownership_fix_20260727.py first")
 DB.write_text(db, encoding="utf-8")
 
-TEST.write_text(r'''from pathlib import Path\n\n\ndef test_strategy_restore_ignores_protection_orders_source():\n    src = (Path(__file__).parents[1] / "app" / "db" / "database.py").read_text(encoding="utf-8")\n    assert "def get_latest_entry_order_payload" in src\n    assert 'strategy in {"emergency_protection", "reconciled", "alpaca", ""}' in src\n    assert 'if order_type in {"stop", "stop_limit"}' in src\n\n\ndef test_reconciliation_restores_entry_strategy_and_target_source():\n    src = (Path(__file__).parents[1] / "app" / "core" / "engine.py").read_text(encoding="utf-8")\n    assert "get_latest_entry_order_strategy" in src\n    assert "get_latest_entry_order_payload" in src\n    assert 'take_profit = order_payload.get("take_profit")' in src\n    assert "self._position_take_profits[p.symbol]" in src\n\n\ndef test_original_take_profit_remains_authoritative_source():\n    src = (Path(__file__).parents[1] / "app" / "core" / "engine.py").read_text(encoding="utf-8")\n    assert "original strategy take-profit triggered" in src\n    assert "high_val >= target" in src\n    assert "low_val <= target" in src\n\n\ndef test_protection_repair_preserves_target_before_cancellation_source():\n    src = (Path(__file__).parents[1] / "app" / "core" / "engine.py").read_text(encoding="utf-8")\n    preserve = src.index("if is_take_profit and limit_px is not None:")\n    cancel = src.index("c_res = self.broker.cancel(o.id)", preserve)\n    assert preserve < cancel\n    block = src[preserve:cancel]\n    assert "self._position_take_profits[p.symbol] = float(limit_px)" in block\n''', encoding="utf-8")
+TEST.write_text('''from pathlib import Path\n\n\ndef test_strategy_restore_uses_entry_ownership_source():\n    db = (Path(__file__).parents[1] / "app" / "db" / "database.py").read_text(encoding="utf-8")\n    engine = (Path(__file__).parents[1] / "app" / "core" / "engine.py").read_text(encoding="utf-8")\n    assert "def get_latest_entry_order_payload" in db\n    assert "def get_latest_entry_order_strategy" in db\n    assert 'non_owning_strategies = {"emergency_protection"}' in db\n    assert "get_latest_entry_order_payload(p.symbol, self.mode)" in engine\n\n\ndef test_reconciliation_restores_original_target_source():\n    src = (Path(__file__).parents[1] / "app" / "core" / "engine.py").read_text(encoding="utf-8")\n    assert 'take_profit = order_payload.get("take_profit")' in src\n    assert "self._position_take_profits[p.symbol] = float(take_profit)" in src\n\n\ndef test_original_take_profit_has_live_safety_net_source():\n    src = (Path(__file__).parents[1] / "app" / "core" / "engine.py").read_text(encoding="utf-8")\n    assert "original strategy take-profit triggered" in src\n    assert "high_val >= target" in src\n    assert "low_val <= target" in src\n\n\ndef test_protection_repair_preserves_target_before_cancel_source():\n    src = (Path(__file__).parents[1] / "app" / "core" / "engine.py").read_text(encoding="utf-8")\n    preserve = src.index("if is_take_profit and limit_px is not None:")\n    cancel = src.index("c_res = self.broker.cancel(o.id)", preserve)\n    assert preserve < cancel\n    assert "self._position_take_profits[p.symbol] = float(limit_px)" in src[preserve:cancel]\n''', encoding="utf-8")
 
 print("Applied exit lifecycle + strategy ownership stabilization.")
 print("Changed: backend/app/core/engine.py, backend/app/db/database.py")
