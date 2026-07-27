@@ -663,6 +663,9 @@ class TradingEngine:
         assert self.data and self.broker and self.risk and self.portfolio and self.pipeline
         self._tick_count += 1
         now = utcnow()
+        now_et = now.astimezone(ET)
+        today_date = now_et.date()
+        et_mins = now_et.hour * 60 + now_et.minute
 
         # Poll real fills at the start of the tick to prevent position reconciliation race conditions
         from app.brokers.paper import PaperBroker
@@ -710,10 +713,6 @@ class TradingEngine:
         # Run post-market trainer (>= 16:15 ET) once per day
         # Run event monitor every 5 minutes during active trading session (9:30 AM to 4:00 PM ET)
         if self.state == EngineState.RUNNING:
-            from zoneinfo import ZoneInfo
-            now_et = now.astimezone(ZoneInfo("America/New_York"))
-            today_date = now_et.date()
-            et_mins = now_et.hour * 60 + now_et.minute
             if self._last_scan_date != today_date and et_mins >= 9 * 60:
                 self._last_scan_date = today_date
                 applog.info("engine", "Pre-market scanner trigger time reached (>= 09:00 ET)")
