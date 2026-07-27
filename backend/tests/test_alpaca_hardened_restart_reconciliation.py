@@ -28,6 +28,8 @@ def _make_hardened_broker(monkeypatch):
     broker._emitted_fill_ids = set()
     broker._processed_fill_qty = {}
     broker._processed_fill_notional = {}
+    broker._emitted_fill_qty = {}
+    broker._emitted_fill_notional = {}
     broker._meta = {}
     broker._symbol_strategies = {}
     broker._shortable_cache = {}

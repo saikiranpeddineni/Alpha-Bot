@@ -442,7 +442,9 @@ class MarketRiskAggregator:
             now_et = tz_aware_T.astimezone(ZoneInfo("America/New_York"))
             is_pre_market = now_et.hour < 9 or (now_et.hour == 9 and now_et.minute < 45)
 
-            start = T - timedelta(days=2)
+            # Match breadth's weekend/single-holiday-safe history horizon.
+            # This changes data availability only; stress thresholds/aggregation are unchanged.
+            start = T - timedelta(days=5)
             extreme = 0
             total = 0
             errors = 0

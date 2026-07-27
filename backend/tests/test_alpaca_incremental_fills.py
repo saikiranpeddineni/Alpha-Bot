@@ -92,7 +92,11 @@ async def test_stale_cumulative_snapshot_cannot_move_watermark_backward_or_dupli
         emitted.extend(broker.drain_fills())
 
     assert [fill.qty for fill in emitted] == [75.0, 25.0]
-    assert broker._processed_fill_qty["order-1"] == 100.0
+    # drain_fills only hands the executions to the engine; it must not claim
+    # durable processing before PortfolioTracker ACKs them. The in-flight
+    # watermark still advances monotonically and blocks stale duplicates.
+    assert broker._emitted_fill_qty["order-1"] == 100.0
+    assert "order-1" not in broker._processed_fill_qty
 
 
 @pytest.mark.asyncio

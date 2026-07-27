@@ -2,8 +2,8 @@
 
 Computed from an equity curve and a trade list; used for both backtest
 results and live-session reporting. Ratios annualize from daily resampled
-returns; with under two sessions of data the ratios are omitted rather than
-reported on noise.
+returns; statistically unstable ratios are omitted until enough independent
+daily returns exist to make the annualization meaningful.
 """
 
 from __future__ import annotations
@@ -17,6 +17,10 @@ import pandas as pd
 from app.core.domain import TradeRecord
 
 TRADING_DAYS = 252
+# Two daily returns are mathematically sufficient to calculate a ratio but are
+# far too noisy to present as an annualized live-performance statistic. Require
+# a modest independent sample before surfacing Sharpe/Sortino in the dashboard.
+MIN_DAILY_RETURNS_FOR_RATIOS = 10
 
 
 def _equity_series(curve: list[tuple[datetime, float]]) -> pd.Series:
@@ -44,10 +48,12 @@ def compute_metrics(
     total_return_pct = (final_equity / starting_equity - 1.0) * 100.0 if starting_equity else 0.0
 
     sharpe = sortino = cagr_pct = None
+    daily_return_count = 0
     if not equity.empty:
         daily = equity.resample("1D").last().dropna()
         rets = daily.pct_change().dropna()
-        if len(rets) >= 2 and float(rets.std(ddof=0)) > 0:
+        daily_return_count = len(rets)
+        if len(rets) >= MIN_DAILY_RETURNS_FOR_RATIOS and float(rets.std(ddof=0)) > 0:
             mean, std = float(rets.mean()), float(rets.std(ddof=0))
             sharpe = round(mean / std * math.sqrt(TRADING_DAYS), 2)
             downside = rets[rets < 0]
@@ -70,6 +76,8 @@ def compute_metrics(
         "cagr_pct": cagr_pct,
         "sharpe": sharpe,
         "sortino": sortino,
+        "ratio_sample_days": daily_return_count,
+        "ratio_min_sample_days": MIN_DAILY_RETURNS_FOR_RATIOS,
         "max_drawdown_pct": round(max_drawdown_pct(equity), 2),
         "total_trades": len(trades),
         "win_rate": round(len(wins) / len(trades) * 100.0, 1) if trades else 0.0,

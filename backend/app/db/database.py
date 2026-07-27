@@ -510,17 +510,37 @@ class Database:
                 s.delete(row)
                 s.commit()
 
-    def get_latest_order_strategy(self, symbol: str, mode: str) -> str | None:
+    def get_latest_entry_order_payload(self, symbol: str, mode: str) -> dict | None:
+        """Return the newest true entry order for an active position.
+
+        Protective/recovery orders are operational children of an existing position;
+        they must never become the position's owning strategy on restart.
+        """
+        symbol = symbol.upper()
+        non_owning_strategies = {"emergency_protection"}
         with self._session() as s:
             stmt = select(OrderRow).where(OrderRow.mode == mode).order_by(OrderRow.ts.desc())
             for row in s.scalars(stmt):
                 try:
                     payload = json.loads(row.payload)
-                    if payload.get("symbol") == symbol.upper():
-                        return payload.get("strategy")
+                    if str(payload.get("symbol", "")).upper() != symbol:
+                        continue
+                    strategy = str(payload.get("strategy") or "").strip()
+                    leg = str(payload.get("leg") or "entry").lower()
+                    if strategy in non_owning_strategies or leg != "entry":
+                        continue
+                    return payload
                 except Exception:
                     pass
         return None
+
+    def get_latest_entry_order_strategy(self, symbol: str, mode: str) -> str | None:
+        payload = self.get_latest_entry_order_payload(symbol, mode)
+        return payload.get("strategy") if payload else None
+
+    def get_latest_order_strategy(self, symbol: str, mode: str) -> str | None:
+        payload = self.get_latest_entry_order_payload(symbol, mode)
+        return payload.get("strategy") if payload else None
 
     def get_latest_order_payload(self, symbol: str, mode: str) -> dict | None:
         with self._session() as s:

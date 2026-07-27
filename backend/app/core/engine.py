@@ -120,6 +120,8 @@ class TradingEngine:
         self._position_peaks: dict[str, float] = {}
         self._position_troughs: dict[str, float] = {}
         self._position_initial_stops: dict[str, float | None] = {}
+        # Original strategy target survives broker protection repair/reconciliation.
+        self._position_take_profits: dict[str, float] = {}
         # PR #271 V2 Adaptive Harvesting: Isolated Shadow State Store (NON-AUTHORITATIVE)
         self._v2_shadow_states: dict[str, dict] = {}
         self._last_scan_date = None
@@ -1033,6 +1035,10 @@ class TradingEngine:
 
 
                         for sig, kelly_val in decision_outcome.approved_entries:
+                            # Defense in depth: reference/risk symbols can never reach broker submission.
+                            if sig.symbol.upper() in {s.upper() for s in self._vix_symbols()}:
+                                applog.error("engine", f"Blocked non-tradable reference symbol at submission boundary: {sig.symbol}")
+                                continue
                             # Attach risk_multiplier from SafetyDecision
                             decision_safety = getattr(self, "last_safety_decision", None)
                             sig.risk_multiplier = decision_safety.risk_multiplier if decision_safety is not None else 1.0
@@ -1155,6 +1161,11 @@ class TradingEngine:
 
     async def _evaluate_symbol(self, symbol: str, position, equity: float, now: datetime) -> list[tuple[Signal, pd.DataFrame]]:  # noqa: ANN001
         assert self.data and self.broker and self.risk and self.pipeline
+        symbol = symbol.upper()
+        # Reference volatility feeds are risk inputs only and must never enter the tradable pipeline.
+        if symbol in {s.upper() for s in self._vix_symbols()}:
+            applog.debug("engine", f"{symbol}: reference/risk symbol excluded from strategy evaluation")
+            return []
         df = enrich(self.data.frame(symbol, "1Min", limit=600))
         if df.empty or len(df) < 30:
             return []
@@ -1176,7 +1187,27 @@ class TradingEngine:
 
             # PR #271 V2 Adaptive Harvesting: PASSIVE OBSERVER (NON-AUTHORITATIVE)
             self._evaluate_v2_shadow_passive(symbol, position, df, now)
-            
+
+            # Safety-net for the ORIGINAL strategy target. Broker TP remains preferred;
+            # this only prevents protection repair from silently turning a bracket into
+            # an unlimited hold if its TP leg disappears.
+            target = self._position_take_profits.get(symbol)
+            if target is None:
+                broker_target = getattr(position, "take_profit", None)
+                if broker_target is not None and float(broker_target) > 0:
+                    target = float(broker_target)
+                    self._position_take_profits[symbol] = target
+            if target is not None:
+                target_hit = (position.qty > 0 and high_val >= target) or (position.qty < 0 and low_val <= target)
+                if target_hit:
+                    applog.info("engine", f"{symbol}: original strategy take-profit triggered @ {target:.4f}")
+                    await self._close_position_guarded(symbol, reason=f"original strategy take-profit triggered ({target:.4f})")
+                    self._position_peaks.pop(symbol, None)
+                    self._position_troughs.pop(symbol, None)
+                    self._position_initial_stops.pop(symbol, None)
+                    self._position_take_profits.pop(symbol, None)
+                    return []
+
             if position.qty > 0:
                 self._position_peaks[symbol] = max(self._position_peaks[symbol], high_val)
                 self._position_troughs[symbol] = min(self._position_troughs[symbol], low_val)
@@ -1221,6 +1252,7 @@ class TradingEngine:
                 del self._position_troughs[symbol]
             if symbol in self._position_initial_stops:
                 del self._position_initial_stops[symbol]
+            self._position_take_profits.pop(symbol, None)
             if symbol in self._v2_shadow_states and not self._v2_shadow_states[symbol].get("is_shadow_closed"):
                 del self._v2_shadow_states[symbol]
 
@@ -1482,7 +1514,11 @@ class TradingEngine:
         _resurrection_enabled = getattr(self.broker, "is_paper", False) is True
         for sig, reason in rejected:
             applog.debug("pipeline", f"{symbol} {sig.strategy} {sig.action}: rejected -- {reason}")
-            if sig.action != SignalAction.EXIT and _resurrection_enabled:
+            if (
+                sig.action != SignalAction.EXIT
+                and _resurrection_enabled
+                and sig.symbol.upper() not in {s.upper() for s in self._vix_symbols()}
+            ):
                 in_queue = any(
                     q["symbol"] == sig.symbol and q["strategy"] == sig.strategy
                     for q in self.resurrection_queue
@@ -1781,10 +1817,21 @@ class TradingEngine:
             if init_stop is not None and symbol not in self._position_initial_stops:
                 self._position_initial_stops[symbol] = init_stop
 
-            trade = self.portfolio.on_fill(
-                fill, peak_price=peak, trough_price=trough, initial_stop=init_stop,
-                risk_manager=self.risk, now=now
-            )
+            try:
+                trade = self.portfolio.on_fill(
+                    fill, peak_price=peak, trough_price=trough, initial_stop=init_stop,
+                    risk_manager=self.risk, now=now
+                )
+            except Exception:
+                # The broker reservation is volatile only. If durable portfolio
+                # processing fails, release it so a later tick can safely retry.
+                nack_fill = getattr(self.broker, "nack_fill_processed", None)
+                if nack_fill is not None:
+                    nack_fill(fill)
+                raise
+            ack_fill = getattr(self.broker, "ack_fill_processed", None)
+            if ack_fill is not None:
+                ack_fill(fill)
             if trade is not None:
                 # PR #271 V2 Shadow Harvest: Finalize counterfactual comparison metadata
                 st = self._v2_shadow_states.pop(symbol, None)
@@ -2119,20 +2166,35 @@ class TradingEngine:
         for p in positions:
             strat = "manual"
             if hasattr(self.broker, "_symbol_strategies"):
-                db_strat = self.db.get_latest_order_strategy(p.symbol, self.mode)
+                db_strat = self.db.get_latest_entry_order_strategy(p.symbol, self.mode)
                 if db_strat:
                     self.broker._symbol_strategies[p.symbol] = db_strat
                     strat = db_strat
                     applog.info("engine", f"Restored strategy '{db_strat}' for active position {p.symbol}")
 
-            order_payload = self.db.get_latest_order_payload(p.symbol, self.mode)
+            # Position ownership comes from the latest true ENTRY, never from a
+            # newer emergency/protective order.  This keeps UI attribution and
+            # strategy-specific exit management bound to the strategy that opened
+            # the surviving position.
+            entry_payload = self.db.get_latest_entry_order_payload(p.symbol, self.mode)
+            order_payload = entry_payload or self.db.get_latest_order_payload(p.symbol, self.mode)
+            if entry_payload and entry_payload.get("strategy"):
+                strat = str(entry_payload["strategy"])
+                p.strategy = strat
+                if hasattr(self.broker, "_symbol_strategies"):
+                    self.broker._symbol_strategies[p.symbol] = strat
             stop_loss = None
+            take_profit = None
             initial_risk = None
             opened_at = p.opened_at if hasattr(p, "opened_at") and p.opened_at else utcnow()
             if order_payload:
                 stop_loss = order_payload.get("stop_loss")
+                take_profit = order_payload.get("take_profit")
                 if stop_loss:
                     initial_risk = abs(p.avg_entry_price - stop_loss)
+                if take_profit is not None and float(take_profit) > 0:
+                    self._position_take_profits[p.symbol] = float(take_profit)
+                    p.take_profit = float(take_profit)
                 submitted_at_str = order_payload.get("submitted_at")
                 if submitted_at_str:
                     try:
@@ -2328,8 +2390,19 @@ class TradingEngine:
                 verified_stop_price = matching_stop.stop_price or 0.0
                 protection_status[sym] = True
                 self._protection_state[sym] = ProtectionState.PROTECTED
+                p.stop_loss = verified_stop_price
                 if self.portfolio and sym in self.portfolio._lots:
                     self.portfolio._lots[sym].stop_loss = verified_stop_price
+                # Populate broker-confirmed take-profit when an active exit limit exists.
+                for exit_order in symbol_exit_orders:
+                    limit_px = getattr(exit_order, "limit_price", None)
+                    if (
+                        exit_order.order_type == OrderType.LIMIT
+                        and limit_px is not None
+                        and ((p.qty > 0 and limit_px > p.avg_entry_price) or (p.qty < 0 and limit_px < p.avg_entry_price))
+                    ):
+                        p.take_profit = limit_px
+                        break
                 stop_str = f"{verified_stop_price:.4f}" if verified_stop_price else "N/A"
                 applog.info(
                     "engine.protection",
@@ -2362,6 +2435,9 @@ class TradingEngine:
                     ProtectionState.AWAITING_CANCEL_CONFIRMATION,
                     ProtectionState.AWAITING_STOP_CONFIRMATION,
                     ProtectionState.AMBIGUOUS,
+                    # A rejected recovery remains fail-closed until broker state changes or restart;
+                    # do not hammer Alpaca every tick while quantity is held by an existing exit.
+                    ProtectionState.RECOVERY_REJECTED,
                 }:
                     applog.info(
                         "engine.protection",
@@ -2417,6 +2493,11 @@ class TradingEngine:
                             and not is_stop_order
                             and not is_take_profit
                         )
+
+                        if is_take_profit and limit_px is not None:
+                            # Preserve target before any repair cancellation.
+                            self._position_take_profits[p.symbol] = float(limit_px)
+                            p.take_profit = float(limit_px)
 
                         if is_bracket_or_oco_parent:
                             applog.warning(
@@ -2485,6 +2566,12 @@ class TradingEngine:
                         applog.info("engine.protection", f"#41: Recovery stop {existing.id} already active for {p.symbol}")
                         continue
 
+                    recovery_strategy = getattr(p, "strategy", None) or "reconciled"
+                    if self.portfolio and p.symbol in self.portfolio._lots:
+                        recovery_strategy = getattr(self.portfolio._lots[p.symbol], "strategy", None) or recovery_strategy
+                    if recovery_strategy in {"alpaca", "emergency_protection", ""}:
+                        recovery_strategy = "reconciled"
+
                     req = OrderRequest(
                         symbol=p.symbol,
                         side=side,
@@ -2492,8 +2579,8 @@ class TradingEngine:
                         order_type=OrderType.STOP,
                         stop_price=stop_px,
                         client_order_id=client_order_id,
-                        strategy="emergency_protection",
-                        reason=f"fix(#41) protective stop recovery source={stop_source}",
+                        strategy=recovery_strategy,
+                        reason=f"emergency_protection: fix(#41) protective stop recovery source={stop_source}",
                     )
                     applog.info(
                         "engine.protection",
@@ -3281,8 +3368,11 @@ class TradingEngine:
                 applog.info("engine.resurrection", f"Resurrected candidate {item['symbol']} reached max retries ({MAX_RETRIES}).")
                 continue
 
-            symbol = item["symbol"]
+            symbol = item["symbol"].upper()
             strategy_name = item["strategy"]
+            if symbol in {s.upper() for s in self._vix_symbols()}:
+                applog.warning("engine.resurrection", f"Dropping non-tradable reference symbol {symbol} from resurrection queue")
+                continue
 
             # Find the originating strategy
             strat = None

@@ -15,6 +15,7 @@ from sqlalchemy import or_, and_, ColumnElement
 from app.core.time_utils import ensure_utc, parse_utc, utc_now
 
 ET_ZONE = ZoneInfo("America/New_York")
+REPLAY_MIN_DELAY_SECONDS = 3600.0
 
 
 class ReplayEligibilityState(StrEnum):
@@ -62,14 +63,24 @@ def parse_datetime_to_utc(dt_val: Any, candidate_id: str | None = None) -> datet
     return dt or candidate_dt
 
 
+def _effective_min_delay(min_delay_seconds: float) -> float:
+    """Never allow production replay eligibility earlier than the 60-minute contract.
+
+    Some legacy callers passed 0 explicitly.  Centralizing the floor here prevents any
+    scheduler/telemetry/DB caller from silently bypassing the authoritative contract.
+    """
+    return max(REPLAY_MIN_DELAY_SECONDS, float(min_delay_seconds or 0.0))
+
+
 def classify_shadow_replay_status(
     record: dict[str, Any],
     now: datetime | None = None,
-    min_delay_seconds: float = 3600.0,
+    min_delay_seconds: float = REPLAY_MIN_DELAY_SECONDS,
     max_age_seconds: float = 86400.0 * 7.0,
 ) -> ReplayEligibilityState:
     """Classify an in-memory shadow record using one aware-UTC time domain."""
     now_utc = ensure_utc(now) if now is not None else utc_now()
+    min_delay_seconds = _effective_min_delay(min_delay_seconds)
 
     replayed = bool(record.get("replayed", False))
     replay_failed = bool(record.get("replay_failed", False))
@@ -99,7 +110,7 @@ def classify_shadow_replay_status(
 def get_replay_eligibility_sql_filter(
     table_class: Any,
     now: datetime | None = None,
-    min_delay_seconds: float = 3600.0,
+    min_delay_seconds: float = REPLAY_MIN_DELAY_SECONDS,
     max_age_seconds: float = 86400.0 * 7.0,
     mode: str = "demo",
     state: ReplayEligibilityState = ReplayEligibilityState.ELIGIBLE,
@@ -112,6 +123,7 @@ def get_replay_eligibility_sql_filter(
     """
     now_utc = ensure_utc(now) if now is not None else utc_now()
     sql_now = now_utc.replace(tzinfo=None)
+    min_delay_seconds = _effective_min_delay(min_delay_seconds)
 
     rejected_cond = table_class.final_decision == "rejected"
     mode_cond = table_class.mode == mode

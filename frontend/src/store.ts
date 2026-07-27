@@ -50,6 +50,8 @@ interface AppState {
   setStrategies(s: StrategyInfo[]): void;
   setTrades(t: TradeRow[]): void;
   setPositions(p: PositionRow[]): void;
+  setOrders(o: OrderRow[]): void;
+  setExecutionSnapshot(p: PositionRow[], o: OrderRow[], t: TradeRow[]): void;
   setHeartbeatStyle(style: HeartbeatStyle): void;
   showToast(kind: "info" | "error", text: string): void;
   clearToast(): void;
@@ -141,6 +143,8 @@ export const useStore = create<AppState>((set, get) => ({
   setStrategies: (s) => set({ strategies: s }),
   setTrades: (t) => set({ trades: t }),
   setPositions: (p) => set({ positions: p }),
+  setOrders: (o) => set({ orders: o }),
+  setExecutionSnapshot: (positions, orders, trades) => set({ positions, orders, trades }),
   setHeartbeatStyle: (style) => {
     localStorage.setItem("alphadesk_heartbeat_style", style);
     set({ heartbeatStyle: style });
