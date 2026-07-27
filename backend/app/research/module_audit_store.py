@@ -1,8 +1,4 @@
-"""Fail-open durable audit trail for ShadowAlphaBot module activity.
-
-This store deliberately depends only on the database persistence boundary. It has
-no broker, risk, portfolio, scanner, or production-decision authority.
-"""
+"""Fail-open durable audit trail for ShadowAlphaBot module activity."""
 from __future__ import annotations
 
 import hashlib
@@ -22,6 +18,7 @@ class ShadowModuleAuditStore:
         self.db = db
         self._lock = Lock()
         self.records_written = 0
+        self.duplicate_writes = 0
         self.persistence_failures = 0
 
     def record(self, module: str, payload: dict[str, Any], *, identity: str | None = None,
@@ -33,13 +30,13 @@ class ShadowModuleAuditStore:
                 "recorded_at": when.isoformat(), **payload}
         try:
             encoded = json.dumps(body, sort_keys=True, default=str, allow_nan=False)
-            # Always hash external identities: candidate IDs may already be 64 chars,
-            # and truncating module+candidate+policy would alias distinct challengers.
             identity_material = identity if identity is not None else encoded
             stable = hashlib.sha256(identity_material.encode("utf-8")).hexdigest()[:32]
-            module_key = module[:20]
-            evidence_id = f"sh:{module_key}:{stable}"  # <= 56 chars
+            evidence_id = f"sh:{module[:20]}:{stable}"
             with self._lock:
+                if hasattr(self.db, "get_policy_evidence") and self.db.get_policy_evidence(evidence_id) is not None:
+                    self.duplicate_writes += 1
+                    return True
                 self.db.save_policy_evidence(evidence_id, f"shadow:{module}"[:64], when, body)
             self.records_written += 1
             return True
@@ -49,4 +46,5 @@ class ShadowModuleAuditStore:
             return False
 
     def telemetry(self) -> dict[str, int]:
-        return {"records_written": self.records_written, "persistence_failures": self.persistence_failures}
+        return {"records_written": self.records_written, "duplicate_writes": self.duplicate_writes,
+                "persistence_failures": self.persistence_failures}
