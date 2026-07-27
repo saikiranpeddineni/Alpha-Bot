@@ -4,8 +4,9 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 
 from app.db.database import Database, PolicyEvidenceRow
+from app.research.shadow_bot import ShadowAlphaBotRuntime
 from app.research.shadow_event import ShadowEventType, TradingObservationEvent
-from app.research.shadow_runtime import ShadowAlphaBotRuntime, ShadowResearchRuntime
+from app.research.shadow_runtime import ShadowResearchRuntime
 
 
 def _candidate() -> TradingObservationEvent:
@@ -33,14 +34,21 @@ def _audit_rows(db: Database, policy_id: str):
         return session.scalars(select(PolicyEvidenceRow).where(PolicyEvidenceRow.policy_id == policy_id)).all()
 
 
-def test_compatibility_alias_preserves_engine_contract():
-    assert ShadowResearchRuntime is ShadowAlphaBotRuntime
+def test_public_shadow_bot_has_zero_execution_capabilities(tmp_path):
+    db = Database(tmp_path / "shadow.db")
+    research = ShadowResearchRuntime(db=db, gemini_api_key=None)
+    bot = ShadowAlphaBotRuntime(research)
+    assert bot.capabilities.broker_authority is False
+    assert bot.capabilities.production_mutation is False
+    assert bot.capabilities.model_training is False
+    assert bot.capabilities.automatic_promotion is False
+    db.close()
 
 
 def test_all_module_audit_is_durable_in_policy_evidence(tmp_path):
     async def run():
         db = Database(tmp_path / "shadow.db")
-        runtime = ShadowAlphaBotRuntime(db=db, gemini_api_key=None)
+        runtime = ShadowResearchRuntime(db=db, gemini_api_key=None)
         await runtime.start()
         try:
             assert runtime.publish(_candidate()) is True
@@ -57,7 +65,7 @@ def test_all_module_audit_is_durable_in_policy_evidence(tmp_path):
 def test_harvest_v2_runs_from_canonical_event_stream_and_persists(tmp_path):
     async def run():
         db = Database(tmp_path / "shadow.db")
-        runtime = ShadowAlphaBotRuntime(db=db, gemini_api_key=None)
+        runtime = ShadowResearchRuntime(db=db, gemini_api_key=None)
         await runtime.start()
         try:
             runtime.publish(_candidate())
@@ -77,7 +85,7 @@ def test_harvest_v2_runs_from_canonical_event_stream_and_persists(tmp_path):
 
 def test_target_d_unavailable_reason_is_explicit(tmp_path):
     db = Database(tmp_path / "shadow.db")
-    runtime = ShadowAlphaBotRuntime(db=db, gemini_api_key=None)
+    runtime = ShadowResearchRuntime(db=db, gemini_api_key=None)
     observation = runtime.target_d.consume(_candidate())
     assert observation is not None
     if observation["target_d_decision"] == "UNAVAILABLE":
