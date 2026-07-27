@@ -163,7 +163,7 @@ function StrategyRow({ strategy, onToggle, onSaveParams }: StrategyRowProps) {
     vol_z_min: "Minimum volume z-score to confirm squeeze breakout. Recommended: 1.0.",
     ema_fast: "Period of the fast exponential moving average. Recommended: 9.",
     ema_slow: "Period of the slow exponential moving average. Recommended: 21.",
-    rsi_period: "Period of the Relative Strength Index. Recommended: 14 (or 2 for short-term mean reversion).",
+    rsi_period: "Period of the Relative Strength Index (RSI). Recommended: 14 (or 2 for short-term mean reversion).",
     rsi_exit_high: "RSI level to exit long positions. Recommended: 70 to 75.",
     rsi_exit_low: "RSI level to exit short positions. Recommended: 25 to 30.",
     rsi_lower: "RSI level to trigger oversold long entry. Recommended: 10 to 15.",
@@ -175,22 +175,46 @@ function StrategyRow({ strategy, onToggle, onSaveParams }: StrategyRowProps) {
 
   return (
     <div className="strat-row-container" style={{ borderBottom: "1px solid var(--border)" }}>
-      <div className="strat-row">
-        <div style={{ flex: 1, cursor: "pointer" }} onClick={() => setExpanded(!expanded)}>
-          <div className="name">{strategy.name} <span style={{ fontSize: "9px", color: "var(--blue)" }}>{expanded ? "▲" : "▼"}</span></div>
-          <div className="desc">{strategy.description}</div>
+      <div className="strat-row" style={{ borderBottom: "none", cursor: "pointer" }} onClick={() => setExpanded(!expanded)}>
+        <div className="info">
+          <div className="name" style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+            {strategy.name}
+            <span style={{ fontSize: "10px", color: "var(--accent)" }}>{expanded ? "▲" : "▼"}</span>
+          </div>
+          <div className="desc" title={strategy.description}>{strategy.description}</div>
         </div>
-        <label className="switch"><input type="checkbox" checked={strategy.enabled} onChange={(e) => onToggle(strategy.name, e.target.checked)} /><span className="slider" /></label>
+        <button
+          className={`switch ${strategy.enabled ? "on" : ""}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggle(strategy.name, !strategy.enabled);
+          }}
+          title={strategy.enabled ? "Disable" : "Enable"}
+        />
       </div>
       {expanded && (
-        <form onSubmit={handleSave} style={{ padding: "8px 12px", background: "var(--panel-2)", display: "flex", flexDirection: "column", gap: "8px" }}>
-          {Object.entries(strategy.params || {}).map(([key]) => (
-            <div key={key} style={{ display: "grid", gridTemplateColumns: "130px 1fr", alignItems: "center", gap: "8px" }}>
-              <label style={{ fontSize: "10px", color: "var(--muted)" }} title={helpTexts[key] || ""}>{key}</label>
-              <input className="num" style={{ width: "100%" }} value={params[key] ?? ""} onChange={(e) => handleParamChange(key, e.target.value)} title={helpTexts[key] || ""} />
-            </div>
-          ))}
-          <button className="btn sm primary" type="submit" disabled={saving}>{saving ? "Saving…" : "Save parameters"}</button>
+        <form onSubmit={handleSave} style={{ padding: "8px 12px 14px", background: "var(--panel-2)", borderTop: "1px solid var(--border)" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px" }}>
+            {Object.keys(strategy.params || {}).map((key) => (
+              <div key={key} className="field" title={helpTexts[key] || key}>
+                <label style={{ display: "flex", alignItems: "center", gap: "4px", cursor: "help" }}>
+                  {key} <span style={{ color: "var(--faint)" }}>ⓘ</span>
+                </label>
+                <input
+                  type="text"
+                  className="num"
+                  style={{ width: "100%", padding: "4px 8px", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: "4px", color: "var(--text)" }}
+                  value={params[key] || ""}
+                  onChange={(e) => handleParamChange(key, e.target.value)}
+                />
+              </div>
+            ))}
+          </div>
+          <div style={{ display: "flex", justifyContent: "flex-end", marginTop: "10px" }}>
+            <button type="submit" className="btn sm primary" disabled={saving} style={{ padding: "4px 12px" }}>
+              {saving ? "Saving…" : "Save Params"}
+            </button>
+          </div>
         </form>
       )}
     </div>
@@ -205,17 +229,36 @@ export function StrategiesPanel() {
   async function toggle(name: string, enabled: boolean) {
     try {
       await api.updateStrategy(name, { enabled });
-      setStrategies(strategies.map((s) => s.name === name ? { ...s, enabled } : s));
-    } catch (e) { showToast("error", (e as Error).message); }
+      setStrategies(await api.strategies());
+    } catch (e) {
+      showToast("error", (e as Error).message);
+    }
   }
 
   async function saveParams(name: string, params: Record<string, any>) {
     try {
-      const updated = await api.updateStrategy(name, { params });
-      setStrategies(strategies.map((s) => s.name === name ? updated : s));
-      showToast("info", `${name} parameters saved`);
-    } catch (e) { showToast("error", (e as Error).message); }
+      await api.updateStrategy(name, { params });
+      setStrategies(await api.strategies());
+      showToast("info", `${name} parameters updated`);
+    } catch (e) {
+      showToast("error", (e as Error).message);
+    }
   }
 
-  return <div className="panel"><div className="panel-head"><span>Strategies</span></div><div className="panel-body">{strategies.map((s) => <StrategyRow key={s.name} strategy={s} onToggle={toggle} onSaveParams={saveParams} />)}</div></div>;
+  return (
+    <div className="panel" style={{ flexShrink: 0 }}>
+      <div className="panel-head"><span>Strategies</span></div>
+      <div>
+        {strategies.map((s) => (
+          <StrategyRow
+            key={s.name}
+            strategy={s}
+            onToggle={toggle}
+            onSaveParams={saveParams}
+          />
+        ))}
+        {strategies.length === 0 && <div className="empty-state">Loading strategies…</div>}
+      </div>
+    </div>
+  );
 }
