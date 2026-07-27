@@ -53,6 +53,17 @@ export const fmtTime = (iso: string | null | undefined): string => {
   });
 };
 
+export const fmtDate = (iso: string | null | undefined): string => {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  return d.toLocaleDateString("en-US", {
+    timeZone: MARKET_TIME_ZONE,
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+  });
+};
+
 export const fmtDateTime = (iso: string | null | undefined): string => {
   if (!iso) return "—";
   const d = new Date(iso);
