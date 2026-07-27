@@ -1794,10 +1794,18 @@ class TradingEngine:
             if init_stop is not None and symbol not in self._position_initial_stops:
                 self._position_initial_stops[symbol] = init_stop
 
-            trade = self.portfolio.on_fill(
-                fill, peak_price=peak, trough_price=trough, initial_stop=init_stop,
-                risk_manager=self.risk, now=now
-            )
+            try:
+                trade = self.portfolio.on_fill(
+                    fill, peak_price=peak, trough_price=trough, initial_stop=init_stop,
+                    risk_manager=self.risk, now=now
+                )
+            except Exception:
+                # The broker reservation is volatile only. If durable portfolio
+                # processing fails, release it so a later tick can safely retry.
+                nack_fill = getattr(self.broker, "nack_fill_processed", None)
+                if nack_fill is not None:
+                    nack_fill(fill)
+                raise
             ack_fill = getattr(self.broker, "ack_fill_processed", None)
             if ack_fill is not None:
                 ack_fill(fill)

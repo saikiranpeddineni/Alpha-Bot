@@ -124,8 +124,13 @@ class AlpacaBroker(Broker):
         self._client = TradingClient(api_key, api_secret, paper=paper)
         self._fills: list[Fill] = []
         self._emitted_fill_ids: set[str] = set()
+        # Acknowledged watermarks advance only after PortfolioTracker commits.
         self._processed_fill_qty: dict[str, float] = {}
         self._processed_fill_notional: dict[str, float] = {}
+        # In-flight watermarks prevent a repeated Alpaca cumulative snapshot from
+        # being emitted twice while the previous Fill awaits durable processing.
+        self._emitted_fill_qty: dict[str, float] = {}
+        self._emitted_fill_notional: dict[str, float] = {}
         self._meta: dict[str, tuple[str, str]] = {}  # order id -> (strategy, reason)
 
         self._symbol_strategies: dict[str, str] = {}
@@ -559,7 +564,10 @@ class AlpacaBroker(Broker):
             if cumulative <= 0 or not o.filled_avg_price:
                 continue
             oid = str(o.id)
-            processed = self._processed_fill_qty.get(oid, 0.0)
+            processed = max(
+                self._processed_fill_qty.get(oid, 0.0),
+                self._emitted_fill_qty.get(oid, 0.0),
+            )
             if db:
                 processed = max(processed, db.processed_fill_qty(mode=self._broker_mode, account_id=self.account_id, fill_key=oid))
             if cumulative <= processed + 1e-9:
@@ -577,7 +585,10 @@ class AlpacaBroker(Broker):
             if oid in local_watermarks:
                 processed = local_watermarks[oid]
             else:
-                processed = self._processed_fill_qty.get(oid, 0.0)
+                processed = max(
+                    self._processed_fill_qty.get(oid, 0.0),
+                    self._emitted_fill_qty.get(oid, 0.0),
+                )
                 if db:
                     processed = max(processed, db.processed_fill_qty(mode=self._broker_mode, account_id=self.account_id, fill_key=oid))
             delta = cumulative - processed
@@ -588,7 +599,17 @@ class AlpacaBroker(Broker):
             # fix(#44): incremental execution pricing from change in cumulative notional
             cum_avg_price = float(o.filled_avg_price or 0.0)
             cum_notional = cumulative * cum_avg_price
-            prev_notional = self._processed_fill_notional.get(oid, 0.0)
+            ack_qty = self._processed_fill_qty.get(oid, 0.0)
+            emitted_qty = self._emitted_fill_qty.get(oid, 0.0)
+            if emitted_qty >= ack_qty and emitted_qty >= processed - 1e-9:
+                prev_notional = self._emitted_fill_notional.get(oid, 0.0)
+            elif ack_qty >= processed - 1e-9:
+                prev_notional = self._processed_fill_notional.get(oid, 0.0)
+            else:
+                # A durable DB watermark can survive a process restart while the
+                # volatile notional cannot. Use the broker cumulative average as
+                # the conservative price basis; quantity de-dup remains exact.
+                prev_notional = processed * cum_avg_price
 
             if processed > 0 and delta > 0 and cum_notional > prev_notional:
                 delta_price = round((cum_notional - prev_notional) / delta, 4)
@@ -611,9 +632,11 @@ class AlpacaBroker(Broker):
                     broker_account_id=self.account_id,
                 )
             )
-            # local_watermarks prevents duplicates within this poll only. Durable/in-memory
-            # acknowledgement happens after PortfolioTracker atomically commits the fill.
+            # Reserve the cumulative snapshot as in-flight before returning it to
+            # the engine. ACK promotes this reservation; NACK releases it.
             local_watermarks[oid] = cumulative
+            self._emitted_fill_qty[oid] = cumulative
+            self._emitted_fill_notional[oid] = cum_notional
 
 
     def ack_fill_processed(self, fill: Fill) -> None:
@@ -623,8 +646,27 @@ class AlpacaBroker(Broker):
             return
         cumulative = float(fill.cumulative_qty or 0.0)
         if cumulative > 0:
-            self._processed_fill_qty[oid] = max(self._processed_fill_qty.get(oid, 0.0), cumulative)
-        self._processed_fill_notional[oid] = self._processed_fill_notional.get(oid, 0.0) + float(fill.qty) * float(fill.price)
+            previous_qty = self._processed_fill_qty.get(oid, 0.0)
+            if cumulative >= previous_qty:
+                self._processed_fill_qty[oid] = cumulative
+                self._processed_fill_notional[oid] = max(
+                    self._processed_fill_notional.get(oid, 0.0),
+                    self._emitted_fill_notional.get(oid, 0.0),
+                    self._processed_fill_notional.get(oid, 0.0) + float(fill.qty) * float(fill.price),
+                )
+        if self._emitted_fill_qty.get(oid, 0.0) <= self._processed_fill_qty.get(oid, 0.0) + 1e-9:
+            self._emitted_fill_qty.pop(oid, None)
+            self._emitted_fill_notional.pop(oid, None)
+
+    def nack_fill_processed(self, fill: Fill) -> None:
+        """Release an uncommitted reservation so a later poll can retry it."""
+        oid = str(fill.broker_fill_key or fill.order_id or "")
+        if not oid:
+            return
+        cumulative = float(fill.cumulative_qty or 0.0)
+        if self._emitted_fill_qty.get(oid, 0.0) <= cumulative + 1e-9:
+            self._emitted_fill_qty.pop(oid, None)
+            self._emitted_fill_notional.pop(oid, None)
 
 
     def drain_fills(self) -> list[Fill]:

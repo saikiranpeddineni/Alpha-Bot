@@ -39,9 +39,10 @@ def test_emergency_protection_does_not_replace_symbol_strategy():
 def test_fill_ack_is_post_durable_processing_source():
     broker_src = (Path(__file__).parents[1] / "app" / "brokers" / "alpaca.py").read_text(encoding="utf-8")
     engine_src = (Path(__file__).parents[1] / "app" / "core" / "engine.py").read_text(encoding="utf-8")
-    poll_block = broker_src[broker_src.index("async def poll_fills"):broker_src.index("def drain_fills")]
+    poll_block = broker_src[broker_src.index("async def poll_fills"):broker_src.index("def ack_fill_processed")]
     assert "self._processed_fill_qty[oid] = cumulative" not in poll_block
     assert "def ack_fill_processed" in broker_src
+    assert "def nack_fill_processed" in broker_src
     on_fill_idx = engine_src.index("trade = self.portfolio.on_fill(")
     ack_idx = engine_src.index('ack_fill = getattr(self.broker, "ack_fill_processed"', on_fill_idx)
     assert ack_idx > on_fill_idx
