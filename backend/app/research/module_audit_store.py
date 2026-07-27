@@ -1,6 +1,6 @@
 """Fail-open durable audit trail for ShadowAlphaBot module activity.
 
-This store deliberately depends only on the database persistence boundary.  It has
+This store deliberately depends only on the database persistence boundary. It has
 no broker, risk, portfolio, scanner, or production-decision authority.
 """
 from __future__ import annotations
@@ -29,23 +29,21 @@ class ShadowModuleAuditStore:
         if self.db is None or not hasattr(self.db, "save_policy_evidence"):
             return False
         when = ts or datetime.now(UTC)
-        body = {
-            "schema_version": 1,
-            "research_only": True,
-            "module": module,
-            "recorded_at": when.isoformat(),
-            **payload,
-        }
+        body = {"schema_version": 1, "research_only": True, "module": module,
+                "recorded_at": when.isoformat(), **payload}
         try:
             encoded = json.dumps(body, sort_keys=True, default=str, allow_nan=False)
-            stable = identity or hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:24]
-            evidence_id = f"shadow:{module}:{stable}"[:64]
+            # Always hash external identities: candidate IDs may already be 64 chars,
+            # and truncating module+candidate+policy would alias distinct challengers.
+            identity_material = identity if identity is not None else encoded
+            stable = hashlib.sha256(identity_material.encode("utf-8")).hexdigest()[:32]
+            module_key = module[:20]
+            evidence_id = f"sh:{module_key}:{stable}"  # <= 56 chars
             with self._lock:
                 self.db.save_policy_evidence(evidence_id, f"shadow:{module}"[:64], when, body)
             self.records_written += 1
             return True
         except Exception as exc:
-            # Duplicate/idempotent writes and all persistence faults are non-authoritative.
             self.persistence_failures += 1
             applog.warning("shadow_audit", f"{module} audit persistence failed open: {exc}")
             return False
