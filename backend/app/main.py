@@ -14,11 +14,6 @@ import sys
 import time
 from contextlib import asynccontextmanager
 
-# ---- Windows ProactorEventLoop fix ----------------------------------------
-# The default ProactorEventLoop on Windows has a known bug where pipe transports
-# raise an unhandled exception in _call_connection_lost when a WebSocket client
-# disconnects while heavy background threads (e.g. model training) are running.
-# Switching to SelectorEventLoop before anything starts eliminates this crash.
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     try:
@@ -37,7 +32,6 @@ if sys.platform == "win32":
         _ProactorBasePipeTransport._call_connection_lost = patched_call
     except ImportError:
         pass
-# ---------------------------------------------------------------------------
 
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
@@ -46,6 +40,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app import __version__
 from app.api.routes import router
+from app.api.replay import router as replay_router
 from app.api.ws import EventHub
 from app.config import FRONTEND_DIST, Settings, get_settings
 from app.core.engine import TradingEngine
@@ -54,12 +49,7 @@ from app.db.database import Database
 
 
 def _json_safe(value):
-    """Normalize non-finite floats at the HTTP JSON boundary.
-
-    Historical/research telemetry can legitimately contain NaN/Infinity from
-    unavailable calculations. JSON has no representation for those values, so
-    expose them as null without mutating persisted evidence or trading state.
-    """
+    """Normalize non-finite floats at the HTTP JSON boundary."""
     if isinstance(value, float):
         return value if math.isfinite(value) else None
     if isinstance(value, dict):
@@ -71,11 +61,6 @@ def _json_safe(value):
     return value
 
 
-# Some routes intentionally construct JSONResponse directly, which bypasses
-# FastAPI's default_response_class. Patch the shared Starlette response class at
-# the serialization boundary so those explicit responses receive the same safe
-# normalization. Keep the original renderer to avoid recursion and preserve all
-# normal JSONResponse behavior.
 _json_response_render = JSONResponse.render
 
 def _safe_json_response_render(self, content) -> bytes:
@@ -96,18 +81,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     hub = EventHub()
     engine.publish = hub.publish
 
-    # Rate-limit applog→WebSocket fan-out during heavy training cycles.
-    # Training emits thousands of log lines; pushing all of them through the
-    # WebSocket send loop races the ProactorEventLoop pipe transport on Windows
-    # and fills the client buffer. Only INFO+ logs are forwarded; DEBUG is dropped.
     _log_seq = 0
     def _safe_log_publish(entry) -> None:
         nonlocal _log_seq
         if entry.level.upper() == "DEBUG":
-            return  # never forward DEBUG to UI
+            return
         _log_seq += 1
-        # Throttle: forward every log, but skip rapid-fire bursts by batching
-        # (the hub is still async; this just avoids saturating the task queue)
         hub.publish("log", entry.model_dump(mode="json"))
 
     applog.subscribe(_safe_log_publish)
@@ -158,6 +137,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
 
     app.include_router(router)
+    app.include_router(replay_router)
 
     @app.websocket("/ws")
     async def ws_endpoint(ws: WebSocket) -> None:
@@ -184,10 +164,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "day_pnl_pct": 0.0,
                     "drawdown_pct": round(engine.portfolio.drawdown_pct(account.equity), 2) if engine.portfolio else 0.0,
                 }
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 applog.warning("ws", f"Broker calls during WebSocket bootstrap failed: {exc}")
             t_broker_ms = round((time.perf_counter() - tb0) * 1000, 2)
-        
+
         t_total_ms = round((time.perf_counter() - t0) * 1000, 2)
         applog.debug("ws", f"WebSocket bootstrap built in {t_total_ms}ms (broker: {t_broker_ms}ms)")
         await hub.handle(ws, bootstrap)
@@ -211,6 +191,5 @@ app = create_app()
 
 if __name__ == "__main__":
     import uvicorn
-
     s = get_settings()
     uvicorn.run(app, host=s.host, port=s.port)
