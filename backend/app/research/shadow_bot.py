@@ -1,10 +1,7 @@
 """Shadow AlphaBot control plane built only from existing research components.
 
-This is deliberately NOT a second production TradingEngine.  It owns no broker,
-order submission, production risk, model training, or promotion authority.  It is
-an orchestration/read-model facade over the existing ShadowResearchRuntime:
-Target-D, Spawn, outcome joiner, and exit challengers (including Harvest V2
-observations emitted by the Champion engine).
+This is deliberately NOT a second production TradingEngine. It owns no broker,
+order submission, production risk, model training, or promotion authority.
 """
 from __future__ import annotations
 
@@ -23,13 +20,19 @@ class ShadowBotCapabilities:
     model_training: bool = False
     automatic_promotion: bool = False
     target_d: bool = True
+    gemini_ranker: bool = True
     spawn: bool = True
+    spawn_rotation: bool = True
     outcome_joiner: bool = True
+    rejected_signal_replay_evidence: bool = True
+    discovery_evidence: bool = True
     exit_challengers: bool = True
+    harvest_v2: bool = True
+    durable_module_audit: bool = True
 
 
 class ShadowAlphaBotRuntime:
-    """Single lifecycle/telemetry boundary for the existing shadow stack."""
+    """Single lifecycle, publish, telemetry, and audit facade for the shadow stack."""
 
     def __init__(self, research: ShadowResearchRuntime):
         self.research = research
@@ -54,7 +57,6 @@ class ShadowAlphaBotRuntime:
         research = self.research.telemetry()
         publisher = research.get("publisher", {})
         spawn = research.get("spawn", {})
-        target_d = research.get("target_d", {})
         return {
             "name": "ShadowAlphaBot",
             "started": bool(research.get("started")),
@@ -62,26 +64,30 @@ class ShadowAlphaBotRuntime:
             "stopped_at": self.stopped_at.isoformat() if self.stopped_at else None,
             "capabilities": self.capabilities.__dict__.copy(),
             "health": {
-                "queue_depth": publisher.get("queue_depth", 0),
-                "queue_capacity": publisher.get("queue_capacity", 0),
+                "queue_depth": publisher.get("queue_size", 0),
                 "lag_seconds": publisher.get("lag_seconds"),
                 "events_published": publisher.get("events_published", 0),
                 "events_processed": publisher.get("events_processed", 0),
                 "events_dropped": publisher.get("events_dropped", 0),
                 "events_duplicate": publisher.get("events_duplicate", 0),
                 "consumer_errors": publisher.get("consumer_errors", 0),
-                "consumer_errors_by_name": publisher.get("consumer_errors_by_name", {}),
             },
             "coverage": {
                 "spawn_observations": spawn.get("observations_processed", 0),
                 "spawn_candidates": spawn.get("candidate_observations_processed", 0),
                 "spawn_market_bars": spawn.get("market_bars_processed", 0),
-                "spawn_last_observation_ts": spawn.get("last_observation_ts"),
-                "spawn_last_candidate_ts": spawn.get("last_candidate_ts"),
-                "spawn_last_market_bar_ts": spawn.get("last_market_bar_ts"),
+                "evidence_records": research.get("evidence", {}).get("records", 0),
+                "audit_records": research.get("audit", {}).get("records_written", 0),
+                "outcomes_emitted": research.get("outcomes", {}).get("outcomes_emitted", 0),
+                "exit_replays": research.get("exit_challengers", {}).get("replays", 0),
+                "harvest_v2_replays": research.get("exit_challengers", {}).get("harvest_replays", 0),
             },
-            "target_d": target_d,
+            "target_d": research.get("target_d", {}),
+            "gemini": research.get("gemini", {}),
             "spawn": spawn,
+            "discovery": {"persisted": True},
+            "audit": research.get("audit", {}),
+            "evidence": research.get("evidence", {}),
             "outcomes": research.get("outcomes", {}),
             "exit_challengers": research.get("exit_challengers", {}),
             "lifecycle_errors": research.get("lifecycle_errors", 0),
