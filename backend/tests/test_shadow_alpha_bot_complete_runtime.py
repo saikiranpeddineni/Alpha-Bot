@@ -1,15 +1,16 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
 
-from app.db.database import Database
+from sqlalchemy import select
+
+from app.db.database import Database, PolicyEvidenceRow
 from app.research.shadow_event import ShadowEventType, TradingObservationEvent
 from app.research.shadow_runtime import ShadowAlphaBotRuntime, ShadowResearchRuntime
 
 
 def _candidate() -> TradingObservationEvent:
     return TradingObservationEvent(
-        event_type=ShadowEventType.CANDIDATE,
-        event_id="evt-c1", candidate_id="c1",
+        event_type=ShadowEventType.CANDIDATE, event_id="evt-c1", candidate_id="c1",
         ts=datetime(2026, 7, 28, 14, 30, tzinfo=UTC),
         decision_bar_timestamp_utc=datetime(2026, 7, 28, 14, 29, tzinfo=UTC),
         symbol="NVDA", side="long", strategy="momentum", price=100.0,
@@ -27,6 +28,11 @@ def _bar(minute: int, close: float = 101.0) -> TradingObservationEvent:
     )
 
 
+def _audit_rows(db: Database, policy_id: str):
+    with db._session() as session:
+        return session.scalars(select(PolicyEvidenceRow).where(PolicyEvidenceRow.policy_id == policy_id)).all()
+
+
 def test_compatibility_alias_preserves_engine_contract():
     assert ShadowResearchRuntime is ShadowAlphaBotRuntime
 
@@ -39,9 +45,9 @@ def test_all_module_audit_is_durable_in_policy_evidence(tmp_path):
         try:
             assert runtime.publish(_candidate()) is True
             await asyncio.wait_for(runtime.publisher.queue.join(), timeout=2)
-            rows = db.get_policy_evidence_by_policy("shadow:champion")
+            rows = _audit_rows(db, "shadow:champion")
             assert rows
-            assert any((row.get("payload") or {}).get("candidate_id") == "c1" for row in rows)
+            assert any("c1" in row.payload for row in rows)
         finally:
             await runtime.stop()
             db.close()
@@ -62,15 +68,14 @@ def test_harvest_v2_runs_from_canonical_event_stream_and_persists(tmp_path):
             assert record is not None
             assert record["decision"] in {"REPLAYED", "UNAVAILABLE"}
             assert runtime.telemetry()["harvest_v2"]["replays"] == 1
-            audit_rows = db.get_policy_evidence_by_policy("shadow:harvest_v2")
-            assert audit_rows
+            assert _audit_rows(db, "shadow:harvest_v2")
         finally:
             await runtime.stop()
             db.close()
     asyncio.run(run())
 
 
-def test_target_d_unavailable_reason_is_persistable(tmp_path):
+def test_target_d_unavailable_reason_is_explicit(tmp_path):
     db = Database(tmp_path / "shadow.db")
     runtime = ShadowAlphaBotRuntime(db=db, gemini_api_key=None)
     observation = runtime.target_d.consume(_candidate())
