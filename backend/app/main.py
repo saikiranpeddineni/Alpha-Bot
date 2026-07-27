@@ -6,10 +6,10 @@ Run from the repo root:
 The FastAPI app serves the REST API, the /ws event stream, and (when built)
 the production frontend from frontend/dist.
 """
-
 from __future__ import annotations
 
 import asyncio
+import math
 import sys
 import time
 from contextlib import asynccontextmanager
@@ -41,16 +41,51 @@ if sys.platform == "win32":
 
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import __version__
 from app.api.routes import router
-from app.api.replay import router as replay_router
 from app.api.ws import EventHub
 from app.config import FRONTEND_DIST, Settings, get_settings
 from app.core.engine import TradingEngine
 from app.core.logging import applog, configure_std_logging
 from app.db.database import Database
+
+
+def _json_safe(value):
+    """Normalize non-finite floats at the HTTP JSON boundary.
+
+    Historical/research telemetry can legitimately contain NaN/Infinity from
+    unavailable calculations. JSON has no representation for those values, so
+    expose them as null without mutating persisted evidence or trading state.
+    """
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return [_json_safe(item) for item in value]
+    return value
+
+
+# Some routes intentionally construct JSONResponse directly, which bypasses
+# FastAPI's default_response_class. Patch the shared Starlette response class at
+# the serialization boundary so those explicit responses receive the same safe
+# normalization. Keep the original renderer to avoid recursion and preserve all
+# normal JSONResponse behavior.
+_json_response_render = JSONResponse.render
+
+def _safe_json_response_render(self, content) -> bytes:
+    return _json_response_render(self, _json_safe(content))
+
+JSONResponse.render = _safe_json_response_render
+
+
+class SafeJSONResponse(JSONResponse):
+    """Default response class; JSONResponse itself is normalized above too."""
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -85,7 +120,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         yield
         await engine.shutdown()
 
-    app = FastAPI(title="AlphaDesk", version=__version__, lifespan=lifespan)
+    app = FastAPI(
+        title="AlphaDesk",
+        version=__version__,
+        lifespan=lifespan,
+        default_response_class=SafeJSONResponse,
+    )
     app.state.settings = settings
     app.state.db = db
     app.state.engine = engine
@@ -118,7 +158,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
 
     app.include_router(router)
-    app.include_router(replay_router)
 
     @app.websocket("/ws")
     async def ws_endpoint(ws: WebSocket) -> None:

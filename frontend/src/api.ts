@@ -102,14 +102,8 @@ export const api = {
   backtests: () => request<BacktestSummary[]>("/api/backtests"),
   backtest: (id: string) => request<BacktestResult>(`/api/backtests/${id}`),
   runScanner: () => request<{ status: string; watchlist: string[] }>("/api/scanner/run", { method: "POST" }),
-  runProfitValidation: (body?: { symbols?: string[]; start_date?: string | null; end_date?: string | null }) =>
-    request<{ status: string; report: string }>("/api/validation/profit-optimization", {
-      method: "POST",
-      body: body ? JSON.stringify(body) : undefined,
-    }),
   shadowLedgerAnalytics: () => request<ShadowAnalyticsResponse>("/api/shadow-ledger/analytics"),
   shadowLedgerGateAlpha: () =>
-    request<{ gates: GateAlphaResponse; population_meta: unknown }>("/api/shadow-ledger/gate-alpha")
-      .then((r) => r.gates),
+    request<{ gates: GateAlphaResponse; population_meta: unknown }>("/api/shadow-ledger/gate-alpha").then((r) => r.gates),
   shadowLedgerCandidates: (limit = 100) => request<any[]>(`/api/shadow-ledger?limit=${limit}`),
 };
