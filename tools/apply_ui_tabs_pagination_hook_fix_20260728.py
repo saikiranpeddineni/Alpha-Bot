@@ -51,8 +51,8 @@ src = replace_once(
     "trade pagination controls",
 )
 
-# BottomTabs now uses fmtDate for explicit date column.
-src = replace_once(src, 'fmtDateTime, fmtMoney', 'fmtDate, fmtDateTime, fmtMoney', "fmtDate import")
+# BottomTabs uses explicit market-date + market-time columns; fmtDateTime is no longer needed here.
+src = replace_once(src, 'fmtDateTime, fmtMoney', 'fmtDate, fmtMoney', "fmtDate import")
 bottom.write_text(src, encoding="utf-8")
 
 fmt_src = fmt.read_text(encoding="utf-8")
