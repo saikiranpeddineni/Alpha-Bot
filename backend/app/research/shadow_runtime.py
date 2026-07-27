@@ -1,6 +1,6 @@
 """Composition root for the complete non-authoritative ShadowAlphaBot research plane.
 
-TradingEngine knows this runtime, not individual research implementations.  Every
+TradingEngine knows this runtime, not individual research implementations. Every
 consumer is one-way, fail-open, and receives immutable value snapshots only.
 """
 from __future__ import annotations
@@ -40,9 +40,6 @@ class ShadowResearchRuntime:
         self._lifecycle_errors = 0
 
         def gemini_sink(observation: dict[str, Any]) -> None:
-            # Gemini is asynchronous and can rank a batch, so persist the complete
-            # observation as module evidence in addition to the legacy sink.
-            ids = observation.get("candidate_ids") or []
             identity = f"{observation.get('session')}:{observation.get('candidate_fingerprint')}"
             self.audit.record("gemini", observation, identity=identity)
             if gemini_observation_sink is not None:
@@ -57,8 +54,6 @@ class ShadowResearchRuntime:
         self.gemini = GeminiShadowBridge(GeminiShadowRanker(gemini_api_key or ""), observation_sink=gemini_sink)
         self.target_d = TargetDShadowConsumer(TargetDShadowObserver(), observation_sink=target_d_sink)
 
-        # Registration order is intentional: canonical ingress is persisted first;
-        # independent consumers then operate on exactly the same immutable event.
         self.publisher.register("shadow_ingress", self._record_ingress)
         self.publisher.register("evidence_champion", self._record_champion)
         self.publisher.register("discovery", self._record_discovery)
@@ -69,12 +64,8 @@ class ShadowResearchRuntime:
         self.publisher.register("target_d", self._consume_target_d)
 
     def _record_ingress(self, event: TradingObservationEvent) -> None:
-        self.audit.record(
-            "event_ingress",
-            {"event": event.model_dump(mode="json")},
-            identity=event.event_id,
-            ts=event.ts,
-        )
+        self.audit.record("event_ingress", {"event": event.model_dump(mode="json")},
+                          identity=event.event_id, ts=event.ts)
 
     def _record_champion(self, event: TradingObservationEvent) -> None:
         if event.candidate_id:
@@ -84,12 +75,8 @@ class ShadowResearchRuntime:
     def _record_discovery(self, event: TradingObservationEvent) -> None:
         if event.event_type != ShadowEventType.CANDIDATE or not event.candidate_id:
             return
-        evidence = {
-            "discovery_source": event.discovery_source,
-            "scanner_score": event.scanner_score,
-            "scanner_auc": event.scanner_auc,
-            "symbol": event.symbol,
-        }
+        evidence = {"discovery_source": event.discovery_source, "scanner_score": event.scanner_score,
+                    "scanner_auc": event.scanner_auc, "symbol": event.symbol}
         self.evidence.record(event, challenger_id="discovery", challenger_version="observed_source_v1",
                              decision=event.discovery_source or "UNAVAILABLE", evidence=evidence)
         self.audit.record("discovery", evidence, identity=event.candidate_id, ts=event.ts)
@@ -102,10 +89,8 @@ class ShadowResearchRuntime:
 
     def _record_exit(self, event: TradingObservationEvent, policy: str, evidence: dict[str, Any]) -> None:
         if event.candidate_id:
-            if evidence.get("replay_valid") is False:
-                decision = "UNAVAILABLE"
-            else:
-                decision = "AMBIGUOUS" if evidence.get("ambiguous") else "REPLAYED"
+            decision = "UNAVAILABLE" if evidence.get("replay_valid") is False else (
+                "AMBIGUOUS" if evidence.get("ambiguous") else "REPLAYED")
             self.evidence.record(event, challenger_id="exit_policy", challenger_version=policy,
                                  decision=decision, evidence=evidence)
             self.audit.record("exit_policy", {"policy": policy, **evidence},
@@ -113,8 +98,6 @@ class ShadowResearchRuntime:
 
     def _consume_spawn(self, event: TradingObservationEvent) -> None:
         self.spawn_adapter.consume(event)
-        # Spawn owns richer trade/checkpoint tables already.  This audit row proves
-        # canonical delivery and captures coordinator telemetry for cross-module validation.
         self.audit.record("spawn", {"event_id": event.event_id, "candidate_id": event.candidate_id,
                                     "telemetry": self.spawn.telemetry()}, identity=event.event_id, ts=event.ts)
 
@@ -138,11 +121,11 @@ class ShadowResearchRuntime:
             self._lifecycle_errors += 1
             applog.error("shadow_research", f"spawn startup failed (fail-open): {exc}")
         self._started = True
-        self.audit.record("runtime", {"event": "START", "telemetry": self.telemetry()}, identity="runtime:start")
+        # No fixed identity: each process lifecycle must remain independently auditable.
+        self.audit.record("runtime", {"event": "START", "telemetry": self.telemetry()})
 
     async def stop(self) -> None:
-        # Snapshot before teardown so validation retains final module counters.
-        self.audit.record("runtime", {"event": "STOP", "telemetry": self.telemetry()}, identity="runtime:stop")
+        self.audit.record("runtime", {"event": "STOP", "telemetry": self.telemetry()})
         for name, cleanup in (("publisher", self.publisher.stop), ("gemini", self.gemini.shutdown), ("spawn", self.spawn.stop)):
             try:
                 await cleanup()
