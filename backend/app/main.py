@@ -44,7 +44,7 @@ from app.api.routes import router
 from app.api.replay import router as replay_router
 from app.api.ws import EventHub
 from app.config import FRONTEND_DIST, Settings, get_settings
-from app.core.engine import TradingEngine
+from app.core.durable_engine import DurableTradingEngine
 from app.core.logging import applog, configure_std_logging
 from app.db.database import Database
 
@@ -78,7 +78,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     configure_std_logging()
     settings = settings or get_settings()
     db = Database(settings.resolved_db_path)
-    engine = TradingEngine(settings, db)
+    engine = DurableTradingEngine(settings, db)
     hub = EventHub()
     engine.publish = hub.publish
 
