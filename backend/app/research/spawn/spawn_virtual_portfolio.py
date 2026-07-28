@@ -6,7 +6,7 @@ import math
 
 @dataclass
 class VirtualPosition:
-    symbol:str; side:str; qty:float; entry_price:float; entry_at:datetime; initial_stop:float; initial_target:float|None=None; trailing_stop:float|None=None; peak_price:float=0.0; trough_price:float=0.0; virtual_order_id:str=""
+    symbol:str; side:str; qty:float; entry_price:float; entry_at:datetime; initial_stop:float; initial_target:float|None=None; trailing_stop:float|None=None; peak_price:float=0.0; trough_price:float=0.0; virtual_order_id:str=""; strategy:str="unknown"
     def __post_init__(self):
         self.peak_price=self.peak_price or self.entry_price; self.trough_price=self.trough_price or self.entry_price
         if self.trailing_stop is None:self.trailing_stop=self.initial_stop
@@ -46,39 +46,20 @@ class SpawnVirtualPortfolio:
     def check_and_execute_rotation(self, candidate_obs, now, profiles=None):
         from app.research.spawn.spawn_opportunity_cost import check_rotation_opportunity
         res = check_rotation_opportunity(self.positions, self.last_prices, candidate_obs, now, profiles, self.risk_config)
-        if res is None:
-            return None
+        if res is None:return None
         weakest_pos, weakest_eval, incoming_eval, edge_delta = res
         raw_px = self.last_prices.get(weakest_pos.symbol)
-        if raw_px is None:
-            return None
-        try:
-            px = float(raw_px)
-        except (TypeError, ValueError):
-            return None
-        if px <= 0.0:
-            return None
-        rec = self.close_virtual_position(weakest_pos.symbol, px, "OPPORTUNITY_ROTATION_EXIT", now)
-        if rec:
-            rec["rotation_telemetry"] = {
-                "incumbent_symbol": weakest_eval.symbol,
-                "incoming_symbol": incoming_eval.symbol,
-                "incumbent_score": weakest_eval.incumbent_score,
-                "incoming_score": incoming_eval.incoming_score,
-                "score_delta": edge_delta,
-                "incumbent_current_r": weakest_eval.current_r,
-                "capital_released": weakest_pos.entry_notional,
-                "holding_minutes": weakest_eval.holding_mins,
-                "rotation_reason": "OPPORTUNITY_ROTATION_EDGE",
-                "missing_incumbent_mark": False,
-            }
+        try:px=float(raw_px)
+        except (TypeError,ValueError):return None
+        if not math.isfinite(px) or px<=0.0:return None
+        rec=self.close_virtual_position(weakest_pos.symbol,px,"OPPORTUNITY_ROTATION_EXIT",now)
+        if rec:rec["rotation_telemetry"]={"incumbent_symbol":weakest_eval.symbol,"incoming_symbol":incoming_eval.symbol,"incumbent_score":weakest_eval.incumbent_score,"incoming_score":incoming_eval.incoming_score,"score_delta":edge_delta,"incumbent_current_r":weakest_eval.current_r,"capital_released":weakest_pos.entry_notional,"holding_minutes":weakest_eval.holding_mins,"rotation_reason":"OPPORTUNITY_ROTATION_EDGE","missing_incumbent_mark":False}
         return rec
     def open_virtual_position(self,symbol,side,qty,price,stop,target,now,order_id="",candidate_obs=None,profiles=None):
         sym=symbol.upper()
-        if not self.can_open_position(sym) and candidate_obs:
-            self.check_and_execute_rotation(candidate_obs, now, profiles)
+        if not self.can_open_position(sym) and candidate_obs:self.check_and_execute_rotation(candidate_obs,now,profiles)
         if not self.can_open_position(sym) or qty<=0:return None
-        p=VirtualPosition(sym,side.lower(),qty,price,now,stop,target,virtual_order_id=order_id); self.positions[sym]=p; self.last_prices[sym]=price; self.cumulative_entry_notional+=p.entry_notional; self.cumulative_initial_risk+=p.initial_dollar_risk; self._refresh_capital_deployed(); self.mark_to_market({sym:price}); return p
+        p=VirtualPosition(sym,side.lower(),qty,price,now,stop,target,virtual_order_id=order_id,strategy=str((candidate_obs or {}).get("strategy","unknown")).lower()); self.positions[sym]=p; self.last_prices[sym]=price; self.cumulative_entry_notional+=p.entry_notional; self.cumulative_initial_risk+=p.initial_dollar_risk; self._refresh_capital_deployed(); self.mark_to_market({sym:price}); return p
     def _stagnation_exit_price(self,position,close_px,now):
         minutes=float(self.risk_config.get("stagnation_exit_minutes",0.0)); max_abs_r=float(self.risk_config.get("stagnation_max_abs_r",0.0))
         if minutes<=0 or max_abs_r<=0 or not isinstance(now,datetime) or not isinstance(position.entry_at,datetime):return None
@@ -94,36 +75,50 @@ class SpawnVirtualPortfolio:
         if now is None:now=legacy_kwargs.pop("ts",None)
         if legacy_kwargs:raise TypeError(f"Unexpected OHLC arguments: {sorted(legacy_kwargs)}")
         if any(v is None for v in(o,h,l,c,now)):raise ValueError("Complete OHLC values and timestamp are required")
+        vals=[]
+        for v in(o,h,l,c):
+            try:x=float(v)
+            except (TypeError,ValueError):raise ValueError("OHLC values must be finite positive numbers")
+            if not math.isfinite(x) or x<=0:raise ValueError("OHLC values must be finite positive numbers")
+            vals.append(x)
+        o,h,l,c=vals
+        if h<max(o,c,l) or l>min(o,c,h):raise ValueError("Invalid OHLC ordering")
         sym=symbol.upper(); p=self.positions.get(sym)
         if not p:return None
         watermark=f"BAR|{sym}|{now.isoformat()}"
         if watermark in self.processed_watermarks:return None
+        # Include the exit bar in excursion statistics before an exit is evaluated.
+        p.peak_price=max(p.peak_price,h); p.trough_price=min(p.trough_price,l)
         stop=p.trailing_stop if p.trailing_stop is not None else p.initial_stop; exit_record=None
         if p.side=="long":
-            if l<=stop:exit_record=self.close_virtual_position(sym,stop,"STOP_LOSS",now)
+            if o<=stop:exit_record=self.close_virtual_position(sym,o,"STOP_LOSS_GAP",now)
+            elif l<=stop:exit_record=self.close_virtual_position(sym,stop,"STOP_LOSS",now)
+            elif p.initial_target and o>=p.initial_target:exit_record=self.close_virtual_position(sym,o,"TAKE_PROFIT_GAP",now)
             elif p.initial_target and h>=p.initial_target:exit_record=self.close_virtual_position(sym,p.initial_target,"TAKE_PROFIT",now)
         else:
-            if h>=stop:exit_record=self.close_virtual_position(sym,stop,"STOP_LOSS",now)
+            if o>=stop:exit_record=self.close_virtual_position(sym,o,"STOP_LOSS_GAP",now)
+            elif h>=stop:exit_record=self.close_virtual_position(sym,stop,"STOP_LOSS",now)
+            elif p.initial_target and o<=p.initial_target:exit_record=self.close_virtual_position(sym,o,"TAKE_PROFIT_GAP",now)
             elif p.initial_target and l<=p.initial_target:exit_record=self.close_virtual_position(sym,p.initial_target,"TAKE_PROFIT",now)
         if exit_record is None:
             stagnation_price=self._stagnation_exit_price(p,c,now)
             if stagnation_price is not None:exit_record=self.close_virtual_position(sym,stagnation_price,"STAGNATION_EXIT",now)
         self.record_processed_watermark(watermark)
         if exit_record is not None:return exit_record
-        p.peak_price=max(p.peak_price,h); p.trough_price=min(p.trough_price,l); mult=float(self.risk_config.get("trailing_stop_atr_mult",0.0)); risk=p.initial_risk_per_share
+        mult=float(self.risk_config.get("trailing_stop_atr_mult",0.0)); risk=p.initial_risk_per_share
         if mult>0 and p.side=="long" and p.peak_price>p.entry_price:p.trailing_stop=max(p.trailing_stop or p.initial_stop,p.peak_price-risk*mult)
         elif mult>0 and p.side=="short" and p.trough_price<p.entry_price:p.trailing_stop=min(p.trailing_stop or p.initial_stop,p.trough_price+risk*mult)
         self.mark_to_market({sym:c}); return None
     def close_virtual_position(self,symbol,exit_price,reason,now):
-        sym=symbol.upper(); p=self.positions.pop(sym); risk=p.initial_risk_per_share; pnl=((exit_price-p.entry_price) if p.side=="long" else (p.entry_price-exit_price))*p.qty; rr=((exit_price-p.entry_price) if p.side=="long" else (p.entry_price-exit_price))/risk; mfe=((p.peak_price-p.entry_price) if p.side=="long" else (p.entry_price-p.trough_price))/risk; mae=((p.entry_price-p.trough_price) if p.side=="long" else (p.peak_price-p.entry_price))/risk; self.cash+=pnl; self.realized_equity+=pnl; self.daily_pnl+=pnl; self.realized_r+=rr; self.trade_count+=1; self.last_prices[sym]=exit_price; self._refresh_capital_deployed(); self.mark_to_market({sym:exit_price}); self._sizing_equity(); record={"policy_id":self.policy_id,"symbol":sym,"side":p.side,"qty":p.qty,"entry_price":p.entry_price,"exit_price":exit_price,"entry_at":p.entry_at.isoformat(),"exit_at":now.isoformat(),"pnl":pnl,"realized_r":rr,"mfe_r":mfe,"mae_r":mae,"exit_reason":reason,"entry_notional":p.entry_notional,"initial_dollar_risk":p.initial_dollar_risk}; self.closed_trades.append(record); return record
+        sym=symbol.upper(); p=self.positions.pop(sym); risk=p.initial_risk_per_share; pnl=((exit_price-p.entry_price) if p.side=="long" else (p.entry_price-exit_price))*p.qty; rr=((exit_price-p.entry_price) if p.side=="long" else (p.entry_price-exit_price))/risk; mfe=((p.peak_price-p.entry_price) if p.side=="long" else (p.entry_price-p.trough_price))/risk; mae=((p.entry_price-p.trough_price) if p.side=="long" else (p.peak_price-p.entry_price))/risk; self.cash+=pnl; self.realized_equity+=pnl; self.daily_pnl+=pnl; self.realized_r+=rr; self.trade_count+=1; self.last_prices[sym]=exit_price; self._refresh_capital_deployed(); self.mark_to_market({sym:exit_price}); self._sizing_equity(); record={"policy_id":self.policy_id,"symbol":sym,"side":p.side,"strategy":p.strategy,"qty":p.qty,"entry_price":p.entry_price,"exit_price":exit_price,"entry_at":p.entry_at.isoformat(),"exit_at":now.isoformat(),"pnl":pnl,"realized_r":rr,"mfe_r":mfe,"mae_r":mae,"exit_reason":reason,"entry_notional":p.entry_notional,"initial_dollar_risk":p.initial_dollar_risk}; self.closed_trades.append(record); return record
     def to_checkpoint_dict(self):
-        positions={s:{"symbol":p.symbol,"side":p.side,"qty":p.qty,"entry_price":p.entry_price,"entry_at":p.entry_at.isoformat(),"initial_stop":p.initial_stop,"initial_target":p.initial_target,"trailing_stop":p.trailing_stop,"peak_price":p.peak_price,"trough_price":p.trough_price,"virtual_order_id":p.virtual_order_id} for s,p in self.positions.items()}; envelope={"schema":5,"orders":self.pending_orders,"last_prices":dict(self.last_prices),"processed_watermarks":list(self.processed_watermarks),"max_drawdown_pct":self.max_drawdown_pct,"capital_efficiency":self.capital_efficiency_metrics()}; return {"policy_id":self.policy_id,"cash":self.cash,"equity":self.marked_equity,"peak_equity":self.peak_equity,"positions":positions,"last_prices":dict(self.last_prices),"processed_watermarks":list(self.processed_watermarks),"pending_orders":envelope,"daily_pnl":self.daily_pnl,"realized_r":self.realized_r,"trade_count":self.trade_count,"drawdown":self.get_drawdown_pct(),"max_drawdown_pct":self.max_drawdown_pct,"current_capital_deployed":self.current_capital_deployed,"peak_capital_deployed":self.peak_capital_deployed,"cumulative_entry_notional":self.cumulative_entry_notional,"cumulative_initial_risk":self.cumulative_initial_risk,"realized_profit_reinvested":self.realized_profit_reinvested}
+        positions={s:{"symbol":p.symbol,"side":p.side,"strategy":p.strategy,"qty":p.qty,"entry_price":p.entry_price,"entry_at":p.entry_at.isoformat(),"initial_stop":p.initial_stop,"initial_target":p.initial_target,"trailing_stop":p.trailing_stop,"peak_price":p.peak_price,"trough_price":p.trough_price,"virtual_order_id":p.virtual_order_id} for s,p in self.positions.items()}; envelope={"schema":6,"orders":self.pending_orders,"last_prices":dict(self.last_prices),"processed_watermarks":list(self.processed_watermarks),"max_drawdown_pct":self.max_drawdown_pct,"capital_efficiency":self.capital_efficiency_metrics()}; return {"policy_id":self.policy_id,"cash":self.cash,"equity":self.marked_equity,"peak_equity":self.peak_equity,"positions":positions,"last_prices":dict(self.last_prices),"processed_watermarks":list(self.processed_watermarks),"pending_orders":envelope,"daily_pnl":self.daily_pnl,"realized_r":self.realized_r,"trade_count":self.trade_count,"drawdown":self.get_drawdown_pct(),"max_drawdown_pct":self.max_drawdown_pct,"current_capital_deployed":self.current_capital_deployed,"peak_capital_deployed":self.peak_capital_deployed,"cumulative_entry_notional":self.cumulative_entry_notional,"cumulative_initial_risk":self.cumulative_initial_risk,"realized_profit_reinvested":self.realized_profit_reinvested}
     def restore_from_checkpoint(self,checkpoint):
         self.cash=float(checkpoint.get("cash",self.seed_capital)); self.marked_equity=float(checkpoint.get("equity",self.seed_capital)); self.realized_equity=self.cash; self.peak_equity=float(checkpoint.get("peak_equity",self.marked_equity)); self.daily_pnl=float(checkpoint.get("daily_pnl",0)); self.realized_r=float(checkpoint.get("realized_r",0)); self.trade_count=int(checkpoint.get("trade_count",0)); self.max_drawdown_pct=float(checkpoint.get("max_drawdown_pct",checkpoint.get("drawdown",0.0))); self.current_capital_deployed=float(checkpoint.get("current_capital_deployed",0.0)); self.peak_capital_deployed=float(checkpoint.get("peak_capital_deployed",0.0)); self.cumulative_entry_notional=float(checkpoint.get("cumulative_entry_notional",0.0)); self.cumulative_initial_risk=float(checkpoint.get("cumulative_initial_risk",0.0)); self.realized_profit_reinvested=float(checkpoint.get("realized_profit_reinvested",0.0)); envelope=checkpoint.get("pending_orders") or {}
         if isinstance(envelope,dict):
             self.pending_orders=list(envelope.get("orders",[])); self.last_prices={str(k):float(v) for k,v in(envelope.get("last_prices") or checkpoint.get("last_prices") or {}).items()}; watermarks=envelope.get("processed_watermarks") or checkpoint.get("processed_watermarks") or []; self.processed_watermarks={str(i):None for i in watermarks[-self.MAX_DURABLE_WATERMARKS:]}; ce=envelope.get("capital_efficiency") or {}; self.peak_capital_deployed=max(self.peak_capital_deployed,float(ce.get("peak_capital_deployed",0.0) or 0.0)); self.cumulative_entry_notional=max(self.cumulative_entry_notional,float(ce.get("cumulative_entry_notional",0.0) or 0.0)); self.cumulative_initial_risk=max(self.cumulative_initial_risk,float(ce.get("cumulative_initial_risk",0.0) or 0.0))
         else:self.pending_orders=list(envelope); self.last_prices={str(k):float(v) for k,v in(checkpoint.get("last_prices") or {}).items()}; self.processed_watermarks={str(i):None for i in(checkpoint.get("processed_watermarks") or [])}; self.peak_capital_deployed=max(self.peak_capital_deployed,float(checkpoint.get("peak_capital_deployed",0.0) or 0.0)); self.cumulative_entry_notional=max(self.cumulative_entry_notional,float(checkpoint.get("cumulative_entry_notional",0.0) or 0.0)); self.cumulative_initial_risk=max(self.cumulative_initial_risk,float(checkpoint.get("cumulative_initial_risk",0.0) or 0.0))
-        self.positions={};
+        self.positions={}
         for s,d in(checkpoint.get("positions") or {}).items():
-            p=VirtualPosition(d["symbol"],d["side"],d["qty"],d["entry_price"],datetime.fromisoformat(d["entry_at"]),d["initial_stop"],d.get("initial_target"),d.get("trailing_stop"),d.get("peak_price",d["entry_price"]),d.get("trough_price",d["entry_price"]),d.get("virtual_order_id","") ); self.positions[s]=p
+            p=VirtualPosition(d["symbol"],d["side"],d["qty"],d["entry_price"],datetime.fromisoformat(d["entry_at"]),d["initial_stop"],d.get("initial_target"),d.get("trailing_stop"),d.get("peak_price",d["entry_price"]),d.get("trough_price",d["entry_price"]),d.get("virtual_order_id",""),d.get("strategy","unknown")); self.positions[s]=p
         self._refresh_capital_deployed(); self.mark_to_market(self.last_prices)
