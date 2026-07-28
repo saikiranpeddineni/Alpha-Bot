@@ -34,6 +34,9 @@ class ChildPolicyExecutor:
         if bar_watermark in self.portfolio.processed_watermarks:return None
         try:return self.portfolio.update_ohlc_and_check_exits(symbol,open_px,high_px,low_px,close_px,ts)
         except ValueError:return None
+    @staticmethod
+    def _disagreement(champion_pass:bool,child_pass:bool)->str:
+        return "BOTH_PASS" if champion_pass and child_pass else "BOTH_REJECT" if not champion_pass and not child_pass else "CHAMPION_ONLY" if champion_pass else "CHILD_ONLY"
     def evaluate_observation(self,observation:dict[str,Any])->dict[str,Any]|None:
         ts=observation.get("ts")
         if not isinstance(ts,datetime) or ts.tzinfo is None or not self.is_eligible_at(ts):return None
@@ -55,18 +58,27 @@ class ChildPolicyExecutor:
         raw_ml=self._finite(champion.get("ml_probability",observation.get("ml_probability"))); ml_threshold=float(self.config.ml_overrides.get("ml_threshold",0.48)); ml_pass=raw_ml is not None and raw_ml>=ml_threshold; ml_decision=("PASS" if ml_pass else "REJECT") if raw_ml is not None else "UNAVAILABLE"
         raw_meta=self._finite(champion.get("meta_probability",observation.get("meta_probability")))
         if raw_meta is not None:meta_threshold=float(self.config.meta_overrides.get("meta_threshold",0.55)); meta_pass=raw_meta>=meta_threshold; meta_decision="PASS" if meta_pass else "REJECT"
-        else:categorical_pipeline_pass=champion.get("final_decision") in("accepted","rejected","bypassed"); meta_pass=categorical_pipeline_pass; meta_decision="PASS_PRODUCTION_PIPELINE_EVIDENCE" if meta_pass else "UNAVAILABLE"
+        else:meta_pass=False; meta_decision="UNAVAILABLE"
         raw_score=self._finite(champion.get("trade_score",observation.get("trade_score"))); score_threshold=float(self.config.risk_overrides.get("min_trade_score",50.0)); score_pass=raw_score is not None and raw_score>=score_threshold; score_decision=("PASS" if score_pass else "REJECT") if raw_score is not None else "UNAVAILABLE"
-        stop=self._finite(observation.get("stop_loss")); target=self._finite(observation.get("take_profit"))
-        if stop is None:distance=price*0.02; stop=price-distance if direction=="long" else price+distance
-        if (direction=="long" and stop>=price) or (direction=="short" and stop<=price):return None
-        qty=self.portfolio.calculate_position_size(price,stop); candidate_capital=max(1.0,qty*price) if qty>0 else max(1.0,self.config.seed_capital*float(self.config.risk_overrides.get("max_position_pct",25.0))/100.0)
+        stop=self._finite(observation.get("stop_loss")); target=self._finite(observation.get("take_profit")); stop_valid=stop is not None and ((direction=="long" and stop<price) or (direction=="short" and stop>price))
+        qty=self.portfolio.calculate_position_size(price,stop) if stop_valid else 0.0
+        candidate_capital=max(1.0,qty*price) if qty>0 else max(1.0,self.config.seed_capital*float(self.config.risk_overrides.get("max_position_pct",25.0))/100.0)
         allocator_obs=dict(observation); allocator_obs.setdefault("symbol",symbol); allocator_obs.setdefault("side",direction); allocator_obs.setdefault("strategy",strategy)
         if raw_score is not None and "score" not in allocator_obs:allocator_obs["score"]=raw_score/100.0 if raw_score>1.0 else raw_score
-        allocation=self.allocator.evaluate_allocation(self.portfolio,self.portfolio.last_prices,allocator_obs,ts,candidate_capital=candidate_capital) if self.allocator.enabled else None
-        if allocation is None:capital_pass=self.portfolio.can_open_position(symbol); allocation_reason="ALLOCATOR_DISABLED"
-        else:capital_pass=allocation.action in("SPAWN_NEW","ROTATE_REPLACE"); allocation_reason=allocation.reason
-        risk_decision="PASS" if capital_pass else f"REJECT_CAPITAL_{allocation_reason}"; hypothetical_pass=signal_generated and ml_pass and meta_pass and score_pass and capital_pass; final_decision="ACCEPTED" if hypothetical_pass else "REJECTED"; champion_pass=champion.get("final_decision") in("accepted","bypassed"); disagreement="BOTH_PASS" if champion_pass and hypothetical_pass else "BOTH_REJECT" if not champion_pass and not hypothetical_pass else "CHAMPION_ONLY" if champion_pass else "CHILD_ONLY"
+        allocation=None
+        if not stop_valid:
+            capital_pass=False; risk_decision="REJECT_RISK_STOP_UNAVAILABLE" if stop is None else "REJECT_RISK_STOP_INVALID"
+        elif symbol in self.portfolio.positions:
+            # Never sacrifice another incumbent trying to rotate into a symbol that is
+            # already held. If the same-bar exit above did not close it, this candidate
+            # cannot create an additional position in the isolated virtual portfolio.
+            capital_pass=False; risk_decision="REJECT_CAPITAL_DUPLICATE_SYMBOL"
+        else:
+            allocation=self.allocator.evaluate_allocation(self.portfolio,self.portfolio.last_prices,allocator_obs,ts,candidate_capital=candidate_capital) if self.allocator.enabled else None
+            if allocation is None:capital_pass=self.portfolio.can_open_position(symbol); allocation_reason="ALLOCATOR_DISABLED"
+            else:capital_pass=allocation.action in("SPAWN_NEW","ROTATE_REPLACE"); allocation_reason=allocation.reason
+            risk_decision="PASS" if capital_pass else f"REJECT_CAPITAL_{allocation_reason}"
+        hypothetical_pass=signal_generated and ml_pass and meta_pass and score_pass and capital_pass; final_decision="ACCEPTED" if hypothetical_pass else "REJECTED"; champion_pass=champion.get("final_decision") in("accepted","bypassed")
         virtual_order_id=None; virtual_fill_price=None; rotation_exit=None
         if hypothetical_pass and qty>0:
             if allocation is not None and allocation.action=="ROTATE_REPLACE":
@@ -77,7 +89,11 @@ class ChildPolicyExecutor:
                 virtual_order_id=f"virt_{self.policy_id}_{hashlib.sha256(f'{candidate_id}|{ts.isoformat()}'.encode()).hexdigest()[:10]}"
                 opened=self.portfolio.open_virtual_position(symbol,direction,qty,price,stop,target,ts,virtual_order_id,candidate_obs=None)
                 if opened is not None:virtual_fill_price=price; opened.strategy=str(strategy).lower()
-                else:hypothetical_pass=False; final_decision="REJECTED"; risk_decision="REJECT_CAPITAL_OPEN_FAILED"
+                else:
+                    # This should be unreachable after the preflight checks. Fail closed
+                    # and surface the accounting inconsistency rather than claiming PASS.
+                    hypothetical_pass=False; final_decision="REJECTED"; risk_decision="REJECT_CAPITAL_OPEN_FAILED"
+        disagreement=self._disagreement(champion_pass,hypothetical_pass)
         event_id=hashlib.sha256(f"{self.policy_id}|{candidate_id}|{ts.isoformat()}|EVALUATION".encode()).hexdigest(); self.portfolio.record_processed_watermark(watermark)
         allocation_payload=None if allocation is None else {"action":allocation.action,"reason":allocation.reason,"score_delta":allocation.score_delta,"candidate_score":allocation.candidate_score,"incumbent_symbol":allocation.incumbent_symbol,"incumbent_score":allocation.incumbent_score,"rotation_exit":rotation_exit}
         record={"id":event_id,"policy_id":self.policy_id,"parent_policy_id":self.config.parent_policy_id,"config_fingerprint":self.config_fingerprint,"candidate_id":candidate_id,"ts":ts,"symbol":symbol,"strategy":strategy,"direction":direction,"signal_generated":signal_generated,"ml_probability":raw_ml,"ml_decision":ml_decision,"meta_probability":raw_meta,"meta_decision":meta_decision,"trade_score":raw_score,"trade_score_decision":score_decision,"risk_decision":risk_decision,"hypothetical_final_decision":final_decision,"disagreement_category":disagreement,"entry_price":price,"stop_loss":stop,"take_profit":target,"virtual_order_id":virtual_order_id,"virtual_fill_price":virtual_fill_price,"virtual_exit_price":exit_record["exit_price"] if exit_record else None,"virtual_exit_reason":exit_record["exit_reason"] if exit_record else None,"realized_r":exit_record["realized_r"] if exit_record else None,"mfe_r":exit_record["mfe_r"] if exit_record else None,"mae_r":exit_record["mae_r"] if exit_record else None,"payload_obj":{"checkpoint":self.portfolio.to_checkpoint_dict(),"exit_record":exit_record,"allocation":allocation_payload}}
