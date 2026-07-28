@@ -60,7 +60,7 @@ old = '''        # Monitor 8: Position reconciliation
                             break
                     if reconciled:
                         for sym, qty in db_syms.items():
-                            if sym not in broker_syms or broker_syms[sym] != qty:
+                            if sym not in broker_syms or db_syms[sym] != qty:
                                 reconciled = False
                                 break
                                 
@@ -175,12 +175,100 @@ new = '''        # Monitors 8/9: continuously re-evaluate broker truth. Alpaca c
             if self.system_health == "SAFE_MODE":
                 self.system_health = "NORMAL"
 '''
-rep("backend/app/core/engine.py", old, new, "convergent heartbeat reconciliation")
+# tolerate the exact current source variant in which the second comparison uses sym-not-in.
+p = ROOT / "backend/app/core/engine.py"
+s = p.read_text(encoding="utf-8")
+if new not in s:
+    if old not in s:
+        old = old.replace('if sym not in broker_syms or db_syms[sym] != qty:', 'if sym not in broker_syms or broker_syms[sym] != qty:')
+    if old not in s:
+        raise RuntimeError("anchor missing: convergent heartbeat reconciliation")
+    p.write_text(s.replace(old, new, 1), encoding="utf-8")
+    print("applied convergent heartbeat reconciliation")
+else:
+    print("already convergent heartbeat reconciliation")
 
 # 4. Telemetry must expose reconciliation failures; today UI omitted them from reasons.
 rep("backend/app/core/engine.py",
     '        if not diag.get("buying_power_ok", True):\n            degraded_reasons.append("low_buying_power")\n        if not diag.get("vix_fresh", True):',
     '        if not diag.get("buying_power_ok", True):\n            degraded_reasons.append("low_buying_power")\n        if not diag.get("positions_reconciled", True):\n            degraded_reasons.append("positions_not_reconciled")\n        if not diag.get("orders_reconciled", True):\n            degraded_reasons.append("orders_not_reconciled")\n        if not diag.get("vix_fresh", True):',
     "reconciliation telemetry")
+
+# 5. Rule-41 recovery states are state-machine states, not one-tick annotations.
+# The old code overwrote RECOVERY_REJECTED/AWAITING_CANCEL_CONFIRMATION back to
+# UNPROTECTED before the retry guard inspected them, causing the repeated Alpaca
+# 40310000 recovery-stop hammer seen for INTC/NOW.
+rep("backend/app/core/engine.py",
+    '                if self._protection_state.get(sym) != ProtectionState.AWAITING_STOP_CONFIRMATION:\n                    self._protection_state[sym] = ProtectionState.UNPROTECTED',
+    '                if self._protection_state.get(sym) not in {\n                    ProtectionState.AWAITING_STOP_CONFIRMATION,\n                    ProtectionState.AWAITING_CANCEL_CONFIRMATION,\n                    ProtectionState.AMBIGUOUS,\n                    ProtectionState.RECOVERY_REJECTED,\n                }:\n                    self._protection_state[sym] = ProtectionState.UNPROTECTED',
+    "preserve protection recovery state")
+
+# 6/7. Make evaluation progress observable independently from signal acceptance.
+# Zero accepted signals is legitimate; zero evaluated symbols while fresh bars arrive is not.
+rep("backend/app/core/engine.py",
+    '        self._signals_evaluated_today = 0\n        self._last_telemetry_event: dict | None = None',
+    '        self._signals_evaluated_today = 0\n        self._last_evaluation_at: datetime | None = None\n        self._last_evaluated_symbol_count = 0\n        self._last_closed_bar_symbol_count = 0\n        self._last_telemetry_event: dict | None = None',
+    "evaluation progress state")
+rep("backend/app/core/engine.py",
+    '            symbols_to_evaluate = list(new_closed.keys())\n            if self.state != EngineState.RUNNING or not allow_entries:',
+    '            symbols_to_evaluate = list(new_closed.keys())\n            self._last_closed_bar_symbol_count = len(symbols_to_evaluate)\n            if self.state != EngineState.RUNNING or not allow_entries:',
+    "closed bar progress")
+rep("backend/app/core/engine.py",
+    '            for symbol in symbols_to_evaluate:\n                # fix(#86): skip new ENTRY signals',
+    '            self._last_evaluated_symbol_count = len(symbols_to_evaluate)\n            if symbols_to_evaluate:\n                self._last_evaluation_at = now\n            for symbol in symbols_to_evaluate:\n                # fix(#86): skip new ENTRY signals',
+    "evaluation progress")
+
+# 8/10. The immediate close-time counterfactual is structurally censored: at 09:36 it
+# only has bars through 09:36, so every policy falls back to the same current close.
+# CanonicalExitChallengerConsumer already performs the causal 60-minute replay from
+# streamed market-bar events. Remove the duplicate censored replay rather than letting
+# it contaminate research/log interpretation.
+old_cf = '''                # Exit counterfactuals replay on live completed trade
+                try:
+                    sym_frame = enrich(self.data.frame(symbol, "1Min", limit=600)) if self.data else pd.DataFrame()
+                    if not sym_frame.empty:
+                        entry_ts = pd.Timestamp(trade.entry_at)
+
+                        if sym_frame.index.tz is not None:
+                            if entry_ts.tzinfo is None:
+                                entry_ts = entry_ts.tz_localize("UTC")
+                            entry_ts = entry_ts.tz_convert(sym_frame.index.tz)
+                        elif entry_ts.tzinfo is not None:
+                            entry_ts = entry_ts.tz_localize(None)
+
+                        entry_idx = sym_frame.index.searchsorted(entry_ts, side="right") - 1
+
+                        if entry_idx < 0 or entry_idx >= len(sym_frame):
+                            raise ValueError(
+                                f"Entry timestamp {trade.entry_at} outside available "
+                                f"counterfactual frame for {symbol}"
+                            )
+                        entry_price = trade.entry_price
+                        side = trade.side
+                        init_stop_price = init_stop if init_stop is not None else entry_price * (0.985 if side == "long" else 1.015)
+                        entry_bar = sym_frame.iloc[entry_idx]
+                        initial_atr = float(entry_bar["atr14"]) if "atr14" in entry_bar and pd.notna(entry_bar["atr14"]) else (entry_price * 0.01)
+                        
+                        counterfactuals = ExitCounterfactualEngine.replay_all_policies(
+                            df=sym_frame,
+                            entry_idx=entry_idx,
+                            entry_price=entry_price,
+                            side=side,
+                            initial_stop=init_stop_price,
+                            initial_atr=initial_atr,
+                        )
+                        applog.info("counterfactual", f"Live Closed Trade {symbol} Exit Counterfactual Replay: {counterfactuals}")
+                except Exception as exc:
+                    applog.warning(
+                        "counterfactual",
+                        f"Live exit counterfactual replay failed for {symbol}: {exc}",
+                    )
+'''
+new_cf = '''                # Exit-policy research is intentionally NOT replayed at the instant the
+                # live trade closes: that path is right-censored and made every challenger
+                # appear to exit at the same early bar. CanonicalExitChallengerConsumer
+                # receives causal market bars and evaluates the full 60-minute horizon.
+'''
+rep("backend/app/core/engine.py", old_cf, new_cf, "remove censored close-time counterfactual")
 
 print("heartbeat/runtime root-cause patch applied")
