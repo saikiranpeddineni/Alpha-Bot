@@ -493,7 +493,13 @@ class AlpacaBroker(Broker):
         except Exception as exc:  # noqa: BLE001
             if self._is_definitive_rejection(exc):
                 err_msg = str(exc).lower()
-                if "not allowed to short" in err_msg or "40310000" in err_msg:
+                short_permission_denied = (
+                    "not allowed to short" in err_msg
+                    or "shorting is not permitted" in err_msg
+                    or "asset is not shortable" in err_msg
+                    or "not shortable" in err_msg
+                )
+                if short_permission_denied:
                     self._shorting_enabled = False
                     self._shortable_cache[req.symbol.upper()] = False
                 applog.error("broker.alpaca", f"Order rejected {req.symbol} {req.side} {qty}: {exc}")

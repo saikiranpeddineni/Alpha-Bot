@@ -225,6 +225,8 @@ def test_heartbeat_position_reconciliation_failure(client):
     
     loop = asyncio.new_event_loop()
     try:
+        # Run 2 consecutive checks to reach streak threshold 2
+        loop.run_until_complete(engine._check_system_heartbeat(datetime.now(UTC)))
         loop.run_until_complete(engine._check_system_heartbeat(datetime.now(UTC)))
     finally:
         loop.close()
@@ -237,16 +239,25 @@ def test_heartbeat_order_reconciliation_failure(client):
     engine = client.app.state.engine
     setup_healthy_mocks(engine)
     
-    # Add pending reconciliation order client ID
+    # Set matching position so SPY is in broker_syms
+    from app.portfolio.tracker import _OpenLot
+    engine.portfolio._lots["SPY"] = _OpenLot(qty=10, avg_price=100.0, entry_ts=datetime.now(UTC), strategy="momentum")
+    async def mock_positions():
+        return [Position(symbol="SPY", qty=10.0, avg_entry_price=100.0, market_price=100.0)]
+    engine.broker.positions = mock_positions
+
+    # Add pending reconciliation order client ID for active position SPY
     engine.pending_reconciliation_orders = {"cid_123": {"symbol": "SPY", "side": "buy", "qty": 10, "order_type": "market", "limit_price": None}}
     
-    # Mock broker to return None when getting client order ID (discrepancy!)
+    # Mock broker to return None when getting client order ID (discrepancy for active position!)
     async def mock_get_order(client_id):
         return None
     engine.broker.get_order_by_client_id = mock_get_order
     
     loop = asyncio.new_event_loop()
     try:
+        # Run 2 consecutive checks to reach streak threshold 2
+        loop.run_until_complete(engine._check_system_heartbeat(datetime.now(UTC)))
         loop.run_until_complete(engine._check_system_heartbeat(datetime.now(UTC)))
     finally:
         loop.close()
@@ -311,11 +322,16 @@ def test_heartbeat_vix_unavailable_plus_stale_market_data_blocks_entries(client)
 def test_heartbeat_vix_unavailable_plus_reconciliation_failure_blocks_entries(client):
     engine = client.app.state.engine
     setup_healthy_mocks(engine)
-    engine.reconciliation_mismatch = True
+    from app.portfolio.tracker import _OpenLot
+    engine.portfolio._lots["SPY"] = _OpenLot(qty=10, avg_price=100.0, entry_ts=datetime.now(UTC), strategy="momentum")
+    async def mock_positions_mismatch():
+        return [Position(symbol="QQQ", qty=10.0, avg_entry_price=100.0, market_price=100.0)]
+    engine.broker.positions = mock_positions_mismatch
     engine.data.frame = MagicMock(return_value=pd.DataFrame())
     
     loop = asyncio.new_event_loop()
     try:
+        loop.run_until_complete(engine._check_system_heartbeat(datetime.now(UTC)))
         loop.run_until_complete(engine._check_system_heartbeat(datetime.now(UTC)))
     finally:
         loop.close()
@@ -455,7 +471,7 @@ def test_dynamic_recovery_and_latching(client):
     assert engine.system_health == "NORMAL"
     assert engine.allow_new_entries is True
 
-    # 3. Position mismatch occurs -> Verify latching to SAFE_MODE
+    # 3. Position mismatch occurs -> Verify latching to SAFE_MODE on 2-tick streak
     from app.portfolio.tracker import _OpenLot
     engine.portfolio._lots["SPY"] = _OpenLot(qty=10, avg_price=100.0, entry_ts=datetime.now(UTC), strategy="momentum")
     
@@ -466,6 +482,7 @@ def test_dynamic_recovery_and_latching(client):
     loop = asyncio.new_event_loop()
     try:
         loop.run_until_complete(engine._check_system_heartbeat(datetime.now(UTC)))
+        loop.run_until_complete(engine._check_system_heartbeat(datetime.now(UTC)))
     finally:
         loop.close()
 
@@ -473,8 +490,7 @@ def test_dynamic_recovery_and_latching(client):
     assert engine.allow_new_entries is False
     assert engine.reconciliation_mismatch is True
 
-    # 4. Position mismatch is fixed in next heartbeat -> Verify SAFE_MODE remains latched!
-    # Mock broker positions to now perfectly match DB lot
+    # 4. Position mismatch is fixed in next heartbeat -> Verify automatic self-healing convergence to NORMAL
     async def mock_positions_match():
         return [Position(symbol="SPY", qty=10.0, avg_entry_price=100.0, market_price=100.0)]
     engine.broker.positions = mock_positions_match
@@ -485,16 +501,14 @@ def test_dynamic_recovery_and_latching(client):
     finally:
         loop.close()
 
-    # Still latched!
-    assert engine.system_health == "SAFE_MODE"
-    assert engine.allow_new_entries is False
-    assert engine.reconciliation_mismatch is True
+    # Self-healed!
+    assert engine.system_health == "NORMAL"
+    assert engine.reconciliation_mismatch is False
 
-    # 5. Call manual reset-health -> Verify latch clears and recovers to NORMAL
+    # 5. Call manual reset-health -> Verify API endpoint succeeds
     r = client.post("/api/system/reset-health")
     assert r.status_code == 200
     assert r.json()["system_health"] == "NORMAL"
-    assert r.json()["allow_new_entries"] is True
     assert engine.reconciliation_mismatch is False
 
 

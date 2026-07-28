@@ -51,11 +51,11 @@ def test_fill_ack_is_post_durable_processing_source():
 def test_open_orders_expands_broker_child_legs_source():
     src = (Path(__file__).parents[1] / "app" / "brokers" / "alpaca.py").read_text(encoding="utf-8")
     block = src[src.index("async def open_orders"):src.index("def _to_order")]
-    assert 'getattr(raw_order, "legs", None)' in block
+    assert '("legs", "related_orders")' in block
     assert "normalized.append(self._to_order(child))" in block
 
 
 def test_recovery_rejection_is_fail_closed_not_tight_retry_source():
     src = (Path(__file__).parents[1] / "app" / "core" / "engine.py").read_text(encoding="utf-8")
     assert "ProtectionState.RECOVERY_REJECTED" in src
-    assert "do not hammer Alpaca every tick" in src
+    assert "waiting for broker reconciliation" in src

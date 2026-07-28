@@ -392,13 +392,29 @@ class RiskManager:
         elif side == OrderSide.SELL and take_profit >= price:
             return RiskDecision(False, f"short target must be below entry ({take_profit:.4f} >= {price:.4f})")
 
+        executable_entry = round(float(price), 2)
+        executable_stop = round(float(stop_loss), 2)
+        executable_target = round(float(take_profit), 2)
+        if side == OrderSide.BUY:
+            if executable_stop >= executable_entry:
+                executable_stop = round(executable_entry - 0.01, 2)
+            if executable_target <= executable_entry:
+                executable_target = round(executable_entry + 0.01, 2)
+        else:
+            if executable_stop <= executable_entry:
+                executable_stop = round(executable_entry + 0.01, 2)
+            if executable_target >= executable_entry:
+                executable_target = round(executable_entry - 0.01, 2)
+        if executable_stop <= 0 or executable_target <= 0:
+            return RiskDecision(False, "broker-valid bracket geometry unavailable at current price")
+
         order = OrderRequest(
             symbol=symbol,
             side=side,
             qty=qty,
             order_type=OrderType.MARKET,
-            stop_loss=round(stop_loss, 2),
-            take_profit=round(take_profit, 2),
+            stop_loss=executable_stop,
+            take_profit=executable_target,
             strategy=signal.strategy,
             reason=signal.reason,
         )

@@ -3750,7 +3750,26 @@ class TradingEngine:
                         else:
                             order_bad = True
                 for cid in stale:
-                    self.pending_reconciliation_orders.pop(cid, None)
+                    info = self.pending_reconciliation_orders.pop(cid, None)
+                    if info and isinstance(info, dict):
+                        try:
+                            sym = str(info.get("symbol", "")).upper()
+                            side = OrderSide.BUY if str(info.get("side", "")).lower() in ("buy", "long") else OrderSide.SELL
+                            qty = float(info.get("qty", 1.0))
+                            rej_order = Order(
+                                id=cid,
+                                client_order_id=cid,
+                                symbol=sym,
+                                side=side,
+                                qty=qty,
+                                order_type=OrderType.LIMIT if info.get("limit_price") else OrderType.MARKET,
+                                limit_price=info.get("limit_price"),
+                                status=OrderStatus.REJECTED,
+                                reason="Terminal reconciliation order cleared for flat position",
+                            )
+                            self.db.save_order(rej_order, self.mode)
+                        except Exception:
+                            pass
                 if stale:
                     self.db.set_setting("pending_reconciliation_orders", self.pending_reconciliation_orders)
                     applog.info("engine.heartbeat", f"Cleared {len(stale)} terminal reconciliation order(s) for flat positions")
