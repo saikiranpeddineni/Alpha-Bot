@@ -1,9 +1,10 @@
 """Evidence-driven mutation memory for the SHADOW-ONLY Spawn laboratory.
 
 The memory learns which bounded parameter moves have historically improved child
-fitness relative to their parent.  It deliberately has no broker/database access
-and never claims future profitability; it only biases exploration using observed
-parent-relative evidence while retaining a non-zero exploration probability.
+fitness relative to their parent. It has no broker/database access and never claims
+future profitability. Evidence is deliberately bounded so one outlier generation
+cannot monopolize all future mutations, while a non-zero exploration floor prevents
+premature convergence.
 """
 from __future__ import annotations
 
@@ -39,9 +40,13 @@ class SpawnMutationIntelligence:
         self._outcomes: list[MutationOutcome] = []
 
     def record(self, dimension: str, direction: int, fitness_delta: float, child_trades: int) -> None:
-        if not dimension or direction not in (-1, 1) or not math.isfinite(float(fitness_delta)):
+        try:
+            delta = float(fitness_delta)
+        except (TypeError, ValueError):
             return
-        self._outcomes.append(MutationOutcome(str(dimension), int(direction), float(fitness_delta), max(0, int(child_trades))))
+        if not dimension or direction not in (-1, 1) or not math.isfinite(delta):
+            return
+        self._outcomes.append(MutationOutcome(str(dimension), int(direction), delta, max(0, int(child_trades))))
 
     def preferences(self) -> list[MutationPreference]:
         grouped: dict[tuple[str, int], list[MutationOutcome]] = {}
@@ -50,11 +55,14 @@ class SpawnMutationIntelligence:
         prefs: list[MutationPreference] = []
         for (dimension, direction), rows in grouped.items():
             n = len(rows)
-            raw_mean = sum(row.fitness_delta for row in rows) / n
+            # tanh bounds individual outcomes: a single extraordinary/lucky child cannot
+            # overwhelm many ordinary observations from other generations.
+            bounded = [math.tanh(row.fitness_delta) for row in rows]
+            raw_mean = sum(bounded) / n
             confidence = min(1.0, n / max(float(self.min_samples), self.prior_strength))
             shrunk_mean = raw_mean * (n / (n + self.prior_strength))
-            # Negative evidence never removes exploration completely.
-            evidence_weight = max(0.05, 1.0 + shrunk_mean)
+            # Keep every direction reachable. Evidence can bias, never eliminate.
+            evidence_weight = max(0.20, min(2.0, 1.0 + shrunk_mean))
             prefs.append(MutationPreference(dimension, direction, n, shrunk_mean, confidence, evidence_weight))
         return prefs
 
@@ -72,5 +80,5 @@ class SpawnMutationIntelligence:
             for direction in (-1, 1):
                 pref = pref_map.get((dimension, direction))
                 candidates.append(((group, key), direction))
-                weights.append(1.0 if pref is None else max(0.05, pref.weight * (0.5 + pref.confidence)))
+                weights.append(1.0 if pref is None else max(0.10, pref.weight * (0.5 + pref.confidence)))
         return rng.choices(candidates, weights=weights, k=1)[0]
