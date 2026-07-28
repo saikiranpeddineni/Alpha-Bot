@@ -59,7 +59,6 @@ class ChildPolicyExecutor:
         raw_score=self._finite(champion.get("trade_score",observation.get("trade_score"))); score_threshold=float(self.config.risk_overrides.get("min_trade_score",50.0)); score_pass=raw_score is not None and raw_score>=score_threshold; score_decision=("PASS" if score_pass else "REJECT") if raw_score is not None else "UNAVAILABLE"
         stop=self._finite(observation.get("stop_loss")); target=self._finite(observation.get("take_profit"))
         if stop is None:distance=price*0.02; stop=price-distance if direction=="long" else price+distance
-        # Invalid-side stops are unavailable research evidence, not a sizing opportunity.
         if (direction=="long" and stop>=price) or (direction=="short" and stop<=price):return None
         qty=self.portfolio.calculate_position_size(price,stop); candidate_capital=max(1.0,qty*price) if qty>0 else max(1.0,self.config.seed_capital*float(self.config.risk_overrides.get("max_position_pct",25.0))/100.0)
         allocator_obs=dict(observation); allocator_obs.setdefault("symbol",symbol); allocator_obs.setdefault("side",direction); allocator_obs.setdefault("strategy",strategy)
@@ -70,18 +69,14 @@ class ChildPolicyExecutor:
         risk_decision="PASS" if capital_pass else f"REJECT_CAPITAL_{allocation_reason}"; hypothetical_pass=signal_generated and ml_pass and meta_pass and score_pass and capital_pass; final_decision="ACCEPTED" if hypothetical_pass else "REJECTED"; champion_pass=champion.get("final_decision") in("accepted","bypassed"); disagreement="BOTH_PASS" if champion_pass and hypothetical_pass else "BOTH_REJECT" if not champion_pass and not hypothetical_pass else "CHAMPION_ONLY" if champion_pass else "CHILD_ONLY"
         virtual_order_id=None; virtual_fill_price=None; rotation_exit=None
         if hypothetical_pass and qty>0:
-            # The allocator is the authority for rotation selection. Close exactly the incumbent
-            # it scored, using its current mark, before opening the replacement. Do not invoke the
-            # legacy second rotation scorer inside open_virtual_position or the two can disagree.
             if allocation is not None and allocation.action=="ROTATE_REPLACE":
                 incumbent=allocation.incumbent_symbol; raw_mark=self.portfolio.last_prices.get(incumbent) if incumbent else None; mark=self._finite(raw_mark)
-                if not incumbent or mark is None or mark<=0 or incumbent not in self.portfolio.positions:
-                    hypothetical_pass=False; final_decision="REJECTED"; risk_decision="REJECT_CAPITAL_ROTATION_INCUMBENT_UNAVAILABLE"
-                else:
-                    rotation_exit=self.portfolio.close_virtual_position(incumbent,mark,"OPPORTUNITY_ROTATION_EXIT",ts)
+                if not incumbent or mark is None or mark<=0 or incumbent not in self.portfolio.positions:hypothetical_pass=False; final_decision="REJECTED"; risk_decision="REJECT_CAPITAL_ROTATION_INCUMBENT_UNAVAILABLE"
+                else:rotation_exit=self.portfolio.close_virtual_position(incumbent,mark,"OPPORTUNITY_ROTATION_EXIT",ts)
             if hypothetical_pass:
                 virtual_order_id=f"virt_{self.policy_id}_{hashlib.sha256(f'{candidate_id}|{ts.isoformat()}'.encode()).hexdigest()[:10]}"
-                if self.portfolio.open_virtual_position(symbol,direction,qty,price,stop,target,ts,virtual_order_id,candidate_obs=None):virtual_fill_price=price; position=self.portfolio.positions.get(symbol); position.strategy=str(strategy).lower() if position is not None else "unknown"
+                opened=self.portfolio.open_virtual_position(symbol,direction,qty,price,stop,target,ts,virtual_order_id,candidate_obs=None)
+                if opened is not None:virtual_fill_price=price; opened.strategy=str(strategy).lower()
                 else:hypothetical_pass=False; final_decision="REJECTED"; risk_decision="REJECT_CAPITAL_OPEN_FAILED"
         event_id=hashlib.sha256(f"{self.policy_id}|{candidate_id}|{ts.isoformat()}|EVALUATION".encode()).hexdigest(); self.portfolio.record_processed_watermark(watermark)
         allocation_payload=None if allocation is None else {"action":allocation.action,"reason":allocation.reason,"score_delta":allocation.score_delta,"candidate_score":allocation.candidate_score,"incumbent_symbol":allocation.incumbent_symbol,"incumbent_score":allocation.incumbent_score,"rotation_exit":rotation_exit}
