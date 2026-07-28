@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from typing import Any
 from app.core.logging import applog
@@ -17,15 +18,20 @@ class SpawnShadowCoordinator:
         self.db=db; self.max_queue_size=max_queue_size; self.executors={}; self.queue=asyncio.Queue(maxsize=max_queue_size); self.worker_task=None; self.running=False; self.shadow_events_dropped=0; self.shutdown_undrained=0; self.worker_errors=0; self.observations_processed=0; self.candidate_observations_processed=0; self.market_bars_processed=0; self.evolution_interval=max(1,int(evolution_interval)); self.evolution=SpawnEvolutionEngine(evolution_settings); self.children_spawned=0; self.children_retired=0; self.evolution_cycles=0
     def telemetry(self)->dict[str,Any]:
         return {"shadow_events_dropped":self.shadow_events_dropped,"shutdown_undrained":self.shutdown_undrained,"worker_errors":self.worker_errors,"queue_size":self.queue.qsize(),"executors_count":len(self.executors),"active_children":sum(executor.status=="ACTIVE" for executor in self.executors.values()),"running":self.running,"observations_processed":self.observations_processed,"candidate_observations_processed":self.candidate_observations_processed,"market_bars_processed":self.market_bars_processed,"evolution_cycles":self.evolution_cycles,"children_spawned":self.children_spawned,"children_retired":self.children_retired,"generation":self.evolution.generation}
+    @staticmethod
+    def _generation_from_config(config:ChildPolicyConfig)->int:
+        match=re.fullmatch(r"g(\d+)",str(config.policy_version or "").lower())
+        return int(match.group(1)) if match else 0
     def initialize_from_db(self)->int:
         if not self.db:return 0
-        count=0
+        count=0; max_generation=self.evolution.generation
         try:
             for row in self.db.get_active_spawned_strategies():
                 policy_id=row["policy_id"]; raw=row.get("config_snapshot_json"); expected=row.get("config_fingerprint")
                 if not raw:applog.error("spawn_coordinator",f"Policy {policy_id} disabled: MISSING_CONFIG_SNAPSHOT"); continue
                 try:config=ChildPolicyConfig.from_dict(json.loads(raw))
                 except Exception as exc:applog.error("spawn_coordinator",f"Policy {policy_id} disabled: INVALID_CONFIG_SNAPSHOT:{exc}"); continue
+                max_generation=max(max_generation,self._generation_from_config(config))
                 executor=ChildPolicyExecutor(config)
                 if expected and expected!=config.compute_fingerprint():executor.status="UNAVAILABLE"; executor.unavailable_reason="FINGERPRINT_MISMATCH"; applog.error("spawn_coordinator",f"Policy {policy_id} disabled: FINGERPRINT_MISMATCH")
                 elif executor.status=="ACTIVE":
@@ -35,6 +41,9 @@ class SpawnShadowCoordinator:
                         except Exception as exc:executor.status="UNAVAILABLE"; executor.unavailable_reason=f"CORRUPT_CHECKPOINT:{exc}"; applog.error("spawn_coordinator",f"Policy {policy_id} checkpoint rejected: {exc}")
                 self.executors[policy_id]=executor
                 if executor.status=="ACTIVE":count+=1
+            # Generation is durable provenance. Restart must continue from the highest
+            # persisted generation rather than silently returning to g1.
+            self.evolution.generation=max_generation
         except Exception as exc:applog.error("spawn_coordinator",f"Research initialization failed: {exc}")
         return count
     def _bootstrap_if_empty(self)->None:
@@ -47,8 +56,6 @@ class SpawnShadowCoordinator:
         self.running=True; self.initialize_from_db(); self._bootstrap_if_empty(); self.worker_task=asyncio.create_task(self._background_worker(),name="spawn-shadow-worker"); applog.info("spawn_coordinator","Shadow army worker started.")
     async def stop(self)->None:
         if not self.running:return
-        # Stop accepting new observations only after callers have drained the parent publisher.
-        # Drain this second-stage queue so accepted evidence is not silently lost at shutdown.
         try:await asyncio.wait_for(self.queue.join(),timeout=3.0)
         except asyncio.TimeoutError:self.shutdown_undrained+=self.queue.qsize(); applog.warning("spawn_coordinator",f"Shutdown with {self.queue.qsize()} undrained spawn observations")
         self.running=False
@@ -107,8 +114,10 @@ class SpawnShadowCoordinator:
         if self.candidate_observations_processed%self.evolution_interval==0:await asyncio.to_thread(self._run_evolution_cycle_sync,observation.get("ts"))
     def add_child(self,config:ChildPolicyConfig,persist:bool=True)->bool:
         if config.execution_mode!="SHADOW_ONLY" or config.policy_id in self.executors:return False
-        fingerprint=config.compute_fingerprint()
-        if any(executor.config_fingerprint==fingerprint for executor in self.executors.values()):return False
+        fingerprint=config.compute_fingerprint(); behavior_fp=self.evolution.behavior_config_fingerprint(config)
+        # Identity fingerprints contain lineage. Evolution needs behavioral uniqueness,
+        # otherwise the army can grow copies of the same policy under new IDs.
+        if any(self.evolution.behavior_config_fingerprint(executor.config)==behavior_fp for executor in self.executors.values()):return False
         executor=ChildPolicyExecutor(config)
         if executor.status!="ACTIVE":return False
         if persist and self.db:self.db.save_spawned_strategy(policy_id=config.policy_id,seed_capital=config.seed_capital,parent_policy_id=config.parent_policy_id,policy_version=config.policy_version,config_snapshot_json=config.snapshot_json(),config_fingerprint=fingerprint,created_from_candidate=config.created_from_candidate,spawn_reason=config.spawn_reason,execution_mode="SHADOW_ONLY",code_commit_sha=config.code_commit_sha,model_manifest_sha=config.model_manifest_sha,spawned_at=config.spawned_at)
@@ -116,6 +125,10 @@ class SpawnShadowCoordinator:
     def _run_evolution_cycle_sync(self,now:datetime|None=None)->None:
         if not isinstance(now,datetime) or now.tzinfo is None:now=datetime.now(timezone.utc)
         self.evolution_cycles+=1
+        # Learn while parent and child are still in their evaluated lifecycle state.
+        # Retiring a parent first would apply the ineligible fitness sentinel and poison
+        # the child's mutation delta with a false ~+1,000,000 advantage.
+        self.evolution.learn_mutation_outcomes(self.executors)
         for policy_id in self.evolution.retirement_candidates(self.executors):
             try:self.retire_child(policy_id,now)
             except Exception as exc:self.worker_errors+=1; applog.error("spawn_coordinator",f"Retirement failed for {policy_id}: {exc}")
