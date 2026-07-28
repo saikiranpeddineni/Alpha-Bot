@@ -268,23 +268,59 @@ class AlpacaBroker(Broker):
 
         raw = await _call(
             self._client.get_orders,
-            GetOrdersRequest(status="open", limit=200),
+            GetOrdersRequest(status="open", limit=200, nested=True),
             label="get_orders/open",
         )
         normalized: list[Order] = []
+        seen_ids: set[str] = set()
+
         for raw_order in raw:
             parent = self._to_order(raw_order)
-            normalized.append(parent)
+            parent_id = str(getattr(raw_order, "id", ""))
+            if parent_id and parent_id not in seen_ids:
+                seen_ids.add(parent_id)
+                normalized.append(parent)
+
             parent_strategy, parent_reason = self._meta.get(
-                str(getattr(raw_order, "id", "")),
+                parent_id,
                 (parent.strategy, parent.reason),
             )
-            for child in (getattr(raw_order, "legs", None) or []):
+
+            # Collect child orders from both legs and related_orders
+            children = []
+            child_seen = set()
+            stack = []
+            for key in ("legs", "related_orders"):
+                for item in (getattr(raw_order, key, None) or []):
+                    cid = str(getattr(item, "id", ""))
+                    if cid and cid not in child_seen:
+                        child_seen.add(cid)
+                        stack.append(item)
+
+            while stack:
+                child_raw = stack.pop(0)
+                children.append(child_raw)
+                for key in ("legs", "related_orders"):
+                    for item in (getattr(child_raw, key, None) or []):
+                        cid = str(getattr(item, "id", ""))
+                        if cid and cid not in child_seen:
+                            child_seen.add(cid)
+                            stack.append(item)
+
+            for child in children:
                 child_id = str(getattr(child, "id", ""))
-                if child_id and child_id not in self._meta:
-                    self._meta[child_id] = (parent_strategy, parent_reason)
-                normalized.append(self._to_order(child))
+                if child_id and child_id not in seen_ids:
+                    seen_ids.add(child_id)
+                    if child_id not in self._meta:
+                        self._meta[child_id] = (parent_strategy, parent_reason)
+                    if parent_id and not getattr(child, "parent_id", None) and not getattr(child, "parent_order_id", None):
+                        try:
+                            setattr(child, "parent_id", parent_id)
+                        except Exception:
+                            pass
+                    normalized.append(self._to_order(child))
         return normalized
+
 
     def _to_order(self, o) -> Order:  # noqa: ANN001
         type_map = {
@@ -341,7 +377,7 @@ class AlpacaBroker(Broker):
             else None
         )
 
-        legs = getattr(o, "legs", None)
+        legs = getattr(o, "legs", None) or getattr(o, "related_orders", None)
         if legs:
             for child in legs:
                 child_type = (

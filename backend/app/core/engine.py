@@ -127,6 +127,7 @@ class TradingEngine:
         self._last_scan_date = None
         self._last_train_date = None
         self._last_event_monitor_min = None
+        self._event_monitor_task: asyncio.Task | None = None
         self._last_intraday_scan_min: int | None = None  # Feature 1: 30-min intraday refresh
         self._midday_active: bool = False                 # Feature 3: midday threshold state
         self._flattened_sessions: set = set()
@@ -164,6 +165,8 @@ class TradingEngine:
         self.pending_reconciliation_orders: dict[str, dict] = db.get_setting("pending_reconciliation_orders") or {}
         self.reconciliation_failed = False
         self.reconciliation_mismatch = False
+        self._position_reconciliation_mismatch_streak = 0
+        self._order_reconciliation_mismatch_streak = 0
 
         # Heartbeat System Diagnostics (CR-146 Phase F)
         self.system_health = "NORMAL"
@@ -180,6 +183,9 @@ class TradingEngine:
         self._heartbeat_seq = 0
         self._evaluations_window_count = 0
         self._signals_evaluated_today = 0
+        self._last_evaluation_at: datetime | None = None
+        self._last_evaluated_symbol_count = 0
+        self._last_closed_bar_symbol_count = 0
         self._last_telemetry_event: dict | None = None
         now_iso = datetime.now(timezone.utc).isoformat()
         self._subsystem_timestamps: dict[str, str] = {
@@ -434,6 +440,14 @@ class TradingEngine:
             except asyncio.CancelledError:
                 pass
             self._task = None
+        event_task = getattr(self, "_event_monitor_task", None)
+        if event_task is not None and not event_task.done():
+            event_task.cancel()
+            try:
+                await event_task
+            except asyncio.CancelledError:
+                pass
+        self._event_monitor_task = None
         # fix(#56): cancel emergency flatten task when engine is explicitly stopped
         if self._emergency_flatten_task is not None and not self._emergency_flatten_task.done():
             self._emergency_flatten_task.cancel()
@@ -754,7 +768,14 @@ class TradingEngine:
                 )
             if 9 * 60 + 30 <= et_mins <= 16 * 60 and et_mins % 5 == 0 and self._last_event_monitor_min != et_mins:
                 self._last_event_monitor_min = et_mins
-                await self.run_event_monitor(now)
+                task = self._event_monitor_task
+                if task is None or task.done():
+                    if task is not None and not task.cancelled():
+                        try:
+                            task.result()
+                        except Exception as exc:
+                            applog.warning("engine", f"Event monitor failed open: {exc}")
+                    self._event_monitor_task = asyncio.create_task(self.run_event_monitor(now), name="event-monitor")
 
         new_closed = await self.data.poll(self.watchlist)
 
@@ -943,9 +964,13 @@ class TradingEngine:
             candidates.extend(resurrected)
 
             symbols_to_evaluate = list(new_closed.keys())
+            self._last_closed_bar_symbol_count = len(symbols_to_evaluate)
             if self.state != EngineState.RUNNING or not allow_entries:
                 symbols_to_evaluate = [sym for sym in symbols_to_evaluate if sym in pos_by_symbol]
 
+            self._last_evaluated_symbol_count = len(symbols_to_evaluate)
+            if symbols_to_evaluate:
+                self._last_evaluation_at = now
             for symbol in symbols_to_evaluate:
                 # fix(#86): skip new ENTRY signals for symbols with active market-data gaps
                 sym_upper = symbol.upper()
@@ -1918,46 +1943,10 @@ class TradingEngine:
                 self.publish("trade", trade.model_dump(mode="json"))
 
 
-                # Exit counterfactuals replay on live completed trade
-                try:
-                    sym_frame = enrich(self.data.frame(symbol, "1Min", limit=600)) if self.data else pd.DataFrame()
-                    if not sym_frame.empty:
-                        entry_ts = pd.Timestamp(trade.entry_at)
-
-                        if sym_frame.index.tz is not None:
-                            if entry_ts.tzinfo is None:
-                                entry_ts = entry_ts.tz_localize("UTC")
-                            entry_ts = entry_ts.tz_convert(sym_frame.index.tz)
-                        elif entry_ts.tzinfo is not None:
-                            entry_ts = entry_ts.tz_localize(None)
-
-                        entry_idx = sym_frame.index.searchsorted(entry_ts, side="right") - 1
-
-                        if entry_idx < 0 or entry_idx >= len(sym_frame):
-                            raise ValueError(
-                                f"Entry timestamp {trade.entry_at} outside available "
-                                f"counterfactual frame for {symbol}"
-                            )
-                        entry_price = trade.entry_price
-                        side = trade.side
-                        init_stop_price = init_stop if init_stop is not None else entry_price * (0.985 if side == "long" else 1.015)
-                        entry_bar = sym_frame.iloc[entry_idx]
-                        initial_atr = float(entry_bar["atr14"]) if "atr14" in entry_bar and pd.notna(entry_bar["atr14"]) else (entry_price * 0.01)
-                        
-                        counterfactuals = ExitCounterfactualEngine.replay_all_policies(
-                            df=sym_frame,
-                            entry_idx=entry_idx,
-                            entry_price=entry_price,
-                            side=side,
-                            initial_stop=init_stop_price,
-                            initial_atr=initial_atr,
-                        )
-                        applog.info("counterfactual", f"Live Closed Trade {symbol} Exit Counterfactual Replay: {counterfactuals}")
-                except Exception as exc:
-                    applog.warning(
-                        "counterfactual",
-                        f"Live exit counterfactual replay failed for {symbol}: {exc}",
-                    )
+                # Exit-policy research is intentionally NOT replayed at the instant the
+                # live trade closes: that path is right-censored and made every challenger
+                # appear to exit at the same early bar. CanonicalExitChallengerConsumer
+                # receives causal market bars and evaluates the full 60-minute horizon.
 
                 # Cleanup peak/trough/stop
                 if symbol in self._position_peaks:
@@ -2039,6 +2028,10 @@ class TradingEngine:
             degraded_reasons.append("scanner_never_run")
         if not diag.get("buying_power_ok", True):
             degraded_reasons.append("low_buying_power")
+        if not diag.get("positions_reconciled", True):
+            degraded_reasons.append("positions_not_reconciled")
+        if not diag.get("orders_reconciled", True):
+            degraded_reasons.append("orders_not_reconciled")
         if not diag.get("vix_fresh", True):
             degraded_reasons.append("vix_feed_unavailable")
 
@@ -2063,6 +2056,13 @@ class TradingEngine:
                 "universe_count": (len(u) if (u := getattr(self, "universe", None)) is not None and hasattr(u, '__len__') else len(self.watchlist)),
                 "signals_evaluated_today": self._signals_evaluated_today,
                 "evaluations_last_sec": self._evaluations_window_count,
+                "last_evaluation_at": self._last_evaluation_at.isoformat() if getattr(self, "_last_evaluation_at", None) else None,
+                "last_evaluated_symbol_count": getattr(self, "_last_evaluated_symbol_count", 0),
+                "last_closed_bar_symbol_count": getattr(self, "_last_closed_bar_symbol_count", 0),
+                "evaluator_stalled": (
+                    getattr(self, "_last_closed_bar_symbol_count", 0) > 0
+                    and getattr(self, "_last_evaluated_symbol_count", 0) == 0
+                ),
                 "orders_today": orders_today,
                 "replay_queue_depth": 0,
                 "latency_ms": 15,
@@ -2445,7 +2445,12 @@ class TradingEngine:
             else:
                 protection_status[sym] = False
                 unprotected.append(p)
-                if self._protection_state.get(sym) != ProtectionState.AWAITING_STOP_CONFIRMATION:
+                if self._protection_state.get(sym) not in {
+                    ProtectionState.AWAITING_STOP_CONFIRMATION,
+                    ProtectionState.AWAITING_CANCEL_CONFIRMATION,
+                    ProtectionState.AMBIGUOUS,
+                    ProtectionState.RECOVERY_REJECTED,
+                }:
                     self._protection_state[sym] = ProtectionState.UNPROTECTED
                 applog.warning(
                     "engine.protection",
@@ -2464,40 +2469,58 @@ class TradingEngine:
                     continue
 
                 state = self._protection_state.get(p.symbol)
+                side = OrderSide.SELL if p.qty > 0 else OrderSide.BUY
+                required_qty = abs(p.qty)
+
+                symbol_exit_orders = [
+                    o for o in open_orders
+                    if o.symbol == p.symbol
+                    and o.side == side
+                    and o.status not in (
+                        OrderStatus.CANCELED,
+                        OrderStatus.REJECTED,
+                        OrderStatus.FILLED,
+                    )
+                ]
+
+                # Check if we were awaiting cancel confirmation: if no conflicting exit orders remain, cancellation is confirmed
+                if state == ProtectionState.AWAITING_CANCEL_CONFIRMATION:
+                    conflicting = [
+                        o for o in symbol_exit_orders
+                        if not TradingEngine._is_valid_protective_stop(self, o, p)
+                        and str(getattr(o, "order_class", "") or "").lower() not in {"bracket", "oco", "oto"}
+                    ]
+                    if conflicting:
+                        applog.info(
+                            "engine.protection",
+                            f"#41: Waiting for broker cancellation confirmation for {p.symbol}; "
+                            f"{len(conflicting)} exit order(s) still active on broker.",
+                        )
+                        continue
+                    else:
+                        applog.info(
+                            "engine.protection",
+                            f"#41: Broker cancellation confirmed for {p.symbol}. Proceeding to submit replacement stop.",
+                        )
+                        state = ProtectionState.UNPROTECTED
+                        self._protection_state[p.symbol] = ProtectionState.UNPROTECTED
+
                 if state in {
-                    ProtectionState.AWAITING_CANCEL_CONFIRMATION,
                     ProtectionState.AWAITING_STOP_CONFIRMATION,
                     ProtectionState.AMBIGUOUS,
-                    # A rejected recovery remains fail-closed until broker state changes or restart;
-                    # do not hammer Alpaca every tick while quantity is held by an existing exit.
                     ProtectionState.RECOVERY_REJECTED,
                 }:
                     applog.info(
                         "engine.protection",
-                        f"#41: Recovery already pending for {p.symbol}; "
+                        f"#41: Recovery already pending/backed off for {p.symbol} (state={state}); "
                         "waiting for broker reconciliation.",
                     )
                     continue
 
                 try:
-                    side = OrderSide.SELL if p.qty > 0 else OrderSide.BUY
-                    required_qty = abs(p.qty)
-                    opened_at = getattr(p, "opened_at", None)
-
                     cancellation_failed = False
                     cancellation_pending = False
                     recovery_blocked = False
-
-                    symbol_exit_orders = [
-                        o for o in open_orders
-                        if o.symbol == p.symbol
-                        and o.side == side
-                        and o.status not in (
-                            OrderStatus.CANCELED,
-                            OrderStatus.REJECTED,
-                            OrderStatus.FILLED,
-                        )
-                    ]
 
                     for o in symbol_exit_orders:
                         st_px = getattr(o, "stop_price", None)
@@ -2528,8 +2551,7 @@ class TradingEngine:
                         )
 
                         if is_take_profit and limit_px is not None:
-                            # Preserve target metadata. Broker-managed bracket/OCO TP legs
-                            # are valid siblings of a replacement stop and must not be cancelled.
+                            # Preserve target metadata.
                             tp_map = getattr(self, "_position_take_profits", None)
                             if isinstance(tp_map, dict):
                                 tp_map[p.symbol] = float(limit_px)
@@ -3688,66 +3710,74 @@ class TradingEngine:
             except Exception as exc:
                 applog.debug("engine.heartbeat", f"Buying power check failed: {exc}")
 
-        # Monitor 8: Position reconciliation
-        if diagnostics["broker_connected"] and not getattr(self, "reconciliation_mismatch", False):
+        # Monitors 8/9: continuously re-evaluate broker truth. Alpaca can expose a
+        # partial/flatten fill before the durable fill consumer has applied it locally.
+        # Confirm mismatches across heartbeats and automatically clear reconciliation-only
+        # SAFE_MODE once broker and durable lots converge.
+        position_bad = False
+        order_bad = False
+        broker_syms: dict[str, float] = {}
+        if diagnostics["broker_connected"]:
             try:
                 broker_positions = await self.broker.positions()
-                broker_syms = {p.symbol: float(p.qty) for p in broker_positions if hasattr(p, "symbol")}
+                broker_syms = {p.symbol: float(p.qty) for p in broker_positions if hasattr(p, "symbol") and abs(float(p.qty)) > 1e-9}
                 lots = getattr(self.portfolio, "_lots", {}) if self.portfolio else {}
-                if isinstance(lots, dict):
-                    db_syms = {sym: float(lot.qty) for sym, lot in lots.items() if hasattr(lot, "qty") and lot.qty != 0}
-                    reconciled = True
-                    for sym, qty in broker_syms.items():
-                        if sym not in db_syms or db_syms[sym] != qty:
-                            reconciled = False
-                            break
-                    if reconciled:
-                        for sym, qty in db_syms.items():
-                            if sym not in broker_syms or broker_syms[sym] != qty:
-                                reconciled = False
-                                break
-                                
-                    if not reconciled:
-                        diagnostics["positions_reconciled"] = False
-                        self.reconciliation_mismatch = True
-                        self.allow_new_entries = False
-                        if self.system_health not in ("HALTED",):
-                            self.system_health = "SAFE_MODE"
-                        applog.warning("engine.heartbeat", f"Position reconciliation failure. Broker: {broker_syms}, DB lots: {db_syms}")
+                db_syms = {sym: float(lot.qty) for sym, lot in lots.items() if hasattr(lot, "qty") and abs(float(lot.qty)) > 1e-9} if isinstance(lots, dict) else {}
+                position_bad = broker_syms != db_syms
+                if position_bad:
+                    diagnostics["positions_reconciled"] = False
+                    self._position_reconciliation_mismatch_streak += 1
+                    applog.warning("engine.heartbeat", f"Position reconciliation mismatch confirmation {self._position_reconciliation_mismatch_streak}/2. Broker: {broker_syms}, DB lots: {db_syms}")
+                else:
+                    self._position_reconciliation_mismatch_streak = 0
             except Exception as exc:
-                applog.debug("engine.heartbeat", f"Position reconciliation check skipped/failed: {exc}")
-                self.reconciliation_mismatch = True
-                self.allow_new_entries = False
-                if self.system_health not in ("HALTED",):
-                    self.system_health = "SAFE_MODE"
+                diagnostics["positions_reconciled"] = False
+                applog.debug("engine.heartbeat", f"Position reconciliation observation unavailable: {exc}")
 
-        # Monitor 9: Order reconciliation
-        if diagnostics["broker_connected"] and not getattr(self, "reconciliation_mismatch", False):
             try:
-                discrepancy = False
-                for cid in list(self.pending_reconciliation_orders.keys()):
+                stale = []
+                for cid, info in list(self.pending_reconciliation_orders.items()):
                     try:
                         order = await self.broker.get_order_by_client_id(cid)
-                        if order is None:
-                            discrepancy = True
-                            break
-                    except Exception:
-                        discrepancy = True
-                        break
-                        
-                if discrepancy:
+                    except Exception as exc:
+                        diagnostics["orders_reconciled"] = False
+                        applog.debug("engine.heartbeat", f"Order reconciliation observation unavailable for {cid}: {exc}")
+                        continue
+                    if order is None:
+                        symbol = str((info or {}).get("symbol", "")).upper()
+                        if symbol and symbol not in broker_syms:
+                            stale.append(cid)
+                        else:
+                            order_bad = True
+                for cid in stale:
+                    self.pending_reconciliation_orders.pop(cid, None)
+                if stale:
+                    self.db.set_setting("pending_reconciliation_orders", self.pending_reconciliation_orders)
+                    applog.info("engine.heartbeat", f"Cleared {len(stale)} terminal reconciliation order(s) for flat positions")
+                if order_bad:
                     diagnostics["orders_reconciled"] = False
-                    self.reconciliation_mismatch = True
-                    self.allow_new_entries = False
-                    if self.system_health not in ("HALTED",):
-                        self.system_health = "SAFE_MODE"
-                    applog.warning("engine.heartbeat", "Order reconciliation mismatch found.")
-            except Exception:
+                    self._order_reconciliation_mismatch_streak += 1
+                    applog.warning("engine.heartbeat", f"Order reconciliation mismatch confirmation {self._order_reconciliation_mismatch_streak}/2")
+                else:
+                    self._order_reconciliation_mismatch_streak = 0
+            except Exception as exc:
                 diagnostics["orders_reconciled"] = False
-                self.reconciliation_mismatch = True
-                self.allow_new_entries = False
-                if self.system_health not in ("HALTED",):
-                    self.system_health = "SAFE_MODE"
+                applog.debug("engine.heartbeat", f"Order reconciliation observation unavailable: {exc}")
+
+        confirmed_bad = self._position_reconciliation_mismatch_streak >= 2 or self._order_reconciliation_mismatch_streak >= 2
+        if confirmed_bad:
+            self.reconciliation_mismatch = True
+            self.allow_new_entries = False
+            if self.system_health != "HALTED":
+                self.system_health = "SAFE_MODE"
+        elif diagnostics["broker_connected"] and not position_bad and not order_bad:
+            if self.reconciliation_mismatch:
+                applog.info("engine.heartbeat", "Broker/local reconciliation restored; clearing reconciliation SAFE_MODE latch")
+            self.reconciliation_mismatch = False
+            diagnostics["positions_reconciled"] = True
+            diagnostics["orders_reconciled"] = True
+            if self.system_health == "SAFE_MODE":
+                self.system_health = "NORMAL"
 
         # Monitor 10: VIX feed availability
         vix_fresh = False
