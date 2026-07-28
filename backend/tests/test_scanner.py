@@ -5,6 +5,7 @@ from datetime import datetime, UTC
 from unittest.mock import AsyncMock, MagicMock
 
 from app.core.scanner import MarketScanner, DEFENSIVE_WATCHLIST, ScannerOutcome, SpyVolatilityState
+from app.risk.market_regime import MarketRiskState
 from app.indicators.ta import enrich
 
 
@@ -29,8 +30,9 @@ async def test_spy_volatility_checks(mock_data_manager):
     }, index=idx)
     mock_data_manager.history.return_value = df
     
+    scanner._regime.assess = AsyncMock(return_value=(MarketRiskState.NORMAL, 1.0, 1.0, [], {}))
     res = await scanner.check_spy_volatility()
-    assert res is SpyVolatilityState.SAFE  # normal volatility
+    assert res is SpyVolatilityState.SAFE  # NORMAL/CAUTION map to legacy SAFE
 
 
 @pytest.mark.anyio
@@ -97,8 +99,9 @@ async def test_scanner_panic_fallback(mock_data_manager):
     }, index=idx)
     mock_data_manager.history.return_value = df
     
+    scanner._regime.assess = AsyncMock(return_value=(MarketRiskState.PANIC, 1.0, 1.0, ["test_panic"], {}))
     res = await scanner.check_spy_volatility()
-    assert res is SpyVolatilityState.PANIC  # panic volatility triggered
+    assert res is SpyVolatilityState.PANIC  # STRESS/PANIC map to legacy PANIC
     
     outcome, watchlist = await scanner.run()
     assert outcome == ScannerOutcome.SUCCESS_NONEMPTY

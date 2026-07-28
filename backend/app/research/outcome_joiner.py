@@ -66,6 +66,7 @@ class CanonicalOutcomeJoiner:
             self._consume_bar(event)
 
     def _register_candidate(self, event: TradingObservationEvent) -> None:
+        self.candidates_seen += 1
         if not event.candidate_id or event.price is None or float(event.price) <= 0:
             return
         if event.candidate_id in self._active:

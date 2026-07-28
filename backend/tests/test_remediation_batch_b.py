@@ -1,5 +1,5 @@
 import pytest
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 import pandas as pd
 import numpy as np
@@ -41,7 +41,7 @@ def test_db_driven_replay_queue_oldest_first(tmp_path):
     db.save_shadow_signal("cand_old", ts_old, "AAPL", "orb", "long", "demo", {"final_decision": "rejected", "replayed": False, "candidate_id": "cand_old"})
     db.save_shadow_signal("cand_mid", ts_mid, "AAPL", "orb", "long", "demo", {"final_decision": "rejected", "replayed": False, "candidate_id": "cand_mid"})
 
-    pending = db.get_pending_shadow_replays(mode="demo", limit=10)
+    pending = db.get_pending_shadow_replays(mode="demo", now=ts_new + timedelta(hours=1), limit=10)
     assert len(pending) == 3
     # Verify strict ASC order (cand_old -> cand_mid -> cand_new)
     assert pending[0]["candidate_id"] == "cand_old"

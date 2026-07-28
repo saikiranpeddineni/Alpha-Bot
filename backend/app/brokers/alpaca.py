@@ -320,9 +320,10 @@ class AlpacaBroker(Broker):
         order_status = status_map.get(raw_status, OrderStatus.SUBMITTED)
 
         symbol_key = str(getattr(o, "symbol", "") or "").upper()
+        symbol_strategies = getattr(self, "_symbol_strategies", {})
         strategy, reason = self._meta.get(
             str(o.id),
-            (self._symbol_strategies.get(symbol_key, "alpaca"), ""),
+            (symbol_strategies.get(symbol_key, "alpaca"), ""),
         )
         stop_price = (
             float(o.stop_price)

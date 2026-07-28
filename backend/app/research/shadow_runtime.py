@@ -27,7 +27,7 @@ class ShadowResearchRuntime:
                  gemini_observation_sink=None, target_d_observation_sink=None,
                  max_queue_size: int = 2000) -> None:
         self.publisher = ShadowEventPublisher(max_queue_size=max_queue_size)
-        self.evidence = UnifiedEvidenceStore(db)
+        self.evidence = UnifiedEvidenceStore(db, persist_every=50)
         self.audit = ShadowModuleAuditStore(db)
         self.spawn = SpawnShadowCoordinator(db=db)
         self.spawn_adapter = SpawnShadowEventAdapter(self.spawn)
@@ -193,6 +193,7 @@ class ShadowResearchRuntime:
 
     async def stop(self) -> None:
         self.audit.record("runtime", {"event": "STOP", "telemetry": self.telemetry()})
+        self.evidence.flush()
         for name, cleanup in (("publisher", self.publisher.stop), ("gemini", self.gemini.shutdown), ("spawn", self.spawn.stop)):
             try:
                 await cleanup()

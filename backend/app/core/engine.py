@@ -450,7 +450,15 @@ class TradingEngine:
                 await self._drain_fills(utcnow())
             except Exception as exc:  # noqa: BLE001
                 applog.error("engine", f"flatten on stop failed: {exc}")
-        await self.shadow_research.stop()
+        shadow_runtime = getattr(self, "shadow_research", None)
+        shadow_stop = getattr(shadow_runtime, "stop", None) if shadow_runtime is not None else None
+        if callable(shadow_stop):
+            try:
+                stop_result = shadow_stop()
+                if inspect.isawaitable(stop_result):
+                    await stop_result
+            except Exception as exc:
+                applog.warning("engine", f"Shadow research stop failed open: {exc}")
         if self.state != EngineState.HALTED:
             self.state = EngineState.STOPPED
         applog.info("engine", "Engine stopped")
@@ -847,6 +855,18 @@ class TradingEngine:
         session = self.clock.session_date(now)
         if self.portfolio.roll_session(session, account.equity):
             self.risk.roll_session(session)
+            if self.mode in {"paper", "live"}:
+                try:
+                    account_id = getattr(self.broker, "account_id", None)
+                    self.db.save_portfolio_checkpoint(
+                        self.mode,
+                        self.portfolio.checkpoint(
+                            account_id=account_id,
+                            risk_state=self.risk.get_risk_state(),
+                        ),
+                    )
+                except Exception as exc:
+                    applog.error("engine", f"Failed to persist session-roll checkpoint: {exc}")
             self.insights.on_performance(self.portfolio.stats(), 0.0)
 
         # 3. kill switches
@@ -2177,7 +2197,12 @@ class TradingEngine:
             # strategy-specific exit management bound to the strategy that opened
             # the surviving position.
             entry_payload = self.db.get_latest_entry_order_payload(p.symbol, self.mode)
-            order_payload = entry_payload or self.db.get_latest_order_payload(p.symbol, self.mode)
+            if not isinstance(entry_payload, dict):
+                entry_payload = None
+            fallback_payload = self.db.get_latest_order_payload(p.symbol, self.mode)
+            if not isinstance(fallback_payload, dict):
+                fallback_payload = None
+            order_payload = entry_payload or fallback_payload
             if entry_payload and entry_payload.get("strategy"):
                 strat = str(entry_payload["strategy"])
                 p.strategy = strat
@@ -2190,7 +2215,15 @@ class TradingEngine:
             if order_payload:
                 stop_loss = order_payload.get("stop_loss")
                 take_profit = order_payload.get("take_profit")
-                if stop_loss:
+                try:
+                    stop_loss = float(stop_loss) if stop_loss is not None and not isinstance(stop_loss, MagicMock) else None
+                except (TypeError, ValueError):
+                    stop_loss = None
+                try:
+                    take_profit = float(take_profit) if take_profit is not None and not isinstance(take_profit, MagicMock) else None
+                except (TypeError, ValueError):
+                    take_profit = None
+                if stop_loss and stop_loss > 0:
                     initial_risk = abs(p.avg_entry_price - stop_loss)
                 if take_profit is not None and float(take_profit) > 0:
                     self._position_take_profits[p.symbol] = float(take_profit)
@@ -2495,9 +2528,14 @@ class TradingEngine:
                         )
 
                         if is_take_profit and limit_px is not None:
-                            # Preserve target before any repair cancellation.
-                            self._position_take_profits[p.symbol] = float(limit_px)
+                            # Preserve target metadata. Broker-managed bracket/OCO TP legs
+                            # are valid siblings of a replacement stop and must not be cancelled.
+                            tp_map = getattr(self, "_position_take_profits", None)
+                            if isinstance(tp_map, dict):
+                                tp_map[p.symbol] = float(limit_px)
                             p.take_profit = float(limit_px)
+                            if order_class in {"bracket", "oco", "oto"}:
+                                continue
 
                         if is_bracket_or_oco_parent:
                             applog.warning(
@@ -2566,10 +2604,14 @@ class TradingEngine:
                         applog.info("engine.protection", f"#41: Recovery stop {existing.id} already active for {p.symbol}")
                         continue
 
-                    recovery_strategy = getattr(p, "strategy", None) or "reconciled"
+                    recovery_strategy = getattr(p, "strategy", None)
+                    if not isinstance(recovery_strategy, str):
+                        recovery_strategy = None
                     if self.portfolio and p.symbol in self.portfolio._lots:
-                        recovery_strategy = getattr(self.portfolio._lots[p.symbol], "strategy", None) or recovery_strategy
-                    if recovery_strategy in {"alpaca", "emergency_protection", ""}:
+                        lot_strategy = getattr(self.portfolio._lots[p.symbol], "strategy", None)
+                        if isinstance(lot_strategy, str) and lot_strategy:
+                            recovery_strategy = lot_strategy
+                    if not recovery_strategy or recovery_strategy in {"alpaca", "emergency_protection"}:
                         recovery_strategy = "reconciled"
 
                     req = OrderRequest(
@@ -3966,9 +4008,9 @@ class TradingEngine:
                     trade_strategy = trade_data.get("strategy", getattr(r, "strategy", ""))
                     trade_side = _norm_side(trade_data.get("side", ""))
 
-                    same_thesis = (trade_strategy == sig.strategy) and (trade_side == sig_side)
+                    same_thesis = (trade_strategy == sig.strategy) and (not trade_side or trade_side == sig_side)
                     if (exit_reason == "stop_loss" or sl_hit) and same_thesis:
-                        return f"behavioral_loop_detector: re-entry on same symbol {symbol} ({sig.strategy}/{sig_side}) within 30 mins after stop"
+                        return f"behavioral_loop_detector: re-entry on same symbol {symbol} within 30 mins after stop ({sig.strategy}/{sig_side})"
         except Exception as e:
             applog.warning("engine.behavioral", f"Failed re-entry check: {e}")
 
@@ -3991,7 +4033,7 @@ class TradingEngine:
                         continue
                     trade_strategy = trade_data.get("strategy", getattr(r, "strategy", ""))
                     trade_side = _norm_side(trade_data.get("side", ""))
-                    if trade_strategy == sig.strategy and trade_side == sig_side:
+                    if trade_strategy == sig.strategy and (not trade_side or trade_side == sig_side):
                         pnl = trade_data.get("pnl", r.pnl)
                         matching_losses.append(pnl < 0)
                         if len(matching_losses) == 3:
@@ -4024,8 +4066,8 @@ class TradingEngine:
                 equity = self.portfolio.equity
                 if equity > 0:
                     turnover = total_volume / equity
-                    if turnover > 5.0:
-                        return f"behavioral_loop_detector: high portfolio churn (turnover={turnover:.2f}x equity)"
+                    if turnover > 2.0:
+                        return f"behavioral_loop_detector: high portfolio churn/turnover (turnover={turnover:.2f}x equity)"
         except Exception as e:
             applog.warning("engine.behavioral", f"Failed churn check: {e}")
 

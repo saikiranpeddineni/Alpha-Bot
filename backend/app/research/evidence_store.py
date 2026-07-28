@@ -38,9 +38,11 @@ class UnifiedEvidenceStore:
     SETTING_KEY = "shadow_unified_evidence_v1"
     WATERMARK_KEY = "shadow_unified_evidence_watermarks_v1"
 
-    def __init__(self, db: Database | None, *, max_records: int = 20000) -> None:
+    def __init__(self, db: Database | None, *, max_records: int = 20000, persist_every: int = 1) -> None:
         self.db = db
         self.max_records = max(100, int(max_records))
+        self.persist_every = max(1, int(persist_every))
+        self._dirty_records = 0
         self._lock = Lock()
         self._records: dict[str, dict[str, Any]] = {}
         self._event_watermarks: set[str] = set()
@@ -104,7 +106,9 @@ class UnifiedEvidenceStore:
             if len(self._records) > self.max_records:
                 oldest_key = next(iter(self._records))
                 self._records.pop(oldest_key, None)
-            self._persist_fail_open()
+            self._dirty_records += 1
+            if self._dirty_records >= self.persist_every:
+                self._persist_fail_open()
             return True
 
     def _persist_fail_open(self) -> None:
@@ -114,9 +118,15 @@ class UnifiedEvidenceStore:
             self.db.set_setting(self.SETTING_KEY, self._records)
             self.db.set_setting(self.WATERMARK_KEY, sorted(self._event_watermarks)[-self.max_records:])
             self.last_persisted_at = datetime.now(timezone.utc)
+            self._dirty_records = 0
         except Exception as exc:
             self.persistence_failures += 1
             applog.warning("shadow_evidence", f"Evidence persistence failed open: {exc}")
+
+    def flush(self) -> None:
+        """Persist any pending compatibility snapshot; failures remain research-only."""
+        if self._dirty_records:
+            self._persist_fail_open()
 
     def get(self, candidate_id: str, challenger_id: str, challenger_version: str) -> dict[str, Any] | None:
         return self._records.get(EvidenceIdentity(candidate_id, challenger_id, challenger_version).key)

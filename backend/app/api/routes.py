@@ -2289,10 +2289,9 @@ async def get_spawner_status(request: Request) -> dict:
     total_pnl = db.get_total_realized_pnl(mode=engine.mode)
     
     total_allocated_research = max(0.0, total_pnl) * rc_pct / 100.0
-    active_spawned_capital = db.get_active_spawned_capital()
+    active_strategies = [row for row in db.get_active_spawned_strategies() if not str(row.get("policy_id", "")).startswith("spawn_g")]
+    active_spawned_capital = sum(float(row.get("seed_capital", 0.0) or 0.0) for row in active_strategies)
     research_pool_balance = max(0.0, total_allocated_research - active_spawned_capital)
-    
-    active_strategies = db.get_active_spawned_strategies()
     
     return {
         "active_strategies": active_strategies,
@@ -2321,7 +2320,10 @@ async def spawn_strategy(body: SpawnStrategyRequest, request: Request) -> dict:
                     detail=f"Lifecycle violation: policy {body.policy_id} is in status '{nominee.status}', must be 'approved' or 'promoted' to spawn."
                 )
                 
-        active_strategies = db.get_active_spawned_strategies()
+        active_strategies = [
+            row for row in db.get_active_spawned_strategies()
+            if not str(row.get("policy_id", "")).startswith("spawn_g")
+        ]
         if len(active_strategies) >= 5:
             raise HTTPException(
                 status_code=400,
@@ -2337,7 +2339,7 @@ async def spawn_strategy(body: SpawnStrategyRequest, request: Request) -> dict:
         total_pnl = db.get_total_realized_pnl(mode=engine.mode)
         
         total_allocated_research = max(0.0, total_pnl) * rc_pct / 100.0
-        active_spawned_capital = db.get_active_spawned_capital()
+        active_spawned_capital = sum(float(row.get("seed_capital", 0.0) or 0.0) for row in active_strategies)
         research_pool_balance = total_allocated_research - active_spawned_capital
         
         if body.seed_capital <= 0.0:

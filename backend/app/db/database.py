@@ -272,7 +272,14 @@ class Database:
     def __init__(self, path: Path) -> None:
         global _ACTIVE_DATABASE
         path.parent.mkdir(parents=True, exist_ok=True)
-        self.engine = create_engine(f"sqlite:///{path}", connect_args={"check_same_thread": False})
+        self.engine = create_engine(
+            f"sqlite:///{path}",
+            connect_args={"check_same_thread": False, "timeout": 30.0},
+        )
+        with self.engine.connect() as conn:
+            conn.exec_driver_sql("PRAGMA journal_mode=WAL")
+            conn.exec_driver_sql("PRAGMA synchronous=NORMAL")
+            conn.exec_driver_sql("PRAGMA busy_timeout=30000")
         Base.metadata.create_all(self.engine)
 
         # Self-healing migration for shadow_ledger table columns

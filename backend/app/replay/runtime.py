@@ -153,7 +153,9 @@ class ReplayRuntime:
                         close = float(bar.get("close", bar.get("c")))
                         broker.process_ohlc(bar["symbol"], float(bar.get("open", bar.get("o", close))), float(bar.get("high", bar.get("h", close))), float(bar.get("low", bar.get("l", close))), close, ts)
                     await engine._tick()
-                    if engine.spawn_coordinator.running: await engine.spawn_coordinator.queue.join()
+                    spawn = getattr(getattr(engine, "shadow_research", None), "spawn", None)
+                    if spawn is not None and spawn.running:
+                        await spawn.queue.join()
                     ledger.production_ticks += 1
                     acct, positions = await broker.account(), await broker.positions()
                     ledger.record_equity(ts, acct.equity, acct.cash, acct.buying_power, len(positions))
@@ -216,7 +218,7 @@ class ReplayRuntime:
         account = await broker.account(); engine.portfolio.roll_session(clock.session_date(clock.now_utc()), account.equity)
         engine.portfolio.peak_equity = account.equity; engine.portfolio.mark_equity(account.equity, clock.now_utc())
         engine.state = EngineState.RUNNING; engine.publish = ledger.capture_publish
-        await engine.spawn_coordinator.start()
+        await engine.shadow_research.start()
 
     def _snapshot_source_database(self, target: Path) -> None:
         """Take one transactionally consistent DB snapshot for the entire A/B replay run."""
