@@ -3,7 +3,7 @@
 This runner is intentionally deterministic and ordered. It does not tune strategy
 signals, ML/meta thresholds, position sizing, scanner economics, stops, or targets.
 It only applies verified runtime-safety, lifecycle, reconciliation, research
-isolation, observability, and regression-test corrections.
+isolation, observability, restart-fidelity, and regression-test corrections.
 """
 from __future__ import annotations
 
@@ -23,10 +23,12 @@ SCRIPTS = [
     "tools/apply_20260729_submission_reconciliation_fixes.py",
     "tools/apply_20260729_shadow_observability_fixes.py",
     "tools/apply_20260729_forensic_report_corrections.py",
+    "tools/apply_20260729_portfolio_restart_fidelity_fix.py",
     # Regression coverage is applied last, after production anchors converge.
     "tools/apply_20260728_architecture_audit_tests.py",
     "tools/apply_20260729_architecture_audit_tests.py",
     "tools/apply_20260729_lifecycle_isolation_tests.py",
+    "tools/apply_20260729_portfolio_restart_fidelity_test.py",
 ]
 
 for rel in SCRIPTS:
