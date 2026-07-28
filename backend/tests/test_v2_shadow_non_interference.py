@@ -34,6 +34,10 @@ def mock_engine(tmp_path):
     engine.broker.submit = AsyncMock()
     engine.broker.cancel = AsyncMock()
     engine.broker.cancel_all = AsyncMock()
+    # Fill ACK/NACK are deliberately synchronous in the broker contract: they only
+    # advance/release local durable-fill bookkeeping after portfolio processing.
+    engine.broker.ack_fill_processed = MagicMock()
+    engine.broker.nack_fill_processed = MagicMock()
     engine.broker.is_paper = True
     
     return engine
@@ -333,7 +337,7 @@ async def test_shadow_state_cleanup_on_real_exit(mock_engine):
 
 
 # 13. Restart/recovery failure cannot alter production state
-def test_restart_recovery_failure_cannot_alter_production(mock_engine):
+def test_restart_recovery_failure_cannot_alter_production_state(mock_engine):
     # Empty _v2_shadow_states simulates fresh restart
     mock_engine._v2_shadow_states.clear()
     mock_engine.portfolio = MagicMock()
