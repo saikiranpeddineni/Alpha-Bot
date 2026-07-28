@@ -62,6 +62,39 @@ def test_candidate_fanout_records_champion_evidence():
     asyncio.run(run())
 
 
+def test_legacy_shadow_ledger_is_reachable_but_canonical_joiner_owns_outcomes():
+    async def run():
+        runtime = ShadowResearchRuntime(db=MemoryDb(), gemini_api_key=None)
+        await runtime.start()
+        try:
+            assert runtime.publish(candidate()) is True
+            await asyncio.wait_for(runtime.publisher.queue.join(), timeout=1.0)
+            telemetry = runtime.telemetry()
+            assert telemetry["module_events"]["legacy_shadow_ledger"] == 1
+            assert telemetry["outcomes"]["candidates_seen"] == 1
+        finally:
+            await runtime.stop()
+
+    asyncio.run(run())
+
+
+def test_discovery_session_is_reachable_through_common_audit_plane():
+    runtime = ShadowResearchRuntime(db=MemoryDb(), gemini_api_key=None)
+    runtime.record_discovery_session("2026-07-28", {
+        "fixed_candidates": ["AAPL"],
+        "dynamic_candidates": ["AAPL", "NVDA"],
+        "fixed_qualified": ["AAPL"],
+        "dynamic_qualified": ["AAPL", "NVDA"],
+        "fixed_requests": 1,
+        "dynamic_requests": 1,
+        "fixed_latency_ms": 10.0,
+        "dynamic_latency_ms": 12.0,
+        "dynamic_missing": 0,
+        "dynamic_stale": 0,
+    })
+    assert runtime.telemetry()["module_events"]["discovery_validation"] == 1
+
+
 def test_target_d_evidence_uses_same_candidate_identity():
     runtime = ShadowResearchRuntime(db=MemoryDb(), gemini_api_key=None)
     runtime.target_d.consume = lambda event: {
@@ -109,7 +142,6 @@ def test_spawn_start_failure_is_contained():
         runtime.spawn.start = broken_start
         await runtime.start()
         try:
-            # Dispatcher remains usable and Champion evidence is still accepted.
             assert runtime.publish(candidate()) is True
             await asyncio.wait_for(runtime.publisher.queue.join(), timeout=1.0)
             assert runtime.evidence.get("cand-1", "champion", "production") is not None
