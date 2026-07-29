@@ -7,16 +7,12 @@ relative ranking signal; RiskManager remains the sole position-sizing authority.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
 
-from app.core.domain import Signal
+from app.core.domain import Position, Signal, SignalAction
 from app.core.logging import applog
-
-if TYPE_CHECKING:
-    from app.core.domain import Position
 
 _SECTOR_MAP: dict[str, str] = {
     "AAPL": "TECH", "MSFT": "TECH", "NVDA": "TECH", "AMD": "TECH",
@@ -75,7 +71,7 @@ class PortfolioAIGate:
         self._corr = pd.DataFrame(returns).corr(min_periods=20)
         applog.info("portfolio.gate", f"Correlation matrix updated: {len(returns)} symbols")
 
-    def _max_corr_with_positions(self, symbol: str, open_positions: list["Position"]) -> float:
+    def _max_corr_with_positions(self, symbol: str, open_positions: list[Position]) -> float:
         if self._corr is None:
             return 0.0
         sym = symbol.upper()
@@ -90,7 +86,7 @@ class PortfolioAIGate:
                     max_c = max(max_c, abs(float(c)))
         return max_c
 
-    def gate(self, symbol: str, open_positions: list["Position"], sector_override: str | None = None) -> tuple[bool, str]:
+    def gate(self, symbol: str, open_positions: list[Position], sector_override: str | None = None) -> tuple[bool, str]:
         sym = symbol.upper()
         max_c = self._max_corr_with_positions(sym, open_positions)
         if max_c > self.max_correlation:
@@ -195,7 +191,7 @@ class PortfolioDecision:
 
 def process_portfolio_allocations(
     signals: list[Signal],
-    positions: list["Position"],
+    positions: list[Position],
     available_capital: float,
     equity: float,
     portfolio_gate: PortfolioAIGate | None = None,
@@ -204,10 +200,28 @@ def process_portfolio_allocations(
     approved_candidates: list[Signal] = []
     gated_entries: list[tuple[Signal, str]] = []
 
+    # The broker snapshot is authoritative at cycle start, but every candidate
+    # approved in this batch is potential same-cycle exposure.  Gate later
+    # candidates against those prior approvals too, otherwise two correlated or
+    # same-sector signals can both pass against the same stale snapshot and only
+    # become visible after broker submission.  Quantity is intentionally a
+    # placeholder: this ledger exists only for symbol/sector/correlation checks;
+    # RiskManager remains the sole sizing authority.
+    effective_positions = list(positions)
     for sig in signals:
-        approved, reason = portfolio_gate.gate(sig.symbol, positions) if portfolio_gate is not None else (True, "ok")
+        approved, reason = portfolio_gate.gate(sig.symbol, effective_positions) if portfolio_gate is not None else (True, "ok")
         if approved:
             approved_candidates.append(sig)
+            if portfolio_gate is not None:
+                reference_price = float(sig.price) if sig.price is not None and float(sig.price) > 0 else 1.0
+                signed_qty = -1.0 if sig.action == SignalAction.ENTER_SHORT else 1.0
+                effective_positions.append(Position(
+                    symbol=sig.symbol.upper(),
+                    qty=signed_qty,
+                    avg_entry_price=reference_price,
+                    market_price=reference_price,
+                    strategy=sig.strategy,
+                ))
         else:
             gated_entries.append((sig, reason))
 
