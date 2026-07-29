@@ -54,3 +54,37 @@ async def test_spawn_sidecar_non_blocking_behavior():
     published = coordinator.publish_observation(cand_obs)
     assert published is False  # Dropped because queue full
     assert coordinator.shadow_events_dropped == 1
+
+
+def test_spawn_retirement_fails_closed_without_current_mark():
+    coordinator = SpawnShadowCoordinator()
+    executor = MagicMock()
+    executor.status = "ACTIVE"
+    executor.portfolio.positions = {"NVDA": MagicMock()}
+    executor.portfolio.last_prices = {}
+    executor._finite.return_value = None
+    coordinator.executors = {"spawn_test": executor}
+
+    retired = coordinator.retire_child("spawn_test", datetime.now(timezone.utc))
+
+    assert retired is False
+    assert executor.status == "ACTIVE"
+    executor.portfolio.close_virtual_position.assert_not_called()
+    assert coordinator.children_retired == 0
+
+
+def test_spawn_retirement_preflights_all_marks_before_any_close():
+    coordinator = SpawnShadowCoordinator()
+    executor = MagicMock()
+    executor.status = "ACTIVE"
+    executor.portfolio.positions = {"NVDA": MagicMock(), "AMD": MagicMock()}
+    executor.portfolio.last_prices = {"NVDA": 120.0}
+    executor._finite.side_effect = lambda value: float(value) if value is not None else None
+    coordinator.executors = {"spawn_test": executor}
+
+    retired = coordinator.retire_child("spawn_test", datetime.now(timezone.utc))
+
+    assert retired is False
+    assert executor.status == "ACTIVE"
+    executor.portfolio.close_virtual_position.assert_not_called()
+    assert coordinator.children_retired == 0
