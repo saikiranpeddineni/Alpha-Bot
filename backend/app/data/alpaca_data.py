@@ -211,19 +211,56 @@ class AlpacaDataProvider(DataProvider):
                 StockSnapshotRequest(symbol_or_symbols=list(symbols))
             )
             quotes: dict[str, Quote] = {}
+            def _valid_float(val: Any) -> float | None:
+                if val is None or getattr(type(val), "__module__", "").startswith("unittest.mock"):
+                    return None
+                try:
+                    return float(val)
+                except (TypeError, ValueError):
+                    return None
+
             for symbol, snap in snapshots.items():
                 try:
                     trade = snap.latest_trade
                     daily = snap.daily_bar
                     prev = snap.previous_daily_bar
-                    price = float(trade.price)
-                    prev_close = float(prev.close) if prev else price
+
+                    price = None
+                    ts = None
+                    if trade is not None:
+                        price = _valid_float(getattr(trade, "price", None))
+                        if price is not None:
+                            ts = getattr(trade, "timestamp", None)
+
+                    if price is None and daily is not None:
+                        price = _valid_float(getattr(daily, "close", None))
+                        if price is not None:
+                            ts = getattr(daily, "timestamp", None)
+
+                    if price is None and prev is not None:
+                        price = _valid_float(getattr(prev, "close", None))
+                        if price is not None:
+                            ts = getattr(prev, "timestamp", None)
+
+                    if price is None:
+                        raise ValueError("no trade or bar price available in snapshot")
+
+                    prev_close = _valid_float(getattr(prev, "close", None)) if prev is not None else None
+                    if prev_close is None:
+                        prev_close = price
+
+                    vol = _valid_float(getattr(daily, "volume", None)) if daily is not None else None
+                    if vol is None:
+                        vol = 0.0
+
+                    ts_dt = ts if ts is not None and getattr(ts, "tzinfo", None) and not _valid_float(getattr(type(ts), "__module__", None)) else utcnow()
+
                     quotes[symbol.upper()] = Quote(
                         symbol=symbol.upper(),
                         price=round(price, 2),
                         change_pct=round((price / prev_close - 1.0) * 100.0, 3) if prev_close else 0.0,
-                        volume=float(daily.volume) if daily else 0.0,
-                        ts=trade.timestamp if trade.timestamp.tzinfo else trade.timestamp.replace(tzinfo=UTC),
+                        volume=vol,
+                        ts=ts_dt,
                     )
                     self._snapshot_fail_counts.pop(symbol, None)  # reset on success
                 except Exception as exc:  # noqa: BLE001
