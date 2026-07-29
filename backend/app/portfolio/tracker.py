@@ -205,15 +205,27 @@ class PortfolioTracker:
         return 100000.0
 
     def note_stop(self, symbol: str, stop_loss: float | None) -> None:
-        """Record the current broker-confirmed stop without redefining entry risk.
+        """Record a broker-confirmed stop while preserving immutable entry risk.
 
-        ``initial_*`` fields are entry-bound accounting evidence.  A later trailing
-        or profit-lock stop may cross breakeven and must never change the R
-        denominator used for MFE/MAE, capture efficiency, or realized R.
+        The first valid stop may establish original R geometry when the entry fill
+        did not carry it.  Later trailing, breakeven, or runner ratchets update only
+        the current stop and can never rewrite the original R denominator.
         """
         lot = self._lots.get(symbol.upper())
-        if lot and stop_loss is not None:
-            lot.stop_loss = stop_loss
+        if lot is None or stop_loss is None:
+            return
+        stop = float(stop_loss)
+        lot.stop_loss = stop
+        if (
+            lot.initial_stop_loss is None
+            and lot.initial_risk_per_share is None
+            and lot.initial_risk_dollars <= 0
+        ):
+            risk_per_share = abs(float(lot.avg_price) - stop)
+            if risk_per_share > 1e-12:
+                lot.initial_stop_loss = stop
+                lot.initial_risk_per_share = risk_per_share
+                lot.initial_risk_dollars = abs(float(lot.qty)) * risk_per_share
 
     def open_positions(self) -> dict[str, _OpenLot]:
         return {s: lot for s, lot in self._lots.items() if abs(lot.qty) >= 1e-9}
@@ -314,7 +326,9 @@ class PortfolioTracker:
             from app.db.database import Database
             db = Database.active()
             if db is not None:
-                processed = db.processed_fill_qty(mode=fill.broker_mode, account_id=fill.broker_account_id or "default_account", fill_key=fill.broker_fill_key)
+                account_id = fill.broker_account_id or "default_account"
+                processed = db.processed_fill_qty(mode=fill.broker_mode, account_id=account_id, fill_key=fill.broker_fill_key)
+                previous_notional = db.processed_fill_notional(mode=fill.broker_mode, account_id=account_id, fill_key=fill.broker_fill_key)
                 delta = float(fill.cumulative_qty) - processed
                 if delta <= 1e-9:
                     return None
@@ -329,7 +343,8 @@ class PortfolioTracker:
                         risk_state = risk_manager.get_risk_state()
                     elif risk_state is None and risk_manager is not None:
                         risk_state = risk_manager.get_risk_state()
-                    db.commit_fill_processing(fill_key=fill.broker_fill_key, cumulative_qty=float(fill.cumulative_qty), mode=fill.broker_mode, account_id=fill.broker_account_id or "default_account", checkpoint=self.checkpoint(risk_state=risk_state), trade=trade)
+                    cumulative_notional = previous_notional + float(effective.qty) * float(effective.price)
+                    db.commit_fill_processing(fill_key=fill.broker_fill_key, cumulative_qty=float(fill.cumulative_qty), cumulative_notional=cumulative_notional, mode=fill.broker_mode, account_id=account_id, checkpoint=self.checkpoint(risk_state=risk_state), trade=trade)
                     return trade
                 except Exception:
                     self.__dict__.clear()

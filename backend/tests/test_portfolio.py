@@ -77,6 +77,40 @@ def test_r_multiple_uses_noted_stop():
     assert trade.r_multiple == pytest.approx(2.0)
 
 
+def test_r_multiple_uses_noted_stop_short():
+    p = PortfolioTracker()
+    p.on_fill(fill(side=OrderSide.SELL, qty=10, price=100.0))
+    p.note_stop("AAPL", 102.0)
+    trade = p.on_fill(fill(side=OrderSide.BUY, qty=10, price=96.0))
+    assert trade.r_multiple == pytest.approx(2.0)
+
+
+def test_noted_stop_risk_is_immutable_across_ratchets():
+    p = PortfolioTracker()
+    p.on_fill(fill(qty=10, price=100.0))
+    p.note_stop("AAPL", 98.0)
+    p.note_stop("AAPL", 99.0)
+    p.note_stop("AAPL", 101.0)
+    lot = p._lots["AAPL"]
+    assert lot.stop_loss == pytest.approx(101.0)
+    assert lot.initial_stop_loss == pytest.approx(98.0)
+    assert lot.initial_risk_per_share == pytest.approx(2.0)
+    assert lot.initial_risk_dollars == pytest.approx(20.0)
+    trade = p.on_fill(fill(side=OrderSide.SELL, qty=10, price=104.0))
+    assert trade.r_multiple == pytest.approx(2.0)
+
+
+def test_entry_supplied_initial_risk_is_not_redefined_by_note_stop():
+    p = PortfolioTracker()
+    p.on_fill(fill(qty=10, price=100.0), initial_stop=97.0)
+    p.note_stop("AAPL", 99.0)
+    lot = p._lots["AAPL"]
+    assert lot.stop_loss == pytest.approx(99.0)
+    assert lot.initial_stop_loss == pytest.approx(97.0)
+    assert lot.initial_risk_per_share == pytest.approx(3.0)
+    assert lot.initial_risk_dollars == pytest.approx(30.0)
+
+
 def test_session_roll_resets_day_stats():
     p = PortfolioTracker()
     p.roll_session(T0.date(), 100_000.0)

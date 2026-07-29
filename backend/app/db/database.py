@@ -124,6 +124,7 @@ class FillProgressRow(Base):
     account_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     fill_key: Mapped[str] = mapped_column(String(96), primary_key=True)
     cumulative_qty: Mapped[float] = mapped_column(Float)
+    cumulative_notional: Mapped[float] = mapped_column(Float, default=0.0)
     processed_at: Mapped[datetime]
 
 
@@ -336,6 +337,15 @@ class Database:
                         needs_nominee_commit = True
                 if needs_nominee_commit:
                     conn.commit()
+
+                # Backward-compatible migration for durable partial-fill pricing.
+                cursor = conn.exec_driver_sql("PRAGMA table_info(broker_fill_progress)")
+                fill_progress_cols = {row[1] for row in cursor.fetchall()}
+                if "cumulative_notional" not in fill_progress_cols:
+                    conn.exec_driver_sql(
+                        "ALTER TABLE broker_fill_progress ADD COLUMN cumulative_notional FLOAT DEFAULT 0.0"
+                    )
+                    conn.commit()
         except Exception as exc:
             # Avoid cyclical import for applog at early initialization
             print(f"[Database Migration Warning] Failed to run self-healing migration: {exc}")
@@ -415,6 +425,11 @@ class Database:
             row = s.get(FillProgressRow, (mode, account_id, fill_key))
             return float(row.cumulative_qty) if row else 0.0
 
+    def processed_fill_notional(self, mode: str, account_id: str, fill_key: str) -> float:
+        with self._session() as s:
+            row = s.get(FillProgressRow, (mode, account_id, fill_key))
+            return float(row.cumulative_notional or 0.0) if row else 0.0
+
     def get_fill_recovery_cursor_timestamp(self, mode: str, account_id: str) -> datetime | None:
         """Return most recent processed_at from FillProgressRow for forward cursor recovery (#47)."""
         from sqlalchemy import func, select
@@ -444,7 +459,7 @@ class Database:
             s.commit()
 
     def commit_fill_processing(
-        self, *, fill_key: str, cumulative_qty: float, mode: str, account_id: str,
+        self, *, fill_key: str, cumulative_qty: float, cumulative_notional: float = 0.0, mode: str, account_id: str,
         checkpoint: dict, trade: TradeRecord | None,
     ) -> None:
         """Atomically advance a broker execution watermark and portfolio state."""
@@ -453,7 +468,8 @@ class Database:
             if current is not None and float(current.cumulative_qty) >= cumulative_qty - 1e-9:
                 return
             s.merge(FillProgressRow(mode=mode, account_id=account_id, fill_key=fill_key,
-                                    cumulative_qty=cumulative_qty, processed_at=datetime.now(UTC)))
+                                    cumulative_qty=cumulative_qty, cumulative_notional=cumulative_notional,
+                                    processed_at=datetime.now(UTC)))
             s.merge(PortfolioCheckpointRow(mode=mode, updated_at=datetime.now(UTC),
                                            payload=json.dumps(checkpoint, default=str)))
             if trade is not None:

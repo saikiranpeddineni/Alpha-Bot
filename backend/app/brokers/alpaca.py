@@ -649,10 +649,14 @@ class AlpacaBroker(Broker):
             elif ack_qty >= processed - 1e-9:
                 prev_notional = self._processed_fill_notional.get(oid, 0.0)
             else:
-                # A durable DB watermark can survive a process restart while the
-                # volatile notional cannot. Use the broker cumulative average as
-                # the conservative price basis; quantity de-dup remains exact.
-                prev_notional = processed * cum_avg_price
+                # A durable DB watermark survives restart; use its matching cumulative
+                # notional so the next delta price remains exact as well as its quantity.
+                durable_notional = 0.0
+                if db:
+                    durable_notional = db.processed_fill_notional(
+                        mode=self._broker_mode, account_id=self.account_id, fill_key=oid
+                    )
+                prev_notional = durable_notional if durable_notional > 0 else processed * cum_avg_price
 
             if processed > 0 and delta > 0 and cum_notional > prev_notional:
                 delta_price = round((cum_notional - prev_notional) / delta, 4)

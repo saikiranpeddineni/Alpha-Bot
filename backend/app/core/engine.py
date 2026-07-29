@@ -94,6 +94,7 @@ class TradingEngine:
         self.user_watchlist: list[str] = db.get_setting("watchlist") or settings.watchlist_symbols()
         self.scanned_watchlist: list[str] = []
         self.scanned_watchlist_ttl: dict[str, int] = {}
+        self.scanned_watchlist_expires_at: dict[str, datetime] = {}
         self.watchlist: list[str] = sorted(list(set(self.user_watchlist + self.scanned_watchlist)))
         self.core_watchlist: list[str] = list(self.user_watchlist)
         stored_risk = db.get_setting("risk_config") or {}
@@ -154,10 +155,10 @@ class TradingEngine:
         self._last_data_bar_ts: dict[str, datetime] = {}
         self._data_gap_symbols: set[str] = set()
 
-        # Scanner state initialization
-        self.scanned_watchlist: list[str] = []
-        self.scanned_watchlist_ttl: dict[str, int] = {}
-        self.scanned_watchlist_expires_at: dict[str, datetime] = {}
+        # Slow scheduled work is explicitly detached from the market-data/execution tick.
+        self._scanner_task: asyncio.Task | None = None
+        self._trainer_task: asyncio.Task | None = None
+        self._shadow_replay_task: asyncio.Task | None = None
 
         # Feature 4: Economic calendar / event guard
         from app.core.calendar import EventCalendar
@@ -193,16 +194,16 @@ class TradingEngine:
         self._last_evaluated_symbol_count = 0
         self._last_closed_bar_symbol_count = 0
         self._last_telemetry_event: dict | None = None
-        now_iso = datetime.now(timezone.utc).isoformat()
-        self._subsystem_timestamps: dict[str, str] = {
-            "last_scan": now_iso,
-            "last_bar": now_iso,
-            "last_order": now_iso,
-            "last_strategy": now_iso,
-            "last_replay": now_iso,
-            "last_training": now_iso,
-            "last_broker_ping": now_iso,
+        self._subsystem_timestamps: dict[str, str | None] = {
+            "last_scan": None,
+            "last_bar": None,
+            "last_order": None,
+            "last_strategy": None,
+            "last_replay": None,
+            "last_training": None,
+            "last_broker_ping": None,
         }
+        self._last_broker_latency_ms: float | None = None
 
     # ------------------------------------------------------------------
     # kill-switch persistence helpers
@@ -454,6 +455,15 @@ class TradingEngine:
             except asyncio.CancelledError:
                 pass
         self._event_monitor_task = None
+        for attr in ("_scanner_task", "_trainer_task", "_shadow_replay_task"):
+            task = getattr(self, attr, None)
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            setattr(self, attr, None)
         # fix(#56): cancel emergency flatten task when engine is explicitly stopped
         if self._emergency_flatten_task is not None and not self._emergency_flatten_task.done():
             self._emergency_flatten_task.cancel()
@@ -643,9 +653,9 @@ class TradingEngine:
             positions = await self.broker.positions()
             if positions:
                 applog.warning("engine", f"EOD liquidation unresolved: flattening {len(positions)} authoritative positions")
+                for position in positions:
+                    self._pending_close_symbols.add(position.symbol.upper())
                 await self.broker.flatten_all(reason="end of day")
-                if hasattr(self, "_pending_close_symbols"):
-                    self._pending_close_symbols.clear()
                 await self._drain_fills(now)
             residual_positions = await self.broker.positions()
             residual_orders = await self.broker.open_orders()
@@ -697,11 +707,15 @@ class TradingEngine:
         today_date = now_et.date()
         et_mins = now_et.hour * 60 + now_et.minute
 
-        # Poll real fills at the start of the tick to prevent position reconciliation race conditions
         from app.brokers.paper import PaperBroker
-        if not isinstance(self.broker, PaperBroker) and hasattr(self.broker, "poll_fills"):
-            await self.broker.poll_fills()
-            await self._drain_fills(now)
+
+        # Resolve durable ambiguous submissions before heartbeat evaluates broker/local
+        # order reconciliation.  Heartbeat is an observer of this state, not a second
+        # owner that may independently delete idempotency guards.
+        try:
+            await self._reconcile_pending_submissions(now=now)
+        except Exception as exc:
+            applog.error("engine", f"Failed to reconcile pending submissions: {exc}")
 
         # System Heartbeat Checks (CR-146 Phase F)
         await self._check_system_heartbeat(now)
@@ -734,11 +748,6 @@ class TradingEngine:
             val = 0.55
         self.pipeline.ml_threshold = val
 
-        try:
-            await self._reconcile_pending_submissions()
-        except Exception as exc:
-            applog.error("engine", f"Failed to reconcile pending submissions: {exc}")
-
         # Run pre-market scanner (9:00 AM ET onwards) once per day
         # Run post-market trainer (>= 16:15 ET) once per day
         # Run event monitor every 5 minutes during active trading session (9:30 AM to 4:00 PM ET)
@@ -746,7 +755,10 @@ class TradingEngine:
             if self._last_scan_date != today_date and et_mins >= 9 * 60:
                 self._last_scan_date = today_date
                 applog.info("engine", "Pre-market scanner trigger time reached (>= 09:00 ET)")
-                await self.run_market_scanner(is_intraday=False)
+                if self._scanner_task is None or self._scanner_task.done():
+                    self._scanner_task = asyncio.create_task(
+                        self.run_market_scanner(is_intraday=False), name="market-scanner"
+                    )
             # Feature 1: Intraday watchlist refresh every 30 min during session
             elif (
                 9 * 60 + 30 <= et_mins <= 15 * 60 + 30  # 9:30 AM – 3:30 PM ET
@@ -755,11 +767,19 @@ class TradingEngine:
             ):
                 self._last_intraday_scan_min = et_mins
                 applog.info("engine", f"Intraday watchlist refresh triggered at {et_mins} ET mins")
-                await self.run_market_scanner(is_intraday=True)
+                if self._scanner_task is None or self._scanner_task.done():
+                    self._scanner_task = asyncio.create_task(
+                        self.run_market_scanner(is_intraday=True), name="market-scanner-intraday"
+                    )
+                else:
+                    applog.info("engine", "Intraday scanner skipped: previous scanner task still running")
             if self.trainer and self._last_train_date != today_date and et_mins >= 16 * 60 + 15:
                 self._last_train_date = today_date
                 applog.info("engine", "Post-market trainer trigger time reached (>= 16:15 ET)")
-                await self.trainer.trigger(self.watchlist)
+                if self._trainer_task is None or self._trainer_task.done():
+                    self._trainer_task = asyncio.create_task(
+                        self.trainer.trigger(list(self.watchlist)), name="post-market-trainer"
+                    )
             # Feature 3: Midday score threshold boost (raise threshold, not hard block)
             rc = self.risk_config
             is_midday = rc.midday_start_et <= et_mins <= rc.midday_end_et
@@ -1144,12 +1164,17 @@ class TradingEngine:
                                 "order_type": str(decision.order.order_type),
                                 "limit_price": decision.order.limit_price,
                                 "submitted_at": utcnow().isoformat(),
+                                "submission_state": "submitting",
                             }
                             self.db.set_setting("pending_reconciliation_orders", self.pending_reconciliation_orders)
 
                             try:
                                 order = await self.broker.submit(decision.order)
-                                self.pending_reconciliation_orders.pop(client_order_id, None)
+                                if order.status == OrderStatus.REJECTED:
+                                    self.pending_reconciliation_orders.pop(client_order_id, None)
+                                else:
+                                    self.pending_reconciliation_orders[client_order_id]["submission_state"] = "broker_acknowledged"
+                                    self.pending_reconciliation_orders[client_order_id]["broker_order_id"] = getattr(order, "id", None)
                                 self.db.set_setting("pending_reconciliation_orders", self.pending_reconciliation_orders)
                                 self.recent_orders.appendleft(order)
                                 self.db.save_order(order, self.mode)
@@ -1166,6 +1191,9 @@ class TradingEngine:
                                     else:
                                         self._update_shadow_decision(sig.candidate_id, "accepted", "", "none")
                             except Exception as exc:
+                                self.pending_reconciliation_orders[client_order_id]["submission_state"] = "ambiguous"
+                                self.pending_reconciliation_orders[client_order_id]["last_error"] = str(exc)
+                                self.db.set_setting("pending_reconciliation_orders", self.pending_reconciliation_orders)
                                 applog.error("engine", f"Ambiguous submission exception for {decision.order.symbol} ({client_order_id}): {exc}")
                                 order = Order(
                                     id=client_order_id,
@@ -1188,12 +1216,19 @@ class TradingEngine:
 
             await self._drain_fills(now)
 
-        # 5.5 Periodic background replay of pending shadow signals
+        # 5.5 Periodic shadow replay. Historical-data I/O is research-only and
+        # cannot own or delay the production market-data/execution tick.
         if self._tick_count % 10 == 0:
-            try:
-                await self._replay_pending_signals(now)
-            except Exception as e:
-                applog.error("engine", f"Background replay error: {e}")
+            task = self._shadow_replay_task
+            if task is None or task.done():
+                if task is not None and not task.cancelled():
+                    try:
+                        task.result()
+                    except Exception as exc:
+                        applog.error("engine", f"Background replay error: {exc}")
+                self._shadow_replay_task = asyncio.create_task(
+                    self._replay_pending_signals(now), name="shadow-replay"
+                )
 
         # 6. mark equity + persist
         if not getattr(self, "reconciliation_failed", False) and new_closed:
@@ -1967,17 +2002,22 @@ class TradingEngine:
                 order = self.db.get_order(fill.order_id)
 
             if order is not None and order.status != OrderStatus.FILLED:
-                # Paper orders share objects and are already updated; Alpaca
-                # orders are snapshots that need their fill state applied.
-                order.status = OrderStatus.FILLED
-                order.filled_qty = fill.qty
+                # Alpaca fill events are incremental fragments with a cumulative
+                # watermark. Preserve PARTIALLY_FILLED until cumulative execution
+                # reaches the broker order quantity.
+                cumulative = float(getattr(fill, "cumulative_qty", 0.0) or 0.0)
+                if cumulative <= 0:
+                    cumulative = float(getattr(order, "filled_qty", 0.0) or 0.0) + float(fill.qty)
+                order.filled_qty = min(float(order.qty), cumulative)
+                order.status = (
+                    OrderStatus.FILLED
+                    if order.filled_qty + 1e-9 >= float(order.qty)
+                    else OrderStatus.PARTIALLY_FILLED
+                )
                 order.filled_avg_price = fill.price
-                order.filled_at = fill.ts
-            
+                order.filled_at = fill.ts if order.status == OrderStatus.FILLED else None
+
             symbol = fill.symbol.upper()
-            # Release pending-close guard when sell fill arrives
-            if fill.side == OrderSide.SELL:
-                self._pending_close_symbols.discard(symbol)
             peak = self._position_peaks.get(symbol)
             trough = self._position_troughs.get(symbol)
             
@@ -2014,6 +2054,9 @@ class TradingEngine:
             ack_fill = getattr(self.broker, "ack_fill_processed", None)
             if ack_fill is not None:
                 ack_fill(fill)
+            local_lot = getattr(self.portfolio, "_lots", {}).get(symbol)
+            if local_lot is None or abs(float(getattr(local_lot, "qty", 0.0))) < 1e-9:
+                self._pending_close_symbols.discard(symbol)
             if trade is not None:
                 # PR #271 V2 Shadow Harvest: Finalize counterfactual comparison metadata
                 st = self._v2_shadow_states.pop(symbol, None)
@@ -2123,7 +2166,6 @@ class TradingEngine:
     ) -> dict:
         self._heartbeat_seq += 1
         now_iso = datetime.now(timezone.utc).isoformat()
-        self._subsystem_timestamps["last_broker_ping"] = now_iso
 
         # Classify activity state
         if self.state == EngineState.HALTED or self.system_health == "HALTED":
@@ -2202,7 +2244,7 @@ class TradingEngine:
                 ),
                 "orders_today": orders_today,
                 "replay_queue_depth": 0,
-                "latency_ms": 15,
+                "latency_ms": self._last_broker_latency_ms,
                 "degraded_reasons": degraded_reasons,
             },
         }
@@ -2318,9 +2360,26 @@ class TradingEngine:
         }
 
     def _reconcile_positions(self, positions: list[Position]) -> None:
-        """Reconcile and reconstruct database portfolio lot states from broker positions."""
-        self.portfolio._lots.clear()
+        """Reconcile local lots to authoritative broker positions without erasing matching lot state."""
+        broker_symbols = {p.symbol for p in positions if abs(float(p.qty)) > 1e-9}
+        for local_symbol in list(self.portfolio._lots):
+            if local_symbol not in broker_symbols:
+                self.portfolio._lots.pop(local_symbol, None)
+                self._position_take_profits.pop(local_symbol, None)
+                self._position_peaks.pop(local_symbol, None)
+
         for p in positions:
+            existing_lot = self.portfolio._lots.get(p.symbol)
+            if existing_lot is not None:
+                qty_matches = abs(float(existing_lot.qty) - float(p.qty)) <= 1e-9
+                price_scale = max(1.0, abs(float(p.avg_entry_price)))
+                avg_matches = abs(float(existing_lot.avg_price) - float(p.avg_entry_price)) <= 1e-8 * price_scale
+                if qty_matches and avg_matches:
+                    # Fill processing already established the same economic lot. Keep
+                    # its original/current stop, initial R, strategy and entry timestamp.
+                    p.strategy = existing_lot.strategy
+                    continue
+
             strat = "manual"
             if hasattr(self.broker, "_symbol_strategies"):
                 db_strat = self.db.get_latest_entry_order_strategy(p.symbol, self.mode)
@@ -2398,37 +2457,6 @@ class TradingEngine:
             )
         self.reconciliation_failed = False
 
-    async def verify_broker_protective_stops(self, positions: list[Position]) -> dict[str, bool]:
-        """Authoritative broker-side protective-order reconciliation (#41).
-
-        Verifies that every active position has a live, matching broker-side protective stop.
-        Local DB/metadata is NOT accepted as proof of protection.
-
-        Criteria:
-          1. Verify an active stop child order exists on the broker.
-          2. Reject canceled, rejected, expired, or filled orders.
-          3. Verify correct directional geometry:
-             - LONG: SELL order with stop_price < avg_entry_price.
-             - SHORT: BUY order with stop_price > avg_entry_price.
-          4. Verify sufficient remaining quantity (order.qty >= position.qty).
-          5. Reject stale orders submitted prior to current position.opened_at.
-          6. If protection is missing, fail closed for new entries (allow_new_entries = False).
-          7. Perform idempotent recovery by submitting a protective stop order to the broker.
-        """
-        if self.broker is None or not positions:
-            return {}
-
-        active_positions = [p for p in positions if abs(p.qty) > 1e-9]
-        if not active_positions:
-            return {}
-
-        try:
-            open_orders = await self.broker.open_orders()
-        except Exception as exc:
-            applog.error("engine.protection", f"#41: Failed to fetch open orders from broker: {exc}")
-            self.allow_new_entries = False
-            if self.system_health not in ("HALTED", "SAFE_MODE"):
-                self.system_health = "DEGRADED"
     def _resolve_recovery_stop(self, position: Position) -> tuple[float, str]:
         sym = position.symbol
         if self.portfolio and sym in self.portfolio._lots:
@@ -2459,12 +2487,13 @@ class TradingEngine:
             OrderType.STOP_LIMIT,
         }
 
+        # A bracket/OTO/OCO *parent* may carry a child stop_price copied from
+        # nested broker legs for display/reconciliation metadata.  Parent class or
+        # parent_id alone is therefore not proof that this order is the stop leg.
+        # Rule-41 accepts only an explicit stop child or a standalone STOP order.
+        leg = str(getattr(order, "leg", "") or "").lower()
         is_stop_leg = (
-            (
-                getattr(order, "leg", "") in {"stop", "stop_loss"}
-                or getattr(order, "order_class", "") in {"bracket", "oco", "oto"}
-                or bool(getattr(order, "parent_id", None))
-            )
+            leg in {"stop", "stop_loss"}
             and order.stop_price is not None
         )
 
@@ -2608,6 +2637,52 @@ class TradingEngine:
                 state = self._protection_state.get(p.symbol)
                 side = OrderSide.SELL if p.qty > 0 else OrderSide.BUY
                 required_qty = abs(p.qty)
+
+                # Alpaca bracket exits are not active until the entry parent is
+                # completely filled.  A partially-filled bracket therefore leaves
+                # a real position temporarily unprotected.  Freeze exposure first:
+                # cancel the still-fillable entry parent, wait for broker confirmation,
+                # then recover a standalone stop sized to the authoritative position.
+                entry_side = OrderSide.BUY if p.qty > 0 else OrderSide.SELL
+                partial_bracket_entries = [
+                    o for o in open_orders
+                    if o.symbol == p.symbol
+                    and o.side == entry_side
+                    and str(getattr(o, "order_class", "") or "").lower() == "bracket"
+                    and str(getattr(o, "leg", "") or "").lower() == "entry"
+                    and o.status == OrderStatus.PARTIALLY_FILLED
+                    and float(getattr(o, "filled_qty", 0.0) or 0.0) > 0
+                    and float(getattr(o, "remaining_qty", 0.0) or 0.0) > 1e-9
+                ]
+                if partial_bracket_entries:
+                    if state == ProtectionState.AWAITING_CANCEL_CONFIRMATION:
+                        applog.info(
+                            "engine.protection",
+                            f"#41: Waiting for partial bracket entry cancellation confirmation for {p.symbol}; "
+                            f"{len(partial_bracket_entries)} parent order(s) still open.",
+                        )
+                        continue
+                    cancel_failed = False
+                    for parent in partial_bracket_entries:
+                        try:
+                            c_res = self.broker.cancel(parent.id)
+                            if inspect.isawaitable(c_res):
+                                await c_res
+                            applog.warning(
+                                "engine.protection",
+                                f"#41: Partial bracket entry {parent.id} for {p.symbol} has "
+                                f"filled={parent.filled_qty}/{parent.qty}; requested cancellation of remaining "
+                                "entry quantity before protective-stop recovery.",
+                            )
+                        except Exception as cancel_exc:
+                            cancel_failed = True
+                            applog.error(
+                                "engine.protection",
+                                f"#41: Failed to cancel partial bracket entry {parent.id} for {p.symbol}: {cancel_exc}",
+                            )
+                    if not cancel_failed:
+                        self._protection_state[p.symbol] = ProtectionState.AWAITING_CANCEL_CONFIRMATION
+                    continue
 
                 symbol_exit_orders = [
                     o for o in open_orders
@@ -2817,42 +2892,55 @@ class TradingEngine:
         return protection_status
 
 
-    async def _reconcile_pending_submissions(self) -> None:
-        """Query the broker for ambiguous order submissions and resolve their status."""
+    async def _reconcile_pending_submissions(self, now: datetime | None = None) -> None:
+        """Resolve ambiguous submits without releasing duplicate/exposure guards early."""
         if not self.pending_reconciliation_orders:
             return
-
+        now = now or utcnow()
+        min_absence_age_seconds = 60.0
+        required_not_found_observations = 3
         client_ids = list(self.pending_reconciliation_orders.keys())
         applog.info("engine", f"Checking status of {len(client_ids)} ambiguous order submissions: {client_ids}")
-
+        changed = False
         for cid in client_ids:
-            order_info = self.pending_reconciliation_orders[cid]
-            symbol = order_info["symbol"]
+            order_info = self.pending_reconciliation_orders.get(cid)
+            if not isinstance(order_info, dict):
+                continue
+            symbol = str(order_info.get("symbol", "")).upper()
             try:
                 order = await self.broker.get_order_by_client_id(cid)
-                if order is not None:
-                    applog.info("engine", f"Ambiguous order resolved: {symbol} ({cid}) is active/filled at broker.")
-                    self.pending_reconciliation_orders.pop(cid, None)
-                    self.db.set_setting("pending_reconciliation_orders", self.pending_reconciliation_orders)
-                    self.db.save_order(order, self.mode)
-                else:
-                    applog.info("engine", f"Ambiguous order resolved: {symbol} ({cid}) was NEVER received by broker. Treating as REJECTED.")
-                    self.pending_reconciliation_orders.pop(cid, None)
-                    self.db.set_setting("pending_reconciliation_orders", self.pending_reconciliation_orders)
-                    rejected_order = Order(
-                        id=cid,
-                        client_order_id=cid,
-                        symbol=symbol,
-                        side=OrderSide.BUY if order_info["side"].lower() == "buy" else OrderSide.SELL,
-                        qty=order_info["qty"],
-                        order_type=OrderType.LIMIT if order_info["order_type"].lower() == "limit" else OrderType.MARKET,
-                        limit_price=order_info["limit_price"],
-                        status=OrderStatus.REJECTED,
-                        reason="Ambiguous submit resolved to not found at broker."
-                    )
-                    self.db.save_order(rejected_order, self.mode)
             except Exception as exc:
                 applog.warning("engine", f"Reconciliation query failed for client ID {cid}: {exc}. Retaining guard.")
+                continue
+            if order is not None:
+                applog.info("engine", f"Ambiguous order resolved from broker truth: {symbol} ({cid}) status={order.status}.")
+                self.pending_reconciliation_orders.pop(cid, None)
+                self.db.save_order(order, self.mode)
+                changed = True
+                continue
+            submitted_at = order_info.get("submitted_at")
+            try:
+                submitted_dt = datetime.fromisoformat(str(submitted_at).replace("Z", "+00:00"))
+                if submitted_dt.tzinfo is None:
+                    submitted_dt = submitted_dt.replace(tzinfo=UTC)
+                age_seconds = max(0.0, (now - submitted_dt.astimezone(UTC)).total_seconds())
+            except (TypeError, ValueError):
+                age_seconds = 0.0
+            count = int(order_info.get("reconcile_not_found_count", 0) or 0) + 1
+            order_info["reconcile_not_found_count"] = count
+            order_info["last_reconcile_not_found_at"] = now.isoformat()
+            if not order_info.get("first_reconcile_not_found_at"):
+                order_info["first_reconcile_not_found_at"] = now.isoformat()
+            changed = True
+            if count < required_not_found_observations or age_seconds < min_absence_age_seconds:
+                applog.warning("engine", f"Ambiguous order still unresolved: {symbol} ({cid}) broker_not_found observation={count}/{required_not_found_observations} age={age_seconds:.1f}s; retaining guard.")
+                continue
+            applog.warning("engine", f"Ambiguous order resolved absent after bounded reconciliation: {symbol} ({cid}) not_found_observations={count} age={age_seconds:.1f}s. Treating as REJECTED.")
+            self.pending_reconciliation_orders.pop(cid, None)
+            rejected_order = Order(id=cid, client_order_id=cid, symbol=symbol, side=OrderSide.BUY if str(order_info.get("side", "")).lower() == "buy" else OrderSide.SELL, qty=float(order_info.get("qty", 0.0) or 0.0), order_type=OrderType.LIMIT if str(order_info.get("order_type", "")).lower() == "limit" else OrderType.MARKET, limit_price=order_info.get("limit_price"), status=OrderStatus.REJECTED, reason=f"Ambiguous submit resolved absent after repeated broker not-found observations ({count}) and {age_seconds:.1f}s age.")
+            self.db.save_order(rejected_order, self.mode)
+        if changed:
+            self.db.set_setting("pending_reconciliation_orders", self.pending_reconciliation_orders)
 
     def _update_shadow_decision(self, candidate_id: str, final_decision: str, rejection_reason: str, rejection_stage: str) -> None:
         """Update a candidate signal's gating decision in the database."""
@@ -3790,10 +3878,11 @@ class TradingEngine:
             except Exception as persist_exc:
                 applog.error("engine.heartbeat", f"Failed to persist halt reason: {persist_exc}")
             applog.error("engine.heartbeat", f"FATAL: Database write check failed. Escalating to HALTED. Error: {exc}")
-            asyncio.create_task(
-                self._emergency_flatten_loop(),
-                name="trading-engine-emergency-flatten"
-            )
+            if self._emergency_flatten_task is None or self._emergency_flatten_task.done():
+                self._emergency_flatten_task = asyncio.create_task(
+                    self._emergency_flatten_loop(),
+                    name="trading-engine-emergency-flatten"
+                )
             self.heartbeat_diagnostics = diagnostics
             return
 
@@ -3872,52 +3961,18 @@ class TradingEngine:
                 applog.debug("engine.heartbeat", f"Position reconciliation observation unavailable: {exc}")
 
             try:
-                stale = []
-                for cid, info in list(self.pending_reconciliation_orders.items()):
-                    try:
-                        order = await self.broker.get_order_by_client_id(cid)
-                    except Exception as exc:
-                        diagnostics["orders_reconciled"] = False
-                        applog.debug("engine.heartbeat", f"Order reconciliation observation unavailable for {cid}: {exc}")
-                        continue
-                    if order is None:
-                        symbol = str((info or {}).get("symbol", "")).upper()
-                        if symbol and symbol not in broker_syms:
-                            stale.append(cid)
-                        else:
-                            order_bad = True
-                for cid in stale:
-                    info = self.pending_reconciliation_orders.pop(cid, None)
-                    if info and isinstance(info, dict):
-                        try:
-                            sym = str(info.get("symbol", "")).upper()
-                            side = OrderSide.BUY if str(info.get("side", "")).lower() in ("buy", "long") else OrderSide.SELL
-                            qty = float(info.get("qty", 1.0))
-                            rej_order = Order(
-                                id=cid,
-                                client_order_id=cid,
-                                symbol=sym,
-                                side=side,
-                                qty=qty,
-                                order_type=OrderType.LIMIT if info.get("limit_price") else OrderType.MARKET,
-                                limit_price=info.get("limit_price"),
-                                status=OrderStatus.REJECTED,
-                                reason="Terminal reconciliation order cleared for flat position",
-                            )
-                            self.db.save_order(rej_order, self.mode)
-                        except Exception:
-                            pass
-                if stale:
-                    self.db.set_setting("pending_reconciliation_orders", self.pending_reconciliation_orders)
-                    applog.info("engine.heartbeat", f"Cleared {len(stale)} terminal reconciliation order(s) for flat positions")
+                # Durable ambiguous submissions are owned by
+                # _reconcile_pending_submissions(). Heartbeat never deletes them.
+                order_bad = bool(self.pending_reconciliation_orders)
                 if order_bad:
                     diagnostics["orders_reconciled"] = False
                     self._order_reconciliation_mismatch_streak += 1
-                    applog.warning("engine.heartbeat", f"Order reconciliation mismatch confirmation {self._order_reconciliation_mismatch_streak}/2")
+                    applog.warning("engine.heartbeat", f"Order reconciliation unresolved confirmation {self._order_reconciliation_mismatch_streak}/2: pending_client_ids={list(self.pending_reconciliation_orders.keys())}")
                 else:
                     self._order_reconciliation_mismatch_streak = 0
             except Exception as exc:
                 diagnostics["orders_reconciled"] = False
+                order_bad = True
                 applog.debug("engine.heartbeat", f"Order reconciliation observation unavailable: {exc}")
 
         confirmed_bad = self._position_reconciliation_mismatch_streak >= 2 or self._order_reconciliation_mismatch_streak >= 2
@@ -3982,6 +4037,16 @@ class TradingEngine:
                 self._vix_unavailable_last_state = False
 
         self.heartbeat_diagnostics = diagnostics
+
+        # Health severity is monotonic within a heartbeat.  A later, less-severe
+        # monitor (for example broker connectivity -> DEGRADED) must never overwrite
+        # an already-latched reconciliation SAFE_MODE.
+        if self.state == EngineState.HALTED or getattr(self.risk, "hard_halted", False):
+            self.system_health = "HALTED"
+            self.allow_new_entries = False
+        elif getattr(self, "reconciliation_mismatch", False):
+            self.system_health = "SAFE_MODE"
+            self.allow_new_entries = False
 
         # Phase F2: Market Risk Evaluation
         market_risk_state, risk_multiplier, allowed_strategies, risk_allow_entries = self._evaluate_market_risk(now)

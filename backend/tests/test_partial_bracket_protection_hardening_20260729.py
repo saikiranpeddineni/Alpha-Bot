@@ -8,7 +8,8 @@ from pathlib import Path
 
 def _protection_source() -> str:
     src = (Path(__file__).parents[1] / "app/core/engine.py").read_text(encoding="utf-8")
-    start = src.index("    async def verify_broker_protective_stops(", src.index("    async def verify_broker_protective_stops(") + 1)
+    start = src.index("    async def verify_broker_protective_stops(")
+
     end = src.index("    async def _reconcile_pending_submissions", start)
     return src[start:end]
 
