@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -103,7 +103,7 @@ async def test_ambiguous_submit_retains_pending_entry_guard_and_reconciles(tmp_p
     )
     db = Database(settings.resolved_db_path)
     engine = TradingEngine(settings, db)
-    
+
     async def fake_ensure_data(self, mode=None):
         self.data = _FakeData()
         return self.data
@@ -113,14 +113,10 @@ async def test_ambiguous_submit_retains_pending_entry_guard_and_reconciles(tmp_p
     monkeypatch.setattr(TradingEngine, "ensure_data", fake_ensure_data)
     monkeypatch.setattr(TradingEngine, "_run_loop", fake_run_loop)
 
-    # 1. Trigger start (will initialize with default empty database setting)
     await engine.start("paper")
-    
-    # 2. Setup mock broker and overwrite the instantiated paper broker
     broker = _FakeBroker()
     monkeypatch.setattr(engine, "broker", broker)
 
-    # 3. Add ambiguous submit entry manually
     client_order_id = "test-cid-123"
     engine.pending_reconciliation_orders[client_order_id] = {
         "symbol": "AAPL",
@@ -133,19 +129,11 @@ async def test_ambiguous_submit_retains_pending_entry_guard_and_reconciles(tmp_p
     }
     db.set_setting("pending_reconciliation_orders", engine.pending_reconciliation_orders)
 
-    # 4. Verify AAPL is guarded in effective_pending_entries/pending_entry_symbols
-    # When engine executes _tick, it reconciles
-    # Let's mock broker get to timeout first:
     broker.should_fail_get = True
-    
-    # Run a tick:
     await engine._tick()
-    
-    # Reconcile fails, so AAPL MUST remain in pending reconciliation and guard MUST NOT be released
     assert client_order_id in engine.pending_reconciliation_orders
     assert db.get_setting("pending_reconciliation_orders") != {}
-    
-    # 5. Now make the get query succeed (order is returned as submitted)
+
     broker.should_fail_get = False
     fake_submitted_order = Order(
         id="broker-id-123",
@@ -158,22 +146,18 @@ async def test_ambiguous_submit_retains_pending_entry_guard_and_reconciles(tmp_p
         status=OrderStatus.SUBMITTED,
     )
     broker.orders[client_order_id] = fake_submitted_order
-    
-    # Run a tick:
     await engine._tick()
-    
-    # Order resolved, so it must be removed from pending reconciliation!
+
     assert client_order_id not in engine.pending_reconciliation_orders
     assert db.get_setting("pending_reconciliation_orders") == {}
-    
-    # Verify the order was saved in DB with status SUBMITTED
     saved_payload = db.get_latest_order_payload("AAPL", "paper")
     assert saved_payload is not None
     assert saved_payload["status"] == "submitted"
 
 
 @pytest.mark.asyncio
-async def test_ambiguous_submit_resolved_to_rejection(tmp_path, monkeypatch):
+async def test_ambiguous_submit_single_not_found_retains_guard(tmp_path, monkeypatch):
+    """One lookup miss is negative evidence, never definitive broker rejection."""
     settings = Settings(
         ALPHADESK_MODE="paper",
         DATA_PROVIDER="synthetic",
@@ -182,7 +166,7 @@ async def test_ambiguous_submit_resolved_to_rejection(tmp_path, monkeypatch):
     )
     db = Database(settings.resolved_db_path)
     engine = TradingEngine(settings, db)
-    
+
     async def fake_ensure_data(self, mode=None):
         self.data = _FakeData()
         return self.data
@@ -191,13 +175,10 @@ async def test_ambiguous_submit_resolved_to_rejection(tmp_path, monkeypatch):
 
     monkeypatch.setattr(TradingEngine, "ensure_data", fake_ensure_data)
     monkeypatch.setattr(TradingEngine, "_run_loop", fake_run_loop)
-
     await engine.start("paper")
 
-    # Setup mock broker
     broker = _FakeBroker()
     monkeypatch.setattr(engine, "broker", broker)
-
     client_order_id = "test-cid-456"
     engine.pending_reconciliation_orders[client_order_id] = {
         "symbol": "AAPL",
@@ -206,21 +187,58 @@ async def test_ambiguous_submit_resolved_to_rejection(tmp_path, monkeypatch):
         "qty": 10.0,
         "order_type": "limit",
         "limit_price": 150.0,
-        "submitted_at": datetime.now(UTC).isoformat(),
+        "submitted_at": (datetime.now(UTC) - timedelta(minutes=5)).isoformat(),
     }
     db.set_setting("pending_reconciliation_orders", engine.pending_reconciliation_orders)
 
-    # Reconcile returns None (not found), which implies definitive rejection/absence at broker
-    broker.should_fail_get = False
-    broker.orders.pop(client_order_id, None) # not found
-    
-    await engine._tick()
-    
-    # Must be resolved and removed from pending list
-    assert client_order_id not in engine.pending_reconciliation_orders
+    await engine._reconcile_pending_submissions(now=datetime.now(UTC))
+
+    assert client_order_id in engine.pending_reconciliation_orders
+    assert engine.pending_reconciliation_orders[client_order_id]["reconcile_not_found_count"] == 1
+    assert db.get_setting("pending_reconciliation_orders") != {}
+    saved_payload = db.get_latest_order_payload("AAPL", "paper")
+    assert saved_payload is None or saved_payload.get("status") != "rejected"
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_submit_repeated_old_absence_resolves_to_rejection(tmp_path, monkeypatch):
+    settings = Settings(
+        ALPHADESK_MODE="paper",
+        DATA_PROVIDER="synthetic",
+        ALPHADESK_DB_PATH=str(tmp_path / "bot.db"),
+        DEFAULT_WATCHLIST="AAPL",
+    )
+    db = Database(settings.resolved_db_path)
+    engine = TradingEngine(settings, db)
+
+    async def fake_ensure_data(self, mode=None):
+        self.data = _FakeData()
+        return self.data
+    async def fake_run_loop(self):
+        pass
+
+    monkeypatch.setattr(TradingEngine, "ensure_data", fake_ensure_data)
+    monkeypatch.setattr(TradingEngine, "_run_loop", fake_run_loop)
+    await engine.start("paper")
+    broker = _FakeBroker()
+    monkeypatch.setattr(engine, "broker", broker)
+
+    cid = "test-cid-789"
+    base = datetime.now(UTC)
+    engine.pending_reconciliation_orders[cid] = {
+        "symbol": "AAPL", "client_order_id": cid, "side": "buy", "qty": 10.0,
+        "order_type": "limit", "limit_price": 150.0,
+        "submitted_at": (base - timedelta(minutes=5)).isoformat(),
+    }
+    db.set_setting("pending_reconciliation_orders", engine.pending_reconciliation_orders)
+
+    for seconds in (0, 1):
+        await engine._reconcile_pending_submissions(now=base + timedelta(seconds=seconds))
+        assert cid in engine.pending_reconciliation_orders
+    await engine._reconcile_pending_submissions(now=base + timedelta(seconds=2))
+
+    assert cid not in engine.pending_reconciliation_orders
     assert db.get_setting("pending_reconciliation_orders") == {}
-    
-    # Must save a rejected placeholder in DB
     saved_payload = db.get_latest_order_payload("AAPL", "paper")
     assert saved_payload is not None
     assert saved_payload["status"] == "rejected"
