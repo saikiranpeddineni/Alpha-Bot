@@ -4,9 +4,9 @@ Usage from repo root:
     python tools/run_holistic_live_exit_validation_20260729.py
 
 This materializes the surgical production fixes, then runs the focused entry,
-submission, reconciliation, protection, partial-fill, bracket-child, exit,
-duplicate-close and authoritative liquidation regression suites. The final gate
-remains the entire local pytest suite after this focused runner is clean.
+submission, reconciliation, protection, partial-fill, bracket-child, partial-bracket,
+exit, duplicate-close and authoritative liquidation regression suites. The final
+gate remains the entire local pytest suite after this focused runner is clean.
 """
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ runpy.run_path(str(ROOT / "tools/apply_holistic_live_exit_validation_suite_20260
 runpy.run_path(str(ROOT / "tools/apply_entry_exit_reconciliation_hardening_20260729.py"), run_name="__main__")
 runpy.run_path(str(ROOT / "tools/apply_partial_fill_close_guard_hardening_20260729.py"), run_name="__main__")
 runpy.run_path(str(ROOT / "tools/apply_bracket_child_protection_hardening_20260729.py"), run_name="__main__")
+runpy.run_path(str(ROOT / "tools/apply_partial_bracket_protection_hardening_20260729.py"), run_name="__main__")
 
 backend = ROOT / "backend"
 tests = [
@@ -37,6 +38,7 @@ tests = [
     "tests/test_rule_41_protection.py",
     "tests/test_protection_and_accounting_refactor.py",
     "tests/test_bracket_child_protection_hardening_20260729.py",
+    "tests/test_partial_bracket_protection_hardening_20260729.py",
     "tests/test_holistic_live_exit_harvest.py",
     "tests/test_exit_lifecycle_strategy_ownership_20260727.py",
     "tests/test_045_duplicate_close_guard.py",
