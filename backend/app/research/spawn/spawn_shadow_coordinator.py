@@ -139,8 +139,18 @@ class SpawnShadowCoordinator:
     def retire_child(self,policy_id:str,now:datetime|None=None)->bool:
         executor=self.executors.get(policy_id); now_ts=now or datetime.now(timezone.utc)
         if not executor or executor.status!="ACTIVE":return False
+        # Retirement is an accounting event. Preflight every open position before changing
+        # lifecycle state or closing anything: entry price is never a valid substitute for
+        # a missing current mark because it can manufacture P&L/R and corrupt evolution.
+        retirement_marks={}
+        for symbol in list(executor.portfolio.positions):
+            mark=executor._finite(executor.portfolio.last_prices.get(symbol))
+            if mark is None or mark<=0:
+                applog.warning("spawn_coordinator",f"Retirement blocked for {policy_id}: MISSING_INCUMBENT_MARK:{symbol}")
+                return False
+            retirement_marks[symbol]=mark
         executor.status="RETIRED"; events=[]
         for symbol in list(executor.portfolio.positions):
-            position=executor.portfolio.positions[symbol]; price=float(executor.portfolio.last_prices.get(symbol,position.entry_price)); trade=executor.portfolio.close_virtual_position(symbol,price,"RETIRED_FLATTEN",now_ts); event_id=hashlib.sha256(f"{policy_id}|{symbol}|{now_ts.isoformat()}|RETIREMENT_EXIT".encode()).hexdigest(); events.append({"id":event_id,"policy_id":policy_id,"parent_policy_id":executor.config.parent_policy_id,"config_fingerprint":executor.config_fingerprint,"candidate_id":f"retire_{symbol}_{int(now_ts.timestamp())}","ts":now_ts,"symbol":symbol,"strategy":position.strategy,"direction":position.side,"signal_generated":False,"hypothetical_final_decision":"REJECTED","disagreement_category":"NON_COMPARABLE","entry_price":position.entry_price,"virtual_exit_price":trade["exit_price"],"virtual_exit_reason":"RETIRED_FLATTEN","realized_r":trade["realized_r"],"mfe_r":trade["mfe_r"],"mae_r":trade["mae_r"],"payload_obj":{"exit_record":trade}})
+            position=executor.portfolio.positions[symbol]; price=retirement_marks[symbol]; trade=executor.portfolio.close_virtual_position(symbol,price,"RETIRED_FLATTEN",now_ts); event_id=hashlib.sha256(f"{policy_id}|{symbol}|{now_ts.isoformat()}|RETIREMENT_EXIT".encode()).hexdigest(); events.append({"id":event_id,"policy_id":policy_id,"parent_policy_id":executor.config.parent_policy_id,"config_fingerprint":executor.config_fingerprint,"candidate_id":f"retire_{symbol}_{int(now_ts.timestamp())}","ts":now_ts,"symbol":symbol,"strategy":position.strategy,"direction":position.side,"signal_generated":False,"hypothetical_final_decision":"REJECTED","disagreement_category":"NON_COMPARABLE","entry_price":position.entry_price,"virtual_exit_price":trade["exit_price"],"virtual_exit_reason":"RETIRED_FLATTEN","realized_r":trade["realized_r"],"mfe_r":trade["mfe_r"],"mae_r":trade["mae_r"],"payload_obj":{"exit_record":trade}})
         if self.db:self.db.retire_spawned_strategy(policy_id); self.db.commit_spawn_observation(events,[(policy_id,executor.portfolio.to_checkpoint_dict())])
         self.children_retired+=1; return True
