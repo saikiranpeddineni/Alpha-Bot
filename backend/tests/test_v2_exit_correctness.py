@@ -93,6 +93,6 @@ def test_double_exit_prevention():
     rec1 = vp.close_virtual_position("POS1", 95.0, "STOP_LOSS", now + timedelta(minutes=1))
     assert rec1 is not None
     
-    # Second exit attempt on closed position raises KeyError or returns None
-    with pytest.raises(KeyError):
-        vp.close_virtual_position("POS1", 95.0, "STOP_LOSS", now + timedelta(minutes=2))
+    # Second exit attempt on closed position returns None
+    rec2 = vp.close_virtual_position("POS1", 95.0, "STOP_LOSS", now + timedelta(minutes=2))
+    assert rec2 is None

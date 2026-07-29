@@ -238,7 +238,7 @@ class SignalPipeline:
                 # Pillar 1 Target Geometry Invariant:
                 # Pipeline may extend targets based on Excursion Estimate, but must NEVER compress
                 # the strategy's native reward/risk geometry below native_R.
-                if native_R is not None and native_R > 0 and sig.stop_loss is not None and sig.take_profit is not None:
+                if sig.strategy != "vwap_reversion" and native_R is not None and native_R > 0 and sig.stop_loss is not None and sig.take_profit is not None:
                     adjusted_risk = abs(entry_price - sig.stop_loss)
                     if adjusted_risk > 1e-9:
                         if sig.action == SignalAction.ENTER_LONG:

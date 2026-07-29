@@ -653,6 +653,8 @@ class TradingEngine:
             positions = await self.broker.positions()
             if positions:
                 applog.warning("engine", f"EOD liquidation unresolved: flattening {len(positions)} authoritative positions")
+                if not hasattr(self, "_pending_close_symbols"):
+                    self._pending_close_symbols = set()
                 for position in positions:
                     self._pending_close_symbols.add(position.symbol.upper())
                 await self.broker.flatten_all(reason="end of day")
@@ -2064,10 +2066,11 @@ class TradingEngine:
             # Close/cover idempotency is position-lifecycle based, not side based.
             # Keep the guard through partial SELL exits and partial BUY covers; only
             # release it after portfolio accounting proves the original lot is gone.
-            if symbol in self._pending_close_symbols:
+            pending_close = getattr(self, "_pending_close_symbols", None)
+            if pending_close is not None and symbol in pending_close:
                 local_lot = getattr(self.portfolio, "_lots", {}).get(symbol)
                 if local_lot is None or abs(float(getattr(local_lot, "qty", 0.0))) < 1e-9:
-                    self._pending_close_symbols.discard(symbol)
+                    pending_close.discard(symbol)
             if trade is not None:
                 # PR #271 V2 Shadow Harvest: Finalize counterfactual comparison metadata
                 st = self._v2_shadow_states.pop(symbol, None)
@@ -2255,7 +2258,7 @@ class TradingEngine:
                 ),
                 "orders_today": orders_today,
                 "replay_queue_depth": 0,
-                "latency_ms": self._last_broker_latency_ms,
+                "latency_ms": getattr(self, "_last_broker_latency_ms", 0.0),
                 "degraded_reasons": degraded_reasons,
             },
         }
