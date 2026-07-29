@@ -973,9 +973,13 @@ class TradingEngine:
             pos_by_symbol = {p.symbol: p for p in positions}
             candidates = []
 
-            # Retrieve active safety decision entries permission
+            # Heartbeat establishes baseline eligibility before broker protection is
+            # audited. Rule-41 runs later in this tick and may fail-close entries when
+            # an authoritative broker position lacks a verified stop. Intersect both
+            # authorities so a stale pre-Rule-41 SafetyDecision can never bypass #41.
             decision = getattr(self, "last_safety_decision", None)
-            allow_entries = decision.allow_new_entries if decision is not None else self.allow_new_entries
+            heartbeat_allows_entries = decision.allow_new_entries if decision is not None else True
+            allow_entries = bool(heartbeat_allows_entries and self.allow_new_entries)
 
             # Process resurrected signals from queue (CR-146 Phase 4)
             # SAFETY: Resurrection uses stale signal price/SL/TP from the original rejection tick.
