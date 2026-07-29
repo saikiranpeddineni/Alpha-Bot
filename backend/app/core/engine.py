@@ -2005,21 +2005,23 @@ class TradingEngine:
             if order is None and fill.order_id:
                 order = self.db.get_order(fill.order_id)
 
-            if order is not None and order.status != OrderStatus.FILLED:
-                # Alpaca fill events are incremental fragments with a cumulative
-                # watermark. Preserve PARTIALLY_FILLED until cumulative execution
-                # reaches the broker order quantity.
-                cumulative = float(getattr(fill, "cumulative_qty", 0.0) or 0.0)
-                if cumulative <= 0:
-                    cumulative = float(getattr(order, "filled_qty", 0.0) or 0.0) + float(fill.qty)
-                order.filled_qty = min(float(order.qty), cumulative)
-                order.status = (
-                    OrderStatus.FILLED
-                    if order.filled_qty + 1e-9 >= float(order.qty)
-                    else OrderStatus.PARTIALLY_FILLED
-                )
+            if order is not None:
+                # Broker fills are incremental deltas. Preserve cumulative order
+                # truth: a partial execution must never make the parent look FILLED
+                # or replace filled_qty with only the newest delta.
+                previous_filled = max(0.0, float(getattr(order, "filled_qty", 0.0) or 0.0))
+                broker_cumulative = float(getattr(fill, "cumulative_qty", 0.0) or 0.0)
+                if broker_cumulative > 0:
+                    cumulative_filled = max(previous_filled, broker_cumulative)
+                else:
+                    cumulative_filled = previous_filled + max(0.0, float(fill.qty))
+                order_qty = max(0.0, float(getattr(order, "qty", 0.0) or 0.0))
+                order.filled_qty = cumulative_filled
                 order.filled_avg_price = fill.price
-                order.filled_at = fill.ts if order.status == OrderStatus.FILLED else None
+                if order_qty > 0 and cumulative_filled + 1e-9 >= order_qty: order.status = OrderStatus.FILLED; order.filled_at = fill.ts
+                else:
+                    order.status = OrderStatus.PARTIALLY_FILLED
+                    order.filled_at = None
 
             symbol = fill.symbol.upper()
             peak = self._position_peaks.get(symbol)
@@ -2058,9 +2060,14 @@ class TradingEngine:
             ack_fill = getattr(self.broker, "ack_fill_processed", None)
             if ack_fill is not None:
                 ack_fill(fill)
-            local_lot = getattr(self.portfolio, "_lots", {}).get(symbol)
-            if local_lot is None or abs(float(getattr(local_lot, "qty", 0.0))) < 1e-9:
-                self._pending_close_symbols.discard(symbol)
+
+            # Close/cover idempotency is position-lifecycle based, not side based.
+            # Keep the guard through partial SELL exits and partial BUY covers; only
+            # release it after portfolio accounting proves the original lot is gone.
+            if symbol in self._pending_close_symbols:
+                local_lot = getattr(self.portfolio, "_lots", {}).get(symbol)
+                if local_lot is None or abs(float(getattr(local_lot, "qty", 0.0))) < 1e-9:
+                    self._pending_close_symbols.discard(symbol)
             if trade is not None:
                 # PR #271 V2 Shadow Harvest: Finalize counterfactual comparison metadata
                 st = self._v2_shadow_states.pop(symbol, None)

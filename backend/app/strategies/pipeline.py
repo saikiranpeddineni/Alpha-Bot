@@ -197,6 +197,18 @@ class SignalPipeline:
             excursion = ExcursionEstimate.from_atr(atr_pct)
             entry_price = sig.price or (float(df["close"].iloc[-1]) if df is not None and len(df) > 0 else 0.0)
             if entry_price > 0:
+                # 1. Capture native strategy geometry BEFORE pipeline candidate adjustments
+                native_stop = sig.stop_loss
+                native_target = sig.take_profit
+                native_R = None
+                if native_stop is not None and native_target is not None:
+                    native_risk = abs(entry_price - native_stop)
+                    native_reward = abs(native_target - entry_price)
+                    is_valid_long = (sig.action == SignalAction.ENTER_LONG and native_stop < entry_price and native_target > entry_price)
+                    is_valid_short = (sig.action == SignalAction.ENTER_SHORT and native_stop > entry_price and native_target < entry_price)
+                    if (is_valid_long or is_valid_short) and native_risk > 1e-9:
+                        native_R = native_reward / native_risk
+
                 if sig.action == SignalAction.ENTER_SHORT:
                     if sig.take_profit is None:
                         sig.take_profit = round(entry_price * (1 - excursion.suggested_target_pct / 100.0), 4)
@@ -222,6 +234,19 @@ class SignalPipeline:
                     if orig_risk > 0:
                         new_reward = abs(entry_price - sig.stop_loss) * (orig_reward / orig_risk)
                         sig.take_profit = round(entry_price + new_reward, 4) if sig.action == SignalAction.ENTER_LONG else round(entry_price - new_reward, 4)
+
+                # Pillar 1 Target Geometry Invariant:
+                # Pipeline may extend targets based on Excursion Estimate, but must NEVER compress
+                # the strategy's native reward/risk geometry below native_R.
+                if native_R is not None and native_R > 0 and sig.stop_loss is not None and sig.take_profit is not None:
+                    adjusted_risk = abs(entry_price - sig.stop_loss)
+                    if adjusted_risk > 1e-9:
+                        if sig.action == SignalAction.ENTER_LONG:
+                            minimum_target = entry_price + native_R * adjusted_risk
+                            sig.take_profit = max(sig.take_profit, round(minimum_target, 4))
+                        elif sig.action == SignalAction.ENTER_SHORT:
+                            minimum_target = entry_price - native_R * adjusted_risk
+                            sig.take_profit = min(sig.take_profit, round(minimum_target, 4))
 
             side_str = "long" if sig.action == SignalAction.ENTER_LONG else "short"
             meta_pred = self.meta_label_engine.predict(sig.strategy, features, side=side_str)
