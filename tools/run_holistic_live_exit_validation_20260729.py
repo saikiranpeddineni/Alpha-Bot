@@ -4,9 +4,10 @@ Usage from repo root:
     python tools/run_holistic_live_exit_validation_20260729.py
 
 This materializes the surgical production fixes, then runs the focused entry,
-submission, fill/reconciliation ordering, continuous broker authority, protection,
-partial-fill, bracket-child, partial-bracket, exit, duplicate-close and authoritative
-liquidation regression suites. The final gate remains the entire local pytest suite.
+submission, fill/reconciliation ordering, crash-boundary atomicity, continuous broker
+authority, protection, partial-fill, bracket-child, partial-bracket, exit,
+duplicate-close and authoritative liquidation regression suites. The final gate remains
+the entire local pytest suite.
 """
 from __future__ import annotations
 
@@ -36,6 +37,7 @@ tests = [
     "tests/test_issue_016_reconciliation_fail_closed.py",
     "tests/test_alpaca_hardened_restart_reconciliation.py",
     "tests/test_restart_fill_reconciliation.py",
+    "tests/test_fill_crash_boundary_atomicity_20260729.py",
     "tests/test_alpaca_incremental_fills.py",
     "tests/test_partial_fill_close_guard_hardening_20260729.py",
     "tests/test_reconciliation_fill_ordering_hardening_20260729.py",
