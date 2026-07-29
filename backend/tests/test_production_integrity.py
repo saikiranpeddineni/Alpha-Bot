@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pandas as pd
+
 from app.config import Settings
 from app.core.domain import Position, Signal, SignalAction
 from app.portfolio.allocator import (
@@ -62,3 +64,44 @@ def test_unknown_symbols_do_not_share_fake_other_sector():
     positions = [Position(symbol="UNKNOWN_A", qty=1, avg_entry_price=10, market_price=10, strategy="test")]
     approved, reason = gate.gate("UNKNOWN_B", positions)
     assert approved, reason
+
+
+def test_same_cycle_sector_limit_counts_prior_approved_candidate():
+    gate = PortfolioAIGate(max_correlation=1.0, max_positions_per_sector=1)
+    aapl = _signal("AAPL", 0.9, 0.6)
+    msft = _signal("MSFT", 0.8, 0.6)
+
+    decision = process_portfolio_allocations(
+        [aapl, msft], [], available_capital=20_000, equity=100_000,
+        portfolio_gate=gate,
+        portfolio_allocator=CapitalAllocationOptimizer(),
+    )
+
+    assert decision.approved_entries == [(aapl, None)]
+    assert len(decision.gated_entries) == 1
+    assert decision.gated_entries[0][0] is msft
+    assert "sector limit" in decision.gated_entries[0][1]
+
+
+def test_same_cycle_correlation_limit_counts_prior_approved_candidate():
+    gate = PortfolioAIGate(max_correlation=0.75, max_positions_per_sector=10)
+    # Deterministic, strongly correlated return series for the two candidates.
+    aapl_close = pd.Series([100.0 + i for i in range(40)])
+    msft_close = pd.Series([200.0 + 2.0 * i for i in range(40)])
+    gate.update_correlation_matrix({
+        "AAPL": pd.DataFrame({"close": aapl_close}),
+        "MSFT": pd.DataFrame({"close": msft_close}),
+    })
+    aapl = _signal("AAPL", 0.9, 0.6)
+    msft = _signal("MSFT", 0.8, 0.6)
+
+    decision = process_portfolio_allocations(
+        [aapl, msft], [], available_capital=20_000, equity=100_000,
+        portfolio_gate=gate,
+        portfolio_allocator=CapitalAllocationOptimizer(),
+    )
+
+    assert decision.approved_entries == [(aapl, None)]
+    assert len(decision.gated_entries) == 1
+    assert decision.gated_entries[0][0] is msft
+    assert "correlation" in decision.gated_entries[0][1]
