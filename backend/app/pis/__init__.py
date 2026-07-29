@@ -5,6 +5,8 @@ catastrophic protection, reconciliation, kill switches, and mandatory end-of-day
 liquidation remain safety mechanisms rather than competing exit strategies.
 """
 
+from .authority import ExitAuthority, ExitAuthorityViolation, assert_close_authorized
+from .engine_adapter import PISEngineAdapter, PISEvaluation
 from .evidence import observation_from_market_data
 from .execution import ExecutionIntent, PISExecutionAuthority
 from .models import (
@@ -23,8 +25,12 @@ __all__ = [
     "AdaptiveProtectionPlanner",
     "ExecutionIntent",
     "ExitAction",
+    "ExitAuthority",
+    "ExitAuthorityViolation",
     "LifecycleState",
     "PISDecision",
+    "PISEngineAdapter",
+    "PISEvaluation",
     "PISExecutionAuthority",
     "PositionBrain",
     "PositionIntelligenceSystem",
@@ -32,5 +38,6 @@ __all__ = [
     "PositionSnapshot",
     "ProtectionPlan",
     "ThesisState",
+    "assert_close_authorized",
     "observation_from_market_data",
 ]
