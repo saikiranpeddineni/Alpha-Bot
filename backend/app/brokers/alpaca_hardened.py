@@ -253,6 +253,65 @@ class AlpacaBroker(legacy.AlpacaBroker):
             )
             return False
 
+    async def replace_exit_leg(
+        self,
+        order_id: str,
+        *,
+        limit_price: float | None = None,
+        stop_price: float | None = None,
+    ) -> Order | None:
+        """Replace one live bracket/OCO exit leg and verify broker truth.
+
+        Alpaca documents that a successful PATCH does not prove the replacement
+        won the race with an execution.  Therefore the returned replacement ID is
+        re-fetched and its requested price is verified before callers may treat
+        the new protection as authoritative.
+        """
+        if (limit_price is None) == (stop_price is None):
+            raise ValueError("replace_exit_leg requires exactly one price field")
+        from alpaca.trading.requests import ReplaceOrderRequest
+
+        kwargs = {}
+        if limit_price is not None:
+            kwargs["limit_price"] = normalize_stock_price(limit_price)
+        else:
+            kwargs["stop_price"] = normalize_stock_price(stop_price)
+        try:
+            raw = await legacy._call(
+                self._client.replace_order_by_id,
+                order_id,
+                ReplaceOrderRequest(**kwargs),
+                label=f"replace_order/{order_id}",
+            )
+            replacement_id = str(getattr(raw, "id", "") or "")
+            if not replacement_id:
+                applog.warning("broker.alpaca", f"replace {order_id}: broker returned no replacement id")
+                return None
+            verified = await legacy._call(
+                self._client.get_order_by_id,
+                replacement_id,
+                label=f"verify_replacement/{replacement_id}",
+            )
+            status = normalize_order_status(getattr(verified, "status", None))
+            if status in {OrderStatus.REJECTED, OrderStatus.CANCELED, OrderStatus.FILLED}:
+                applog.warning("broker.alpaca", f"replace {order_id}: replacement {replacement_id} is {status}")
+                return None
+            actual = getattr(verified, "limit_price" if limit_price is not None else "stop_price", None)
+            expected = float(limit_price if limit_price is not None else stop_price)
+            if actual is None or abs(float(actual) - expected) > 0.011:
+                applog.warning(
+                    "broker.alpaca",
+                    f"replace {order_id}: price verification failed expected={expected:.4f} actual={actual}",
+                )
+                return None
+            return self._to_order(verified)
+        except BrokerTimeoutError:
+            applog.warning("broker.alpaca", f"replace {order_id} timed out; replacement state is ambiguous")
+            return None
+        except Exception as exc:  # noqa: BLE001
+            applog.warning("broker.alpaca", f"replace {order_id} failed: {exc}")
+            return None
+
     async def cancel_all(self) -> None:
         """Request cancellation and verify no open orders remain."""
         from alpaca.trading.requests import GetOrdersRequest

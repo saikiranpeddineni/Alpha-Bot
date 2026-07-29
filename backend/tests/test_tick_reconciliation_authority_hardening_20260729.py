@@ -28,7 +28,7 @@ def test_alpaca_positions_reconcile_even_without_prior_failure():
     positions = body.index("positions = await self.broker.positions()")
     protection = body.index("await self.verify_broker_protective_stops(positions)", positions)
     block = body[positions:protection]
-    assert "if isinstance(self.broker, AlpacaBroker):" in block
+    assert "isinstance(self.broker, AlpacaBroker)" not in block
     assert "self._reconcile_positions(positions)" in block
     # Prior failure may affect logging, but must not gate reconciliation itself.
     assert 'if getattr(self, "reconciliation_failed", False):\n                    self._reconcile_positions' not in block
