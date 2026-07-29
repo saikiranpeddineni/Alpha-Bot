@@ -4,10 +4,10 @@ Usage from repo root:
     python tools/run_holistic_live_exit_validation_20260729.py
 
 This materializes the surgical production fixes, then runs the focused entry,
-submission, fill/reconciliation ordering, crash-boundary atomicity, continuous broker
-authority, protection, partial-fill, bracket-child, partial-bracket, exit,
-duplicate-close and authoritative liquidation regression suites. The final gate remains
-the entire local pytest suite.
+submission, fill/reconciliation ordering, crash-boundary atomicity, exact restart
+partial-fill pricing, continuous broker authority, protection, partial-fill,
+bracket-child, partial-bracket, exit, duplicate-close and authoritative liquidation
+regression suites. The final gate remains the entire local pytest suite.
 """
 from __future__ import annotations
 
@@ -26,6 +26,7 @@ runpy.run_path(str(ROOT / "tools/apply_bracket_child_protection_hardening_202607
 runpy.run_path(str(ROOT / "tools/apply_partial_bracket_protection_hardening_20260729.py"), run_name="__main__")
 runpy.run_path(str(ROOT / "tools/apply_reconciliation_fill_ordering_hardening_20260729.py"), run_name="__main__")
 runpy.run_path(str(ROOT / "tools/apply_tick_reconciliation_authority_hardening_20260729.py"), run_name="__main__")
+runpy.run_path(str(ROOT / "tools/apply_durable_fill_notional_hardening_20260729.py"), run_name="__main__")
 
 backend = ROOT / "backend"
 tests = [
@@ -39,6 +40,7 @@ tests = [
     "tests/test_restart_fill_reconciliation.py",
     "tests/test_fill_crash_boundary_atomicity_20260729.py",
     "tests/test_alpaca_incremental_fills.py",
+    "tests/test_durable_fill_notional_restart_20260729.py",
     "tests/test_partial_fill_close_guard_hardening_20260729.py",
     "tests/test_reconciliation_fill_ordering_hardening_20260729.py",
     "tests/test_tick_reconciliation_authority_hardening_20260729.py",
