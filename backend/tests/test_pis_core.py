@@ -37,14 +37,25 @@ def test_fixed_two_r_is_not_an_exit_condition_for_healthy_runner():
     assert not decision.requests_exit
 
 
-def test_broken_thesis_is_pis_exit():
+def test_single_bad_bar_does_not_force_premature_exit():
     now = datetime.now(timezone.utc)
     brain = PositionBrain("AAA", "long", 100, 98, now)
     brain.observe(obs(100, trend=85, momentum=85, volume=85, rs=85, market=85))
     decision = brain.observe(obs(99, trend=20, momentum=20, volume=30, rs=20, market=30))
     assert decision.snapshot.lifecycle is LifecycleState.EXIT_CANDIDATE
-    assert decision.action is ExitAction.EXIT
-    assert decision.requests_exit
+    assert decision.action is ExitAction.TIGHTEN_PROTECTION
+    assert not decision.requests_exit
+
+
+def test_broken_thesis_requires_confirmation_before_pis_exit():
+    now = datetime.now(timezone.utc)
+    brain = PositionBrain("AAA", "long", 100, 98, now)
+    brain.observe(obs(100, trend=85, momentum=85, volume=85, rs=85, market=85))
+    first = brain.observe(obs(99, trend=20, momentum=20, volume=30, rs=20, market=30))
+    second = brain.observe(obs(98.8, trend=18, momentum=18, volume=25, rs=18, market=28))
+    assert first.action is ExitAction.TIGHTEN_PROTECTION
+    assert second.action is ExitAction.EXIT
+    assert second.requests_exit
 
 
 def test_position_intelligence_system_owns_position_brains():
