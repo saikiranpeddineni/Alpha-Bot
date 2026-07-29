@@ -192,7 +192,12 @@ async def get_positions(request: Request) -> list[dict]:
     engine = _engine(request)
     if engine.broker is None:
         return []
-    return [p.to_payload() for p in await engine.broker.positions()]
+    try:
+        return [p.to_payload() for p in await engine.broker.positions()]
+    except Exception as exc:
+        applog.warning("api", f"Failed to fetch broker positions: {exc}")
+        return []
+
 
 
 @router.post("/positions/{symbol}/close")
