@@ -3,11 +3,9 @@
 Usage from repo root:
     python tools/run_holistic_live_exit_validation_20260729.py
 
-This materializes the surgical production fixes, then runs the focused entry,
-submission, fill/reconciliation ordering, crash-boundary atomicity, exact restart
-partial-fill pricing, continuous broker authority, protection, partial-fill,
-bracket-child, partial-bracket, exit, duplicate-close and authoritative liquidation
-regression suites. The final gate remains the entire local pytest suite.
+This materializes the surgical production fixes, including defects exposed by local
+validation, then runs the focused lifecycle regression suites. The final gate remains
+the entire local pytest suite.
 """
 from __future__ import annotations
 
@@ -27,6 +25,7 @@ runpy.run_path(str(ROOT / "tools/apply_partial_bracket_protection_hardening_2026
 runpy.run_path(str(ROOT / "tools/apply_reconciliation_fill_ordering_hardening_20260729.py"), run_name="__main__")
 runpy.run_path(str(ROOT / "tools/apply_tick_reconciliation_authority_hardening_20260729.py"), run_name="__main__")
 runpy.run_path(str(ROOT / "tools/apply_durable_fill_notional_hardening_20260729.py"), run_name="__main__")
+runpy.run_path(str(ROOT / "tools/apply_local_validation_failures_fix_20260729.py"), run_name="__main__")
 
 backend = ROOT / "backend"
 tests = [
