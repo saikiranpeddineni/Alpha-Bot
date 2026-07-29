@@ -6,16 +6,24 @@ from .models import ExitAction, LifecycleState, PISDecision, PositionSnapshot, T
 class PISExitPlanner:
     """Single owner of discretionary exit policy under CR-290.
 
-    This planner does not replace broker/risk safety invariants. Catastrophic
-    protection, reconciliation, kill-switch liquidation and mandatory EOD
-    flattening remain outside discretionary exit policy.
+    The planner is intentionally asymmetric: opening risk is controlled by the
+    original protective stop, while discretionary exits require stronger,
+    persistent evidence. This reduces premature exits without pretending losses
+    can be eliminated. Hard broker/risk safety invariants remain superior.
     """
 
-    policy_version = "pis-v1"
+    policy_version = "pis-v2-confirmed"
+
+    def __init__(self, *, exit_confirmation_bars: int = 2) -> None:
+        self.exit_confirmation_bars = max(1, int(exit_confirmation_bars))
+        self._critical_streak = 0
+        self._weakening_streak = 0
 
     def decide(self, snapshot: PositionSnapshot) -> PISDecision:
         health = snapshot.health
         if health is None or snapshot.thesis_state is ThesisState.UNKNOWN:
+            self._critical_streak = 0
+            self._weakening_streak = 0
             return PISDecision(
                 ExitAction.INSUFFICIENT_EVIDENCE,
                 0.0,
@@ -24,39 +32,48 @@ class PISExitPlanner:
                 self.policy_version,
             )
 
-        if snapshot.lifecycle is LifecycleState.EXIT_CANDIDATE or snapshot.thesis_state is ThesisState.BROKEN:
-            confidence = min(100.0, max(70.0, 100.0 - health))
+        critical = snapshot.lifecycle is LifecycleState.EXIT_CANDIDATE or snapshot.thesis_state is ThesisState.BROKEN
+        weakening = snapshot.lifecycle is LifecycleState.WEAKENING or snapshot.thesis_state is ThesisState.WEAKENING
+        self._critical_streak = self._critical_streak + 1 if critical else 0
+        self._weakening_streak = self._weakening_streak + 1 if weakening else 0
+
+        if critical:
+            if self._critical_streak < self.exit_confirmation_bars:
+                return PISDecision(
+                    ExitAction.TIGHTEN_PROTECTION,
+                    68.0,
+                    ("PIS_CRITICAL_AWAITING_CONFIRMATION",),
+                    snapshot,
+                    self.policy_version,
+                )
+            confidence = min(100.0, max(75.0, 100.0 - health))
             return PISDecision(
                 ExitAction.EXIT,
                 confidence,
-                ("PIS_THESIS_BROKEN", "PIS_HEALTH_CRITICAL"),
+                ("PIS_THESIS_BROKEN_CONFIRMED", "PIS_HEALTH_CRITICAL_CONFIRMED"),
                 snapshot,
                 self.policy_version,
             )
 
-        if snapshot.lifecycle is LifecycleState.WEAKENING:
-            # Do not turn ordinary noise into a realized loss. PIS v1 exits a
-            # weakening thesis only after material deterioration; otherwise it
-            # requests tighter protection and waits for confirmation.
-            if health < 42.0 and snapshot.thesis_drift is not None and snapshot.thesis_drift <= -20.0:
+        if weakening:
+            severe = health < 42.0 and snapshot.thesis_drift is not None and snapshot.thesis_drift <= -20.0
+            if severe and self._weakening_streak >= self.exit_confirmation_bars + 1:
                 return PISDecision(
                     ExitAction.EXIT,
                     min(95.0, 60.0 + abs(snapshot.thesis_drift)),
-                    ("PIS_PERSISTENT_DETERIORATION",),
+                    ("PIS_PERSISTENT_DETERIORATION_CONFIRMED",),
                     snapshot,
                     self.policy_version,
                 )
             return PISDecision(
                 ExitAction.TIGHTEN_PROTECTION,
                 65.0,
-                ("PIS_THESIS_WEAKENING",),
+                ("PIS_THESIS_WEAKENING", "PIS_NO_PREMATURE_EXIT"),
                 snapshot,
                 self.policy_version,
             )
 
         if snapshot.lifecycle is LifecycleState.RUNNER:
-            # A fixed +1R/+2R target is intentionally not an exit condition.
-            # Healthy runners stay alive and transition to trailing protection.
             return PISDecision(
                 ExitAction.TRAIL,
                 min(95.0, max(70.0, health)),
