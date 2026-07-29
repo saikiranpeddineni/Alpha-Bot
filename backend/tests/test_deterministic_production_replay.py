@@ -153,3 +153,14 @@ def test_missing_market_data_fails_closed(test_settings: Settings, tmp_db: Datab
     with pytest.raises(FileNotFoundError):
         runtime.run_replay("2026-07-24", "2026-07-24")
     assert mgr.get_session("rpl_missing")["status"] == "FAILED"
+
+
+def test_out_of_window_replay_bars_includes_available_range(tmp_path: Path):
+    data_path = tmp_path / "bars.jsonl"
+    _write_fixture(data_path)
+    feed = ReplayMarketFeed(data_path)
+    with pytest.raises(ValueError) as excinfo:
+        feed.load_bars("2026-07-28", "2026-07-28")
+    assert "No replay bars inside 2026-07-28..2026-07-28" in str(excinfo.value)
+    assert "Available replay data date range: 2026-07-24..2026-07-24" in str(excinfo.value)
+

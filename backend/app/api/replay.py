@@ -32,8 +32,12 @@ def _persist_result(replay_id: str, result: dict[str, Any]) -> None:
 def _run_replay_bg(request: Request, replay_id: str, req: ReplayRunRequest) -> None:
     engine = request.app.state.engine
     runtime = ReplayRuntime(engine.settings, engine.db, replay_id=replay_id, session_manager=session_mgr)
-    result = runtime.run_replay(req.start_date, req.end_date, req.symbols, req.fill_model, req.slippage_bps)
-    _persist_result(replay_id, result)
+    try:
+        result = runtime.run_replay(req.start_date, req.end_date, req.symbols, req.fill_model, req.slippage_bps)
+        _persist_result(replay_id, result)
+    except Exception:
+        # ReplayRuntime already updates session status to FAILED and logs full diagnostics
+        pass
 
 
 @router.post("/run")
@@ -43,9 +47,14 @@ def run_replay(req: ReplayRunRequest, request: Request, background_tasks: Backgr
     if req.async_mode:
         background_tasks.add_task(_run_replay_bg, request, runtime.replay_id, req)
         return {"status": "LAUNCHED", "replay_id": runtime.replay_id}
-    result = runtime.run_replay(req.start_date, req.end_date, req.symbols, req.fill_model, req.slippage_bps)
-    _persist_result(runtime.replay_id, result)
-    return result
+    try:
+        result = runtime.run_replay(req.start_date, req.end_date, req.symbols, req.fill_model, req.slippage_bps)
+        _persist_result(runtime.replay_id, result)
+        return result
+    except (ValueError, RuntimeError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Replay execution failed: {exc}")
 
 
 @router.get("")

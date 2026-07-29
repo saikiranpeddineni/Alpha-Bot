@@ -83,7 +83,11 @@ class ReplayMarketFeed:
             deduped[(row["symbol"], row["ts_dt"])] = row
         rows = sorted(deduped.values(), key=lambda r: (r["ts_dt"], r["symbol"]))
         if not any(r["in_replay_window"] for r in rows):
-            raise ValueError(f"No replay bars inside {start_date}..{end_date} symbols={symbols or 'ALL'}")
+            avail_dates = sorted({r["ts_dt"].strftime("%Y-%m-%d") for r in rows})
+            msg = f"No replay bars inside {start_date}..{end_date} symbols={symbols or 'ALL'}"
+            if avail_dates:
+                msg += f". Available replay data date range: {avail_dates[0]}..{avail_dates[-1]}"
+            raise ValueError(msg)
 
         present = {r["symbol"] for r in rows}
         missing = [s for s in ("SPY", "QQQ") if s not in present]
