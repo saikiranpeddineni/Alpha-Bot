@@ -101,6 +101,19 @@ class PISEngineAdapter:
 
         eval_ts = timestamp or datetime.now(timezone.utc)
 
+        # Sanitize prices against nan/inf
+        def _clean_px(val: float, fallback: float) -> float:
+            if val is None or math.isnan(val) or math.isinf(val) or val < 0:
+                return fallback
+            return float(val)
+
+        close_px = _clean_px(close_px, entry_px)
+        cur_px = _clean_px(cur_px, close_px)
+        high_px = _clean_px(high_px, max(entry_px, cur_px, close_px))
+        low_px = _clean_px(low_px, min(entry_px, cur_px, close_px))
+        vol_px = max(0.0, _clean_px(vol_px, 0.0))
+        atr_px = max(0.01, _clean_px(atr_px, 1.0))
+
         # Build clean observation
         obs = PositionObservation(
             timestamp=eval_ts,
@@ -112,7 +125,7 @@ class PISEngineAdapter:
             high=max(high_px, cur_px),
             low=min(low_px, cur_px),
             close=close_px,
-            volume=max(0.0, vol_px),
+            volume=vol_px,
             atr=atr_px,
             initial_stop=initial_stop,
             risk_per_share=risk_per_share,
