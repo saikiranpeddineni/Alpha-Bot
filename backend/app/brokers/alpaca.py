@@ -461,12 +461,19 @@ class AlpacaBroker(Broker):
             "time_in_force": TimeInForce.DAY,
             "client_order_id": req.client_order_id,
         }
-        if req.stop_loss is not None and req.take_profit is not None:
+        if req.stop_loss is not None or req.take_profit is not None:
             from alpaca.trading.enums import OrderClass
 
-            kwargs["order_class"] = OrderClass.BRACKET
-            kwargs["stop_loss"] = StopLossRequest(stop_price=round(req.stop_loss, 2))
-            kwargs["take_profit"] = TakeProfitRequest(limit_price=round(req.take_profit, 2))
+            if req.stop_loss is not None and req.take_profit is not None:
+                kwargs["order_class"] = OrderClass.BRACKET
+                kwargs["stop_loss"] = StopLossRequest(stop_price=round(req.stop_loss, 2))
+                kwargs["take_profit"] = TakeProfitRequest(limit_price=round(req.take_profit, 2))
+            elif req.stop_loss is not None:
+                kwargs["order_class"] = OrderClass.OTO
+                kwargs["stop_loss"] = StopLossRequest(stop_price=round(req.stop_loss, 2))
+            elif req.take_profit is not None:
+                kwargs["order_class"] = OrderClass.OTO
+                kwargs["take_profit"] = TakeProfitRequest(limit_price=round(req.take_profit, 2))
 
         if req.order_type == OrderType.MARKET:
             request = MarketOrderRequest(**kwargs)

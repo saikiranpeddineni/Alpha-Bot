@@ -217,6 +217,8 @@ class PISConfig:
     activation_mfe_r: float = 1.5
     runner_qualification_r: float = 3.0
     giveback_pct_runner: float = 0.35
+    giveback_pct_hyper_runner_min: float = 0.10
+    hyper_runner_decay_rate: float = 0.05
     giveback_pct_maturing: float = 0.45
     min_breathing_room_r: float = 0.60
     min_locked_r: float = 0.05

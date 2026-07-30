@@ -119,7 +119,6 @@ def _atr_percentile(df_min: pd.DataFrame) -> tuple[float | None, str]:
         {"open": "first", "high": "max", "low": "min",
          "close": "last", "volume": "sum"}
     ).dropna()
-
     if len(df_h) < 20:
         return None, f"insufficient hourly bars ({len(df_h)})"
 
@@ -365,7 +364,7 @@ class MarketRiskAggregator:
             errors = 0
             for sym in self._universe[:20]:  # cap at 20 for latency
                 try:
-                    df = await _safe_history(self._data, sym, "1Day", start, T, prefer_cache=True)
+                    df = await _safe_history(self._data, sym, "1Min", start, T, prefer_cache=True)
                     if is_pre_market and not df.empty:
                         last_date = df.index[-1].date()
                         if last_date == now_et.date():
@@ -450,7 +449,7 @@ class MarketRiskAggregator:
             errors = 0
             for sym in self._universe[:20]:
                 try:
-                    df = await _safe_history(self._data, sym, "1Day", start, T, prefer_cache=True)
+                    df = await _safe_history(self._data, sym, "1Min", start, T, prefer_cache=True)
                     if is_pre_market and not df.empty:
                         last_date = df.index[-1].date()
                         if last_date == now_et.date():

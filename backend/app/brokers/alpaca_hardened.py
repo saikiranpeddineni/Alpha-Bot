@@ -119,10 +119,13 @@ class AlpacaBroker(legacy.AlpacaBroker):
         )
 
         side = ASide.BUY if req.side == OrderSide.BUY else ASide.SELL
-        bracket = req.stop_loss is not None and req.take_profit is not None
+        has_stop = req.stop_loss is not None
+        has_target = req.take_profit is not None
+        has_advanced_legs = has_stop or has_target
+        
         qty = normalized_qty(
             req.qty,
-            allow_fractional=req.order_type == OrderType.MARKET and not bracket,
+            allow_fractional=req.order_type == OrderType.MARKET and not has_advanced_legs,
         )
         kwargs: dict = {
             "symbol": req.symbol.upper(),
@@ -131,14 +134,18 @@ class AlpacaBroker(legacy.AlpacaBroker):
             "time_in_force": TimeInForce.DAY,
             "client_order_id": req.client_order_id,
         }
-        if bracket:
-            kwargs["order_class"] = OrderClass.BRACKET
-            kwargs["stop_loss"] = StopLossRequest(
-                stop_price=normalize_stock_price(req.stop_loss)
-            )
-            kwargs["take_profit"] = TakeProfitRequest(
-                limit_price=normalize_stock_price(req.take_profit)
-            )
+        
+        if has_advanced_legs:
+            if has_stop and has_target:
+                kwargs["order_class"] = OrderClass.BRACKET
+                kwargs["stop_loss"] = StopLossRequest(stop_price=normalize_stock_price(req.stop_loss))
+                kwargs["take_profit"] = TakeProfitRequest(limit_price=normalize_stock_price(req.take_profit))
+            elif has_stop:
+                kwargs["order_class"] = OrderClass.OTO
+                kwargs["stop_loss"] = StopLossRequest(stop_price=normalize_stock_price(req.stop_loss))
+            elif has_target:
+                kwargs["order_class"] = OrderClass.OTO
+                kwargs["take_profit"] = TakeProfitRequest(limit_price=normalize_stock_price(req.take_profit))
 
         if req.order_type == OrderType.MARKET:
             request = MarketOrderRequest(**kwargs)

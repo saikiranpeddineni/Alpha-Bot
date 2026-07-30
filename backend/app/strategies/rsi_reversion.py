@@ -22,10 +22,10 @@ class Rsi2Reversion(Strategy):
         "rsi2_entry": 5.0,
         "rsi2_exit": 70.0,
         "ema_slope_lookback": 15,
-        "atr_stop_mult": 1.5,
+        "atr_stop_mult": 2.0,
         "reward_risk": 1.5,
         "enable_shorts": False,         # if True, sells RSI(2) rips below falling EMA50
-        "trailing_stop_atr_mult": 0.0,  # if > 0, activates dynamic trailing stop
+        "trailing_stop_atr_mult": 1.5,  # if > 0, activates dynamic trailing stop
     }
 
     def on_bar(self, ctx: StrategyContext, symbol: str, df: pd.DataFrame) -> Signal | None:
@@ -39,25 +39,7 @@ class Rsi2Reversion(Strategy):
         rsi2 = float(last["rsi2"])
 
         if ctx.position is not None:
-            if ctx.position.strategy == self.name:
-                if ctx.position.qty > 0 and rsi2 >= p["rsi2_exit"]:
-                    return Signal(
-                        symbol=symbol,
-                        action=SignalAction.EXIT,
-                        confidence=0.9,
-                        strategy=self.name,
-                        reason=f"RSI(2) normalized to {rsi2:.0f}",
-                        price=close,
-                    )
-                if ctx.position.qty < 0 and p.get("enable_shorts", False) and rsi2 <= (100.0 - p["rsi2_exit"]):
-                    return Signal(
-                        symbol=symbol,
-                        action=SignalAction.EXIT,
-                        confidence=0.9,
-                        strategy=self.name,
-                        reason=f"RSI(2) normalized to {rsi2:.0f}",
-                        price=close,
-                    )
+            # Let the PIS manage exits via trailing stops and health checks
             return None
 
         ema50 = df["ema50"]

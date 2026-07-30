@@ -263,10 +263,10 @@ class MarketScanner:
                     now_et = now_tz.astimezone(ZoneInfo("America/New_York"))
                     et_mins = now_et.hour * 60 + now_et.minute
 
-                    # Allow prior completed session daily bars (up to 120 hours / 5 calendar days
+                    # Allow prior completed session daily bars (up to 96 hours / 4 calendar days
                     # to accommodate long weekends and market holidays). A prior-session completed
                     # 1Day bar is expected to be 17-24+ hours old during regular market hours.
-                    allowed_lag = timedelta(hours=120)
+                    allowed_lag = timedelta(hours=96)
 
                     raw_lag = now_tz - latest_bar_ts
                     time_since_midnight = now_et - now_et.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -422,7 +422,7 @@ class MarketScanner:
         from sklearn.model_selection import TimeSeriesSplit
 
         end = as_of or datetime.now(UTC)
-        start = end - timedelta(days=60)
+        start = end - timedelta(days=20)
         semaphore = asyncio.Semaphore(_ML_CONCURRENCY)
 
         async def _validate(candidate: dict) -> dict:
@@ -439,24 +439,26 @@ class MarketScanner:
                         candidate["auc"] = 0.0
                         return candidate
 
-                    tscv = TimeSeriesSplit(n_splits=3)
-                    aucs: list[float] = []
-                    for train_idx, val_idx in tscv.split(X):
-                        y_train = y.iloc[train_idx]
-                        if y_train.nunique() < 2:
-                            continue
-                        model = RandomForestClassifier(
-                            n_estimators=50, max_depth=5, min_samples_leaf=10,
-                            random_state=42, n_jobs=1,
-                        )
-                        model.fit(X.iloc[train_idx][FEATURE_COLUMNS], y_train)
-                        probs = model.predict_proba(X.iloc[val_idx][FEATURE_COLUMNS])[:, 1]
-                        try:
-                            aucs.append(roc_auc_score(y.iloc[val_idx], probs))
-                        except ValueError:
-                            continue
+                    def _train_and_evaluate(X_sync, y_sync):
+                        tscv_sync = TimeSeriesSplit(n_splits=3)
+                        aucs_sync = []
+                        for train_idx, val_idx in tscv_sync.split(X_sync):
+                            y_train = y_sync.iloc[train_idx]
+                            if y_train.nunique() < 2:
+                                continue
+                            model = RandomForestClassifier(
+                                n_estimators=50, max_depth=5, min_samples_leaf=10,
+                                random_state=42, n_jobs=1,
+                            )
+                            model.fit(X_sync.iloc[train_idx][FEATURE_COLUMNS], y_train)
+                            probs = model.predict_proba(X_sync.iloc[val_idx][FEATURE_COLUMNS])[:, 1]
+                            try:
+                                aucs_sync.append(roc_auc_score(y_sync.iloc[val_idx], probs))
+                            except ValueError:
+                                continue
+                        return float(np.mean(aucs_sync)) if aucs_sync else 0.0
 
-                    candidate["auc"] = float(np.mean(aucs)) if aucs else 0.0
+                    candidate["auc"] = await asyncio.to_thread(_train_and_evaluate, X, y)
                 except Exception as exc:
                     applog.error("scanner", f"ML validation failed for {symbol}: {exc}")
                     candidate["auc"] = 0.0

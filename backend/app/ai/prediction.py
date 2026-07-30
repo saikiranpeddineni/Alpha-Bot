@@ -756,11 +756,13 @@ class MetaLabelEngine:
     # Strategies that REQUIRE a trained MetaLabel model to pass.
     # If the model is absent, candidates are REJECTED (fail-closed).
     # Strategies not listed here are BYPASSED when no model is available.
-    # ^ Currently empty: all strategies bypass until their MetaLabel models
-    # have been trained and validated. Move a strategy here once its model
-    # has been validated with sufficient real-data samples.
-    # Example: MANDATORY_STRATEGIES = frozenset({"orb", "momentum"})
-    MANDATORY_STRATEGIES: frozenset = frozenset()
+    MANDATORY_STRATEGIES: frozenset = frozenset({
+        "orb",
+        "momentum",
+        "vwap_reversion",
+        "rsi2_reversion",
+        "bb_squeeze"
+    })
 
     def __init__(self, models_dir: "Path") -> None:  # type: ignore[name-defined]
         from pathlib import Path as _Path

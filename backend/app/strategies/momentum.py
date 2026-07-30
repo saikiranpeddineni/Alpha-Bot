@@ -45,9 +45,9 @@ class MomentumCross(Strategy):
         "rsi_max": 78.0,
         "vol_z_min": 0.0,
         "event_window_bars": 10,
-        "atr_stop_mult": 1.5,
+        "atr_stop_mult": 2.0,
         "reward_risk": 1.8,
-        "trailing_stop_atr_mult": 0.0,
+        "trailing_stop_atr_mult": 1.5,
         "htf_trend_filter": False,
         "midday_block": False,
     }
@@ -169,26 +169,7 @@ class MomentumCross(Strategy):
 
         # ---- Exit management for an open momentum position ----
         if ctx.position is not None:
-            if ctx.position.strategy != self.name:
-                return None
-            if ctx.position.qty > 0 and crossed_down:
-                return Signal(
-                    symbol=symbol,
-                    action=SignalAction.EXIT,
-                    confidence=0.9,
-                    strategy=self.name,
-                    reason="EMA9 crossed back below EMA20 -- momentum faded",
-                    price=close,
-                )
-            if ctx.position.qty < 0 and crossed_up:
-                return Signal(
-                    symbol=symbol,
-                    action=SignalAction.EXIT,
-                    confidence=0.9,
-                    strategy=self.name,
-                    reason="EMA9 crossed back above EMA20 -- momentum faded",
-                    price=close,
-                )
+            # Let the PIS manage exits (trailing stops and momentum decay)
             return None
 
         # ---- Optional time filter ----

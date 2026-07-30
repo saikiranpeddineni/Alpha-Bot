@@ -31,7 +31,7 @@ class OpeningRangeBreakout(Strategy):
         "volume_z_min": 0.5,
         "atr_stop_mult": 2.0,         # risk cap when the range is very wide
         "reward_risk": 2.0,
-        "trailing_stop_atr_mult": 0.0 # if > 0, activates dynamic trailing stop
+        "trailing_stop_atr_mult": 1.5 # if > 0, activates dynamic trailing stop
     }
 
     def __init__(self, params: dict | None = None, enabled: bool = True) -> None:
@@ -93,6 +93,11 @@ class OpeningRangeBreakout(Strategy):
             buffer = 1.0 + p["breakout_buffer_bps"] / 10_000.0
         volume_ok = vol_z >= p["volume_z_min"]
         confidence = min(0.85, 0.55 + 0.08 * max(0.0, vol_z))
+
+        # Climax guard: prevent entering if price is stretched more than 1.0 ATR from EMA9
+        ema9 = float(last.get("ema9", close))
+        if abs(close - ema9) > 1.0 * atr:
+            return None
 
         if close > or_high * buffer and volume_ok:
             stop = max(or_low, close - p["atr_stop_mult"] * atr)

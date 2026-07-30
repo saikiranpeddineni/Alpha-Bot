@@ -13,7 +13,7 @@ from __future__ import annotations
 import math
 from typing import Optional
 
-from app.pis.models import PISConfig, PositionObservation
+from app.pis.models import PISConfig, PositionObservation, TradeHealth
 
 
 class MonotonicProtectionViolationError(ValueError):
@@ -32,6 +32,7 @@ class AdaptiveProtectionPlanner:
         self,
         obs: PositionObservation,
         peak_r: float,
+        health: TradeHealth,
         previous_floor: Optional[float] = None,
         allow_relaxation: bool = False,
     ) -> float:
@@ -67,11 +68,20 @@ class AdaptiveProtectionPlanner:
             candidate_floor = previous_floor if previous_floor is not None else initial_stop
         else:
             # 2. Dynamic giveback calculation based on peak R
-            giveback_pct = (
-                self.config.giveback_pct_runner
-                if peak_r >= self.config.runner_qualification_r
-                else self.config.giveback_pct_maturing
-            )
+            if peak_r >= self.config.runner_qualification_r:
+                r_excess = peak_r - self.config.runner_qualification_r
+                
+                # Health-Aware Decay:
+                # If health is perfect (1.0), health_factor is 0.0 -> no decay (survive pullbacks).
+                # If health is broken (0.0), health_factor is 1.0 -> max decay (lock profit).
+                health_factor = max(0.0, min(1.0, 1.0 - health.overall))
+                decay = r_excess * getattr(self.config, "hyper_runner_decay_rate", 0.05) * health_factor
+                
+                base_giveback = self.config.giveback_pct_runner
+                min_giveback = getattr(self.config, "giveback_pct_hyper_runner_min", 0.10)
+                giveback_pct = max(min_giveback, base_giveback - decay)
+            else:
+                giveback_pct = self.config.giveback_pct_maturing
             giveback_allowance_r = max(self.config.min_breathing_room_r, peak_r * giveback_pct)
             locked_r = max(self.config.min_locked_r, peak_r - giveback_allowance_r)
 

@@ -21,7 +21,7 @@ class BollingerBandSqueeze(Strategy):
         "vol_z_min": 1.0,
         "atr_stop_mult": 2.0,
         "reward_risk": 2.0,
-        "trailing_stop_atr_mult": 4.0,
+        "trailing_stop_atr_mult": 1.5,
         "use_trend_filter": True,
     }
 

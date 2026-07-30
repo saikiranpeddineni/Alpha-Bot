@@ -1313,36 +1313,7 @@ class TradingEngine:
                 self._position_peaks[symbol] = min(self._position_peaks[symbol], low_val)
                 self._position_troughs[symbol] = max(self._position_troughs[symbol], high_val)
 
-            strat = next((s for s in self.strategies if s.name == position.strategy), None)
-            if strat is not None:
-                ts_mult = strat.params.get("trailing_stop_atr_mult")
-                if ts_mult is not None and ts_mult > 0:
-                    atr = float(df["atr14"].iloc[-1]) if "atr14" in df.columns and len(df) > 0 and pd.notna(df["atr14"].iloc[-1]) else 0.0
-                    if atr > 0:
-                        if position.qty > 0:
-                            stop_price = self._position_peaks[symbol] - ts_mult * atr
-                            if close <= stop_price:
-                                applog.info("engine", f"{symbol}: trailing stop triggered @ {close:.2f} (stop {stop_price:.2f})")
-                                await self._close_position_guarded(symbol, reason=f"trailing stop triggered ({ts_mult}x ATR)")
-                                if symbol in self._position_peaks:
-                                    del self._position_peaks[symbol]
-                                if symbol in self._position_troughs:
-                                    del self._position_troughs[symbol]
-                                if symbol in self._position_initial_stops:
-                                    del self._position_initial_stops[symbol]
-                                return []
-                        else:
-                            stop_price = self._position_peaks[symbol] + ts_mult * atr
-                            if close >= stop_price:
-                                applog.info("engine", f"{symbol}: trailing stop triggered @ {close:.2f} (stop {stop_price:.2f})")
-                                await self._close_position_guarded(symbol, reason=f"trailing stop triggered ({ts_mult}x ATR)")
-                                if symbol in self._position_peaks:
-                                    del self._position_peaks[symbol]
-                                if symbol in self._position_troughs:
-                                    del self._position_troughs[symbol]
-                                if symbol in self._position_initial_stops:
-                                    del self._position_initial_stops[symbol]
-                                return []
+            # Legacy local trailing stops removed to give PIS sole authority over exits
         else:
             if symbol in self._position_peaks:
                 del self._position_peaks[symbol]

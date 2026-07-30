@@ -189,7 +189,7 @@ class SignalPipeline:
                         continue
                     else:
                         sig.ml_gate_decision = "BASE_FALLBACK_BYPASS"
-                        applog.info("pipeline", f"{symbol}: RSI2 BASE_FALLBACK ML advisory bypass active: prob={ml:.4f} < threshold={self.ml_threshold:.4f} (mins_et={mins_et})")
+                        applog.info("pipeline", f"{symbol}: {sig.strategy.upper()} BASE_FALLBACK ML advisory bypass active: prob={ml:.4f} < threshold={self.ml_threshold:.4f} (mins_et={mins_et})")
                 else:
                     sig.ml_gate_decision = "PASS"
 
@@ -210,16 +210,13 @@ class SignalPipeline:
                         native_R = native_reward / native_risk
 
                 if sig.action == SignalAction.ENTER_SHORT:
-                    if sig.take_profit is None:
-                        sig.take_profit = round(entry_price * (1 - excursion.suggested_target_pct / 100.0), 4)
                     if sig.stop_loss is None:
                         sig.stop_loss = round(entry_price * (1 + excursion.suggested_stop_pct / 100.0), 4)
                 else:
-                    if sig.take_profit is None:
-                        sig.take_profit = round(entry_price * (1 + excursion.suggested_target_pct / 100.0), 4)
                     if sig.stop_loss is None:
                         sig.stop_loss = round(entry_price * (1 - excursion.suggested_stop_pct / 100.0), 4)
-                original_stop, original_target = sig.stop_loss, sig.take_profit
+                original_stop = sig.stop_loss
+                original_target = sig.take_profit
                 min_stop_pct = get_settings().risk_config().min_stop_pct
                 adjusted = False
                 if min_stop_pct > 0:

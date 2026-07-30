@@ -206,6 +206,7 @@ class PositionBrain:
         target_stop = self.authority.protection_planner.compute_protection_floor(
             obs=obs,
             peak_r=peak_r,
+            health=health,
             previous_floor=self._current_stop_floor,
             allow_relaxation=False,
         )

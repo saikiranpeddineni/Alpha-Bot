@@ -56,7 +56,7 @@ class DataManager:
     async def warmup(self, symbols: list[str], lookback_bars: int = 800) -> None:
         extended = list(symbols)
         if not self.is_synthetic:
-            for v in ["^VIX"]:
+            for v in ["^VIX", "SPY", "QQQ"]:
                 if v not in extended:
                     extended.append(v)
         for symbol in extended:
@@ -66,7 +66,10 @@ class DataManager:
                 if symbol in ("VIX", "^VIX") and not self.is_synthetic:
                     from app.data.yahoo import YahooProvider
                     provider = YahooProvider()
-                df = await provider.get_bars(symbol, "1Min", limit=lookback_bars)
+                
+                # Market regime needs 20 hourly bars (approx 1300 1-min bars) for SPY/QQQ
+                fetch_limit = 2000 if symbol in ("SPY", "QQQ", "VIX", "^VIX") else lookback_bars
+                df = await provider.get_bars(symbol, "1Min", limit=fetch_limit)
             except Exception as exc:  # noqa: BLE001
                 applog.error("data", f"{symbol}: warmup failed: {exc}")
                 df = empty_bars()

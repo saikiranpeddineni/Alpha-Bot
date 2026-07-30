@@ -30,6 +30,7 @@ class VwapReversion(Strategy):
         "max_vwap_drift_pct": 0.15,
         "use_ema_filter": True,
         "min_minutes_since_open": 30,
+        "trailing_stop_atr_mult": 1.5,
     }
 
     def on_bar(self, ctx: StrategyContext, symbol: str, df: pd.DataFrame) -> Signal | None:
