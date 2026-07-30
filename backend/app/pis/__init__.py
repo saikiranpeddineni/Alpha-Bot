@@ -1,43 +1,42 @@
-"""CR-290 Position Intelligence System.
+"""Position Intelligence System (PIS)
 
-PIS is the single policy owner for discretionary position exits. Broker-level
-catastrophic protection, reconciliation, kill switches, and mandatory end-of-day
-liquidation remain safety mechanisms rather than competing exit strategies.
+Single source of truth for dynamic position health tracking, adaptive protection,
+runner intelligence, and discretionary exit management.
+
+Broker-agnostic core. Deterministic, explainable, and thread-safe.
 """
 
-from .authority import ExitAuthority, ExitAuthorityViolation, assert_close_authorized
-from .engine_adapter import PISEngineAdapter, PISEvaluation
-from .evidence import observation_from_market_data
-from .execution import ExecutionIntent, PISExecutionAuthority
-from .models import (
+from app.pis.models import (
+    EvidenceCoverage,
     ExitAction,
     LifecycleState,
-    PositionObservation,
-    PositionSnapshot,
+    PISConfig,
     PISDecision,
-    ThesisState,
+    PositionObservation,
+    ReasonCode,
+    SnapshotHistory,
+    ThesisDrift,
+    TradeHealth,
 )
-from .position_brain import PositionBrain
-from .protection import AdaptiveProtectionPlanner, ProtectionPlan
-from .service import PositionIntelligenceSystem
+from app.pis.position_brain import PositionBrain
+from app.pis.service import PISService
+from app.pis.engine_adapter import PISEngineAdapter
+from app.pis.state_machine import PositionLifecycleStateMachine, InvalidLifecycleTransitionError
 
 __all__ = [
-    "AdaptiveProtectionPlanner",
-    "ExecutionIntent",
+    "EvidenceCoverage",
     "ExitAction",
-    "ExitAuthority",
-    "ExitAuthorityViolation",
     "LifecycleState",
+    "PISConfig",
     "PISDecision",
-    "PISEngineAdapter",
-    "PISEvaluation",
-    "PISExecutionAuthority",
-    "PositionBrain",
-    "PositionIntelligenceSystem",
     "PositionObservation",
-    "PositionSnapshot",
-    "ProtectionPlan",
-    "ThesisState",
-    "assert_close_authorized",
-    "observation_from_market_data",
+    "ReasonCode",
+    "SnapshotHistory",
+    "ThesisDrift",
+    "TradeHealth",
+    "PositionBrain",
+    "PISService",
+    "PISEngineAdapter",
+    "PositionLifecycleStateMachine",
+    "InvalidLifecycleTransitionError",
 ]

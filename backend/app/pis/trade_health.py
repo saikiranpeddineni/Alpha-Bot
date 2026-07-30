@@ -1,59 +1,93 @@
+"""PIS Trade Health Evaluation Engine.
+
+Evaluates multi-factor trade health [0.0, 1.0] across trend, momentum,
+volatility, and volume sub-metrics with strict numerical stability.
+"""
+
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Mapping
+import math
+from typing import Optional
 
-from .models import PositionObservation
-
-
-@dataclass(frozen=True)
-class HealthResult:
-    score: float | None
-    components: Mapping[str, float]
-    coverage: float
+from app.pis.models import PISConfig, PositionObservation, TradeHealth
 
 
-class TradeHealthScorer:
-    """Deterministic, explainable PIS v1 health score.
+class TradeHealthEvaluator:
+    """Computes health scores clamped to [0.0, 1.0] without numerical hazards."""
 
-    Missing evidence is excluded and weights are renormalized. It is never
-    silently converted to bullish or bearish evidence.
-    """
+    def __init__(self, config: Optional[PISConfig] = None) -> None:
+        self.config = config or PISConfig()
 
-    DEFAULT_WEIGHTS = {
-        "trend": 0.30,
-        "momentum": 0.20,
-        "volume": 0.15,
-        "relative_strength": 0.15,
-        "market_context": 0.20,
-    }
+    def evaluate(
+        self,
+        obs: PositionObservation,
+        peak_r: float,
+        trough_r: float,
+    ) -> TradeHealth:
+        """Evaluate trade health for a position observation.
 
-    def __init__(self, weights: Mapping[str, float] | None = None, min_coverage: float = 0.50):
-        self.weights = dict(weights or self.DEFAULT_WEIGHTS)
-        self.min_coverage = float(min_coverage)
+        Args:
+            obs: PositionObservation.
+            peak_r: Peak R achieved so far.
+            trough_r: Trough R achieved so far.
 
-    @staticmethod
-    def _bound(value: float) -> float:
-        return max(0.0, min(100.0, float(value)))
+        Returns:
+            TradeHealth object containing breakdown and overall score [0.0, 1.0].
+        """
+        # Defensive numerical sanitization
+        atr = max(1e-6, obs.atr) if not math.isnan(obs.atr) and not math.isinf(obs.atr) else 1e-6
+        risk = max(1e-6, obs.risk_per_share) if not math.isnan(obs.risk_per_share) and not math.isinf(obs.risk_per_share) else 1e-6
 
-    def score(self, observation: PositionObservation) -> HealthResult:
-        components: dict[str, float] = {}
-        available_weight = 0.0
-        total_weight = sum(self.weights.values()) or 1.0
-        weighted_sum = 0.0
-        for name, weight in self.weights.items():
-            raw = getattr(observation, name, None)
-            if raw is None:
-                continue
-            value = self._bound(raw)
-            components[name] = value
-            weighted_sum += value * weight
-            available_weight += weight
-        coverage = available_weight / total_weight
-        if available_weight <= 0.0 or coverage < self.min_coverage:
-            return HealthResult(score=None, components=components, coverage=coverage)
-        return HealthResult(
-            score=round(weighted_sum / available_weight, 4),
-            components=components,
-            coverage=round(coverage, 4),
+        # 1. Trend Score: measures current R relative to peak R
+        current_r = obs.r_multiple
+        if math.isnan(current_r) or math.isinf(current_r):
+            current_r = 0.0
+
+        if peak_r > 0.1:
+            retention = current_r / peak_r
+            trend_score = max(0.0, min(1.0, retention))
+        else:
+            # Early trade: check if current_r is non-negative
+            trend_score = 0.5 + max(-0.5, min(0.5, current_r * 0.5))
+
+        # 2. Momentum Score: close position relative to high/low bar range
+        bar_range = obs.high - obs.low
+        if bar_range <= 1e-8 or math.isnan(bar_range) or math.isinf(bar_range):
+            momentum_score = 0.5
+        else:
+            if obs.side > 0:  # Long
+                pos_in_bar = (obs.close - obs.low) / bar_range
+            else:  # Short
+                pos_in_bar = (obs.high - obs.close) / bar_range
+            momentum_score = max(0.0, min(1.0, pos_in_bar))
+
+        # 3. Volatility Score: ratio of bar range to ATR (excessive range indicates distribution)
+        vol_ratio = bar_range / atr
+        if math.isnan(vol_ratio) or math.isinf(vol_ratio):
+            volatility_score = 0.5
+        elif vol_ratio > 3.0:
+            volatility_score = 0.2
+        elif vol_ratio > 2.0:
+            volatility_score = 0.5
+        else:
+            volatility_score = 0.9
+
+        # 4. Volume Score: volume presence
+        volume_score = 0.7 if obs.volume > 0 else 0.5
+
+        # Weighted overall composite health
+        overall = (
+            trend_score * 0.45
+            + momentum_score * 0.30
+            + volatility_score * 0.15
+            + volume_score * 0.10
+        )
+        overall = max(0.0, min(1.0, overall))
+
+        return TradeHealth(
+            overall=overall,
+            trend_score=trend_score,
+            momentum_score=momentum_score,
+            volatility_score=volatility_score,
+            volume_score=volume_score,
         )

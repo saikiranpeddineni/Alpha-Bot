@@ -1,95 +1,124 @@
+"""PIS Exit Planner & Decision Synthesizer.
+
+Synthesizes health, thesis drift, lifecycle state, and protection levels
+to produce deterministic, explainable PISDecision outputs.
+"""
+
 from __future__ import annotations
 
-from .models import ExitAction, LifecycleState, PISDecision, PositionSnapshot, ThesisState
-from .profit_memory import ProfitMemory
-from .runner_intelligence import RunnerIntelligence
+from typing import List, Optional
+
+from app.pis.evidence import EvidenceEvaluator
+from app.pis.models import (
+    ExitAction,
+    LifecycleState,
+    PISConfig,
+    PISDecision,
+    PositionObservation,
+    ReasonCode,
+    ThesisDrift,
+    TradeHealth,
+)
 
 
-class PISExitPlanner:
-    """Single owner of discretionary exit policy under CR-290."""
+class ExitPlanner:
+    """Synthesizes position multi-factor state into a PISDecision."""
 
-    policy_version = "pis-v3-runner-intelligence"
+    def __init__(self, config: Optional[PISConfig] = None) -> None:
+        self.config = config or PISConfig()
 
-    def __init__(self, *, exit_confirmation_bars: int = 2) -> None:
-        self.exit_confirmation_bars = max(1, int(exit_confirmation_bars))
-        self._critical_streak = 0
-        self._weakening_streak = 0
-        self.profit_memory = ProfitMemory()
-        self.runner_intelligence = RunnerIntelligence()
+    def synthesize_decision(
+        self,
+        obs: PositionObservation,
+        lifecycle: LifecycleState,
+        health: TradeHealth,
+        thesis: ThesisDrift,
+        runner_score: float,
+        is_runner: bool,
+        target_stop: float,
+        peak_r: float,
+        trough_r: float,
+        history_len: int,
+    ) -> PISDecision:
+        """Synthesize final PISDecision.
 
-    def decide(self, snapshot: PositionSnapshot) -> PISDecision:
-        health = snapshot.health
-        if health is None or snapshot.thesis_state is ThesisState.UNKNOWN:
-            self._critical_streak = 0
-            self._weakening_streak = 0
-            return PISDecision(ExitAction.INSUFFICIENT_EVIDENCE, 0.0, ("PIS_EVIDENCE_INCOMPLETE",), snapshot, self.policy_version)
+        Args:
+            obs: PositionObservation snapshot.
+            lifecycle: Current LifecycleState.
+            health: TradeHealth breakdown.
+            thesis: ThesisDrift breakdown.
+            runner_score: Runner potential score [0.0, 1.0].
+            is_runner: True if qualified runner.
+            target_stop: Protection floor target stop loss price.
+            peak_r: Peak R achieved.
+            trough_r: Trough R achieved.
+            history_len: Count of history observations.
 
-        pullback = self.profit_memory.assess(snapshot)
-        runner = self.runner_intelligence.assess(snapshot)
+        Returns:
+            Immutable PISDecision.
+        """
+        side = obs.side
+        price = obs.current_price
 
-        # Critical deterioration is still confirmation-gated. A previously
-        # exceptional winner is not granted immunity if the thesis truly breaks.
-        critical = snapshot.lifecycle is LifecycleState.EXIT_CANDIDATE or snapshot.thesis_state is ThesisState.BROKEN
-        weakening = snapshot.lifecycle is LifecycleState.WEAKENING or snapshot.thesis_state is ThesisState.WEAKENING
-        self._critical_streak = self._critical_streak + 1 if critical else 0
-        self._weakening_streak = self._weakening_streak + 1 if weakening else 0
+        # Check protection breach
+        protection_breached = False
+        if target_stop > 0:
+            if side > 0 and price <= target_stop:
+                protection_breached = True
+            elif side < 0 and price >= target_stop:
+                protection_breached = True
 
-        if critical:
-            if self._critical_streak < self.exit_confirmation_bars:
-                return PISDecision(ExitAction.TIGHTEN_PROTECTION, 68.0, ("PIS_CRITICAL_AWAITING_CONFIRMATION",), snapshot, self.policy_version)
-            return PISDecision(
-                ExitAction.EXIT,
-                min(100.0, max(75.0, 100.0 - health)),
-                ("PIS_THESIS_BROKEN_CONFIRMED", "PIS_HEALTH_CRITICAL_CONFIRMED"),
-                snapshot,
-                self.policy_version,
-            )
+        # Check protection floor ratchet update
+        protection_updated = False
+        if obs.current_stop is not None and target_stop > 0:
+            if side > 0 and target_stop > obs.current_stop + 1e-4:
+                protection_updated = True
+            elif side < 0 and target_stop < obs.current_stop - 1e-4:
+                protection_updated = True
+        elif target_stop > 0 and abs(target_stop - obs.initial_stop) > 1e-4:
+            protection_updated = True
 
-        # This is the anti-premature-exit rule: retracement from MFE is not a
-        # sell signal when trend/thesis health says it is ordinary digestion.
-        if pullback.healthy_pullback and runner.runner:
-            return PISDecision(
-                ExitAction.HOLD,
-                min(98.0, max(72.0, runner.continuation_score)),
-                ("PIS_HEALTHY_PULLBACK", "PIS_RUNNER_CONTINUATION", "PIS_DO_NOT_CHASE_MFE"),
-                snapshot,
-                self.policy_version,
-            )
+        # Determine exit action
+        if protection_breached or lifecycle == LifecycleState.EXIT_CANDIDATE:
+            action = ExitAction.FULL_EXIT
+            exit_ratio = 1.0
+        elif lifecycle == LifecycleState.DISTRIBUTION and health.overall < self.config.health_distribution_threshold:
+            action = ExitAction.PARTIAL_EXIT
+            exit_ratio = 0.5
+        elif protection_updated:
+            action = ExitAction.UPDATE_PROTECTION
+            exit_ratio = 0.0
+        else:
+            action = ExitAction.HOLD
+            exit_ratio = 0.0
 
-        if weakening:
-            severe = health < 42.0 and snapshot.thesis_drift is not None and snapshot.thesis_drift <= -20.0
-            if severe and self._weakening_streak >= self.exit_confirmation_bars + 1:
-                return PISDecision(
-                    ExitAction.EXIT,
-                    min(95.0, 60.0 + abs(snapshot.thesis_drift)),
-                    ("PIS_PERSISTENT_DETERIORATION_CONFIRMED",),
-                    snapshot,
-                    self.policy_version,
-                )
-            reasons = ["PIS_THESIS_WEAKENING", "PIS_NO_PREMATURE_EXIT"]
-            if pullback.distribution_risk:
-                reasons.append("PIS_DISTRIBUTION_RISK")
-            return PISDecision(ExitAction.TIGHTEN_PROTECTION, 65.0, tuple(reasons), snapshot, self.policy_version)
+        # Build evidence coverage and reason codes
+        coverage = EvidenceEvaluator.compute_coverage(history_len, health, thesis)
+        reasons = EvidenceEvaluator.build_reason_codes(
+            lifecycle, health, thesis, protection_updated, is_runner
+        )
 
-        if runner.exceptional_runner:
-            return PISDecision(
-                ExitAction.TRAIL,
-                min(98.0, max(80.0, runner.continuation_score)),
-                ("PIS_EXCEPTIONAL_RUNNER", "PIS_PRESERVE_RIGHT_TAIL", "PIS_NO_FIXED_PROFIT_CAP"),
-                snapshot,
-                self.policy_version,
-            )
+        if protection_breached:
+            reasons.append(ReasonCode.PROTECTION_BREACH)
 
-        if snapshot.lifecycle is LifecycleState.RUNNER or runner.runner:
-            return PISDecision(
-                ExitAction.TRAIL,
-                min(95.0, max(70.0, runner.continuation_score)),
-                ("PIS_RUNNER_HEALTHY", "PIS_LET_WINNER_RUN"),
-                snapshot,
-                self.policy_version,
-            )
-
-        if snapshot.thesis_state is ThesisState.STRENGTHENING:
-            return PISDecision(ExitAction.HOLD, min(95.0, max(60.0, health)), ("PIS_THESIS_STRENGTHENING",), snapshot, self.policy_version)
-
-        return PISDecision(ExitAction.KEEP_PLAN, min(90.0, max(50.0, health)), ("PIS_THESIS_STABLE",), snapshot, self.policy_version)
+        return PISDecision(
+            timestamp=obs.timestamp,
+            symbol=obs.symbol,
+            action=action,
+            target_stop_loss=target_stop,
+            exit_ratio=exit_ratio,
+            reason_codes=reasons,
+            health=health,
+            thesis=thesis,
+            runner_score=runner_score,
+            confidence=coverage.confidence,
+            lifecycle_state=lifecycle,
+            evidence_coverage=coverage,
+            peak_r=peak_r,
+            trough_r=trough_r,
+            metadata={
+                "is_runner": is_runner,
+                "protection_updated": protection_updated,
+                "protection_breached": protection_breached,
+            },
+        )

@@ -1,47 +1,52 @@
+"""PIS Execution Helper.
+
+Converts PISDecision outputs into structured engine OrderRequests.
+PIS does not issue orders directly to brokers.
+"""
+
 from __future__ import annotations
 
-from dataclasses import dataclass
+from typing import Optional
 
-from .models import ExitAction, PISDecision
-from .protection import AdaptiveProtectionPlanner, ProtectionPlan
-
-
-@dataclass(frozen=True)
-class ExecutionIntent:
-    close_position: bool
-    protection: ProtectionPlan | None
-    suppress_legacy_exit: bool
-    reason: str
+from app.core.domain import OrderRequest, OrderSide, OrderType, utcnow
+from app.pis.models import ExitAction, PISDecision, PositionObservation
 
 
-class PISExecutionAuthority:
-    """The only translation layer from PIS policy to discretionary execution.
-
-    Legacy strategy EXIT, fixed take-profit, ATR trailing and old harvesting
-    signals are advisory inputs at most. They are never direct close authority.
-    Hard safety liquidation is intentionally outside this class and cannot be
-    vetoed by PIS.
-    """
-
-    def __init__(self) -> None:
-        self.protection_planner = AdaptiveProtectionPlanner()
-
-    def translate(self, decision: PISDecision) -> ExecutionIntent:
-        if decision.action is ExitAction.EXIT:
-            return ExecutionIntent(True, None, True, "PIS_CONFIRMED_EXIT")
-
-        protection = None
-        if decision.action in {ExitAction.TRAIL, ExitAction.TIGHTEN_PROTECTION}:
-            protection = self.protection_planner.plan(decision.snapshot)
-
-        return ExecutionIntent(
-            close_position=False,
-            protection=protection,
-            suppress_legacy_exit=True,
-            reason=f"PIS_{decision.action.value}",
-        )
+class PISExecutionAdapter:
+    """Helper converting PIS exit decisions into engine OrderRequest instances."""
 
     @staticmethod
-    def legacy_discretionary_exit_allowed() -> bool:
-        """CR-290 invariant: no competing discretionary exit authority."""
-        return False
+    def build_order_request(
+        decision: PISDecision,
+        obs: PositionObservation,
+    ) -> Optional[OrderRequest]:
+        """Build engine OrderRequest from PISDecision.
+
+        Args:
+            decision: PISDecision.
+            obs: PositionObservation.
+
+        Returns:
+            OrderRequest or None if action is HOLD or UPDATE_PROTECTION.
+        """
+        if decision.action not in (ExitAction.PARTIAL_EXIT, ExitAction.FULL_EXIT):
+            return None
+
+        # Determine side (opposite of position side)
+        order_side = OrderSide.SELL if obs.side > 0 else OrderSide.BUY
+
+        # Quantity to close
+        qty_to_close = round(obs.qty * decision.exit_ratio, 6)
+        if qty_to_close <= 0:
+            return None
+
+        reason_str = ",".join([r.value for r in decision.reason_codes])
+
+        return OrderRequest(
+            symbol=obs.symbol,
+            side=order_side,
+            order_type=OrderType.MARKET,
+            qty=qty_to_close,
+            strategy_name=f"PISDiscretionaryExit[{decision.lifecycle_state.value}]",
+            notes=f"PIS Exit Reason: {reason_str}",
+        )

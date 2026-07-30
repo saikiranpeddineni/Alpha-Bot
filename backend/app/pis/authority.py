@@ -1,43 +1,27 @@
+"""PIS Authority Module.
+
+PIS evaluation authority orchestrating decision generation for position instances.
+"""
+
 from __future__ import annotations
 
-from enum import Enum
+from typing import Optional
+
+from app.pis.exit_planner import ExitPlanner
+from app.pis.models import PISConfig, PISDecision, PositionObservation
+from app.pis.protection import AdaptiveProtectionPlanner
+from app.pis.runner_intelligence import RunnerIntelligence
+from app.pis.thesis_drift import ThesisDriftEvaluator
+from app.pis.trade_health import TradeHealthEvaluator
 
 
-class ExitAuthority(str, Enum):
-    PIS = "PIS"
-    HARD_RISK = "HARD_RISK"
-    RECONCILIATION = "RECONCILIATION"
-    EOD = "EOD"
-    OPERATOR = "OPERATOR"
+class PISAuthority:
+    """Evaluation authority combining all PIS intelligence modules."""
 
-
-# These reasons may close without a PIS discretionary EXIT because they are
-# safety/operational mandates, not alpha-taking policy.
-NON_DISCRETIONARY_AUTHORITIES = frozenset(
-    {
-        ExitAuthority.HARD_RISK,
-        ExitAuthority.RECONCILIATION,
-        ExitAuthority.EOD,
-        ExitAuthority.OPERATOR,
-    }
-)
-
-
-class ExitAuthorityViolation(RuntimeError):
-    pass
-
-
-def assert_close_authorized(*, authority: ExitAuthority, pis_requests_exit: bool = False) -> None:
-    """Fail closed if any legacy discretionary subsystem attempts to sell.
-
-    The engine migration should call this immediately before discretionary
-    broker close submission. A PIS close needs an explicit confirmed decision;
-    operational/safety authorities remain independently valid.
-    """
-    if authority in NON_DISCRETIONARY_AUTHORITIES:
-        return
-    if authority is ExitAuthority.PIS and pis_requests_exit:
-        return
-    raise ExitAuthorityViolation(
-        f"close rejected: authority={authority.value}; CR-290 requires confirmed PIS EXIT"
-    )
+    def __init__(self, config: Optional[PISConfig] = None) -> None:
+        self.config = config or PISConfig()
+        self.health_evaluator = TradeHealthEvaluator(self.config)
+        self.thesis_evaluator = ThesisDriftEvaluator(self.config)
+        self.runner_intelligence = RunnerIntelligence(self.config)
+        self.protection_planner = AdaptiveProtectionPlanner(self.config)
+        self.exit_planner = ExitPlanner(self.config)
