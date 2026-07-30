@@ -1355,6 +1355,7 @@ class TradingEngine:
             self._live_runner_floor.pop(symbol, None)
             if symbol in self._v2_shadow_states and not self._v2_shadow_states[symbol].get("is_shadow_closed"):
                 del self._v2_shadow_states[symbol]
+            self.pis_adapter.handle_position_closed(symbol)
 
         sctx = StrategyContext(position=position, equity=equity, regime=regime, now=now)
         signals = []
@@ -2036,7 +2037,7 @@ class TradingEngine:
             if pending_close is not None and symbol in pending_close:
                 local_lot = getattr(self.portfolio, "_lots", {}).get(symbol)
                 if local_lot is None or abs(float(getattr(local_lot, "qty", 0.0))) < 1e-9:
-                    pending_close.discard(symbol)
+                    self._pending_close_symbols.discard(symbol)
             if trade is not None:
                 # PR #271 V2 Shadow Harvest: Finalize counterfactual comparison metadata
                 st = self._v2_shadow_states.pop(symbol, None)
