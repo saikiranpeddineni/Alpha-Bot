@@ -1669,13 +1669,7 @@ class TradingEngine:
         return candidate_entries
 
     async def _manage_live_winner_exit(self, symbol: str, position: Any, df: pd.DataFrame) -> bool:
-        """Promote/ratchet a proven LIVE winner without creating a protection gap.
-
-        Returns True only when broker-confirmed runner ownership is active.
-        This policy intentionally avoids trying to predict the exact top.  It
-        converts increasing MFE into an increasing guaranteed floor while moving
-        the bracket TP far enough away to preserve exceptional upside.
-        """
+        """Promote/ratchet a proven LIVE winner using PIS single discretionary exit authority."""
         if self.mode != "live" or self.broker is None or len(df) < 2:
             return symbol in self._live_runner_symbols
         replace_leg = getattr(self.broker, "replace_exit_leg", None)
@@ -1687,73 +1681,44 @@ class TradingEngine:
         if initial_stop is None:
             initial_stop = self._position_initial_stops.get(symbol)
         original_tp = self._position_take_profits.get(symbol)
-        entry = float(position.avg_entry_price)
-        if initial_stop is None or original_tp is None:
-            return symbol in self._live_runner_symbols
-        risk = abs(entry - float(initial_stop))
-        if risk <= 1e-8:
-            return False
-        side = 1.0 if position.qty > 0 else -1.0
-        target_r = max(0.1, side * (float(original_tp) - entry) / risk)
+        current_stop = getattr(lot, "stop_loss", None) if lot is not None else self._live_runner_floor.get(symbol)
 
-        # Completed-bar causal evidence only.  Never promote from an unconfirmed
-        # transient tick/wick.  Activation scales with the strategy's own target
-        # rather than replacing strategy economics with one magic dollar value.
-        prior = df.iloc[-2]
-        if position.qty > 0:
-            prior_best = float(prior["high"])
-            self._position_peaks[symbol] = max(self._position_peaks.get(symbol, entry), prior_best)
-            mfe_r = max(0.0, (self._position_peaks[symbol] - entry) / risk)
-        else:
-            prior_best = float(prior["low"])
-            self._position_peaks[symbol] = min(self._position_peaks.get(symbol, entry), prior_best)
-            mfe_r = max(0.0, (entry - self._position_peaks[symbol]) / risk)
-        activation_r = min(1.0, max(0.75, target_r * 0.60))
-        if mfe_r < activation_r:
-            return symbol in self._live_runner_symbols
-
-        # Give a newly proven winner room, then tighten progressively.  The allowed
-        # giveback shrinks as a fraction of MFE while retaining at least 0.60R of
-        # breathing room so ordinary one-minute noise does not dominate exits.
-        giveback_allowance_r = max(0.60, mfe_r * 0.35)
-        locked_r = max(0.05, mfe_r - giveback_allowance_r)
-        desired_floor = entry + side * locked_r * risk
-        current_floor = self._live_runner_floor.get(symbol)
-        broker_current = getattr(lot, "stop_loss", None) if lot is not None else None
-        if broker_current is not None:
-            current_floor = float(broker_current) if current_floor is None else (
-                max(current_floor, float(broker_current)) if side > 0 else min(current_floor, float(broker_current))
+        # Route evaluation through PISEngineAdapter
+        try:
+            _, decision = self.pis_adapter.evaluate_position_exit(
+                position=position,
+                bar_df=df,
+                initial_stop=initial_stop,
+                take_profit=original_tp,
+                current_stop=current_stop,
             )
-        if current_floor is not None:
-            desired_floor = max(desired_floor, current_floor) if side > 0 else min(desired_floor, current_floor)
+        except Exception as e:
+            applog.warning("engine.exit", f"PIS evaluation fallback for {symbol}: {e}")
+            return symbol in self._live_runner_symbols
 
-        # Stop must remain behind the completed close with a small geometry buffer.
-        prior_close = float(prior["close"])
-        px_buffer = max(0.01, prior_close * 0.0002)
-        desired_floor = min(desired_floor, prior_close - px_buffer) if side > 0 else max(desired_floor, prior_close + px_buffer)
-        if side > 0 and desired_floor <= entry:
-            desired_floor = entry + max(0.01, risk * 0.05)
-        elif side < 0 and desired_floor >= entry:
-            desired_floor = entry - max(0.01, risk * 0.05)
+        desired_floor = decision.target_stop_loss
+        if desired_floor is None or desired_floor <= 0:
+            return symbol in self._live_runner_symbols
 
         orders = await self.broker.open_orders()
         exits = [o for o in orders if o.symbol.upper() == symbol and o.status in {OrderStatus.SUBMITTED, OrderStatus.PARTIALLY_FILLED}]
         stop_leg = next((o for o in exits if o.leg == "stop" or o.order_type in {OrderType.STOP, OrderType.STOP_LIMIT}), None)
         tp_leg = next((o for o in exits if o.leg == "take_profit" and o.limit_price is not None), None)
         if stop_leg is None or tp_leg is None:
-            # Rule-41 owns missing-protection recovery.  Do not compete with it.
             return symbol in self._live_runner_symbols
 
-        # Practically uncap upside: keep the broker OCO/bracket shape but move its
-        # limit far ahead of both the original target and current MFE.  It is moved
-        # again as MFE expands, so the runner is managed by the ratcheting floor.
+        entry = float(position.avg_entry_price)
+        risk = abs(entry - float(initial_stop or entry * 0.98))
+        side = 1.0 if position.qty > 0 else -1.0
+        mfe_r = decision.peak_r
+        target_r = max(0.1, side * (float(original_tp or entry * 1.05) - entry) / max(1e-6, risk))
+
         runner_tp_r = max(20.0, mfe_r + 10.0, target_r + 10.0)
         desired_tp = entry + side * runner_tp_r * risk
         tp_needs_move = (side > 0 and float(tp_leg.limit_price) < desired_tp - 0.01) or (
             side < 0 and float(tp_leg.limit_price) > desired_tp + 0.01
         )
         if tp_needs_move:
-            # Extend upside FIRST.  If this fails, original bracket remains intact.
             replaced_tp = await replace_leg(tp_leg.id, limit_price=desired_tp)
             if replaced_tp is None:
                 return symbol in self._live_runner_symbols
@@ -1765,8 +1730,6 @@ class TradingEngine:
         if stop_needs_move:
             replaced_stop = await replace_leg(stop_leg.id, stop_price=desired_floor)
             if replaced_stop is None:
-                # Upside may already be extended, but original stop still protects.
-                # Do NOT claim runner ownership until profit protection is confirmed.
                 return symbol in self._live_runner_symbols
             confirmed_floor = float(replaced_stop.stop_price or desired_floor)
             self._live_runner_floor[symbol] = confirmed_floor
@@ -1781,10 +1744,11 @@ class TradingEngine:
             if symbol not in self._live_runner_symbols:
                 applog.info(
                     "engine.exit",
-                    f"{symbol}: LIVE RUNNER confirmed mfe={mfe_r:.2f}R floor={floor:.4f}; original TP/ordinary strategy exits subordinated",
+                    f"{symbol}: LIVE RUNNER confirmed mfe={mfe_r:.2f}R floor={floor:.4f} via PIS; original TP/ordinary strategy exits subordinated",
                 )
             self._live_runner_symbols.add(symbol)
         return symbol in self._live_runner_symbols
+
 
     def _evaluate_v2_shadow_passive(self, symbol: str, position: Any, df: pd.DataFrame, now: datetime) -> None:
         """PR #271 V2 Adaptive Harvesting: PASSIVE, NON-AUTHORITATIVE SHADOW OBSERVER.
