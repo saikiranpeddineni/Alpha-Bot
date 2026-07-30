@@ -83,7 +83,7 @@ class Settings(BaseSettings):
         extra="ignore", case_sensitive=False,
     )
 
-    host: str = Field("127.0.0.1", validation_alias=AliasChoices("ALPHADESK_HOST", "HOST"))
+    host: str = Field("0.0.0.0", validation_alias=AliasChoices("ALPHADESK_HOST", "HOST"))
     port: int = Field(8742, validation_alias=AliasChoices("ALPHADESK_PORT", "PORT"))
     mode: str = Field("demo", validation_alias=AliasChoices("ALPHADESK_MODE", "MODE"))
     data_provider: str = Field("auto", validation_alias="DATA_PROVIDER")
