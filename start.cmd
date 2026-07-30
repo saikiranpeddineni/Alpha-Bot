@@ -10,7 +10,7 @@ if not exist ".venv\Scripts\python.exe" (
 )
 
 :: Parse host and port from .env if present
-set "BIND=127.0.0.1"
+set "BIND=0.0.0.0"
 set "PORT=8742"
 if exist ".env" (
     for /f "usebackq tokens=1,2 delims==" %%i in (".env") do (

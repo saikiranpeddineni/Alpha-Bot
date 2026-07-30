@@ -9,7 +9,7 @@ if (-not (Test-Path $venvPy)) {
     exit 1
 }
 
-$bind = "127.0.0.1"; $port = "8742"
+$bind = "0.0.0.0"; $port = "8742"
 if (Test-Path ".env") {
     foreach ($line in Get-Content ".env") {
         if ($line -match "^\s*ALPHADESK_HOST\s*=\s*(.+)$") { $bind = $Matches[1].Trim() }
