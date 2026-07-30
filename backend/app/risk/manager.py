@@ -352,6 +352,24 @@ class RiskManager:
             if risk_mult != 1.0:
                 applog.info("risk", f"Dynamic safety risk multiplier applied: scaling risk to {effective_risk_pct}%")
 
+            # Profit Harvesting Sizing (A+ Setups)
+            ml_prob = getattr(signal, "ml_probability", None)
+            is_harvest_candidate = False
+            if ml_prob is not None and ml_prob > 0.85:
+                is_harvest_candidate = True
+            
+            # Check for explosive volume (recent 10 bars vs 120 bars)
+            if not is_harvest_candidate and not bars.empty and len(bars) > 60:
+                recent_vol = bars["volume"].tail(10).mean()
+                avg_vol = bars["volume"].tail(120).mean()
+                if avg_vol > 0 and (recent_vol / avg_vol) > 3.0:
+                    is_harvest_candidate = True
+
+            if is_harvest_candidate:
+                harvest_mult = getattr(cfg, "harvest_risk_multiplier", 2.5)
+                effective_risk_pct *= harvest_mult
+                applog.info("risk", f"[HARVEST MODE] A+ setup detected for {symbol}. Applying {harvest_mult}x risk multiplier: {effective_risk_pct:.4f}%")
+
             kelly_used = effective_risk_pct / 100.0
             risk_amount = ctx.equity * kelly_used
             qty = int(risk_amount / stop_distance)

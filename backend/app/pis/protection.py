@@ -79,7 +79,11 @@ class AdaptiveProtectionPlanner:
                 
                 base_giveback = self.config.giveback_pct_runner
                 min_giveback = getattr(self.config, "giveback_pct_hyper_runner_min", 0.10)
-                giveback_pct = max(min_giveback, base_giveback - decay)
+                
+                if getattr(self.config, "profit_harvesting_mode", False) and health.overall >= 0.8:
+                    giveback_pct = 0.45  # Let it breathe heavily to capture 25% runs
+                else:
+                    giveback_pct = max(min_giveback, base_giveback - decay)
             else:
                 giveback_pct = self.config.giveback_pct_maturing
             giveback_allowance_r = max(self.config.min_breathing_room_r, peak_r * giveback_pct)

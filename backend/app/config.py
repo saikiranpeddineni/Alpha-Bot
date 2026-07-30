@@ -54,6 +54,7 @@ class RiskConfig(BaseModel):
     kelly_fraction_cap: float = Field(0.15, ge=0.01, le=0.50)
     max_positions_per_sector: int = Field(2, ge=1, le=10)
     max_correlation_penalty: float = Field(0.5, ge=0.0, le=1.0)
+    harvest_risk_multiplier: float = Field(2.5, ge=1.0, le=5.0)
     midday_score_boost: float = Field(15.0, ge=0.0, le=50.0)
     midday_start_et: int = Field(690, ge=570, le=960)
     midday_end_et: int = Field(795, ge=570, le=960)
@@ -109,6 +110,7 @@ class Settings(BaseSettings):
     kelly_fraction_cap: float = Field(0.15, validation_alias="KELLY_FRACTION_CAP")
     max_positions_per_sector: int = Field(2, validation_alias="MAX_POSITIONS_PER_SECTOR")
     max_correlation_penalty: float = Field(0.5, validation_alias="MAX_CORRELATION_PENALTY")
+    harvest_risk_multiplier: float = Field(2.5, validation_alias="HARVEST_RISK_MULTIPLIER")
     score_threshold_trend: float = Field(55.0, validation_alias="SCORE_THRESHOLD_TREND")
     score_threshold_range: float = Field(70.0, validation_alias="SCORE_THRESHOLD_RANGE")
     score_threshold_volatile: float = Field(65.0, validation_alias="SCORE_THRESHOLD_VOLATILE")
@@ -209,6 +211,7 @@ class Settings(BaseSettings):
             kelly_fraction_cap=self.kelly_fraction_cap,
             max_positions_per_sector=self.max_positions_per_sector,
             max_correlation_penalty=self.max_correlation_penalty,
+            harvest_risk_multiplier=self.harvest_risk_multiplier,
         )
 
     def trade_score_weights(self) -> tuple[float, float, float, float, float, float]:

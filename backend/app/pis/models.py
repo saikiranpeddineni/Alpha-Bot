@@ -230,6 +230,7 @@ class PISConfig:
     stagnation_max_bars: int = 30
     price_buffer_pct: float = 0.0002
     min_price_buffer_abs: float = 0.01
+    profit_harvesting_mode: bool = True
 
     def validate(self) -> None:
         """Validate startup configuration boundaries.
