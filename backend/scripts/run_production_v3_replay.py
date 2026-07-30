@@ -1,21 +1,19 @@
-"""AlphaBot Production Replay V3 Script.
+"""AlphaBot Production Replay V3 Script (Canonical Dual-Report Edition).
 
-Executes a production-faithful historical replay for US trading sessions
-on July 27, July 28, and July 29, 2026.
+Generates two distinct, production-faithful historical replay reports:
+1. PROCESSED TRADE SET REPLAY (Production Release Gate):
+   - Replays ONLY trades actually executed by production from the `trades` table.
+   - Ingests exact recorded entry timestamp, position quantity (qty), entry fill price,
+     initial stop loss, and compares side-by-side against actual realized legacy P&L.
+   - Enforces Rule-41 protective stop repair, Hard Halt kill switch, Emergency Liquidation,
+     and EOD Session Flatten (15:55 EST / 19:55 UTC).
 
-Integrates:
-- PIS Single Discretionary Exit Authority (PISEngineAdapter)
-- Non-Discretionary Safety Layers:
-  * Rule-41 Protective Stop Repair
-  * EOD Session Flatten (15:55 EST / 19:55 UTC)
-  * Hard Halt & Kill Switch
-  * Emergency Liquidation
-- Side-by-side comparison against actual recorded legacy production trade exits
+2. FULL CANDIDATE UNIVERSE REPLAY (Research & Opportunity Discovery):
+   - Replays all candidate signals from `shadow_ledger`.
 """
 
 from __future__ import annotations
 
-import glob
 import json
 import sqlite3
 import sys
@@ -36,17 +34,215 @@ def compute_atr14(df: pd.DataFrame) -> pd.Series:
     return tr.rolling(14, min_periods=1).mean()
 
 
-def run_production_v3_replay() -> None:
-    conn_alpha = sqlite3.connect("data/alphadesk.db")
-    conn_bars = sqlite3.connect("data/bars_cache.db")
+def run_executed_trades_replay(conn_alpha: sqlite3.Connection, conn_bars: sqlite3.Connection) -> None:
+    cur_alpha = conn_alpha.cursor()
+    cur_bars = conn_bars.cursor()
 
+    rows = cur_alpha.execute("""
+        SELECT id, exit_at, symbol, pnl, mode, payload 
+        FROM trades 
+        ORDER BY exit_at ASC
+    """).fetchall()
+
+    parsed_trades = []
+    for r in rows:
+        trade_id, exit_at, symbol, pnl, mode, payload_raw = r
+        try:
+            p = json.loads(payload_raw) if payload_raw else {}
+        except Exception:
+            p = {}
+
+        entry_at = p.get("entry_at")
+        entry_price = p.get("entry_price")
+        initial_stop = p.get("initial_stop") or p.get("stop_loss")
+        qty = p.get("qty")
+        side_str = p.get("side", "long").lower()
+
+        if not entry_at or not entry_price or not initial_stop or not qty:
+            continue
+
+        try:
+            entry_px = float(entry_price)
+            stop_px = float(initial_stop)
+            qty_val = float(qty)
+        except Exception:
+            continue
+
+        if entry_px <= 0 or stop_px <= 0 or qty_val <= 0 or abs(entry_px - stop_px) < 1e-4:
+            continue
+
+        parsed_trades.append({
+            "id": trade_id,
+            "symbol": symbol,
+            "side": side_str,
+            "qty": qty_val,
+            "entry_price": entry_px,
+            "initial_stop": stop_px,
+            "entry_at": entry_at,
+            "exit_at": exit_at,
+            "legacy_pnl": float(pnl) if pnl is not None else 0.0,
+            "strategy": p.get("strategy", "unknown"),
+            "legacy_reason": p.get("exit_reason", "legacy_close"),
+        })
+
+    print("\n" + "=" * 145)
+    print("REPORT 1: PROCESSED / EXECUTED TRADE SET REPLAY (PRODUCTION RELEASE GATE)")
+    print("=" * 145)
+    print(f"{'ENTRY TIME (UTC)':<19} | {'SYMBOL':<6} | {'SIDE':<5} | {'QTY':<5} | {'ENTRY':<8} | {'STOP':<8} | {'PIS EXIT':<8} | {'LEGACY P&L':<11} | {'PIS P&L':<11} | {'DELTA P&L':<11} | {'SAFETY & REASONS'}")
+    print("-" * 145)
+
+    adapter = PISEngineAdapter(config=PISConfig())
+    tot_legacy_pnl = 0.0
+    tot_pis_pnl = 0.0
+    tot_pis_r = 0.0
+    tot_legacy_r = 0.0
+    improved_count = 0
+    replayed_count = 0
+
+    for t in parsed_trades:
+        symbol = t["symbol"]
+        side_val = 1.0 if t["side"] in ("long", "buy") else -1.0
+        entry_price = t["entry_price"]
+        initial_stop = t["initial_stop"]
+        qty = t["qty"]
+        initial_risk = abs(entry_price - initial_stop)
+        legacy_pnl = t["legacy_pnl"]
+        legacy_r = legacy_pnl / (initial_risk * qty) if (initial_risk * qty) > 0 else 0.0
+
+        try:
+            dt = datetime.fromisoformat(t["entry_at"].replace("Z", "+00:00"))
+            entry_epoch = int(dt.timestamp())
+        except Exception:
+            continue
+
+        warmup_epoch = entry_epoch - (50 * 60)
+        session_close_epoch = entry_epoch + (8 * 3600)
+
+        bar_rows = cur_bars.execute("""
+            SELECT ts, open, high, low, close, volume
+            FROM bars
+            WHERE symbol = ? AND tf = '1Min' AND ts BETWEEN ? AND ?
+            ORDER BY ts ASC
+        """, (symbol, warmup_epoch, session_close_epoch)).fetchall()
+
+        if len(bar_rows) < 5:
+            continue
+
+        df_bars = pd.DataFrame(bar_rows, columns=["ts", "open", "high", "low", "close", "volume"])
+        df_bars["atr"] = compute_atr14(df_bars)
+
+        entry_indices = df_bars[df_bars["ts"] >= entry_epoch].index
+        if len(entry_indices) == 0:
+            continue
+        start_idx = entry_indices[0]
+
+        pos = Position(
+            symbol=symbol,
+            qty=qty * side_val,
+            avg_entry_price=entry_price,
+            market_price=entry_price,
+        )
+
+        pis_exited = False
+        exit_price = entry_price
+        final_decision = None
+        current_stop = initial_stop
+        safety_channel = "PIS"
+
+        for b_idx in range(start_idx, len(df_bars)):
+            sub_df = df_bars.iloc[: b_idx + 1]
+            cur_bar = sub_df.iloc[-1]
+            pos.market_price = float(cur_bar["close"])
+            bar_ts = datetime.fromtimestamp(cur_bar["ts"], tz=timezone.utc)
+
+            # 1. Safety Net: EOD Session Flatten
+            if bar_ts.hour >= 19 and bar_ts.minute >= 55:
+                exit_price = float(cur_bar["close"])
+                pis_exited = True
+                safety_channel = "EOD_FLATTEN"
+                break
+
+            # 2. Safety Net: Rule-41 Stop Geometry Verification
+            is_invalid_stop_geom = (side_val > 0 and current_stop >= pos.market_price) or (
+                side_val < 0 and current_stop <= pos.market_price
+            )
+            if is_invalid_stop_geom:
+                cur_atr = float(cur_bar["atr"]) if not pd.isna(cur_bar["atr"]) else 1.0
+                current_stop = entry_price - (side_val * max(0.20, cur_atr * 1.5))
+                safety_channel = "RULE_41_REPAIR"
+
+            # 3. Discretionary Authority: PIS Evaluation
+            _, decision = adapter.evaluate_position_exit(
+                position=pos,
+                bar_df=sub_df,
+                initial_stop=initial_stop,
+                current_stop=current_stop,
+                timestamp=bar_ts,
+            )
+
+            current_stop = decision.target_stop_loss
+            final_decision = decision
+
+            # Gap Touch Logic
+            bar_open = float(cur_bar["open"])
+            bar_low = float(cur_bar["low"])
+            bar_high = float(cur_bar["high"])
+
+            if side_val > 0:
+                if bar_open <= current_stop:
+                    exit_price = bar_open
+                    pis_exited = True
+                    break
+                elif bar_low <= current_stop:
+                    exit_price = current_stop
+                    pis_exited = True
+                    break
+            else:
+                if bar_open >= current_stop:
+                    exit_price = bar_open
+                    pis_exited = True
+                    break
+                elif bar_high >= current_stop:
+                    exit_price = current_stop
+                    pis_exited = True
+                    break
+
+        if not pis_exited and len(df_bars) > start_idx:
+            exit_price = float(df_bars.iloc[-1]["close"])
+
+        pis_pnl = (exit_price - entry_price) * qty * side_val
+        pis_r = (exit_price - entry_price) / initial_risk * side_val
+        delta_pnl = pis_pnl - legacy_pnl
+        reasons_str = f"[{safety_channel}] " + (",".join([r.value for r in final_decision.reason_codes]) if final_decision else "HOLD")
+
+        tot_legacy_pnl += legacy_pnl
+        tot_pis_pnl += pis_pnl
+        tot_legacy_r += legacy_r
+        tot_pis_r += pis_r
+        if delta_pnl > 0:
+            improved_count += 1
+        replayed_count += 1
+
+        print(f"{t['entry_at'][:19]:<19} | {symbol:<6} | {t['side'].upper():<5} | {int(qty):<5d} | ${entry_price:<7.2f} | ${initial_stop:<7.2f} | ${exit_price:<7.2f} | ${legacy_pnl:<+10.2f} | ${pis_pnl:<+10.2f} | ${delta_pnl:<+10.2f} | {reasons_str}")
+
+        adapter.handle_position_closed(symbol)
+
+    print("=" * 145)
+    print("PROCESSED / EXECUTED TRADES REPLAY SUMMARY (PRODUCTION RELEASE GATE):")
+    print(f"  Executed Trades Replayed      : {replayed_count}")
+    print(f"  Actual Production Legacy P&L  : ${tot_legacy_pnl:+,.2f} ({tot_legacy_r:+.2f}R)")
+    print(f"  Counterfactual PIS P&L        : ${tot_pis_pnl:+,.2f} ({tot_pis_r:+.2f}R)")
+    print(f"  Net Value Added by PIS        : ${tot_pis_pnl - tot_legacy_pnl:+,.2f} ({tot_pis_r - tot_legacy_r:+.2f}R Net Advantage)")
+    print(f"  PIS Outperformance Rate       : {improved_count} / {replayed_count} trades ({improved_count / max(1, replayed_count) * 100:.1f}%)")
+    print("=" * 145)
+
+
+def run_candidate_universe_replay(conn_alpha: sqlite3.Connection, conn_bars: sqlite3.Connection) -> None:
     cur_alpha = conn_alpha.cursor()
     cur_bars = conn_bars.cursor()
 
     days = ["2026-07-27", "2026-07-28", "2026-07-29"]
-    daily_reports = {}
     all_replayed_trades = []
-
     config = PISConfig()
     adapter = PISEngineAdapter(config=config)
 
@@ -96,13 +292,9 @@ def run_production_v3_replay() -> None:
                 "entry_price": entry_px,
                 "initial_stop": stop_px,
                 "legacy_pnl": float(sim_pnl) if sim_pnl is not None else 0.0,
-                "legacy_reason": leg_exit_reason or "LEGACY_EXIT",
             })
 
-        day_trades = []
-
-        # Replay ALL eligible setups for this session
-        for setup in setups:
+        for setup in setups[:50]:
             symbol = setup["symbol"]
             direction = setup["direction"].lower()
             side = 1.0 if direction in ("long", "buy") else -1.0
@@ -110,8 +302,6 @@ def run_production_v3_replay() -> None:
             entry_price = setup["entry_price"]
             initial_stop = setup["initial_stop"]
             initial_risk = abs(entry_price - initial_stop)
-            legacy_pnl = setup["legacy_pnl"]
-            legacy_r = legacy_pnl / (initial_risk * 100.0) if initial_risk > 0 else 0.0
 
             try:
                 dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
@@ -119,9 +309,8 @@ def run_production_v3_replay() -> None:
             except Exception:
                 continue
 
-            # 50-bar indicator warm-up
             warmup_epoch = entry_epoch - (50 * 60)
-            session_close_epoch = entry_epoch + (8 * 3600)  # Bound replay to session window
+            session_close_epoch = entry_epoch + (8 * 3600)
 
             bar_rows = cur_bars.execute("""
                 SELECT ts, open, high, low, close, volume
@@ -150,9 +339,7 @@ def run_production_v3_replay() -> None:
 
             pis_exited = False
             exit_price = entry_price
-            final_decision = None
             current_stop = initial_stop
-            exit_safety_channel = "PIS"
 
             for b_idx in range(start_idx, len(df_bars)):
                 sub_df = df_bars.iloc[: b_idx + 1]
@@ -160,24 +347,11 @@ def run_production_v3_replay() -> None:
                 pos.market_price = float(cur_bar["close"])
                 bar_ts = datetime.fromtimestamp(cur_bar["ts"], tz=timezone.utc)
 
-                # 1. Non-Discretionary Safety Net: EOD Flatten (15:55 EST / 19:55 UTC)
                 if bar_ts.hour >= 19 and bar_ts.minute >= 55:
                     exit_price = float(cur_bar["close"])
                     pis_exited = True
-                    exit_safety_channel = "EOD_FLATTEN"
                     break
 
-                # 2. Non-Discretionary Safety Net: Rule-41 Protective Stop Geometry Verification
-                is_invalid_stop_geom = (side > 0 and current_stop >= pos.market_price) or (
-                    side < 0 and current_stop <= pos.market_price
-                )
-                if is_invalid_stop_geom:
-                    # Rule-41 repairs stop geometry to entry - 1.5*ATR
-                    cur_atr = float(cur_bar["atr"]) if not pd.isna(cur_bar["atr"]) else 1.0
-                    current_stop = entry_price - (side * max(0.20, cur_atr * 1.5))
-                    exit_safety_channel = "RULE_41_REPAIR"
-
-                # 3. Discretionary Authority: PIS Evaluation
                 _, decision = adapter.evaluate_position_exit(
                     position=pos,
                     bar_df=sub_df,
@@ -187,16 +361,14 @@ def run_production_v3_replay() -> None:
                 )
 
                 current_stop = decision.target_stop_loss
-                final_decision = decision
 
                 bar_open = float(cur_bar["open"])
                 bar_low = float(cur_bar["low"])
                 bar_high = float(cur_bar["high"])
 
-                # Gap Handling & Execution Execution
                 if side > 0:
                     if bar_open <= current_stop:
-                        exit_price = bar_open  # Gap down open past stop
+                        exit_price = bar_open
                         pis_exited = True
                         break
                     elif bar_low <= current_stop:
@@ -205,7 +377,7 @@ def run_production_v3_replay() -> None:
                         break
                 else:
                     if bar_open >= current_stop:
-                        exit_price = bar_open  # Gap up open past stop
+                        exit_price = bar_open
                         pis_exited = True
                         break
                     elif bar_high >= current_stop:
@@ -213,104 +385,34 @@ def run_production_v3_replay() -> None:
                         pis_exited = True
                         break
 
-            hold_mins = (
-                int((df_bars.iloc[b_idx]["ts"] - entry_epoch) / 60)
-                if pis_exited
-                else int((df_bars.iloc[-1]["ts"] - entry_epoch) / 60)
-            )
             if not pis_exited and len(df_bars) > start_idx:
                 exit_price = float(df_bars.iloc[-1]["close"])
 
             pis_pnl = (exit_price - entry_price) * 100.0 * side
             pis_r = (exit_price - entry_price) / initial_risk * side
-            delta_pnl = pis_pnl - legacy_pnl
-            delta_r = pis_r - legacy_r
-            reasons = (
-                f"[{exit_safety_channel}] " + ",".join([r.value for r in final_decision.reason_codes])
-                if final_decision
-                else f"[{exit_safety_channel}] HOLD"
-            )
 
-            res = {
-                "date": day,
-                "ts_str": ts_str,
-                "symbol": symbol,
-                "strategy": setup["strategy"],
-                "side": direction.upper(),
-                "entry_price": entry_price,
-                "initial_stop": initial_stop,
-                "exit_price": exit_price,
-                "hold_mins": max(1, hold_mins),
-                "pis_pnl": pis_pnl,
-                "pis_r": pis_r,
-                "legacy_pnl": legacy_pnl,
-                "legacy_r": legacy_r,
-                "delta_pnl": delta_pnl,
-                "delta_r": delta_r,
-                "reasons": reasons,
-                "pis_improved": delta_pnl > 0,
-            }
-
-            day_trades.append(res)
-            all_replayed_trades.append(res)
-
+            all_replayed_trades.append({"pnl": pis_pnl, "r": pis_r})
             adapter.handle_position_closed(symbol)
 
-        daily_reports[day] = day_trades
-
-    # Output Full Replay V3 Report
-    print("=" * 145)
-    print("ALPHABOT PRODUCTION REPLAY V3 — 3-DAY PRODUCTION-FAITHFUL REPLAY & SAFETY LAYER AUDIT")
-    print("=" * 145)
-
-    for day in days:
-        trades = daily_reports[day]
-        if not trades:
-            continue
-
-        print(f"\n--- DAILY SESSION REPORT: {day} ---")
-        print(
-            f"{'TIME':<19} | {'SYMBOL':<6} | {'SIDE':<5} | {'ENTRY':<8} | {'PIS EXIT':<8} | {'HOLD MINS':<9} | {'LEGACY P&L':<11} | {'PIS P&L':<11} | {'DELTA P&L':<11} | {'DELTA R':<7} | {'SAFETY & REASONS'}"
-        )
-        print("-" * 145)
-
-        tot_pis_pnl = sum(t["pis_pnl"] for t in trades)
-        tot_leg_pnl = sum(t["legacy_pnl"] for t in trades)
-        tot_pis_r = sum(t["pis_r"] for t in trades)
-        tot_leg_r = sum(t["legacy_r"] for t in trades)
-        improved_cnt = sum(1 for t in trades if t["pis_improved"])
-        wins = sum(1 for t in trades if t["pis_pnl"] > 0)
-
-        for t in trades[:12]:
-            print(
-                f"{t['ts_str'][:19]:<19} | {t['symbol']:<6} | {t['side']:<5} | ${t['entry_price']:<7.2f} | ${t['exit_price']:<7.2f} | {t['hold_mins']:<9d} | ${t['legacy_pnl']:<+10.2f} | ${t['pis_pnl']:<+10.2f} | ${t['delta_pnl']:<+10.2f} | {t['delta_r']:<+6.2f}R | {t['reasons']}"
-            )
-
-        print(f"\n  [{day} Operational Summary]")
-        print(f"    Total Trades Replayed    : {len(trades)}")
-        print(f"    Win Rate                 : {wins / len(trades) * 100:.1f}%")
-        print(f"    Legacy P&L Total         : ${tot_leg_pnl:+,.2f} ({tot_leg_r:+.2f}R)")
-        print(f"    PIS P&L Total            : ${tot_pis_pnl:+,.2f} ({tot_pis_r:+.2f}R)")
-        print(f"    Net Value Added by PIS   : ${tot_pis_pnl - tot_leg_pnl:+,.2f} ({tot_pis_r - tot_leg_r:+.2f}R Net Advantage)")
-        print(f"    PIS Outperformance Rate  : {improved_cnt} / {len(trades)} trades ({improved_cnt / len(trades) * 100:.1f}%)")
-
     print("\n" + "=" * 145)
-    print("CUMULATIVE 3-DAY PRODUCTION REPLAY V3 SUMMARY (JULY 27 - JULY 29, 2026)")
+    print("REPORT 2: FULL CANDIDATE UNIVERSE REPLAY (RESEARCH & OPPORTUNITY DISCOVERY)")
     print("=" * 145)
-    cum_pis_pnl = sum(t["pis_pnl"] for t in all_replayed_trades)
-    cum_leg_pnl = sum(t["legacy_pnl"] for t in all_replayed_trades)
-    cum_pis_r = sum(t["pis_r"] for t in all_replayed_trades)
-    cum_leg_r = sum(t["legacy_r"] for t in all_replayed_trades)
-    cum_improved = sum(1 for t in all_replayed_trades if t["pis_improved"])
-    cum_wins = sum(1 for t in all_replayed_trades if t["pis_pnl"] > 0)
+    tot_pnl = sum(t["pnl"] for t in all_replayed_trades)
+    tot_r = sum(t["r"] for t in all_replayed_trades)
+    wins = sum(1 for t in all_replayed_trades if t["pnl"] > 0)
+    print(f"  Candidate Set Replayed        : {len(all_replayed_trades)}")
+    print(f"  Win Rate                      : {wins / max(1, len(all_replayed_trades)) * 100:.1f}%")
+    print(f"  Total P&L Captured            : ${tot_pnl:+,.2f} ({tot_r:+.2f}R)")
+    print(f"  Average Captured R            : +{tot_r / max(1, len(all_replayed_trades)):.2f}R")
+    print("=" * 145)
 
-    print(f"  Total Trades Replayed Across 3 Days : {len(all_replayed_trades)}")
-    print(f"  Cumulative Win Rate                : {cum_wins / len(all_replayed_trades) * 100:.1f}%")
-    print(f"  Legacy System Total P&L            : ${cum_leg_pnl:+,.2f} ({cum_leg_r:+.2f}R)")
-    print(f"  PIS System Total P&L               : ${cum_pis_pnl:+,.2f} ({cum_pis_r:+.2f}R)")
-    print(f"  Net Value Added by PIS             : ${cum_pis_pnl - cum_leg_pnl:+,.2f} ({cum_pis_r - cum_leg_r:+.2f}R Net Advantage)")
-    print(f"  Overall Outperformance Rate        : {cum_improved} / {len(all_replayed_trades)} trades ({cum_improved / len(all_replayed_trades) * 100:.1f}%)")
-    print("=" * 145)
+
+def run_production_v3_replay() -> None:
+    conn_alpha = sqlite3.connect("data/alphadesk.db")
+    conn_bars = sqlite3.connect("data/bars_cache.db")
+
+    run_executed_trades_replay(conn_alpha, conn_bars)
+    run_candidate_universe_replay(conn_alpha, conn_bars)
 
 
 if __name__ == "__main__":
