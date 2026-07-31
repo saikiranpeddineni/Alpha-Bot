@@ -10,7 +10,15 @@ from enum import StrEnum
 from typing import Any
 from pydantic import BaseModel, Field, model_validator
 
+import contextvars
+from typing import Callable
+
+_mock_utcnow: contextvars.ContextVar[Callable[[], datetime] | None] = contextvars.ContextVar("mock_utcnow", default=None)
+
 def utcnow() -> datetime:
+    mock = _mock_utcnow.get()
+    if mock is not None:
+        return mock()
     return datetime.now(UTC)
 
 def new_id() -> str:

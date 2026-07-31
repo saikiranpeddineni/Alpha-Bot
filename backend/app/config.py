@@ -13,9 +13,18 @@ from pathlib import Path
 from pydantic import AliasChoices, BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+import contextvars
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = REPO_ROOT / "data"
-MODELS_DIR = DATA_DIR / "models"
+MODELS_DIR = DATA_DIR / "models"  # Kept for simple script access
+
+_replay_models_dir: contextvars.ContextVar[Path | None] = contextvars.ContextVar("replay_models_dir", default=None)
+
+def get_models_dir() -> Path:
+    mock = _replay_models_dir.get()
+    return mock if mock is not None else MODELS_DIR
+
 FRONTEND_DIST = REPO_ROOT / "frontend" / "dist"
 
 VALID_MODES = ("demo", "paper", "live")
@@ -39,13 +48,13 @@ class RiskConfig(BaseModel):
     ml_confidence_threshold: float = Field(0.55, ge=0.0, le=1.0)
     regime_ml_thresholds: dict[str, float] = Field(
         default={
-            "NORMAL": 0.48,
-            "CAUTION": 0.52,
-            "STRESS": 0.60,
-            "PANIC": 0.65,
+            "NORMAL": 0.40,
+            "CAUTION": 0.45,
+            "STRESS": 0.50,
+            "PANIC": 0.60,
         }
     )
-    min_specialist_auc: float = Field(0.53, ge=0.50, le=1.0)
+    min_specialist_auc: float = Field(0.52, ge=0.50, le=1.0)
     min_stop_pct: float = Field(0.5, ge=0.0, le=5.0)
     score_threshold_trend: float = Field(55.0, ge=0.0, le=100.0)
     score_threshold_range: float = Field(70.0, ge=0.0, le=100.0)

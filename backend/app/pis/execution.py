@@ -50,6 +50,6 @@ class PISExecutionAdapter:
             side=order_side,
             order_type=OrderType.MARKET,
             qty=qty_to_close,
-            strategy_name=f"PISDiscretionaryExit[{decision.lifecycle_state.value}]",
-            notes=f"PIS Exit Reason: {reason_str}",
+            strategy=f"PISDiscretionaryExit[{decision.lifecycle_state.value}]",
+            reason=f"PIS Exit Reason: {reason_str}",
         )

@@ -106,6 +106,21 @@ def efficiency_ratio(series: pd.Series, period: int = 20) -> pd.Series:
     return change / volatility.replace(0.0, np.nan)
 
 
+def volatility_expansion(df: pd.DataFrame, short_period: int = 5, long_period: int = 20) -> pd.Series:
+    """Ratio of short-term ATR to long-term ATR to measure sudden panic/expansion."""
+    short_atr = atr(df, short_period)
+    long_atr = atr(df, long_period)
+    return short_atr / long_atr.replace(0.0, np.nan)
+
+
+def tail_whipsaw(df: pd.DataFrame) -> pd.Series:
+    """Ratio of wick size to total candle size. Higher means more fake-outs."""
+    body_size = (df["open"] - df["close"]).abs()
+    total_size = df["high"] - df["low"]
+    whipsaw_size = total_size - body_size
+    return whipsaw_size / total_size.replace(0.0, np.nan)
+
+
 def enrich(df: pd.DataFrame) -> pd.DataFrame:
     """Append the standard indicator column set. Returns a new DataFrame."""
     if df.empty:
@@ -129,6 +144,8 @@ def enrich(df: pd.DataFrame) -> pd.DataFrame:
     out["vol_sma20"] = sma(out["volume"].astype(float), 20)
     out["vol_z"] = rolling_zscore(out["volume"].astype(float), 20)
     out["er20"] = efficiency_ratio(close, 20)
+    out["vol_expansion"] = volatility_expansion(out, 5, 20)
+    out["whipsaw_ratio"] = tail_whipsaw(out)
     out["ret_1"] = close.pct_change(1)
     out["ret_5"] = close.pct_change(5)
     out["ret_15"] = close.pct_change(15)
@@ -138,6 +155,7 @@ def enrich(df: pd.DataFrame) -> pd.DataFrame:
 REQUIRED_ENRICHED_COLUMNS = (
     "ema9", "ema20", "ema50", "rsi14", "rsi2", "macd_hist", "atr14",
     "bb_pos", "bb_width", "vwap", "vwap_dist_pct", "vol_z", "er20",
+    "vol_expansion", "whipsaw_ratio",
 )
 
 
@@ -157,6 +175,8 @@ def compute_relative_strength(symbol_df: pd.DataFrame, spy_df: pd.DataFrame) -> 
     s_ret15 = float(symbol_df["ret_15"].iloc[-1])
     b_ret5 = float(spy_df["ret_5"].iloc[-1])
     b_ret15 = float(spy_df["ret_15"].iloc[-1])
+    if pd.isna(s_ret5) or pd.isna(s_ret15) or pd.isna(b_ret5) or pd.isna(b_ret15):
+        return None
     # Weighted blend: 40% 5-min, 60% 15-min (smoother than 5m alone)
     rs_raw = 0.40 * (s_ret5 - b_ret5) + 0.60 * (s_ret15 - b_ret15)
     # Normalize: 0.0 center at SPY parity, saturate at ±2% differential → 0.0–1.0

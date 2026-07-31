@@ -140,8 +140,7 @@ class ReplayBroker(Broker):
                 self._cancel_stale_protection(symbol)
                 continue
             fill_px=None
-            if self.fill_model=="next_open":fill_px=open_px
-            elif order.order_type==OrderType.LIMIT:
+            if order.order_type==OrderType.LIMIT:
                 limit=float(order.limit_price)
                 if order.side==OrderSide.BUY and low_px<=limit:fill_px=min(open_px,limit)
                 elif order.side==OrderSide.SELL and high_px>=limit:fill_px=max(open_px,limit)
@@ -155,4 +154,5 @@ class ReplayBroker(Broker):
                 if order.stop_triggered:
                     if order.side==OrderSide.BUY and low_px<=limit:fill_px=min(max(open_px,stop),limit)
                     elif order.side==OrderSide.SELL and high_px>=limit:fill_px=max(min(open_px,stop),limit)
+            elif self.fill_model=="next_open":fill_px=open_px
             if fill_px is not None:self._execute_fill(order,order.remaining_qty,self._slip(fill_px,order.side))

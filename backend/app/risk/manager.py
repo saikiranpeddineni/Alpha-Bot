@@ -232,15 +232,8 @@ class RiskManager:
 
     # ---- entry evaluation ----
 
-    def evaluate_entry(
-        self,
-        signal: Signal,
-        ctx: AccountContext,
-        bars: pd.DataFrame,
-        now: datetime | None = None,
-        kelly_override: float | None = None,
-    ) -> RiskDecision:
-        """Evaluate a proposed entry and return a sizing decision."""
+    def is_entry_permitted(self, signal: Signal, now: datetime | None = None) -> RiskDecision:
+        """Lightweight pre-allocation check for halts, cooldowns, and time windows."""
         cfg = self.config
         symbol = signal.symbol.upper()
         strategy = signal.strategy or "manual"
@@ -256,6 +249,26 @@ class RiskManager:
             return RiskDecision(False, f"ticker-specific cooldown active for {symbol}")
         if not self.clock.in_entry_window(cfg.no_entry_minutes_before_close, now):
             return RiskDecision(False, "outside entry window (market closed or too near close)")
+        
+        return RiskDecision(True, "permitted")
+
+    def evaluate_entry(
+        self,
+        signal: Signal,
+        ctx: AccountContext,
+        bars: pd.DataFrame,
+        now: datetime | None = None,
+        kelly_override: float | None = None,
+    ) -> RiskDecision:
+        """Evaluate a proposed entry and return a sizing decision."""
+        pre_check = self.is_entry_permitted(signal, now)
+        if not pre_check.approved:
+            return pre_check
+            
+        cfg = self.config
+        symbol = signal.symbol.upper()
+        strategy = signal.strategy or "manual"
+
         if symbol in [s.upper() for s in ctx.pending_entry_symbols]:
             return RiskDecision(False, f"order already pending for {symbol}")
         if any(p.symbol == symbol for p in ctx.positions):
@@ -279,7 +292,7 @@ class RiskManager:
             return RiskDecision(False, f"price {price:.2f} below minimum {cfg.min_price}")
         recent = bars.tail(120)
         avg_dollar_vol = float((recent["close"] * recent["volume"]).mean())
-        if avg_dollar_vol < cfg.min_avg_dollar_volume:
+        if pd.isna(avg_dollar_vol) or avg_dollar_vol < cfg.min_avg_dollar_volume:
             return RiskDecision(False, f"illiquid: avg ${avg_dollar_vol:,.0f}/min below minimum")
 
         if ctx.rolling_day_trades >= PDT_MAX_DAY_TRADES and ctx.equity < PDT_EQUITY_MIN:

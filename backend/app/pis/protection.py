@@ -85,7 +85,23 @@ class AdaptiveProtectionPlanner:
                 else:
                     giveback_pct = max(min_giveback, base_giveback - decay)
             else:
-                giveback_pct = self.config.giveback_pct_maturing
+                # Dynamic Exhaustion Prediction: Health-Aware Profit Locking
+                base = self.config.giveback_pct_maturing
+                
+                # 1. Parabolic Exhaustion Override (Chandelier Snapping)
+                # If volatility explodes (score <= 0.2 means range > 3x ATR) and trend is extended, snap the stop!
+                if health.volatility_score <= 0.2 and peak_r > 1.5:
+                    giveback_pct = min(base, 0.15)
+                # 2. Healthy Trend (Breathe)
+                elif health.overall >= 0.8:
+                    giveback_pct = max(base, 0.60)
+                # 3. Exhaustion Top / Rejection (Choke)
+                elif health.overall <= 0.4:
+                    giveback_pct = min(base, 0.20)
+                # 4. Smooth Interpolation (0.4 to 0.8 health -> 20% to 60% giveback)
+                else:
+                    giveback_pct = 0.20 + (0.60 - 0.20) * ((health.overall - 0.4) / (0.8 - 0.4))
+
             giveback_allowance_r = max(self.config.min_breathing_room_r, peak_r * giveback_pct)
             locked_r = max(self.config.min_locked_r, peak_r - giveback_allowance_r)
 

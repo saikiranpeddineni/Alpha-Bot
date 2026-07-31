@@ -52,8 +52,8 @@ class SignalPipeline:
         _risk = risk_config or _settings.risk_config()
         self.trade_score_engine = TradeScoreEngine(weights=_settings.trade_score_weights(), risk_config=_risk)  # type: ignore[arg-type]
         from app.ai.prediction import MetaLabelEngine
-        from app.config import MODELS_DIR
-        self.meta_label_engine = MetaLabelEngine(MODELS_DIR)
+        from app.config import get_models_dir
+        self.meta_label_engine = MetaLabelEngine(get_models_dir())
         # Shadow challengers are intentionally not instantiated here. Champion owns only
         # authoritative ML/Meta/TradeScore behavior; research consumers live behind ShadowResearchRuntime.
         if not hasattr(model, "_meta_label_engine") or model._meta_label_engine is None:

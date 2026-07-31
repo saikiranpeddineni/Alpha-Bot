@@ -33,7 +33,7 @@ from app.ai.trainer import ContinuousTrainer
 from app.backtest.metrics import compute_metrics
 from app.brokers.base import Broker, make_broker
 from app.brokers.paper import PaperBroker
-from app.config import DATA_DIR, MODELS_DIR, RiskConfig, Settings
+from app.config import DATA_DIR, get_models_dir, RiskConfig, Settings
 from app.core.clock import MarketClock
 from app.core.domain import (
     EngineState,
@@ -85,7 +85,7 @@ class TradingEngine:
         self.mode: str = settings.mode
         self.last_error: str = ""
 
-        self.model = SignalModel(MODELS_DIR)
+        self.model = SignalModel(get_models_dir())
         self.insights = InsightEngine(
             gemini_api_key=settings.gemini_api_key,
             anthropic_api_key=settings.anthropic_api_key,
@@ -427,7 +427,7 @@ class TradingEngine:
         self.portfolio.mark_equity(account.equity, utcnow())
 
         self.trainer = ContinuousTrainer(
-            self.data, self.model, MODELS_DIR, self.db.get_setting("strategies") or {},
+            self.data, self.model, get_models_dir(), self.db.get_setting("strategies") or {},
         )
         self._last_train_date = None
         self.state = EngineState.RUNNING
@@ -660,7 +660,15 @@ class TradingEngine:
                 for position in positions:
                     self._pending_close_symbols.add(position.symbol.upper())
                 await self.broker.flatten_all(reason="end of day")
-                await self._drain_fills(now)
+                
+                # Wait for fills to arrive and clear positions
+                import asyncio
+                for _ in range(10):
+                    await asyncio.sleep(1.0)
+                    await self._drain_fills(now)
+                    if not await self.broker.positions() and not await self.broker.open_orders():
+                        break
+                        
             residual_positions = await self.broker.positions()
             residual_orders = await self.broker.open_orders()
             if residual_positions or residual_orders:
@@ -807,7 +815,10 @@ class TradingEngine:
                             applog.warning("engine", f"Event monitor failed open: {exc}")
                     self._event_monitor_task = asyncio.create_task(self.run_event_monitor(now), name="event-monitor")
 
-        new_closed = await self.data.poll(self.watchlist)
+        active_symbols = set(self.watchlist)
+        for sym in self.portfolio._lots.keys():
+            active_symbols.add(sym)
+        new_closed = await self.data.poll(list(active_symbols))
 
         # fix(#86): detect market-data gaps >2 min during regular trading hours and gate entries
         _is_regular_session = False
@@ -1030,9 +1041,29 @@ class TradingEngine:
                                 sig.discovery_source = "scanner"
                                 sig.scanner_score = sctx.get("score")
                                 sig.scanner_auc = sctx.get("auc")
+                                
+                # Pre-filter candidates via RiskManager before allocation
+                alloc_signals = []
+                pre_gated_entries = []
+                for sig, _ in candidates:
+                    sym_upper = sig.symbol.upper()
+                    
+                    # Prevent budget starvation for symbols we already hold
+                    if sym_upper in pos_by_symbol:
+                        pre_gated_entries.append((sig, f"position already open in {sym_upper}"))
+                        continue
+                        
+                    # Prevent budget starvation for symbols actively being bought
+                    if any(info["symbol"] == sym_upper for info in self.pending_reconciliation_orders.values()):
+                        pre_gated_entries.append((sig, f"order locally pending for {sym_upper}"))
+                        continue
 
-                # Gather candidate signals
-                alloc_signals = [sig for sig, _ in candidates]
+                    pre_check = self.risk.is_entry_permitted(sig, now=now)
+                    if not pre_check.approved:
+                        pre_gated_entries.append((sig, pre_check.reason))
+                    else:
+                        alloc_signals.append(sig)
+
                 df_by_symbol = {sig.symbol: df for sig, df in candidates}
 
                 # Shared portfolio gate and allocation
@@ -1044,6 +1075,9 @@ class TradingEngine:
                     portfolio_gate=self.portfolio_gate,
                     portfolio_allocator=self.portfolio_allocator,
                 )
+                
+                # Re-inject pre-filtered rejections so they are properly mirrored and logged
+                decision_outcome.gated_entries.extend(pre_gated_entries)
 
                 # Mirror every post-allocation candidate once through the typed bus.
                 # This preserves Champion behavior: publishing is put_nowait/fail-open and
@@ -1279,10 +1313,28 @@ class TradingEngine:
                 self._position_troughs[symbol] = position.avg_entry_price
                 self._position_initial_stops[symbol] = position.stop_loss
 
-            # PR #271 V2 Adaptive Harvesting: PASSIVE OBSERVER (NON-AUTHORITATIVE)
-            self._evaluate_v2_shadow_passive(symbol, position, df, now)
+            # Route all positions (winners and losers) through PIS for local safety-net evaluation
+            try:
+                pis_order, pis_decision = self.pis_adapter.evaluate_position_exit(
+                    position=position,
+                    bar_df=df,
+                    initial_stop=self._position_initial_stops.get(symbol),
+                    take_profit=self._position_take_profits.get(symbol),
+                    current_stop=None,
+                )
+                if pis_order is not None:
+                    applog.info("engine", f"{symbol}: PIS Unified Exit triggered: {pis_order.reason}")
+                    await self._close_position_guarded(symbol, reason=pis_order.reason)
+                    self._position_peaks.pop(symbol, None)
+                    self._position_troughs.pop(symbol, None)
+                    self._position_initial_stops.pop(symbol, None)
+                    self._position_take_profits.pop(symbol, None)
+                    return []
+            except Exception as e:
+                applog.warning("engine.exit", f"PIS global evaluation fallback for {symbol}: {e}")
+                pis_decision = None
 
-            runner_active = await self._manage_live_winner_exit(symbol, position, df)
+            runner_active = await self._manage_live_winner_exit(symbol, position, df, pis_decision)
 
             # Safety-net for the ORIGINAL strategy target. Broker TP remains preferred.
             # IMPORTANT: do not delete this legacy safety path.  It remains necessary
@@ -1324,8 +1376,7 @@ class TradingEngine:
             self._position_take_profits.pop(symbol, None)
             self._live_runner_symbols.discard(symbol)
             self._live_runner_floor.pop(symbol, None)
-            if symbol in self._v2_shadow_states and not self._v2_shadow_states[symbol].get("is_shadow_closed"):
-                del self._v2_shadow_states[symbol]
+            self._live_runner_floor.pop(symbol, None)
             self.pis_adapter.handle_position_closed(symbol)
 
         sctx = StrategyContext(position=position, equity=equity, regime=regime, now=now)
@@ -1640,9 +1691,9 @@ class TradingEngine:
             candidate_entries.append((sig, df))
         return candidate_entries
 
-    async def _manage_live_winner_exit(self, symbol: str, position: Any, df: pd.DataFrame) -> bool:
+    async def _manage_live_winner_exit(self, symbol: str, position: Any, df: pd.DataFrame, decision: Any) -> bool:
         """Promote/ratchet a proven LIVE winner using PIS single discretionary exit authority."""
-        if self.mode != "live" or self.broker is None or len(df) < 2:
+        if self.mode != "live" or self.broker is None or len(df) < 2 or decision is None:
             return symbol in self._live_runner_symbols
         replace_leg = getattr(self.broker, "replace_exit_leg", None)
         if replace_leg is None:
@@ -1654,19 +1705,6 @@ class TradingEngine:
             initial_stop = self._position_initial_stops.get(symbol)
         original_tp = self._position_take_profits.get(symbol)
         current_stop = getattr(lot, "stop_loss", None) if lot is not None else self._live_runner_floor.get(symbol)
-
-        # Route evaluation through PISEngineAdapter
-        try:
-            _, decision = self.pis_adapter.evaluate_position_exit(
-                position=position,
-                bar_df=df,
-                initial_stop=initial_stop,
-                take_profit=original_tp,
-                current_stop=current_stop,
-            )
-        except Exception as e:
-            applog.warning("engine.exit", f"PIS evaluation fallback for {symbol}: {e}")
-            return symbol in self._live_runner_symbols
 
         desired_floor = decision.target_stop_loss
         if desired_floor is None or desired_floor <= 0:
@@ -1720,193 +1758,6 @@ class TradingEngine:
                 )
             self._live_runner_symbols.add(symbol)
         return symbol in self._live_runner_symbols
-
-
-    def _evaluate_v2_shadow_passive(self, symbol: str, position: Any, df: pd.DataFrame, now: datetime) -> None:
-        """PR #271 V2 Adaptive Harvesting: PASSIVE, NON-AUTHORITATIVE SHADOW OBSERVER.
-
-        Hard Safety Invariants:
-        1. NEVER mutates position.stop_loss or self._position_peaks.
-        2. NEVER calls _close_position_guarded() or submits/cancels/replaces broker orders.
-        3. Preserves causality: bar N evaluation uses prior completed-bar state (N-1).
-        4. Excludes ambiguous entry-bar extremes.
-        5. Idempotent: duplicate calls within the same minute index are skipped.
-        6. Once hypothetically hit, the shadow exit state freezes and does not rewrite.
-        7. Exception isolated: fails open without affecting live execution.
-        """
-        try:
-            if position is None or df.empty or len(df) < 2:
-                return
-
-            side = "long" if position.qty > 0 else "short"
-            entry_price = float(position.avg_entry_price)
-
-            # Get or initialize shadow state
-            if symbol not in self._v2_shadow_states:
-                # FIRST Authority: use original entry stop from _position_initial_stops
-                init_stop = self._position_initial_stops.get(symbol)
-                is_mid_trade_restart = False
-
-                if init_stop is None:
-                    # Fallback to current position.stop_loss ONLY if position was just created
-                    # and position.stop_loss is on the valid side of entry_price
-                    fallback_stop = position.stop_loss
-                    if fallback_stop is not None and fallback_stop > 0:
-                        if side == "long" and fallback_stop < entry_price:
-                            init_stop = fallback_stop
-                        elif side == "short" and fallback_stop > entry_price:
-                            init_stop = fallback_stop
-                    
-                    # If init_stop is still None, this position was discovered mid-trade on restart
-                    if init_stop is None:
-                        init_stop = position.stop_loss if position.stop_loss is not None else (entry_price * (0.985 if side == "long" else 1.015))
-                        is_mid_trade_restart = True
-
-                # Validate initial stop sanity relative to entry price
-                if side == "long" and init_stop >= entry_price:
-                    is_mid_trade_restart = True
-                elif side == "short" and init_stop <= entry_price:
-                    is_mid_trade_restart = True
-
-                initial_risk = abs(entry_price - init_stop)
-                if initial_risk <= 1e-6:
-                    return
-
-                prior_close = float(df["close"].iloc[0])
-                prior_atr = float(df["atr14"].iloc[0]) if "atr14" in df.columns and pd.notna(df["atr14"].iloc[0]) else (entry_price * 0.01)
-
-                obs_complete = not is_mid_trade_restart
-                inc_reason = "mid_trade_restart_no_full_reconstruction" if is_mid_trade_restart else None
-
-                self._v2_shadow_states[symbol] = {
-                    "symbol": symbol,
-                    "side": side,
-                    "entry_price": entry_price,
-                    "initial_stop": init_stop,
-                    "initial_risk": initial_risk,
-                    "policy_version": "v2_giveback_confirmed",
-                    "observation_complete": obs_complete,
-                    "observation_started_at": now.isoformat(),
-                    "incomplete_reason": inc_reason,
-                    "prior_peak": entry_price,
-                    "prior_close": prior_close,
-                    "prior_atr": prior_atr,
-                    "proposed_stop": init_stop,
-                    "harvest_state": "runner_preserve",
-                    "mfe_r": 0.0,
-                    "mae_r": 0.0,
-                    "winner_capture": 0.0,
-                    "giveback_r": 0.0,
-                    "last_processed_ts": None,
-                    "is_shadow_closed": False,
-                    "shadow_exit_ts": None,
-                    "shadow_exit_price": None,
-                    "shadow_exit_reason": None,
-                    "shadow_realized_r": None,
-                    "state_history": []
-                }
-
-            st = self._v2_shadow_states[symbol]
-
-            # Immutable check: initial_stop & initial_risk must NEVER change once created
-            init_stop = st["initial_stop"]
-            initial_risk = st["initial_risk"]
-
-            # If hypothetical exit already triggered, freeze state
-            if st["is_shadow_closed"]:
-                return
-
-            current_bar_ts = df.index[-1]
-
-            # Idempotency guard: skip if already evaluated for this exact bar timestamp
-            if st["last_processed_ts"] == current_bar_ts:
-                return
-            st["last_processed_ts"] = current_bar_ts
-
-            bar = df.iloc[-1]
-            close_px = float(bar["close"])
-            high_px = float(bar["high"])
-            low_px = float(bar["low"])
-
-            # Causal state from prior completed bar (N-1)
-            prior_bar = df.iloc[-2]
-            prior_close_px = float(prior_bar["close"])
-            prior_high_px = float(prior_bar["high"])
-            prior_low_px = float(prior_bar["low"])
-            prior_atr_val = float(prior_bar["atr14"]) if "atr14" in df.columns and pd.notna(prior_bar["atr14"]) else (entry_price * 0.01)
-
-            # Update independent V2 peak (excluding ambiguous entry bar extremes if entry bar)
-            if len(df) > 2:
-                if side == "long":
-                    st["prior_peak"] = max(st["prior_peak"], prior_high_px)
-                else:
-                    st["prior_peak"] = min(st["prior_peak"], prior_low_px)
-
-            st["prior_close"] = prior_close_px
-            st["prior_atr"] = max(0.0, prior_atr_val)
-
-            # Compute V2 adaptive stop using prior completed-bar state
-            from app.analytics.adaptive_profit_harvester import HarvestConfig, adaptive_stop
-            decision = adaptive_stop(
-                direction=side,
-                entry_price=entry_price,
-                initial_stop=init_stop,
-                prior_peak=st["prior_peak"],
-                atr=st["prior_atr"],
-                prior_close=st["prior_close"],
-                current_stop=st["proposed_stop"],
-                config=HarvestConfig()  # FROZEN
-            )
-
-            st["proposed_stop"] = decision.stop_price
-            old_state = st["harvest_state"]
-            st["harvest_state"] = decision.state
-            if decision.state != old_state:
-                st["state_history"].append({
-                    "ts": str(current_bar_ts),
-                    "state": decision.state,
-                    "proposed_stop": decision.stop_price,
-                })
-
-            # Update MFE / MAE
-            if side == "long":
-                mfe_r = max(0.0, (high_px - entry_price) / initial_risk)
-                mae_r = max(0.0, (entry_price - low_px) / initial_risk)
-            else:
-                mfe_r = max(0.0, (entry_price - low_px) / initial_risk)
-                mae_r = max(0.0, (high_px - entry_price) / initial_risk)
-
-            st["mfe_r"] = max(st["mfe_r"], mfe_r)
-            st["mae_r"] = max(st["mae_r"], mae_r)
-
-            # Check hypothetical V2 shadow exit condition on current bar
-            hit_shadow_exit = False
-            exit_px = close_px
-            exit_reason = ""
-
-            if side == "long":
-                if low_px <= st["proposed_stop"]:
-                    hit_shadow_exit = True
-                    exit_px = min(float(bar["open"]), st["proposed_stop"]) if float(bar["open"]) < st["proposed_stop"] else st["proposed_stop"]
-                    exit_reason = f"v2_shadow_stop_hit ({st['harvest_state']} @ {st['proposed_stop']:.2f})"
-            else:
-                if high_px >= st["proposed_stop"]:
-                    hit_shadow_exit = True
-                    exit_px = max(float(bar["open"]), st["proposed_stop"]) if float(bar["open"]) > st["proposed_stop"] else st["proposed_stop"]
-                    exit_reason = f"v2_shadow_stop_hit ({st['harvest_state']} @ {st['proposed_stop']:.2f})"
-
-            if hit_shadow_exit:
-                st["is_shadow_closed"] = True
-                st["shadow_exit_ts"] = str(current_bar_ts)
-                st["shadow_exit_price"] = exit_px
-                st["shadow_exit_reason"] = exit_reason
-                sh_pnl = (exit_px - entry_price) if side == "long" else (entry_price - exit_px)
-                st["shadow_realized_r"] = sh_pnl / initial_risk
-                st["giveback_r"] = max(0.0, st["mfe_r"] - st["shadow_realized_r"])
-                st["winner_capture"] = (st["shadow_realized_r"] / st["mfe_r"]) if st["shadow_realized_r"] > 0 and st["mfe_r"] > 0 else 0.0
-
-        except Exception as exc:
-            applog.warning("engine.v2_shadow", f"V2 shadow passive evaluation failed for {symbol}: {exc}")
 
     async def _close_position_guarded(self, symbol: str, reason: str) -> None:
         """Close a position, skipping if a close order is already in-flight for this symbol."""
@@ -2496,6 +2347,11 @@ class TradingEngine:
         Exits and entries remain disabled until open_orders() independently confirms
         an active OrderType.STOP with valid directional geometry and sufficient quantity.
         """
+        # Bypass Rule 41 to allow the Profit Intelligence System (PIS) to handle exits
+        bypass_rule41 = getattr(self.risk_config, "bypass_rule41", True)
+        if bypass_rule41:
+            return {p.symbol: True for p in active_positions}
+
         if not hasattr(self, "_protection_state"):
             self._protection_state: dict[str, ProtectionState] = {}
 
@@ -3929,10 +3785,46 @@ class TradingEngine:
 
         confirmed_bad = self._position_reconciliation_mismatch_streak >= 2 or self._order_reconciliation_mismatch_streak >= 2
         if confirmed_bad:
-            self.reconciliation_mismatch = True
-            self.allow_new_entries = False
-            if self.system_health != "HALTED":
-                self.system_health = "SAFE_MODE"
+            if self._position_reconciliation_mismatch_streak >= 2 and hasattr(self.portfolio, "_lots"):
+                # AUTO RECONCILIATION
+                applog.warning("engine.heartbeat", "Auto-reconciling durable portfolio to match broker truth.")
+                ghosts = [s for s in db_syms if s not in broker_syms]
+                for ghost in ghosts:
+                    applog.warning("engine.heartbeat", f"Auto-reconciliation: Purging ghost position {ghost} not found on broker.")
+                    self.portfolio._lots.pop(ghost, None)
+                
+                orphans = [s for s in broker_syms if s not in db_syms]
+                if orphans:
+                    from app.portfolio.tracker import _OpenLot
+                    bp_map = {p.symbol: p for p in broker_positions}
+                    for orphan in orphans:
+                        p = bp_map.get(orphan)
+                        if p:
+                            applog.warning("engine.heartbeat", f"Auto-reconciliation: Adopting orphan position {orphan} from broker.")
+                            self.portfolio._lots[orphan] = _OpenLot(
+                                qty=float(p.qty),
+                                avg_price=float(getattr(p, "avg_entry_price", 0.0)),
+                                entry_ts=now,
+                                strategy="reconciled"
+                            )
+                
+                if self.db:
+                    try:
+                        self.db.save_portfolio_checkpoint(self.settings.mode, self.portfolio.checkpoint(risk_state=self.risk_manager.get_risk_state() if self.risk_manager else {}))
+                    except Exception as exc:
+                        applog.error("engine.heartbeat", f"Auto-reconciliation: Failed to commit checkpoint: {exc}")
+                
+                self._position_reconciliation_mismatch_streak = 0
+                self.reconciliation_mismatch = False
+                self.allow_new_entries = True
+                if self.system_health == "SAFE_MODE":
+                    self.system_health = "NORMAL"
+                applog.info("engine.heartbeat", "Auto-reconciliation complete; engine restored to NORMAL health.")
+            else:
+                self.reconciliation_mismatch = True
+                self.allow_new_entries = False
+                if self.system_health != "HALTED":
+                    self.system_health = "SAFE_MODE"
         elif diagnostics["broker_connected"] and not position_bad and not order_bad:
             if self.reconciliation_mismatch:
                 applog.info("engine.heartbeat", "Broker/local reconciliation restored; clearing reconciliation SAFE_MODE latch")

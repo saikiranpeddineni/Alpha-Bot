@@ -414,6 +414,7 @@ class SignalModel:
                             f"[specialist] {sym_upper} AUC below threshold (suppressed repeat) — "
                             f"auc={auc:.4f} < min_auc={min_auc:.4f}",
                         )
+
                     return self._get_base_result(
                         features, action, "REJECTED_LOW_AUC", auc, min_auc,
                         f"Specialist AUC {auc:.4f} below minimum threshold {min_auc:.2f}",

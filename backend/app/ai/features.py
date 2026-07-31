@@ -28,6 +28,9 @@ FEATURE_COLUMNS = [
     "bb_pos",
     "bb_width",
     "er20",
+    "vol_expansion",
+    "whipsaw_ratio",
+    "price_velocity",
     "minute_sin",
     "minute_cos",
     "day_progress",
@@ -46,6 +49,7 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     close = out["close"]
     out["macd_hist_norm"] = out["macd_hist"] / close * 1000.0
     out["atr_pct"] = out["atr14"] / close * 100.0
+    out["price_velocity"] = (close - close.shift(3)) / out["atr14"].replace(0.0, np.nan)
 
     et_index = out.index.tz_convert(ET)
     minute = (et_index.hour * 60 + et_index.minute) - (9 * 60 + 30)
@@ -81,6 +85,12 @@ def build_training_set(
     if feats.empty:
         return pd.DataFrame(columns=FEATURE_COLUMNS), pd.Series(dtype=int)
     fwd_ret = feats["close"].shift(-horizon_bars) / feats["close"] - 1.0
+    
+    # Purge forward returns that cross a calendar day
+    et_series = pd.Series(feats.index.tz_convert(ET), index=feats.index)
+    shifted_et_series = et_series.shift(-horizon_bars)
+    mask_same_day = feats.index.tz_convert(ET).date == shifted_et_series.dt.date
+    fwd_ret.loc[~mask_same_day] = np.nan
     
     if side == "short":
         label = (fwd_ret * 100.0 < -threshold_pct).astype(int)
@@ -121,10 +131,11 @@ def build_mae_mfe_dataset(
     n = len(close)
     mae = np.full(n, np.nan)
     mfe = np.full(n, np.nan)
+    et_dates = feats.index.tz_convert(ET).date
 
     for i in range(n - horizon_bars):
         entry = close[i]
-        if entry <= 0:
+        if entry <= 0 or et_dates[i] != et_dates[i + horizon_bars]:
             continue
         window = close[i + 1 : i + 1 + horizon_bars]
         mae[i] = float(max(0.0, (entry - window.min()) / entry * 100.0))

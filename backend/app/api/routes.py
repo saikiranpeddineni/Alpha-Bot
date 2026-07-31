@@ -363,11 +363,11 @@ async def run_trainer(request: Request) -> dict:
         try:
             data = await engine.ensure_data()
             from app.ai.trainer import ContinuousTrainer
-            from app.config import MODELS_DIR
+            from app.config import get_models_dir
             engine.trainer = ContinuousTrainer(
                 data,
                 engine.model,
-                MODELS_DIR,
+                get_models_dir(),
                 engine.db.get_setting("strategies") or {},
             )
         except Exception as exc:

@@ -44,6 +44,10 @@ class ReplayRuntime:
         parity: dict[str, Any] | None = None
         run_snapshot = Path(tempfile.mkdtemp(prefix="alpha_replay_run_snapshot_"))
         try:
+            # Fallback to DB watchlist or core watchlist if symbols is None
+            target_symbols = symbols if symbols is not None else (self.source_db.get_setting("watchlist") or self.settings.watchlist_symbols())
+            await self.feed.ensure_data(start_date, end_date, target_symbols)
+            
             bars = self.feed.load_bars(start_date, end_date, symbols)
             replay_bars = [b for b in bars if b.get("in_replay_window", True)]
             if not replay_bars:
@@ -120,32 +124,38 @@ class ReplayRuntime:
             # TradingEngine and SignalPipeline import MODELS_DIR as production globals.
             # Bind those globals only while constructing replay components so every ML,
             # meta-label and trainer reference resolves to the historical as-of snapshot.
-            with patch("app.core.engine.MODELS_DIR", replay_models), patch("app.config.MODELS_DIR", replay_models):
+            from app.config import _replay_models_dir
+            from app.core.domain import _mock_utcnow
+            _replay_models_dir.set(replay_models)
+            _mock_utcnow.set(clock.now_utc)
+            
+            if True:
                 engine = TradingEngine(self.settings, replay_db, runtime=TradingRuntime(clock=clock, broker=broker, data=data, ledger=ledger))
                 engine.model = SignalModel(replay_models)
                 await self._initialize_engine(engine, clock, broker, data, ledger, replay_models)
             by_ts: dict[datetime, list[dict[str, Any]]] = defaultdict(list)
             for bar in replay_bars: by_ts[bar["ts_dt"]].append(bar)
 
-            class FrozenDateTime(datetime):
+            class ContextAwareDateTime(datetime):
                 @classmethod
                 def now(cls, tz=None):
-                    value = clock.now_utc()
-                    return value.astimezone(tz) if tz else value.replace(tzinfo=None)
+                    mock = _mock_utcnow.get()
+                    if mock is not None:
+                        value = mock()
+                        return value.astimezone(tz) if tz else value.replace(tzinfo=None)
+                    return datetime.now(tz)
 
             deterministic_uuid = DeterministicUUIDProxy(
                 f"{self.replay_id.split(':',1)[0]}|{replay_bars[0]['ts_dt'].isoformat()}|{replay_bars[-1]['ts_dt'].isoformat()}"
             )
             with ExitStack() as stack:
-                stack.enter_context(patch("app.core.engine.utcnow", clock.now_utc))
-                stack.enter_context(patch("app.core.engine.datetime", FrozenDateTime))
-                stack.enter_context(patch("app.core.scanner.datetime", FrozenDateTime))
-                stack.enter_context(patch("app.risk.manager.datetime", FrozenDateTime))
+                stack.enter_context(patch("app.core.engine.datetime", ContextAwareDateTime))
+                stack.enter_context(patch("app.core.scanner.datetime", ContextAwareDateTime))
+                stack.enter_context(patch("app.risk.manager.datetime", ContextAwareDateTime))
                 stack.enter_context(patch("app.core.shadow_ledger.uuid", deterministic_uuid))
                 stack.enter_context(patch("app.core.domain.uuid", deterministic_uuid))
                 stack.enter_context(patch("app.strategies.refresh_contextual_memory", lambda _db: None))
                 stack.enter_context(patch("app.strategies.memory.refresh_contextual_memory", lambda _db: None))
-                stack.enter_context(patch("app.config.MODELS_DIR", replay_models))
                 for idx, ts in enumerate(sorted(by_ts)):
                     if self.session_manager.is_cancelled(self.replay_id): raise RuntimeError("Replay cancelled")
                     clock.set_time(ts); data.set_time(ts)
@@ -190,8 +200,7 @@ class ReplayRuntime:
         active = engine.db.get_setting("active_policy_snapshot")
         ml = float(active["ml_threshold"]) if active and "ml_threshold" in active else float(engine.db.get_setting("ml_threshold") or engine.risk_config.ml_confidence_threshold)
         engine.risk_config.ml_confidence_threshold = ml
-        with patch("app.config.MODELS_DIR", replay_models):
-            engine.pipeline = SignalPipeline(engine.model, ml)
+        engine.pipeline = SignalPipeline(engine.model, ml)
         engine.evidence_evaluator = ParallelEvidenceEvaluator(model=engine.model, ml_threshold=ml, meta_label_engine=engine.pipeline.meta_label_engine, trade_score_engine=engine.pipeline.trade_score_engine)
 
         for strategy in engine.strategies:

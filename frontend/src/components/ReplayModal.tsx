@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { useStore } from "../store";
 
 type Tab = "flow" | "timeline" | "trades" | "parity" | "manifest";
 type ReplayEvent = { timestamp?: string; event_type?: string; symbol?: string; details?: Record<string, unknown> };
@@ -35,6 +36,8 @@ export function ReplayModal({ onClose }: ReplayModalProps) {
   const [activeTab, setActiveTab] = useState<Tab>("flow");
   const [eventFilter, setEventFilter] = useState("ALL");
   const [query, setQuery] = useState("");
+  const [selectedSymbols, setSelectedSymbols] = useState<string[]>([]);
+  const watchlist = useStore((s) => s.status?.watchlist) || [];
 
   async function handleRunReplay() {
     if (!startDate || !endDate || startDate > endDate) { setError("Choose a valid replay date range."); return; }
@@ -42,6 +45,7 @@ export function ReplayModal({ onClose }: ReplayModalProps) {
     try {
       const res = await fetch("/api/replay/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
         start_date: startDate, end_date: endDate, fill_model: fillModel, slippage_bps: Number(slippageBps) || 0, async_mode: false,
+        symbols: selectedSymbols.length > 0 ? selectedSymbols : undefined,
       }) });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data?.detail || data?.message || `Replay failed (${res.status})`);
@@ -73,6 +77,14 @@ export function ReplayModal({ onClose }: ReplayModalProps) {
         <label><span>To</span><input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} /></label>
         <label><span>Fill model</span><select value={fillModel} onChange={(e) => setFillModel(e.target.value)}><option value="ohlc_touch">OHLC touch</option><option value="next_open">Next-bar open</option><option value="immediate">Immediate</option></select></label>
         <label><span>Slippage (bps)</span><input className="num" type="number" min="0" max="100" step="0.1" value={slippageBps} onChange={(e) => setSlippageBps(e.target.value)} /></label>
+        <label><span>Symbols (All if none)</span>
+          <select multiple size={3} value={selectedSymbols} onChange={(e) => {
+            const vals = Array.from(e.target.selectedOptions, option => option.value);
+            setSelectedSymbols(vals);
+          }}>
+            {watchlist.map(sym => <option key={sym} value={sym}>{sym}</option>)}
+          </select>
+        </label>
         <div className="replay-run-wrap"><button className="btn primary replay-run" onClick={handleRunReplay} disabled={loading}>{loading ? <><span className="replay-spinner" /> Replaying production…</> : "▶ Run production replay"}</button></div>
       </div>
 

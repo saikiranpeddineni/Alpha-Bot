@@ -756,13 +756,7 @@ class MetaLabelEngine:
     # Strategies that REQUIRE a trained MetaLabel model to pass.
     # If the model is absent, candidates are REJECTED (fail-closed).
     # Strategies not listed here are BYPASSED when no model is available.
-    MANDATORY_STRATEGIES: frozenset = frozenset({
-        "orb",
-        "momentum",
-        "vwap_reversion",
-        "rsi2_reversion",
-        "bb_squeeze"
-    })
+    MANDATORY_STRATEGIES: frozenset = frozenset()
 
     def __init__(self, models_dir: "Path") -> None:  # type: ignore[name-defined]
         from pathlib import Path as _Path
@@ -1073,14 +1067,20 @@ class MetaLabelEngine:
             return {"status": "skipped", "strategy": strategy, "side": side, "reason": "insufficient_validation_samples",
                     "n_samples": n_total, "n_train": n_train, "n_val": n_val}
 
-        X_tr, y_tr = X_all.iloc[:split], y_all.iloc[:split]
+        from datetime import timedelta
+        val_start_dt = X_all.iloc[split:].index.min()
+        purge = timedelta(minutes=15)
+        train_mask = X_all.index < val_start_dt - purge
+
+        X_tr, y_tr = X_all[train_mask], y_all[train_mask]
         X_va, y_va = X_all.iloc[split:], y_all.iloc[split:]
 
         clf = _make_classifier("lgbm", n_estimators=200)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             # Fit using DataFrame with column names
-            clf.fit(X_tr, y_tr)
+            if not X_tr.empty:
+                clf.fit(X_tr, y_tr)
 
         # OOS validation AUC
         val_auc = 0.5

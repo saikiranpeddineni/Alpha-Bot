@@ -117,6 +117,8 @@ def refresh_contextual_memory(db: Database) -> None:
 
         # Retrieve canonical realized R using strategy-specific horizon priority (Fix 8)
         realized_r = _canonical_realized_r(strategy, outcomes)
+        if realized_r is None:
+            continue
 
         is_win = 1 if realized_r > 0.0 else 0
 

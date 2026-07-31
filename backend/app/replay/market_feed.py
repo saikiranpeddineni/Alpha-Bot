@@ -41,6 +41,95 @@ class ReplayMarketFeed:
         self.data_path = data_path or (DATA_DIR / "replay_bars.jsonl")
         self.symbols: set[str] = set()
 
+    async def ensure_data(self, start_date: str, end_date: str, symbols: list[str]) -> None:
+        """Download missing 1-minute historical data into the replay JSONL cache."""
+        import shutil
+        from app.config import get_settings
+        from app.data.alpaca_data import AlpacaDataProvider
+        from app.core.logging import applog
+        from datetime import timedelta
+        
+        # Check if fallback scratch file should be copied to establish initial cache
+        if not self.data_path.exists() and not self._explicit_data_path:
+            alt = Path(__file__).resolve().parents[3] / "scratch" / "july24_replay_stream.jsonl"
+            if alt.exists():
+                shutil.copy(alt, self.data_path)
+                applog.info("replay.feed", f"Copied base replay snapshot to {self.data_path.name}")
+            else:
+                self.data_path.parent.mkdir(parents=True, exist_ok=True)
+                self.data_path.touch()
+
+        # Parse existing JSONL cache to determine missing symbols/dates
+        avail_dates: dict[str, set[str]] = {}
+        with self.data_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip(): continue
+                try:
+                    row = json.loads(line)
+                    sym = str(row.get("symbol", "")).upper()
+                    ts = row.get("ts") or row.get("t")
+                    if sym and ts:
+                        avail_dates.setdefault(sym, set()).add(ts[:10])
+                except Exception:
+                    continue
+
+        # Calculate needed dates (excluding weekends)
+        needed_dates = []
+        d = datetime.strptime(start_date, "%Y-%m-%d")
+        end_d = datetime.strptime(end_date, "%Y-%m-%d")
+        while d <= end_d:
+            if d.weekday() < 5:
+                needed_dates.append(d.strftime("%Y-%m-%d"))
+            d += timedelta(days=1)
+        if not needed_dates:
+            return
+
+        missing_symbols = []
+        for symbol in symbols:
+            symbol_avail = avail_dates.get(symbol, set())
+            if any(date not in symbol_avail for date in needed_dates):
+                missing_symbols.append(symbol)
+
+        if not missing_symbols:
+            return
+
+        applog.info("replay.feed", f"Downloading missing historical data for {len(missing_symbols)} symbols: {start_date} to {end_date}")
+        
+        settings = get_settings()
+        try:
+            provider = AlpacaDataProvider(api_key=settings.alpaca_api_key, api_secret=settings.alpaca_api_secret)
+        except RuntimeError:
+            applog.error("replay.feed", "Alpaca API credentials missing. Cannot fetch missing replay data.")
+            return
+
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=timezone.utc, hour=23, minute=59, second=59)
+
+        # Open in append mode so we don't corrupt existing cache.
+        # load_bars() correctly sorts by timestamp, so appended out-of-order data is completely fine.
+        with self.data_path.open("a", encoding="utf-8") as handle:
+            for symbol in missing_symbols:
+                applog.info("replay.feed", f"Fetching 1Min bars for {symbol}...")
+                df = await provider.get_bars(symbol, "1Min", start=start_dt, end=end_dt)
+                if df.empty:
+                    applog.warning("replay.feed", f"No data returned for {symbol}")
+                    continue
+                
+                rows_written = 0
+                for ts, row in df.iterrows():
+                    handle.write(json.dumps({
+                        "symbol": symbol,
+                        "ts": ts.isoformat(),
+                        "open": float(row["open"]),
+                        "high": float(row["high"]),
+                        "low": float(row["low"]),
+                        "close": float(row["close"]),
+                        "volume": float(row["volume"]),
+                        "kind": "bar"
+                    }) + "\n")
+                    rows_written += 1
+                applog.info("replay.feed", f"Appended {rows_written} bars for {symbol}")
+
     def load_bars(self, start_date: str, end_date: str, symbols: list[str] | None = None) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         if not self.data_path.exists() and not self._explicit_data_path:

@@ -218,7 +218,10 @@ class ContinuousTrainer:
             X_va, y_va = X_l[~train_mask], y_l[~train_mask]
         else:
             split_l = int(len(X_l) * 0.75)
-            X_tr, y_tr = X_l.iloc[:split_l], y_l.iloc[:split_l]
+            val_start_dt = X_l.iloc[split_l:].index.min()
+            purge_horizon = timedelta(minutes=15)
+            train_mask = X_l.index < val_start_dt - purge_horizon
+            X_tr, y_tr = X_l[train_mask], y_l[train_mask]
             X_va, y_va = X_l.iloc[split_l:], y_l.iloc[split_l:]
 
         if not X_tr.empty and not X_va.empty:
@@ -243,7 +246,10 @@ class ContinuousTrainer:
             X_va_s, y_va_s = X_s[~train_mask_s], y_s[~train_mask_s]
         else:
             split_s = int(len(X_s) * 0.75)
-            X_tr_s, y_tr_s = X_s.iloc[:split_s], y_s.iloc[:split_s]
+            val_start_dt_s = X_s.iloc[split_s:].index.min()
+            purge_horizon = timedelta(minutes=15)
+            train_mask_s = X_s.index < val_start_dt_s - purge_horizon
+            X_tr_s, y_tr_s = X_s[train_mask_s], y_s[train_mask_s]
             X_va_s, y_va_s = X_s.iloc[split_s:], y_s.iloc[split_s:]
 
         if not X_tr_s.empty and not X_va_s.empty:
@@ -371,26 +377,43 @@ class ContinuousTrainer:
 
         split_l = int(len(X_l) * 0.75)
         split_s = int(len(X_s) * 0.75)
+        
+        from datetime import timedelta
+        purge = timedelta(minutes=15)
+        
+        # Long split with purge
+        val_start_l = X_l.iloc[split_l:].index.min()
+        mask_l = X_l.index < val_start_l - purge
+        X_tr_l, y_tr_l = X_l[mask_l], y_l[mask_l]
+        X_va_l, y_va_l = X_l.iloc[split_l:], y_l.iloc[split_l:]
+        
+        # Short split with purge
+        val_start_s = X_s.iloc[split_s:].index.min()
+        mask_s = X_s.index < val_start_s - purge
+        X_tr_s, y_tr_s = X_s[mask_s], y_s[mask_s]
+        X_va_s, y_va_s = X_s.iloc[split_s:], y_s.iloc[split_s:]
 
         clf_l = HistGradientBoostingClassifier(
             max_iter=150, learning_rate=0.08, max_depth=5,
             l2_regularization=1.0, early_stopping=True, random_state=42,
         )
-        clf_l.fit(X_l.iloc[:split_l].to_numpy(), y_l.iloc[:split_l].to_numpy())
+        if not X_tr_l.empty:
+            clf_l.fit(X_tr_l.to_numpy(), y_tr_l.to_numpy())
 
         clf_s = HistGradientBoostingClassifier(
             max_iter=150, learning_rate=0.08, max_depth=5,
             l2_regularization=1.0, early_stopping=True, random_state=42,
         )
-        clf_s.fit(X_s.iloc[:split_s].to_numpy(), y_s.iloc[:split_s].to_numpy())
+        if not X_tr_s.empty:
+            clf_s.fit(X_tr_s.to_numpy(), y_tr_s.to_numpy())
 
         def _auc(clf, X_val, y_val) -> float:
             if y_val.nunique() < 2:
                 return 0.5
             return float(roc_auc_score(y_val, clf.predict_proba(X_val.to_numpy())[:, 1]))
 
-        auc_l = _auc(clf_l, X_l.iloc[split_l:], y_l.iloc[split_l:])
-        auc_s = _auc(clf_s, X_s.iloc[split_s:], y_s.iloc[split_s:])
+        auc_l = _auc(clf_l, X_va_l, y_va_l) if not X_va_l.empty and not X_tr_l.empty else 0.5
+        auc_s = _auc(clf_s, X_va_s, y_va_s) if not X_va_s.empty and not X_tr_s.empty else 0.5
         candidate_auc = max(auc_l, auc_s)
 
         # Build feature schema fingerprint
@@ -481,14 +504,14 @@ class ContinuousTrainer:
         Returns {strategy_side: result_dict}.
         """
         from app.ai.prediction import MetaLabelEngine
-        from app.config import MODELS_DIR
+        from app.config import get_models_dir
 
         strategies = ["orb", "momentum", "vwap_reversion", "rsi2_reversion", "bb_squeeze"]
         sides = ["long", "short"]
         meta_engine: MetaLabelEngine = getattr(self.model, "_meta_label_engine", None)  # type: ignore[assignment]
         if meta_engine is None:
             # Instantiate standalone engine pointing at same models dir
-            meta_engine = MetaLabelEngine(MODELS_DIR)
+            meta_engine = MetaLabelEngine(get_models_dir())
 
         results: dict[str, dict] = {}
         for strategy in strategies:
@@ -542,7 +565,7 @@ class ContinuousTrainer:
         import hashlib
         from app.ai.features import FEATURE_COLUMNS
         from app.ai.prediction import MetaLabelEngine
-        from app.config import MODELS_DIR
+        from app.config import get_models_dir
 
         runtime_feature_hash = hashlib.md5(",".join(FEATURE_COLUMNS).encode()).hexdigest()[:12]
         applog.info("trainer", "=== POST-TRAINING READINESS AUDIT ===")
@@ -587,7 +610,7 @@ class ContinuousTrainer:
         # ---- MetaLabel ----
         strategies = ["orb", "momentum", "vwap_reversion", "rsi2_reversion", "bb_squeeze"]
         sides = ["long", "short"]
-        meta_dir = MODELS_DIR / "meta"
+        meta_dir = get_models_dir() / "meta"
         for strategy in strategies:
             for side in sides:
                 artifact_path = meta_dir / f"meta_{strategy}_{side}.joblib"
@@ -630,6 +653,6 @@ class ContinuousTrainer:
     def status(self) -> dict:
         return {
             "training_in_progress": self.training_in_progress,
-            "last_trained": self.last_trained.isoformat() if self.last_trained else None,
+            "last_trained": self.last_trained.isoformat() if self.last_trained else self.model.meta.get("trained_at"),
             "last_result": self.last_result,
         }

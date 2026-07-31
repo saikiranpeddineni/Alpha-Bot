@@ -232,7 +232,7 @@ class MomentumCross(Strategy):
                 reason=f"EMA9>EMA20 above VWAP, MACD event confirmed, RSI {rsi:.0f}",
                 price=close,
                 stop_loss=stop,
-                take_profit=close + p["reward_risk"] * (close - stop),
+                take_profit=None,
             )
 
         # ---- Short candidate ----
@@ -252,7 +252,7 @@ class MomentumCross(Strategy):
                 reason=f"EMA9<EMA20 below VWAP, MACD event confirmed, RSI {rsi:.0f}",
                 price=close,
                 stop_loss=stop,
-                take_profit=close - p["reward_risk"] * (stop - close),
+                take_profit=None,
             )
 
         return None
