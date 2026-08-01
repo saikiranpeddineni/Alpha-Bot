@@ -90,3 +90,13 @@ class ReplaySessionManager:
             conn.row_factory = sqlite3.Row
             ids = [r["replay_id"] for r in conn.execute("SELECT replay_id FROM replay_sessions ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()]
         return [s for replay_id in ids if (s := self.get_session(replay_id)) is not None]
+
+    def delete_session(self, replay_id: str) -> bool:
+        import shutil
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("DELETE FROM replay_sessions WHERE replay_id = ?", (replay_id,))
+            conn.commit()
+        artifact_dir = self.artifact_root / replay_id
+        if artifact_dir.exists():
+            shutil.rmtree(artifact_dir, ignore_errors=True)
+        return True

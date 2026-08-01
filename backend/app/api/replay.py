@@ -81,6 +81,13 @@ def cancel_replay(replay_id: str) -> dict[str, Any]:
     return {"replay_id": replay_id, "status": "CANCELLED"}
 
 
+@router.delete("/{replay_id}")
+def delete_replay(replay_id: str) -> dict[str, Any]:
+    _session_or_404(replay_id)
+    success = session_mgr.delete_session(replay_id)
+    return {"replay_id": replay_id, "deleted": success}
+
+
 @router.get("/{replay_id}/status")
 def get_replay_status(replay_id: str) -> dict[str, Any]:
     s = _session_or_404(replay_id)
