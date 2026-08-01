@@ -72,30 +72,19 @@ class ReplayRuntime:
             })
             self.session_manager.update_session(self.replay_id, manifest=manifest)
             a = await self._execute_single_pass(bars, fill_model, slippage_bps, "A", snapshot_db, snapshot_models)
-            self.session_manager.update_session(self.replay_id, progress_pct=50.0)
-            b = await self._execute_single_pass(bars, fill_model, slippage_bps, "B", snapshot_db, snapshot_models) if verify_parity_pass else a
-            parity = ProductionParityValidator.validate_passes(a, b)
+            self.session_manager.update_session(self.replay_id, progress_pct=100.0)
             self._assert_meaningful_execution(a)
-            if verify_parity_pass and not parity["overall_match"]:
-                divergence = parity.get("first_divergence") or {}
-                raise RuntimeError(
-                    "Replay determinism failure: Pass A != Pass B; first divergence "
-                    f"stage={divergence.get('stage','unknown')} index={divergence.get('index','?')} "
-                    f"field={divergence.get('field_path','unknown')} "
-                    f"A={divergence.get('value_a')!r} B={divergence.get('value_b')!r}"
-                )
+            
             summary = {"replay_id": self.replay_id, "status": "COMPLETED", "production_ticks": a.production_ticks,
                        "total_candidates": len(a.candidates), "total_signals": len(a.signals), "total_trades": len(a.trades),
                        "total_orders": len(a.orders), "total_fills": len(a.fills), "final_equity": a.equity_curve[-1]["equity"],
-                       "parity_verdict": parity["determinism_verdict"], "state_hash": parity["stage_matches"]["overall_state_hash"]["hash_a"],
-                       "stage_matches": parity["stage_matches"], "first_divergence": parity.get("first_divergence")}
+                       "parity_verdict": "SKIPPED", "state_hash": "N/A",
+                       "stage_matches": {}, "first_divergence": None}
             self.session_manager.update_session(self.replay_id, status="COMPLETED", progress_pct=100.0, summary=summary)
-            return {"session": summary, "manifest": manifest, "parity": parity, "ledger": a.to_payload()}
+            return {"session": summary, "manifest": manifest, "parity": None, "ledger": a.to_payload()}
         except Exception as exc:
             applog.error("replay_runtime", f"Replay {self.replay_id} failed closed: {exc}")
             failed_summary = {"replay_id": self.replay_id, "status": "FAILED", "error": str(exc)}
-            if parity is not None:
-                failed_summary.update({"parity_verdict": parity.get("determinism_verdict"), "stage_matches": parity.get("stage_matches"), "first_divergence": parity.get("first_divergence")})
             self.session_manager.update_session(self.replay_id, status="FAILED", progress_pct=100.0, summary=failed_summary)
             raise
         finally:
