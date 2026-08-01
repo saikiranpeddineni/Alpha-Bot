@@ -127,15 +127,42 @@ export function ReplayModal({ onClose }: ReplayModalProps) {
             <label><span>To</span><input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} /></label>
             <label><span>Fill model</span><select value={fillModel} onChange={(e) => setFillModel(e.target.value)}><option value="ohlc_touch">OHLC touch</option><option value="next_open">Next-bar open</option><option value="immediate">Immediate</option></select></label>
             <label><span>Slippage (bps)</span><input className="num" type="number" min="0" max="100" step="0.1" value={slippageBps} onChange={(e) => setSlippageBps(e.target.value)} /></label>
-            <label><span>Symbols (All if none)</span>
-              <select multiple size={3} value={selectedSymbols} onChange={(e) => {
-                const vals = Array.from(e.target.selectedOptions, option => option.value);
-                setSelectedSymbols(vals);
-              }}>
-                {watchlist.map(sym => <option key={sym} value={sym}>{sym}</option>)}
-              </select>
-            </label>
             <div className="replay-run-wrap"><button className="btn primary replay-run" onClick={handleRunReplay} disabled={loading}>{loading ? <><span className="replay-spinner" /> Replaying production…</> : "▶ Run new replay"}</button></div>
+          </div>
+
+          <div className="replay-symbols-bar">
+            <span className="replay-symbols-label">Symbols {selectedSymbols.length > 0 ? `(${selectedSymbols.length})` : "(All)"}</span>
+            <div className="replay-symbols-chips">
+              {watchlist.map((sym) => {
+                const active = selectedSymbols.includes(sym);
+                return (
+                  <button
+                    key={sym}
+                    type="button"
+                    className={`btn sm ${active ? "primary" : "ghost"}`}
+                    onClick={() => {
+                      if (active) {
+                        setSelectedSymbols(selectedSymbols.filter((s) => s !== sym));
+                      } else {
+                        setSelectedSymbols([...selectedSymbols, sym]);
+                      }
+                    }}
+                  >
+                    {sym}
+                  </button>
+                );
+              })}
+              {selectedSymbols.length > 0 && (
+                <button
+                  type="button"
+                  className="btn sm ghost"
+                  style={{ fontSize: "11px", color: "var(--muted)", textDecoration: "underline" }}
+                  onClick={() => setSelectedSymbols([])}
+                >
+                  Clear filter
+                </button>
+              )}
+            </div>
           </div>
 
           {error && <div className="replay-alert"><strong>Error</strong><span>{error}</span></div>}
