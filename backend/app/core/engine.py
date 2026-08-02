@@ -24,6 +24,10 @@ from datetime import datetime, timedelta, timezone, UTC
 from typing import Any
 from unittest.mock import MagicMock
 from zoneinfo import ZoneInfo
+import math
+from types import SimpleNamespace
+from app.core.calendar_helper import get_session_close
+from datetime import time as dtime
 
 import pandas as pd
 
@@ -554,8 +558,6 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         today_date = now_et.date()
         et_mins = now_et.hour * 60 + now_et.minute
 
-        from app.brokers.paper import PaperBroker
-
         # Resolve durable ambiguous submissions before heartbeat evaluates broker/local
         # order reconciliation.  Heartbeat is an observer of this state, not a second
         # owner that may independently delete idempotency guards.
@@ -570,30 +572,40 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
             return
 
         # Synchronize ML gate threshold with assessed market risk regime with dynamic scale
+        # Synchronize ML gate threshold with assessed market risk regime with dynamic scale
         raw_regime = getattr(getattr(self, "last_safety_decision", None), "market_risk_state", getattr(self.risk_config, "current_regime", "NORMAL"))
-        if hasattr(raw_regime, "value"):
-            regime_str = str(raw_regime.value)
-        elif hasattr(raw_regime, "name"):
-            regime_str = str(raw_regime.name)
-        else:
-            regime_str = str(raw_regime)
-        current_regime = "STRESS" if self.vix_unavailable else regime_str.split(".")[-1].upper()
-        regime_map = getattr(self.risk_config, "regime_ml_thresholds", {})
-        raw_threshold = regime_map.get(current_regime)
-        if raw_threshold is None:
-            raw_threshold = (
-                getattr(self.risk_config, "stress_ml_confidence_threshold", 0.60)
-                if current_regime in ("STRESS", "PANIC")
-                else getattr(self.risk_config, "ml_confidence_threshold", 0.55)
-            )
-        try:
-            import math
-            val = float(raw_threshold)
-            if math.isnan(val) or math.isinf(val) or not (0.0 <= val <= 1.0):
+        
+        # Fast path check against cached regime to avoid re-calculating threshold on every tick
+        if getattr(self, "_cached_raw_regime", None) != raw_regime:
+            self._cached_raw_regime = raw_regime
+            if hasattr(raw_regime, "value"):
+                regime_str = str(raw_regime.value)
+            elif hasattr(raw_regime, "name"):
+                regime_str = str(raw_regime.name)
+            else:
+                regime_str = str(raw_regime)
+                
+            current_regime = "STRESS" if self.vix_unavailable else regime_str.split(".")[-1].upper()
+            regime_map = getattr(self.risk_config, "regime_ml_thresholds", {})
+            raw_threshold = regime_map.get(current_regime)
+            
+            if raw_threshold is None:
+                raw_threshold = (
+                    getattr(self.risk_config, "stress_ml_confidence_threshold", 0.60)
+                    if current_regime in ("STRESS", "PANIC")
+                    else getattr(self.risk_config, "ml_confidence_threshold", 0.55)
+                )
+                
+            try:
+                val = float(raw_threshold)
+                if math.isnan(val) or math.isinf(val) or not (0.0 <= val <= 1.0):
+                    val = 0.55
+            except (ValueError, TypeError):
                 val = 0.55
-        except (ValueError, TypeError):
-            val = 0.55
-        self.pipeline.ml_threshold = val
+                
+            self._cached_ml_threshold = val
+            
+        self.pipeline.ml_threshold = getattr(self, "_cached_ml_threshold", 0.55)
 
         # Run pre-market scanner (9:00 AM ET onwards) once per day
         # Run post-market trainer (>= 16:15 ET) once per day
@@ -650,16 +662,12 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                             applog.warning("engine", f"Event monitor failed open: {exc}")
                     self._event_monitor_task = asyncio.create_task(self.run_event_monitor(now), name="event-monitor")
 
-        active_symbols = set(self.watchlist)
-        for sym in self.portfolio._lots.keys():
-            active_symbols.add(sym)
+        active_symbols = set(self.watchlist) | set(self.portfolio._lots.keys())
         new_closed = await self.data.poll(list(active_symbols))
 
         # fix(#86): detect market-data gaps >2 min during regular trading hours and gate entries
         _is_regular_session = False
         try:
-            from app.core.calendar_helper import get_session_close
-            from datetime import time as dtime
             session_close = get_session_close(now)
             if now_et.time() >= dtime(9, 30) and now_et <= session_close:
                 _is_regular_session = True
@@ -746,7 +754,6 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         except Exception as exc:
             self.reconciliation_failed = True
             applog.error("engine", f"Failed to fetch account/positions during tick: {exc}. Marking reconciliation uncertain.")
-            from types import SimpleNamespace
             account = SimpleNamespace(
                 equity=self.portfolio.equity,
                 cash=self.portfolio.equity,
