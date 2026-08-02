@@ -380,7 +380,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         # Restore strategy mapping & reconstruct portfolio lots for active positions from database
         try:
             positions = await self.broker.positions()
-            self._reconcile_positions(positions)
+            await self._reconcile_positions(positions)
         except Exception as exc:
             self.reconciliation_failed = True
             applog.error("engine", f"Failed to restore and reconcile active positions: {exc}")
@@ -739,7 +739,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
             positions = await self.broker.positions()
             if getattr(self, "reconciliation_failed", False):
                 applog.info("engine", "Reconciliation state was uncertain. Re-attempting position reconciliation...")
-                self._reconcile_positions(positions)
+                await self._reconcile_positions(positions)
             if positions and not getattr(self, "reconciliation_failed", False):
                 await self.verify_broker_protective_stops(positions)
 
@@ -2026,7 +2026,8 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                 strategy = payload["strategy"]
                 direction = payload["direction"]
                 
-                self.db.save_shadow_signal(
+                await asyncio.to_thread(
+                    self.db.save_shadow_signal,
                     candidate_id=candidate_id,
                     ts=ts,
                     symbol=symbol,
@@ -2276,7 +2277,8 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                     except (TypeError, ValueError) as attrib_exc:
                         applog.warning("engine", f"Skipping veto attribution for {candidate_id}: {attrib_exc}")
 
-                self.db.save_shadow_signal(
+                await asyncio.to_thread(
+                    self.db.save_shadow_signal,
                     candidate_id=candidate_id,
                     ts=ts,
                     symbol=symbol,
@@ -3068,7 +3070,13 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                 
                 if self.db:
                     try:
-                        await asyncio.to_thread(self.db.save_portfolio_checkpoint, self.settings.mode, self.portfolio.checkpoint(risk_state=self.risk_manager.get_risk_state() if self.risk_manager else {}))
+                        import asyncio
+                        from functools import partial
+                        await asyncio.to_thread(
+                            self.db.save_portfolio_checkpoint, 
+                            self.settings.mode, 
+                            self.portfolio.checkpoint(risk_state=self.risk_manager.get_risk_state() if self.risk_manager else {})
+                        )
                     except Exception as exc:
                         applog.error("engine.heartbeat", f"Auto-reconciliation: Failed to commit checkpoint: {exc}")
                 

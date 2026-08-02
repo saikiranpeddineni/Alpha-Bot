@@ -99,7 +99,7 @@ class TradingEnginePortfolioMixin:
             self._live_runner_symbols.add(symbol)
         return symbol in self._live_runner_symbols
 
-    def _reconcile_positions(self, positions: list[Position]) -> None:
+    async def _reconcile_positions(self, positions: list[Position]) -> None:
         """Reconcile local lots to authoritative broker positions without erasing matching lot state."""
         broker_symbols = {p.symbol for p in positions if abs(float(p.qty)) > 1e-9}
         for local_symbol in list(self.portfolio._lots):
@@ -122,7 +122,7 @@ class TradingEnginePortfolioMixin:
 
             strat = "manual"
             if hasattr(self.broker, "_symbol_strategies"):
-                db_strat = self.db.get_latest_entry_order_strategy(p.symbol, self.mode)
+                db_strat = await asyncio.to_thread(self.db.get_latest_entry_order_strategy, p.symbol, self.mode)
                 if db_strat:
                     self.broker._symbol_strategies[p.symbol] = db_strat
                     strat = db_strat
@@ -132,10 +132,10 @@ class TradingEnginePortfolioMixin:
             # newer emergency/protective order.  This keeps UI attribution and
             # strategy-specific exit management bound to the strategy that opened
             # the surviving position.
-            entry_payload = self.db.get_latest_entry_order_payload(p.symbol, self.mode)
+            entry_payload = await asyncio.to_thread(self.db.get_latest_entry_order_payload, p.symbol, self.mode)
             if not isinstance(entry_payload, dict):
                 entry_payload = None
-            fallback_payload = self.db.get_latest_order_payload(p.symbol, self.mode)
+            fallback_payload = await asyncio.to_thread(self.db.get_latest_order_payload, p.symbol, self.mode)
             if not isinstance(fallback_payload, dict):
                 fallback_payload = None
             order_payload = entry_payload or fallback_payload
