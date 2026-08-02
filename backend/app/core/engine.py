@@ -863,20 +863,27 @@ class TradingEngine:
                     except Exception as exc:
                         applog.debug("shadow_research", f"market-bar mirror failed open for {sym_upper}: {exc}")
                 elif sym_upper in self._last_data_bar_ts:
-                    elapsed = (now - self._last_data_bar_ts[sym_upper]).total_seconds()
-                    if elapsed > _DATA_GAP_THRESHOLD_SECS and sym_upper not in self._data_gap_symbols:
-                        self._data_gap_symbols.add(sym_upper)
-                        applog.warning(
-                            "engine",
-                            f"#86: Market-data gap detected for {sym_upper}: no bar for {elapsed:.0f}s "
-                            f"during regular session. New entries BLOCKED until data resumes.",
-                        )
+                    last_ts = self._last_data_bar_ts[sym_upper]
+                    # Protect against overnight clock jumps in replay mode
+                    if now.date() != last_ts.date():
+                        self._last_data_bar_ts[sym_upper] = now
+                        self._data_gap_symbols.discard(sym_upper)
+                    else:
+                        elapsed = (now - last_ts).total_seconds()
+                        if elapsed > _DATA_GAP_THRESHOLD_SECS and sym_upper not in self._data_gap_symbols:
+                            self._data_gap_symbols.add(sym_upper)
+                            applog.warning(
+                                "engine",
+                                f"#86: Market-data gap detected for {sym_upper}: no bar for {elapsed:.0f}s "
+                                f"during regular session. New entries BLOCKED until data resumes.",
+                            )
                 elif sym_upper not in self._last_data_bar_ts:
                     # Initialize timestamp on first tick
                     self._last_data_bar_ts[sym_upper] = now
         else:
-            # Outside regular session: clear all gap flags
+            # Outside regular session: clear all gap flags and history to prevent multi-day bleed
             self._data_gap_symbols.clear()
+            self._last_data_bar_ts.clear()
 
 
         # 1. advance fill simulation / poll real fills
