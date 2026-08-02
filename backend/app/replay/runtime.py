@@ -55,7 +55,7 @@ class ReplayRuntime:
             replay_bars = [b for b in bars if b.get("in_replay_window", True)]
             if not replay_bars:
                 raise RuntimeError("No bars in requested replay window")
-            model_asof = replay_bars[0]["ts_dt"]
+            model_asof = replay_bars[-1]["ts_dt"]
             snapshot_db = run_snapshot / "source.db"
             self._snapshot_source_database(snapshot_db)
             snapshot_models = run_snapshot / "models"
@@ -103,7 +103,10 @@ class ReplayRuntime:
         clock, data = ReplayClock(first_ts, always_open=False), ReplayDataManager(bars)
         broker = ReplayBroker(float(getattr(self.settings, "paper_starting_cash", 100000.0)), slippage_bps, fill_model,
                               volume_constrained=volume_constrained, max_volume_pct=max_volume_pct)
-        ledger = ReplayLedger(f"{self.replay_id}:{pass_name}"); broker.attach_ledger(ledger)
+        start_date_str = replay_bars[0]["ts_dt"].strftime("%Y-%m-%d")
+        end_date_str = replay_bars[-1]["ts_dt"].strftime("%Y-%m-%d")
+        ledger = ReplayLedger(f"{self.replay_id}:{pass_name}", start_date=start_date_str, end_date=end_date_str)
+        broker.attach_ledger(ledger)
         tmp_path = Path(tempfile.mkdtemp(prefix="alpha_replay_"))
         replay_db: Database | None = None
         engine: TradingEngine | None = None

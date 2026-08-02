@@ -49,6 +49,9 @@ export function ReplayModal({
   const [selectedSymbols, setSelectedSymbols] = useState<string[]>([]);
   const [fillModel, setFillModel] = useState("ohlc_touch");
   const [slippageBps, setSlippageBps] = useState("0");
+  const [volumeConstrained, setVolumeConstrained] = useState(true);
+  const [maxVolumePct, setMaxVolumePct] = useState("5");
+  const [warmupBars, setWarmupBars] = useState("50");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [replayData, setReplayData] = useState<any>(null);
@@ -90,6 +93,9 @@ export function ReplayModal({
           symbols: selectedSymbols.length > 0 ? selectedSymbols : undefined,
           fill_model: fillModel,
           slippage_bps: Number(slippageBps) || 0,
+          volume_constrained: volumeConstrained,
+          max_volume_pct: (Number(maxVolumePct) || 5) / 100,
+          warmup_bars: Number(warmupBars) || 0,
           async_mode: false
         })
       });
@@ -265,6 +271,43 @@ export function ReplayModal({
                   step="0.1"
                   value={slippageBps}
                   onChange={(e) => setSlippageBps(e.target.value)}
+                />
+              </label>
+              <label style={{ display: "flex", alignItems: "center", gap: "6px", cursor: "pointer" }}>
+                <input
+                  type="checkbox"
+                  checked={volumeConstrained}
+                  onChange={(e) => setVolumeConstrained(e.target.checked)}
+                  style={{ width: "auto", cursor: "pointer" }}
+                />
+                <span>Volume Cap</span>
+              </label>
+              {volumeConstrained && (
+                <label>
+                  <span>Max Vol %</span>
+                  <input
+                    className="num"
+                    type="number"
+                    min="0.1"
+                    max="100"
+                    step="0.5"
+                    value={maxVolumePct}
+                    onChange={(e) => setMaxVolumePct(e.target.value)}
+                    style={{ width: "70px" }}
+                  />
+                </label>
+              )}
+              <label>
+                <span>Warmup Bars</span>
+                <input
+                  className="num"
+                  type="number"
+                  min="0"
+                  max="500"
+                  step="1"
+                  value={warmupBars}
+                  onChange={(e) => setWarmupBars(e.target.value)}
+                  style={{ width: "80px" }}
                 />
               </label>
               <div className="replay-run-wrap">

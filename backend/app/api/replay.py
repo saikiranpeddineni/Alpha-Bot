@@ -18,6 +18,9 @@ class ReplayRunRequest(BaseModel):
     symbols: list[str] | None = None
     fill_model: str = Field(default="ohlc_touch", pattern="^(ohlc_touch|next_open|immediate)$")
     slippage_bps: float = Field(default=0.0, ge=0.0, le=100.0)
+    volume_constrained: bool = Field(default=False)
+    max_volume_pct: float = Field(default=0.05, ge=0.001, le=1.0)
+    warmup_bars: int = Field(default=0, ge=0, le=500)
     async_mode: bool = False
 
 
@@ -33,7 +36,8 @@ def _run_replay_bg(request: Request, replay_id: str, req: ReplayRunRequest) -> N
     engine = request.app.state.engine
     runtime = ReplayRuntime(engine.settings, engine.db, replay_id=replay_id, session_manager=session_mgr)
     try:
-        result = runtime.run_replay(req.start_date, req.end_date, req.symbols, req.fill_model, req.slippage_bps)
+        result = runtime.run_replay(req.start_date, req.end_date, req.symbols, req.fill_model, req.slippage_bps,
+                                    volume_constrained=req.volume_constrained, max_volume_pct=req.max_volume_pct, warmup_bars=req.warmup_bars)
         _persist_result(replay_id, result)
     except Exception:
         # ReplayRuntime already updates session status to FAILED and logs full diagnostics
@@ -48,7 +52,8 @@ def run_replay(req: ReplayRunRequest, request: Request, background_tasks: Backgr
         background_tasks.add_task(_run_replay_bg, request, runtime.replay_id, req)
         return {"status": "LAUNCHED", "replay_id": runtime.replay_id}
     try:
-        result = runtime.run_replay(req.start_date, req.end_date, req.symbols, req.fill_model, req.slippage_bps)
+        result = runtime.run_replay(req.start_date, req.end_date, req.symbols, req.fill_model, req.slippage_bps,
+                                    volume_constrained=req.volume_constrained, max_volume_pct=req.max_volume_pct, warmup_bars=req.warmup_bars)
         _persist_result(runtime.replay_id, result)
         return result
     except (ValueError, RuntimeError, FileNotFoundError) as exc:

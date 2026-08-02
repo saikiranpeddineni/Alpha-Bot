@@ -8,8 +8,10 @@ from typing import Any
 
 
 class ReplayLedger:
-    def __init__(self, replay_id: str) -> None:
+    def __init__(self, replay_id: str, start_date: str | None = None, end_date: str | None = None) -> None:
         self.replay_id = replay_id
+        self.start_date = start_date
+        self.end_date = end_date
         self.production_ticks = 0
         self.candidates: list[dict[str, Any]] = []
         self.signals: list[dict[str, Any]] = []
@@ -24,7 +26,13 @@ class ReplayLedger:
         self.timeline: list[dict[str, Any]] = []
 
     def record_event(self, event_type: str, timestamp: datetime, symbol: str, details: dict[str, Any]) -> None:
-        event = {"replay_id": self.replay_id, "timestamp": timestamp.isoformat() if isinstance(timestamp, datetime) else str(timestamp),
+        ts_str = timestamp.isoformat() if isinstance(timestamp, datetime) else str(timestamp)
+        event_date = ts_str[:10]
+        if self.start_date and event_date < self.start_date:
+            return
+        if self.end_date and event_date > self.end_date:
+            return
+        event = {"replay_id": self.replay_id, "timestamp": ts_str,
                  "event_type": event_type, "symbol": symbol, "details": details}
         self.timeline.append(event)
         mapping = {

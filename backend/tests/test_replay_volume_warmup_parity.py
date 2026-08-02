@@ -64,3 +64,21 @@ def test_replay_ledger_production_fill_recording():
     assert ledger.production_fills[0]["details"]["price"] == 150.25
     payload = ledger.to_payload()
     assert "production_fills" in payload
+
+
+def test_replay_ledger_warmup_filtering():
+    """Verify ReplayLedger ignores warm-up events occurring prior to start_date or after end_date."""
+    ledger = ReplayLedger("test_rpl_2", start_date="2026-07-29", end_date="2026-07-30")
+    
+    # Event on 2026-07-27 (warm-up date prior to 2026-07-29)
+    ts_warmup = datetime(2026, 7, 27, 14, 30, tzinfo=timezone.utc)
+    ledger.record_event("TRADE_CLOSED", ts_warmup, "NOK", {"pnl": 100.0})
+    assert len(ledger.trades) == 0
+    assert len(ledger.timeline) == 0
+
+    # Event on 2026-07-29 (valid replay date)
+    ts_valid = datetime(2026, 7, 29, 14, 30, tzinfo=timezone.utc)
+    ledger.record_event("TRADE_CLOSED", ts_valid, "NOK", {"pnl": 100.0})
+    assert len(ledger.trades) == 1
+    assert len(ledger.timeline) == 1
+
