@@ -28,6 +28,7 @@ import math
 from types import SimpleNamespace
 from app.core.calendar_helper import get_session_close
 from datetime import time as dtime
+from functools import partial
 
 import pandas as pd
 
@@ -2784,8 +2785,6 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                 fresh_sig.strategy_params = getattr(strat, "params", {})
 
                 # Re-run pipeline process on fresh signal
-                import asyncio
-                from functools import partial
                 accepted, rejected = await asyncio.to_thread(
                     partial(self.pipeline.process, symbol, df, [fresh_sig], regime, sector_strength=rs_score)
                 )
@@ -3077,8 +3076,6 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                 
                 if self.db:
                     try:
-                        import asyncio
-                        from functools import partial
                         await asyncio.to_thread(
                             self.db.save_portfolio_checkpoint, 
                             self.settings.mode, 
