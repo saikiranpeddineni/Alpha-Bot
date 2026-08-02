@@ -559,6 +559,13 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         today_date = now_et.date()
         et_mins = now_et.hour * 60 + now_et.minute
 
+        is_trading_day = False
+        try:
+            get_session_close(now)
+            is_trading_day = True
+        except ValueError:
+            pass
+
         # Resolve durable ambiguous submissions before heartbeat evaluates broker/local
         # order reconciliation.  Heartbeat is an observer of this state, not a second
         # owner that may independently delete idempotency guards.
@@ -614,14 +621,17 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         if self.state == EngineState.RUNNING:
             if self._last_scan_date != today_date and et_mins >= 9 * 60:
                 self._last_scan_date = today_date
-                applog.info("engine", "Pre-market scanner trigger time reached (>= 09:00 ET)")
-                if self._scanner_task is None or self._scanner_task.done():
-                    self._scanner_task = asyncio.create_task(
-                        self.run_market_scanner(is_intraday=False), name="market-scanner"
-                    )
+                
+                if is_trading_day:
+                    applog.info("engine", "Pre-market scanner trigger time reached (>= 09:00 ET)")
+                    if self._scanner_task is None or self._scanner_task.done():
+                        self._scanner_task = asyncio.create_task(
+                            self.run_market_scanner(is_intraday=False), name="market-scanner"
+                        )
             # Feature 1: Intraday watchlist refresh every 30 min during session
             elif (
-                9 * 60 + 30 <= et_mins <= 15 * 60 + 30  # 9:30 AM – 3:30 PM ET
+                is_trading_day
+                and 9 * 60 + 30 <= et_mins <= 15 * 60 + 30  # 9:30 AM – 3:30 PM ET
                 and et_mins % 30 == 0
                 and self._last_intraday_scan_min != et_mins
             ):
@@ -633,7 +643,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                     )
                 else:
                     applog.info("engine", "Intraday scanner skipped: previous scanner task still running")
-            if self.trainer and self._last_train_date != today_date and et_mins >= 16 * 60 + 15:
+            if is_trading_day and self.trainer and self._last_train_date != today_date and et_mins >= 16 * 60 + 15:
                 self._last_train_date = today_date
                 applog.info("engine", "Post-market trainer trigger time reached (>= 16:15 ET)")
                 if self._trainer_task is None or self._trainer_task.done():
@@ -2872,8 +2882,15 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
             market_open_minutes = 9 * 60 + 30
             market_close_minutes = 16 * 60
             minutes_since_open = market_minutes - market_open_minutes
+            
+            is_trading_day = False
+            try:
+                get_session_close(now)
+                is_trading_day = True
+            except ValueError:
+                pass
 
-            if market_open_minutes <= market_minutes <= market_close_minutes and not is_synthetic:
+            if is_trading_day and market_open_minutes <= market_minutes <= market_close_minutes and not is_synthetic:
                 health_symbols = [sym for sym in ("SPY", "QQQ") if self.watchlist and sym in self.watchlist]
                 if self.watchlist:
                     health_symbols.append(self.watchlist[0])
