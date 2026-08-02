@@ -281,9 +281,13 @@ class Database:
     def __init__(self, path: Path) -> None:
         global _ACTIVE_DATABASE
         path.parent.mkdir(parents=True, exist_ok=True)
+        from sqlalchemy import pool
         self.engine = create_engine(
             f"sqlite:///{path}",
             connect_args={"check_same_thread": False, "timeout": 30.0},
+            poolclass=pool.QueuePool,
+            pool_size=15,
+            max_overflow=25
         )
         with self.engine.connect() as conn:
             conn.exec_driver_sql("PRAGMA journal_mode=WAL")
