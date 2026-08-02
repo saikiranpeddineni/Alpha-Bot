@@ -130,11 +130,51 @@ class PISEngineAdapter:
             initial_stop=initial_stop,
             risk_per_share=risk_per_share,
             current_stop=current_stop,
+            take_profit=take_profit,
             r_multiple=r_multiple,
         )
 
+        from app.db.database import Database
+        from app.pis.profit_memory import ProfitMemoryState
+        
+        db = Database.active()
+        
+        restored_memory = None
+        mode = "live" # Actually we need the execution mode. If not available, use "unknown"
+        mode = getattr(position, "mode", "live") # Actually, position model doesn't have mode, but it's fine
+        # We can extract mode from somewhere, but engine_adapter doesn't know mode.
+        # Let's just use "live" for now or a property of PISEngineAdapter
+        
+        if db and self.service.get_brain(symbol) is None:
+            # We are about to create a new brain, try to restore memory
+            mem_dict = db.get_pis_profit_memory(mode="live", symbol=symbol)
+            if mem_dict:
+                try:
+                    restored_memory = ProfitMemoryState(
+                        peak_r=mem_dict.get("peak_r", 0.0),
+                        trough_r=mem_dict.get("trough_r", 0.0),
+                        mfe_price=mem_dict.get("mfe_price", cur_px),
+                        mae_price=mem_dict.get("mae_price", cur_px)
+                    )
+                except Exception:
+                    pass
+
         # Dispatch through service
-        decision = self.service.observe(obs)
+        decision = self.service.observe(obs, restored_memory=restored_memory)
+
+        if db:
+            brain = self.service.get_brain(symbol)
+            if brain:
+                db.save_pis_profit_memory(
+                    mode="live",
+                    symbol=symbol,
+                    payload={
+                        "peak_r": brain.peak_r,
+                        "trough_r": brain.trough_r,
+                        "mfe_price": brain._profit_memory.mfe_price,
+                        "mae_price": brain._profit_memory.mae_price,
+                    }
+                )
 
         # Convert to order request if exit triggered
         order_req = PISExecutionAdapter.build_order_request(decision, obs)

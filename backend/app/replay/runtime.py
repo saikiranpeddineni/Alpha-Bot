@@ -52,6 +52,22 @@ class ReplayRuntime:
             await self.feed.ensure_data(start_date, end_date, target_symbols)
             
             bars = self.feed.load_bars(start_date, end_date, symbols)
+            
+            # Filter bars to include only requested warmup + replay window
+            filtered_bars = []
+            from collections import defaultdict
+            by_sym = defaultdict(list)
+            for b in bars:
+                by_sym[b["symbol"]].append(b)
+                
+            for sym, sym_bars in by_sym.items():
+                sym_bars.sort(key=lambda x: x["ts_dt"])
+                first_in_window = next((i for i, b in enumerate(sym_bars) if b["in_replay_window"]), len(sym_bars))
+                start_idx = max(0, first_in_window - warmup_bars)
+                filtered_bars.extend(sym_bars[start_idx:])
+                
+            bars = sorted(filtered_bars, key=lambda b: (b["ts_dt"], b["symbol"]))
+            
             replay_bars = [b for b in bars if b.get("in_replay_window", True)]
             if not replay_bars:
                 raise RuntimeError("No bars in requested replay window")
@@ -164,6 +180,7 @@ class ReplayRuntime:
                         broker.process_ohlc(bar["symbol"], float(bar.get("open", bar.get("o", close))),
                                             float(bar.get("high", bar.get("h", close))),
                                             float(bar.get("low", bar.get("l", close))), close, ts, volume=vol)
+                    engine.allow_new_entries = is_replay_window
                     await engine._tick()
                     spawn = getattr(getattr(engine, "shadow_research", None), "spawn", None)
                     if spawn is not None and spawn.running:
@@ -211,7 +228,7 @@ class ReplayRuntime:
             original_on_bar = strategy.on_bar
             def observed_on_bar(ctx, symbol, df, _orig=original_on_bar, _name=strategy.name):
                 sig = _orig(ctx, symbol, df)
-                if sig is not None:
+                if sig is not None and clock.now_utc().strftime("%Y-%m-%d") >= start_date_str:
                     details = sig.model_dump(mode="json") if hasattr(sig, "model_dump") else {"strategy": _name, "action": str(getattr(sig, "action", "")), "price": getattr(sig, "price", None)}
                     ledger.record_event("STRATEGY_SIGNAL", clock.now_utc(), str(getattr(sig, "symbol", symbol)), details)
                 return sig
@@ -220,10 +237,11 @@ class ReplayRuntime:
         original_evaluate_entry = engine.risk.evaluate_entry
         def observed_evaluate_entry(signal, ctx, bars, now=None, kelly_override=None):
             decision = original_evaluate_entry(signal, ctx, bars, now=now, kelly_override=kelly_override)
-            details = decision.model_dump(mode="json") if hasattr(decision, "model_dump") else {"allowed": getattr(decision, "allowed", None), "reason": getattr(decision, "reason", None), "qty": getattr(decision, "qty", None)}
-            details["candidate_id"] = getattr(signal, "candidate_id", None)
-            details["strategy"] = getattr(signal, "strategy", None)
-            ledger.record_event("RISK_DECISION", now or clock.now_utc(), str(getattr(signal, "symbol", "")), details)
+            if (now or clock.now_utc()).strftime("%Y-%m-%d") >= start_date_str:
+                details = decision.model_dump(mode="json") if hasattr(decision, "model_dump") else {"allowed": getattr(decision, "allowed", None), "reason": getattr(decision, "reason", None), "qty": getattr(decision, "qty", None)}
+                details["candidate_id"] = getattr(signal, "candidate_id", None)
+                details["strategy"] = getattr(signal, "strategy", None)
+                ledger.record_event("RISK_DECISION", now or clock.now_utc(), str(getattr(signal, "symbol", "")), details)
             return decision
         engine.risk.evaluate_entry = observed_evaluate_entry
 
@@ -301,11 +319,13 @@ class ReplayRuntime:
 
     @staticmethod
     def _hydrate_db_ledger(db: Database, ledger: ReplayLedger) -> None:
+        start_date = getattr(ledger, "start_date", None)
         with db.engine.connect() as conn:
             for row in conn.exec_driver_sql("SELECT ts,symbol,payload FROM shadow_ledger ORDER BY ts,id").fetchall():
                 try: payload = json.loads(row[2])
                 except Exception: continue
                 ts = row[0] if isinstance(row[0], datetime) else datetime.fromisoformat(str(row[0]))
+                if start_date and ts.strftime("%Y-%m-%d") < start_date: continue
                 ledger.record_event("SCANNER_CANDIDATE", ts, row[1], payload)
                 evidence = payload.get("gate_evidence_json") or {}
                 if isinstance(evidence, str):
@@ -315,11 +335,15 @@ class ReplayRuntime:
             for row in conn.exec_driver_sql("SELECT ts,symbol,payload_json FROM spawn_shadow_events ORDER BY ts,id").fetchall():
                 try: details = json.loads(row[2]) if row[2] else {}
                 except Exception: details = {}
-                ts = row[0] if isinstance(row[0], datetime) else datetime.fromisoformat(str(row[0])); ledger.record_event("SPAWN_DECISION", ts, row[1], details)
+                ts = row[0] if isinstance(row[0], datetime) else datetime.fromisoformat(str(row[0]))
+                if start_date and ts.strftime("%Y-%m-%d") < start_date: continue
+                ledger.record_event("SPAWN_DECISION", ts, row[1], details)
             for row in conn.exec_driver_sql("SELECT exit_at,symbol,payload FROM trades ORDER BY exit_at,id").fetchall():
                 try: details = json.loads(row[2])
                 except Exception: continue
-                ts = row[0] if isinstance(row[0], datetime) else datetime.fromisoformat(str(row[0])); ledger.record_event("TRADE_CLOSED", ts, row[1], details)
+                ts = row[0] if isinstance(row[0], datetime) else datetime.fromisoformat(str(row[0]))
+                if start_date and ts.strftime("%Y-%m-%d") < start_date: continue
+                ledger.record_event("TRADE_CLOSED", ts, row[1], details)
 
     def _build_manifest(self, config: dict[str, Any], bars: list[dict[str, Any]]) -> dict[str, Any]:
         digest = hashlib.sha256("\n".join(json.dumps({k:(v.isoformat() if isinstance(v,datetime) else v) for k,v in b.items() if k!="ts_dt"},sort_keys=True,default=str) for b in bars).encode()).hexdigest()

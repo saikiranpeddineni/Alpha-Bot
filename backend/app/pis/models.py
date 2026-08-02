@@ -90,6 +90,7 @@ class PositionObservation:
     initial_stop: float
     risk_per_share: float
     current_stop: Optional[float] = None
+    take_profit: Optional[float] = None
     r_multiple: float = 0.0
 
     def __post_init__(self) -> None:

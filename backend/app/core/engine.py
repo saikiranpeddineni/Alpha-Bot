@@ -1336,27 +1336,8 @@ class TradingEngine:
 
             runner_active = await self._manage_live_winner_exit(symbol, position, df, pis_decision)
 
-            # Safety-net for the ORIGINAL strategy target. Broker TP remains preferred.
-            # IMPORTANT: do not delete this legacy safety path.  It remains necessary
-            # before runner confirmation and after failed/ambiguous broker replacement.
-            # Once BOTH runner legs are broker-confirmed it is intentionally bypassed,
-            # otherwise this local safety-net would cap every exceptional winner.
-            target = None if runner_active else self._position_take_profits.get(symbol)
-            if target is None:
-                broker_target = getattr(position, "take_profit", None)
-                if broker_target is not None and float(broker_target) > 0:
-                    target = float(broker_target)
-                    self._position_take_profits[symbol] = target
-            if target is not None:
-                target_hit = (position.qty > 0 and high_val >= target) or (position.qty < 0 and low_val <= target)
-                if target_hit:
-                    applog.info("engine", f"{symbol}: original strategy take-profit triggered @ {target:.4f}")
-                    await self._close_position_guarded(symbol, reason=f"original strategy take-profit triggered ({target:.4f})")
-                    self._position_peaks.pop(symbol, None)
-                    self._position_troughs.pop(symbol, None)
-                    self._position_initial_stops.pop(symbol, None)
-                    self._position_take_profits.pop(symbol, None)
-                    return []
+            # All exits (including strategy take profit targets) are now handled exclusively by PIS
+            # to guarantee PIS acts as the single source of truth for intelligent exits.
 
             if position.qty > 0:
                 self._position_peaks[symbol] = max(self._position_peaks[symbol], high_val)

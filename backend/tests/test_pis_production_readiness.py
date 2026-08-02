@@ -211,7 +211,8 @@ def test_priority_4_protection_monotonicity_invariant() -> None:
                 r_multiple=cur_r,
             )
 
-            new_floor = planner.compute_protection_floor(obs, peak_r, prev_floor)
+            health = TradeHealth(overall=0.9, trend_score=0.9, momentum_score=0.9, volatility_score=0.9, volume_score=0.9)
+            new_floor = planner.compute_protection_floor(obs, peak_r, health, prev_floor)
 
             if is_long:
                 assert new_floor >= prev_floor, (

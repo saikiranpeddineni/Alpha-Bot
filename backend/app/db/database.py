@@ -153,6 +153,14 @@ class PortfolioCheckpointRow(Base):
     payload: Mapped[str] = mapped_column(Text)
 
 
+class PisProfitMemoryRow(Base):
+    __tablename__ = "pis_profit_memory"
+    symbol: Mapped[str] = mapped_column(String(12), primary_key=True)
+    mode: Mapped[str] = mapped_column(String(10), primary_key=True)
+    updated_at: Mapped[datetime]
+    payload: Mapped[str] = mapped_column(Text)
+
+
 class PolicyEvidenceRow(Base):
     __tablename__ = "policy_evidence"
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -457,6 +465,24 @@ class Database:
             s.merge(PortfolioCheckpointRow(mode=mode, updated_at=datetime.now(UTC),
                                            payload=json.dumps(checkpoint, default=str)))
             s.commit()
+
+    def get_pis_profit_memory(self, mode: str, symbol: str) -> dict | None:
+        with self._session() as s:
+            row = s.get(PisProfitMemoryRow, (symbol, mode))
+            return json.loads(row.payload) if row else None
+
+    def save_pis_profit_memory(self, mode: str, symbol: str, payload: dict) -> None:
+        with self._session() as s:
+            s.merge(PisProfitMemoryRow(mode=mode, symbol=symbol, updated_at=datetime.now(UTC),
+                                       payload=json.dumps(payload, default=str)))
+            s.commit()
+
+    def delete_pis_profit_memory(self, mode: str, symbol: str) -> None:
+        with self._session() as s:
+            row = s.get(PisProfitMemoryRow, (symbol, mode))
+            if row:
+                s.delete(row)
+                s.commit()
 
     def commit_fill_processing(
         self, *, fill_key: str, cumulative_qty: float, cumulative_notional: float = 0.0, mode: str, account_id: str,

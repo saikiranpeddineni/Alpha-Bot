@@ -63,7 +63,7 @@ class TradeHealthEvaluator:
 
         # 3. Volatility Score: ratio of bar range to ATR (excessive range indicates distribution)
         vol_ratio = bar_range / atr
-        if math.isnan(vol_ratio) or math.isinf(vol_ratio):
+        if math.isnan(vol_ratio) or math.isinf(vol_ratio) or bar_range <= 1e-8:
             volatility_score = 0.5
         elif vol_ratio > 3.0:
             volatility_score = 0.2

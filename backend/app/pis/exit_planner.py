@@ -78,10 +78,25 @@ class ExitPlanner:
         elif target_stop > 0 and abs(target_stop - obs.initial_stop) > 1e-4:
             protection_updated = True
 
+        # Check profit target breach
+        target_hit = False
+        if obs.take_profit is not None and obs.take_profit > 0:
+            if side > 0 and obs.high >= obs.take_profit:
+                target_hit = True
+            elif side < 0 and obs.low <= obs.take_profit:
+                target_hit = True
+
         # Determine exit action
         if protection_breached or lifecycle == LifecycleState.EXIT_CANDIDATE:
             action = ExitAction.FULL_EXIT
             exit_ratio = 1.0
+        elif target_hit and not is_runner:
+            action = ExitAction.FULL_EXIT
+            exit_ratio = 1.0
+        elif target_hit and is_runner:
+            # Let runners run, but secure 50% at target
+            action = ExitAction.PARTIAL_EXIT
+            exit_ratio = 0.5
         elif lifecycle == LifecycleState.DISTRIBUTION and health.overall < self.config.health_distribution_threshold:
             action = ExitAction.PARTIAL_EXIT
             exit_ratio = 0.5
@@ -100,6 +115,8 @@ class ExitPlanner:
 
         if protection_breached:
             reasons.append(ReasonCode.PROTECTION_BREACH)
+        elif target_hit:
+            reasons.append(ReasonCode.HEALTHY_TREND)
 
         return PISDecision(
             timestamp=obs.timestamp,

@@ -45,6 +45,7 @@ class PositionBrain:
         symbol: str,
         initial_observation: PositionObservation,
         config: Optional[PISConfig] = None,
+        restored_memory: Optional[Any] = None,
     ) -> None:
         """Initialize PositionBrain for a symbol with initial observation.
 
@@ -52,6 +53,7 @@ class PositionBrain:
             symbol: Standardized symbol string.
             initial_observation: PositionObservation snapshot.
             config: Optional PISConfig instance.
+            restored_memory: Optional restored ProfitMemoryState.
         """
         self._lock = threading.RLock()
         self.config = config or PISConfig()
@@ -74,7 +76,12 @@ class PositionBrain:
             self._history.append(initial_observation)
 
             # Profit memory state (Priority 2, Priority 7)
-            self._profit_memory = ProfitMemoryTracker.initial_state(initial_observation)
+            if restored_memory is not None:
+                self._profit_memory = restored_memory
+                # We need to make sure the state is updated with the initial observation to keep it fresh
+                self._profit_memory = ProfitMemoryTracker.update(self._profit_memory, initial_observation)
+            else:
+                self._profit_memory = ProfitMemoryTracker.initial_state(initial_observation)
 
             self._last_observation: PositionObservation = initial_observation
             self._last_timestamp: datetime = initial_observation.timestamp
@@ -257,7 +264,7 @@ class PositionBrain:
             elif health.overall <= self.config.health_weakening_threshold:
                 target = LifecycleState.WEAKENING
         elif current == LifecycleState.ACCELERATING:
-            if peak_r >= self.config.runner_qualification_r:
+            if peak_r >= self.config.runner_qualification_r and health.overall >= self.config.health_weakening_threshold:
                 target = LifecycleState.RUNNER
             elif health.overall <= self.config.health_weakening_threshold:
                 target = LifecycleState.WEAKENING

@@ -61,11 +61,12 @@ class PISService:
                 return None
             return brain
 
-    def observe(self, obs: PositionObservation) -> PISDecision:
+    def observe(self, obs: PositionObservation, restored_memory: Optional[Any] = None) -> PISDecision:
         """Process observation for symbol through PIS, serializing per-symbol evaluations.
 
         Args:
             obs: PositionObservation snapshot.
+            restored_memory: Optional restored ProfitMemoryState from db.
 
         Returns:
             PISDecision.
@@ -80,7 +81,7 @@ class PISService:
                 brain = self.get_brain(symbol_key)
                 if brain is None:
                     # Initialize new brain
-                    brain = PositionBrain(symbol_key, obs, self.config)
+                    brain = PositionBrain(symbol_key, obs, self.config, restored_memory=restored_memory)
                     with self._lock:
                         self._brains[symbol_key] = brain
                     decision = brain.last_decision or brain.observe(obs)
