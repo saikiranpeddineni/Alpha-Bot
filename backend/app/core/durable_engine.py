@@ -56,10 +56,17 @@ class DurableTradingEngine(TradingEngine):
             self.recent_orders.appendleft(order)
         else:
             cumulative_qty = float(getattr(fill, "cumulative_qty", 0.0) or 0.0)
-            order.status = OrderStatus.FILLED
+            order_qty = max(0.0, float(getattr(order, "qty", 0.0) or 0.0))
             order.filled_qty = cumulative_qty if cumulative_qty > 0 else max(float(order.filled_qty or 0.0), float(fill.qty))
+            
+            if order_qty > 0 and order.filled_qty + 1e-9 >= order_qty:
+                order.status = OrderStatus.FILLED
+                order.filled_at = fill.ts
+            else:
+                order.status = OrderStatus.PARTIALLY_FILLED
+                order.filled_at = None
+                
             order.filled_avg_price = float(fill.price)
-            order.filled_at = fill.ts
 
         self.db.save_order(order, self.mode)
 

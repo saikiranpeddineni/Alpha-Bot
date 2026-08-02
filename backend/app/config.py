@@ -102,6 +102,7 @@ class Settings(BaseSettings):
     alpaca_api_secret: str = Field("", validation_alias="ALPACA_API_SECRET")
     alpaca_paper: bool = Field(True, validation_alias="ALPACA_PAPER")
     enable_live_trading: bool = Field(False, validation_alias="ENABLE_LIVE_TRADING")
+    slack_webhook_url: str = Field("", validation_alias="SLACK_WEBHOOK_URL")
 
     risk_per_trade_pct: float = Field(0.5, validation_alias="RISK_PER_TRADE_PCT")
     max_position_pct: float = Field(20.0, validation_alias="MAX_POSITION_PCT")

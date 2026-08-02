@@ -1060,6 +1060,9 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                                     continue
 
                             client_order_id = decision.order.client_order_id
+                            if not client_order_id:
+                                client_order_id = f"ad-ent-{sig.symbol}-{sig.action.value}-{sig.strategy}-{now.strftime('%Y%m%d%H%M%S')}"
+                                decision.order.client_order_id = client_order_id
                             self.pending_reconciliation_orders[client_order_id] = {
                                 "symbol": decision.order.symbol.upper(),
                                 "client_order_id": client_order_id,
@@ -1934,6 +1937,9 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                     if not recovery_strategy or recovery_strategy in {"alpaca", "emergency_protection"}:
                         recovery_strategy = "reconciled"
 
+                    if not client_order_id:
+                        client_order_id = f"ad-rec-{p.symbol}-{side}-{now.strftime('%Y%m%d%H%M%S')}"
+                        
                     req = OrderRequest(
                         symbol=p.symbol,
                         side=side,
