@@ -10,6 +10,7 @@ Broker-Only Adapter Invariant:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 from datetime import datetime, timezone
@@ -34,7 +35,7 @@ class PISEngineAdapter:
         self.config = config or PISConfig()
         self.service = service or PISService(self.config)
 
-    def evaluate_position_exit(
+    async def evaluate_position_exit(
         self,
         position: Position,
         bar_df: Any,  # pandas DataFrame with high, low, close, volume, atr
@@ -147,7 +148,7 @@ class PISEngineAdapter:
         
         if db and self.service.get_brain(symbol) is None:
             # We are about to create a new brain, try to restore memory
-            mem_dict = db.get_pis_profit_memory(mode="live", symbol=symbol)
+            mem_dict = await asyncio.to_thread(db.get_pis_profit_memory, mode="live", symbol=symbol)
             if mem_dict:
                 try:
                     restored_memory = ProfitMemoryState(
@@ -165,7 +166,8 @@ class PISEngineAdapter:
         if db:
             brain = self.service.get_brain(symbol)
             if brain:
-                db.save_pis_profit_memory(
+                await asyncio.to_thread(
+                    db.save_pis_profit_memory,
                     mode="live",
                     symbol=symbol,
                     payload={

@@ -684,6 +684,9 @@ class TradingEngine:
             if self.last_error.startswith("CRITICAL EOD liquidation unresolved"):
                 self.last_error = ""
             applog.info("engine", "End-of-day liquidation authoritatively complete")
+            # Explicitly clear out all PIS memory states for the next session
+            self.pis_adapter.service.close_all()
+            
             # Refresh contextual aggregate memory at EOD
             try:
                 from app.strategies import refresh_contextual_memory
@@ -1126,7 +1129,7 @@ class TradingEngine:
                     applog.info("engine", f"{sig.symbol}: Portfolio Gate/Allocator rejected -- {reason}")
                     self.publish("insight", self.insights.on_signal(sig, gated=True, gate_reason=reason).model_dump(mode="json"))
                     if getattr(sig, "candidate_id", None) is not None:
-                        self._update_shadow_decision(sig.candidate_id, "rejected", reason, "portfolio_gate")
+                        await self._update_shadow_decision(sig.candidate_id, "rejected", reason, "portfolio_gate")
 
                 # Size and submit approved entries
                 if decision_outcome.approved_entries:
@@ -1134,7 +1137,7 @@ class TradingEngine:
                         applog.warning("engine", "Skipping entry sizing and submission while reconciliation is uncertain.")
                         for sig, _ in decision_outcome.approved_entries:
                             if getattr(sig, "candidate_id", None) is not None:
-                                self._update_shadow_decision(
+                                await self._update_shadow_decision(
                                     sig.candidate_id,
                                     "rejected",
                                     "engine position/broker reconciliation state is uncertain",
@@ -1171,7 +1174,7 @@ class TradingEngine:
                                 applog.info("engine", f"{sig.symbol.upper()}: entry rejected by Behavioral Loop Detector — {behavioral_reason}")
                                 self.publish("insight", self.insights.on_signal(sig, gated=True, gate_reason=behavioral_reason).model_dump(mode="json"))
                                 if getattr(sig, "candidate_id", None) is not None:
-                                    self._update_shadow_decision(sig.candidate_id, "rejected", behavioral_reason, "behavioral_safety_gate")
+                                    await self._update_shadow_decision(sig.candidate_id, "rejected", behavioral_reason, "behavioral_safety_gate")
                                 continue
 
                             df = df_by_symbol[sig.symbol]
@@ -1192,7 +1195,7 @@ class TradingEngine:
                                 applog.info("engine", f"{sig.symbol.upper()}: entry rejected by RiskManager — {decision.reason}")
                                 self.publish("insight", self.insights.on_signal(sig, gated=True, gate_reason=decision.reason).model_dump(mode="json"))
                                 if getattr(sig, "candidate_id", None) is not None:
-                                    self._update_shadow_decision(sig.candidate_id, "rejected", decision.reason, "risk_gate")
+                                    await self._update_shadow_decision(sig.candidate_id, "rejected", decision.reason, "risk_gate")
                                 continue
 
                             # Check if asset is shortable before submitting short entries
@@ -1203,7 +1206,7 @@ class TradingEngine:
                                     applog.info("engine", f"{sig.symbol.upper()}: entry rejected — {reason}")
                                     self.publish("insight", self.insights.on_signal(sig, gated=True, gate_reason=reason).model_dump(mode="json"))
                                     if getattr(sig, "candidate_id", None) is not None:
-                                        self._update_shadow_decision(sig.candidate_id, "rejected", reason, "broker_gate")
+                                        await self._update_shadow_decision(sig.candidate_id, "rejected", reason, "broker_gate")
                                     continue
 
                             client_order_id = decision.order.client_order_id
@@ -1217,7 +1220,7 @@ class TradingEngine:
                                 "submitted_at": utcnow().isoformat(),
                                 "submission_state": "submitting",
                             }
-                            self.db.set_setting("pending_reconciliation_orders", self.pending_reconciliation_orders)
+                            await asyncio.to_thread(self.db.set_setting, "pending_reconciliation_orders", self.pending_reconciliation_orders)
 
                             try:
                                 order = await self.broker.submit(decision.order)
@@ -1226,25 +1229,25 @@ class TradingEngine:
                                 else:
                                     self.pending_reconciliation_orders[client_order_id]["submission_state"] = "broker_acknowledged"
                                     self.pending_reconciliation_orders[client_order_id]["broker_order_id"] = getattr(order, "id", None)
-                                self.db.set_setting("pending_reconciliation_orders", self.pending_reconciliation_orders)
+                                await asyncio.to_thread(self.db.set_setting, "pending_reconciliation_orders", self.pending_reconciliation_orders)
                                 self.recent_orders.appendleft(order)
-                                self.db.save_order(order, self.mode)
+                                await asyncio.to_thread(self.db.save_order, order, self.mode)
                                 self.publish("insight", self.insights.on_signal(sig, gated=False).model_dump(mode="json"))
                                 self.publish("orders", self.orders_payload())
                                 if getattr(sig, "candidate_id", None) is not None:
                                     if order.status == OrderStatus.REJECTED:
-                                        self._update_shadow_decision(
+                                        await self._update_shadow_decision(
                                             sig.candidate_id,
                                             "rejected",
                                             order.reason or "Broker rejected order",
                                             "broker_rejected"
                                         )
                                     else:
-                                        self._update_shadow_decision(sig.candidate_id, "accepted", "", "none")
+                                        await self._update_shadow_decision(sig.candidate_id, "accepted", "", "none")
                             except Exception as exc:
                                 self.pending_reconciliation_orders[client_order_id]["submission_state"] = "ambiguous"
                                 self.pending_reconciliation_orders[client_order_id]["last_error"] = str(exc)
-                                self.db.set_setting("pending_reconciliation_orders", self.pending_reconciliation_orders)
+                                await asyncio.to_thread(self.db.set_setting, "pending_reconciliation_orders", self.pending_reconciliation_orders)
                                 applog.error("engine", f"Ambiguous submission exception for {decision.order.symbol} ({client_order_id}): {exc}")
                                 order = Order(
                                     id=client_order_id,
@@ -1257,7 +1260,7 @@ class TradingEngine:
                                     status=OrderStatus.PENDING,
                                     reason=f"Ambiguous submit: {exc}"
                                 )
-                                self.db.save_order(order, self.mode)
+                                await asyncio.to_thread(self.db.save_order, order, self.mode)
 
                             # Reserve active same-cycle submissions before evaluating the next candidate.
                             # This overlays the stale broker snapshot for cash, position-count, and sector checks.
@@ -1291,7 +1294,7 @@ class TradingEngine:
 
         self.portfolio.mark_equity(account.equity, now)
         if self._tick_count % EQUITY_PERSIST_EVERY_TICKS == 0:
-            self.db.save_equity(account.equity, account.cash, self.mode, now)
+            await asyncio.to_thread(self.db.save_equity, account.equity, account.cash, self.mode, now)
 
         # 7. broadcast
         self._broadcast_tick(account, now, new_closed, positions)
@@ -1324,7 +1327,7 @@ class TradingEngine:
 
             # Route all positions (winners and losers) through PIS for local safety-net evaluation
             try:
-                pis_order, pis_decision = self.pis_adapter.evaluate_position_exit(
+                pis_order, pis_decision = await self.pis_adapter.evaluate_position_exit(
                     position=position,
                     bar_df=df,
                     initial_stop=self._position_initial_stops.get(symbol),
@@ -1784,7 +1787,7 @@ class TradingEngine:
         for fill in fills:
             order = order_by_id.get(fill.order_id)
             if order is None and fill.order_id:
-                order = self.db.get_order(fill.order_id)
+                order = await asyncio.to_thread(self.db.get_order, fill.order_id)
 
             if order is not None:
                 # Broker fills are incremental deltas. Preserve cumulative order
@@ -1912,7 +1915,7 @@ class TradingEngine:
                         applog.warning("engine.v2_shadow", f"Failed to attach V2 shadow harvest metadata: {exc}")
 
                 self.perf_tracker.update(trade, now=now)
-                self.db.save_trade(trade, self.mode)
+                await asyncio.to_thread(self.db.save_trade, trade, self.mode)
                 self.publish("trade", trade.model_dump(mode="json"))
 
 
@@ -2713,7 +2716,7 @@ class TradingEngine:
             if order is not None:
                 applog.info("engine", f"Ambiguous order resolved from broker truth: {symbol} ({cid}) status={order.status}.")
                 self.pending_reconciliation_orders.pop(cid, None)
-                self.db.save_order(order, self.mode)
+                await asyncio.to_thread(self.db.save_order, order, self.mode)
                 changed = True
                 continue
             submitted_at = order_info.get("submitted_at")
@@ -2736,16 +2739,16 @@ class TradingEngine:
             applog.warning("engine", f"Ambiguous order resolved absent after bounded reconciliation: {symbol} ({cid}) not_found_observations={count} age={age_seconds:.1f}s. Treating as REJECTED.")
             self.pending_reconciliation_orders.pop(cid, None)
             rejected_order = Order(id=cid, client_order_id=cid, symbol=symbol, side=OrderSide.BUY if str(order_info.get("side", "")).lower() == "buy" else OrderSide.SELL, qty=float(order_info.get("qty", 0.0) or 0.0), order_type=OrderType.LIMIT if str(order_info.get("order_type", "")).lower() == "limit" else OrderType.MARKET, limit_price=order_info.get("limit_price"), status=OrderStatus.REJECTED, reason=f"Ambiguous submit resolved absent after repeated broker not-found observations ({count}) and {age_seconds:.1f}s age.")
-            self.db.save_order(rejected_order, self.mode)
+            await asyncio.to_thread(self.db.save_order, rejected_order, self.mode)
         if changed:
-            self.db.set_setting("pending_reconciliation_orders", self.pending_reconciliation_orders)
+            await asyncio.to_thread(self.db.set_setting, "pending_reconciliation_orders", self.pending_reconciliation_orders)
 
-    def _update_shadow_decision(self, candidate_id: str, final_decision: str, rejection_reason: str, rejection_stage: str) -> None:
+    async def _update_shadow_decision(self, candidate_id: str, final_decision: str, rejection_reason: str, rejection_stage: str) -> None:
         """Update a candidate signal's gating decision in the database."""
         if not self.db:
             return
         try:
-            payload = self.db.get_shadow_signal(candidate_id)
+            payload = await asyncio.to_thread(self.db.get_shadow_signal, candidate_id)
             if payload:
                 payload["final_decision"] = final_decision
                 payload["rejection_reason"] = rejection_reason
@@ -2776,7 +2779,7 @@ class TradingEngine:
         import numpy as np
         try:
             # Query pending shadow replays directly from DB ordered by ts ASC (oldest first) (#233)
-            pending = self.db.get_pending_shadow_replays(mode=self.mode, now=now, limit=100)
+            pending = await asyncio.to_thread(self.db.get_pending_shadow_replays, mode=self.mode, now=now, limit=100)
             if not pending:
                 return
 
@@ -2822,7 +2825,7 @@ class TradingEngine:
                     df = await self.data.history(symbol, "1Min", start=start_time, end=end_time)
                 except Exception as df_exc:
                     applog.warning("engine", f"Failed to fetch history for replay of {candidate_id}: {df_exc}")
-                    self.db.save_shadow_signal(candidate_id, ts, symbol, strategy_name, direction, self.mode, s)
+                    await asyncio.to_thread(self.db.save_shadow_signal, candidate_id, ts, symbol, strategy_name, direction, self.mode, s)
                     continue
 
                 if df.empty:
@@ -2833,7 +2836,7 @@ class TradingEngine:
                     s["last_replay_attempt_at"] = now_utc.isoformat()
                     s["last_defer_reason"] = "entry_or_following_bar_unavailable"
                     s["next_retry_at"] = (now_utc + timedelta(minutes=delay_minutes)).isoformat()
-                    self.db.save_shadow_signal(candidate_id, ts, symbol, strategy_name, direction, self.mode, s)
+                    await asyncio.to_thread(self.db.save_shadow_signal, candidate_id, ts, symbol, strategy_name, direction, self.mode, s)
                     applog.info(
                         "engine.replay",
                         f"Replay deferred for {candidate_id}: historical data incomplete; retry in {delay_minutes}m",
@@ -2865,7 +2868,7 @@ class TradingEngine:
                     s["last_replay_attempt_at"] = now_utc.isoformat()
                     s["last_defer_reason"] = "entry_or_following_bar_unavailable"
                     s["next_retry_at"] = (now_utc + timedelta(minutes=delay_minutes)).isoformat()
-                    self.db.save_shadow_signal(candidate_id, ts, symbol, strategy_name, direction, self.mode, s)
+                    await asyncio.to_thread(self.db.save_shadow_signal, candidate_id, ts, symbol, strategy_name, direction, self.mode, s)
                     applog.info(
                         "engine.replay",
                         f"Replay deferred for {candidate_id}: historical data incomplete; retry in {delay_minutes}m",
@@ -2884,7 +2887,7 @@ class TradingEngine:
                     s["replayed"] = True
                     s["replay_failed"] = True
                     s["replay_failure_reason"] = "missing_entry_price"
-                    self.db.save_shadow_signal(candidate_id, ts, symbol, strategy_name, direction, self.mode, s)
+                    await asyncio.to_thread(self.db.save_shadow_signal, candidate_id, ts, symbol, strategy_name, direction, self.mode, s)
                     continue
 
                 replay_res = ShadowLedger.replay_signal_60m(
@@ -2903,7 +2906,7 @@ class TradingEngine:
                     s["replayed"] = True
                     s["replay_failed"] = True
                     s["replay_failure_reason"] = "empty_replay_simulation_result"
-                    self.db.save_shadow_signal(candidate_id, ts, symbol, strategy_name, direction, self.mode, s)
+                    await asyncio.to_thread(self.db.save_shadow_signal, candidate_id, ts, symbol, strategy_name, direction, self.mode, s)
                     continue
 
                 s["replayed"] = True
@@ -3064,7 +3067,7 @@ class TradingEngine:
             # Order was rejected — release the guard immediately
             self._pending_close_symbols.discard(sym_upper)
         self.recent_orders.appendleft(order)
-        self.db.save_order(order, self.mode)
+        await asyncio.to_thread(self.db.save_order, order, self.mode)
         await self._drain_fills(utcnow())
         self.publish("orders", self.orders_payload())
         await self._publish_positions()
@@ -3081,7 +3084,7 @@ class TradingEngine:
         order = await self.broker.close_position(symbol, reason="manual close")
         if order is not None:
             self.recent_orders.appendleft(order)
-            self.db.save_order(order, self.mode)
+            await asyncio.to_thread(self.db.save_order, order, self.mode)
         else:
             # Close failed — release guard so retries work
             self._pending_close_symbols.discard(sym_upper)
@@ -3521,7 +3524,7 @@ class TradingEngine:
                         f"Submitting for allocation (retry {item['retry_count']}/{MAX_RETRIES})."
                     )
 
-                    self._update_shadow_decision(
+                    await self._update_shadow_decision(
                         candidate_id=fresh_sig.candidate_id,
                         final_decision="pipeline_approved",
                         rejection_reason="",
@@ -3529,7 +3532,7 @@ class TradingEngine:
                     )
                     # Also update the parent candidate record to mark it as resurrected/approved
                     if "candidate_id" in item:
-                        self._update_shadow_decision(
+                        await self._update_shadow_decision(
                             candidate_id=item["candidate_id"],
                             final_decision="pipeline_approved",
                             rejection_reason="",
@@ -3666,7 +3669,7 @@ class TradingEngine:
 
         # Monitor 4: Database write health
         try:
-            self.db.set_setting("heartbeat_write_check", now.isoformat())
+            await asyncio.to_thread(self.db.set_setting, "heartbeat_write_check", now.isoformat())
         except Exception as exc:
             diagnostics["db_write_ok"] = False
             self.system_health = "HALTED"
@@ -3800,7 +3803,7 @@ class TradingEngine:
                 
                 if self.db:
                     try:
-                        self.db.save_portfolio_checkpoint(self.settings.mode, self.portfolio.checkpoint(risk_state=self.risk_manager.get_risk_state() if self.risk_manager else {}))
+                        await asyncio.to_thread(self.db.save_portfolio_checkpoint, self.settings.mode, self.portfolio.checkpoint(risk_state=self.risk_manager.get_risk_state() if self.risk_manager else {}))
                     except Exception as exc:
                         applog.error("engine.heartbeat", f"Auto-reconciliation: Failed to commit checkpoint: {exc}")
                 
