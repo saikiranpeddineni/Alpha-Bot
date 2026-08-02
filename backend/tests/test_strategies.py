@@ -136,8 +136,9 @@ def test_momentum_exit_on_cross_down():
     at_cross = df.iloc[: cross_positions[-1] + 1]
     pos = Position(symbol="TEST", qty=10, avg_entry_price=100, market_price=103, strategy="momentum")
     sig = strat.on_bar(ctx(position=pos), "TEST", at_cross)
-    assert sig is not None and sig.action == SignalAction.EXIT
-    # A foreign strategy's position is left alone
+    # Position exits are managed by PIS (Position Intelligence System)
+    assert sig is None
+    # Foreign strategy's position is also left alone
     foreign = Position(symbol="TEST", qty=10, avg_entry_price=100, market_price=103, strategy="orb")
     assert strat.on_bar(ctx(position=foreign), "TEST", at_cross) is None
 

@@ -14,6 +14,7 @@ import pandas as pd
 from zoneinfo import ZoneInfo
 
 from app.core.domain import Signal, SignalAction
+from app.data.base import resample_bars
 from app.strategies.base import Strategy, StrategyContext, register
 
 ET = ZoneInfo("America/New_York")
@@ -22,16 +23,17 @@ ET = ZoneInfo("America/New_York")
 @register
 class OpeningRangeBreakout(Strategy):
     name = "orb"
-    description = "Opening range breakout with volume confirmation (first 15 min range)"
+    description = "Opening range breakout with volume confirmation and 5m trend alignment"
     default_params = {
         "range_minutes": 15,
         "entry_cutoff_minute": 180,   # no fresh breakout entries after 12:30 ET
         "breakout_buffer_bps": 5,     # close must clear the range by 0.05%
-        "atr_buffer_mult": 0.0,      # if > 0, overrides breakout_buffer_bps with (mult * ATR)
+        "atr_buffer_mult": 0.0,       # if > 0, overrides breakout_buffer_bps with (mult * ATR)
         "volume_z_min": 0.5,
         "atr_stop_mult": 2.0,         # risk cap when the range is very wide
         "reward_risk": 2.0,
-        "trailing_stop_atr_mult": 1.5 # if > 0, activates dynamic trailing stop
+        "trailing_stop_atr_mult": 1.5, # if > 0, activates dynamic trailing stop
+        "mft_alignment": False,       # optional 5m higher-timeframe trend alignment (set True in config)
     }
 
     def __init__(self, params: dict | None = None, enabled: bool = True) -> None:
@@ -53,6 +55,24 @@ class OpeningRangeBreakout(Strategy):
         dt = getattr(timestamp, "date", lambda: timestamp)()
         key = (symbol, dt)
         self._pending.pop(key, None)
+
+    def _check_5m_trend(self, df: pd.DataFrame) -> tuple[bool, bool]:
+        """Check 5-minute trend direction (bullish, bearish) from 1-minute dataframe."""
+        if len(df) < 50:
+            return True, True
+        try:
+            df_5m = resample_bars(df.tail(200), "5Min")
+            if len(df_5m) < 10:
+                return True, True
+            ema20 = df_5m["close"].ewm(span=20, min_periods=3, adjust=False).mean()
+            if len(ema20) < 2 or pd.isna(ema20.iloc[-1]) or pd.isna(ema20.iloc[-2]):
+                return True, True
+            last_close = float(df_5m["close"].iloc[-1])
+            is_bullish = float(ema20.iloc[-1]) >= float(ema20.iloc[-2]) and last_close >= float(ema20.iloc[-1])
+            is_bearish = float(ema20.iloc[-1]) <= float(ema20.iloc[-2]) and last_close <= float(ema20.iloc[-1])
+            return is_bullish, is_bearish
+        except Exception:
+            return True, True
 
     def on_bar(self, ctx: StrategyContext, symbol: str, df: pd.DataFrame) -> Signal | None:
         p = self.params
@@ -94,12 +114,16 @@ class OpeningRangeBreakout(Strategy):
         volume_ok = vol_z >= p["volume_z_min"]
         confidence = min(0.85, 0.55 + 0.08 * max(0.0, vol_z))
 
-        # Climax guard: prevent entering if price is stretched more than 1.0 ATR from EMA9
+        # Climax guard: prevent entering if price is stretched more than climax_atr_mult ATR from EMA9
+        climax_limit = float(p.get("climax_atr_mult", 0.0))
         ema9 = float(last.get("ema9", close))
-        if abs(close - ema9) > 1.0 * atr:
+        if climax_limit > 0.0 and abs(close - ema9) > climax_limit * atr:
             return None
 
-        if close > or_high * buffer and volume_ok:
+        mft_enabled = bool(p.get("mft_alignment", True))
+        is_bullish_5m, is_bearish_5m = self._check_5m_trend(df) if mft_enabled else (True, True)
+
+        if close > or_high * buffer and volume_ok and is_bullish_5m:
             stop = max(or_low, close - p["atr_stop_mult"] * atr)
             risk = close - stop
             if risk <= 0:
@@ -110,12 +134,12 @@ class OpeningRangeBreakout(Strategy):
                 action=SignalAction.ENTER_LONG,
                 confidence=confidence,
                 strategy=self.name,
-                reason=f"Broke above {rng_n}m opening range {or_high:.2f} (vol z {vol_z:.1f})",
+                reason=f"Broke above {rng_n}m range {or_high:.2f} (vol z {vol_z:.1f}, 5m trend aligned)",
                 price=close,
                 stop_loss=stop,
                 take_profit=close + p["reward_risk"] * risk,
             )
-        if close < or_low / buffer and volume_ok:
+        if close < or_low / buffer and volume_ok and is_bearish_5m:
             stop = min(or_high, close + p["atr_stop_mult"] * atr)
             risk = stop - close
             if risk <= 0:
@@ -126,7 +150,7 @@ class OpeningRangeBreakout(Strategy):
                 action=SignalAction.ENTER_SHORT,
                 confidence=confidence,
                 strategy=self.name,
-                reason=f"Broke below {rng_n}m opening range {or_low:.2f} (vol z {vol_z:.1f})",
+                reason=f"Broke below {rng_n}m range {or_low:.2f} (vol z {vol_z:.1f}, 5m trend aligned)",
                 price=close,
                 stop_loss=stop,
                 take_profit=close - p["reward_risk"] * risk,
