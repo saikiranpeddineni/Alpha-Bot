@@ -9,10 +9,12 @@ class ReplayBroker(Broker):
     name, is_paper = "replay_broker", True
 
     def __init__(self, starting_cash: float = 100_000.0, slippage_bps: float = 0.0,
-                 fill_model: str = "ohlc_touch", allow_partial_fills: bool = False) -> None:
+                 fill_model: str = "ohlc_touch", allow_partial_fills: bool = False,
+                 volume_constrained: bool = False, max_volume_pct: float = 0.05) -> None:
         if fill_model not in {"immediate", "next_open", "ohlc_touch"}: raise ValueError(f"Unsupported fill model {fill_model}")
         self.starting_cash = self.cash = float(starting_cash); self.slippage = float(slippage_bps) / 10_000.0
         self.fill_model, self.allow_partial_fills = fill_model, bool(allow_partial_fills)
+        self.volume_constrained, self.max_volume_pct = bool(volume_constrained), float(max_volume_pct)
         self._positions: dict[str, Position] = {}; self._orders: dict[str, Order] = {}; self._resting: list[str] = []
         self._fills: list[Fill] = []; self._last_price: dict[str, float] = {}; self._now = datetime(1970,1,1,tzinfo=timezone.utc)
         self._seq = 0; self._ledger = None
@@ -128,31 +130,37 @@ class ReplayBroker(Broker):
         if sym not in self._positions:
             self._cancel_stale_protection(sym)
 
-    def process_ohlc(self,symbol:str,open_px:float,high_px:float,low_px:float,close_px:float,ts:datetime)->None:
-        symbol=symbol.upper();self.set_time(ts);self._last_price[symbol]=close_px
-        if symbol in self._positions:self._positions[symbol].market_price=close_px
+    def process_ohlc(self, symbol: str, open_px: float, high_px: float, low_px: float, close_px: float, ts: datetime, volume: float = 0.0) -> None:
+        symbol = symbol.upper(); self.set_time(ts); self._last_price[symbol] = close_px
+        if symbol in self._positions: self._positions[symbol].market_price = close_px
         for oid in list(self._resting):
-            order=self._orders.get(oid)
-            if order is None or order.symbol!=symbol:continue
+            order = self._orders.get(oid)
+            if order is None or order.symbol != symbol: continue
             # A protective exit is reduce-only by intent. If another exit flattened the
             # position before this bar, cancel it rather than allowing a synthetic reversal.
             if self._is_protective_exit(order) and symbol not in self._positions:
                 self._cancel_stale_protection(symbol)
                 continue
-            fill_px=None
-            if order.order_type==OrderType.LIMIT:
-                limit=float(order.limit_price)
-                if order.side==OrderSide.BUY and low_px<=limit:fill_px=min(open_px,limit)
-                elif order.side==OrderSide.SELL and high_px>=limit:fill_px=max(open_px,limit)
-            elif order.order_type==OrderType.STOP:
-                stop=float(order.stop_price)
-                if order.side==OrderSide.BUY and high_px>=stop:fill_px=max(open_px,stop)
-                elif order.side==OrderSide.SELL and low_px<=stop:fill_px=min(open_px,stop)
-            elif order.order_type==OrderType.STOP_LIMIT:
-                stop,limit=float(order.stop_price),float(order.limit_price)
-                order.stop_triggered=order.stop_triggered or (order.side==OrderSide.BUY and high_px>=stop) or (order.side==OrderSide.SELL and low_px<=stop)
+            fill_px = None
+            if order.order_type == OrderType.LIMIT:
+                limit = float(order.limit_price)
+                if order.side == OrderSide.BUY and low_px <= limit: fill_px = min(open_px, limit)
+                elif order.side == OrderSide.SELL and high_px >= limit: fill_px = max(open_px, limit)
+            elif order.order_type == OrderType.STOP:
+                stop = float(order.stop_price)
+                if order.side == OrderSide.BUY and high_px >= stop: fill_px = max(open_px, stop)
+                elif order.side == OrderSide.SELL and low_px <= stop: fill_px = min(open_px, stop)
+            elif order.order_type == OrderType.STOP_LIMIT:
+                stop, limit = float(order.stop_price), float(order.limit_price)
+                order.stop_triggered = order.stop_triggered or (order.side == OrderSide.BUY and high_px >= stop) or (order.side == OrderSide.SELL and low_px <= stop)
                 if order.stop_triggered:
-                    if order.side==OrderSide.BUY and low_px<=limit:fill_px=min(max(open_px,stop),limit)
-                    elif order.side==OrderSide.SELL and high_px>=limit:fill_px=max(min(open_px,stop),limit)
-            elif self.fill_model=="next_open":fill_px=open_px
-            if fill_px is not None:self._execute_fill(order,order.remaining_qty,self._slip(fill_px,order.side))
+                    if order.side == OrderSide.BUY and low_px <= limit: fill_px = min(max(open_px, stop), limit)
+                    elif order.side == OrderSide.SELL and high_px >= limit: fill_px = max(min(open_px, stop), limit)
+            elif self.fill_model == "next_open": fill_px = open_px
+            if fill_px is not None:
+                qty_to_fill = order.remaining_qty
+                if self.volume_constrained and volume > 0:
+                    max_fill = float(volume) * self.max_volume_pct
+                    qty_to_fill = min(qty_to_fill, max_fill)
+                if qty_to_fill > 0:
+                    self._execute_fill(order, qty_to_fill, self._slip(fill_px, order.side))

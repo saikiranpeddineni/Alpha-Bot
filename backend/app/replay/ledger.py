@@ -18,6 +18,7 @@ class ReplayLedger:
         self.risk_decisions: list[dict[str, Any]] = []
         self.orders: list[dict[str, Any]] = []
         self.fills: list[dict[str, Any]] = []
+        self.production_fills: list[dict[str, Any]] = []
         self.trades: list[dict[str, Any]] = []
         self.equity_curve: list[dict[str, Any]] = []
         self.timeline: list[dict[str, Any]] = []
@@ -30,10 +31,15 @@ class ReplayLedger:
             "SCANNER_CANDIDATE": self.candidates, "STRATEGY_SIGNAL": self.signals,
             "ML_DECISION": self.ml_decisions, "SPAWN_DECISION": self.spawn_decisions,
             "RISK_DECISION": self.risk_decisions, "ORDER_SUBMITTED": self.orders,
-            "FILL_EXECUTED": self.fills, "TRADE_CLOSED": self.trades,
+            "FILL_EXECUTED": self.fills, "PROD_FILL_RECORDED": self.production_fills,
+            "TRADE_CLOSED": self.trades,
         }
         if event_type in mapping:
             mapping[event_type].append(event)
+
+    def record_production_fill(self, timestamp: datetime, symbol: str, fill_details: dict[str, Any]) -> None:
+        """Record live telemetry fills for forensic comparison against simulated fills."""
+        self.record_event("PROD_FILL_RECORDED", timestamp, symbol.upper(), fill_details)
 
     def capture_publish(self, topic: str, payload: Any) -> None:
         """Capture production broadcasts as diagnostics only."""
@@ -111,4 +117,5 @@ class ReplayLedger:
         return {"production_ticks": self.production_ticks, "candidates": self.candidates, "signals": self.signals,
                 "ml_decisions": self.ml_decisions, "spawn_decisions": self.spawn_decisions,
                 "risk_decisions": self.risk_decisions, "orders": self.orders, "fills": self.fills,
-                "trades": self.trades, "equity_curve": self.equity_curve, "timeline": self.timeline}
+                "production_fills": self.production_fills, "trades": self.trades,
+                "equity_curve": self.equity_curve, "timeline": self.timeline}

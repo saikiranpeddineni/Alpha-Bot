@@ -33,12 +33,15 @@ class ReplayRuntime:
         self.feed = ReplayMarketFeed(data_path=data_path)
 
     def run_replay(self, start_date: str, end_date: str, symbols: list[str] | None = None,
-                   fill_model: str = "ohlc_touch", slippage_bps: float = 0.0, verify_parity_pass: bool = True) -> dict[str, Any]:
-        return asyncio.run(self.run_replay_async(start_date, end_date, symbols, fill_model, slippage_bps, verify_parity_pass))
+                   fill_model: str = "ohlc_touch", slippage_bps: float = 0.0, verify_parity_pass: bool = True,
+                   volume_constrained: bool = False, max_volume_pct: float = 0.05, warmup_bars: int = 0) -> dict[str, Any]:
+        return asyncio.run(self.run_replay_async(start_date, end_date, symbols, fill_model, slippage_bps, verify_parity_pass, volume_constrained, max_volume_pct, warmup_bars))
 
     async def run_replay_async(self, start_date: str, end_date: str, symbols: list[str] | None = None,
-                               fill_model: str = "ohlc_touch", slippage_bps: float = 0.0, verify_parity_pass: bool = True) -> dict[str, Any]:
-        config = {"start_date": start_date, "end_date": end_date, "symbols": symbols, "fill_model": fill_model, "slippage_bps": slippage_bps}
+                               fill_model: str = "ohlc_touch", slippage_bps: float = 0.0, verify_parity_pass: bool = True,
+                               volume_constrained: bool = False, max_volume_pct: float = 0.05, warmup_bars: int = 0) -> dict[str, Any]:
+        config = {"start_date": start_date, "end_date": end_date, "symbols": symbols, "fill_model": fill_model, "slippage_bps": slippage_bps,
+                  "volume_constrained": volume_constrained, "max_volume_pct": max_volume_pct, "warmup_bars": warmup_bars}
         self.session_manager.create_session(self.replay_id, start_date, end_date, config)
         self.session_manager.update_session(self.replay_id, status="RUNNING", progress_pct=2.0)
         parity: dict[str, Any] | None = None
@@ -71,13 +74,13 @@ class ReplayRuntime:
                 "model_asof_report": model_asof_report,
             })
             self.session_manager.update_session(self.replay_id, manifest=manifest)
-            a = await self._execute_single_pass(bars, fill_model, slippage_bps, "A", snapshot_db, snapshot_models)
+            a = await self._execute_single_pass(bars, fill_model, slippage_bps, "A", snapshot_db, snapshot_models, volume_constrained, max_volume_pct, warmup_bars)
             self.session_manager.update_session(self.replay_id, progress_pct=100.0)
             self._assert_meaningful_execution(a)
             
             summary = {"replay_id": self.replay_id, "status": "COMPLETED", "production_ticks": a.production_ticks,
                        "total_candidates": len(a.candidates), "total_signals": len(a.signals), "total_trades": len(a.trades),
-                       "total_orders": len(a.orders), "total_fills": len(a.fills), "final_equity": a.equity_curve[-1]["equity"],
+                       "total_orders": len(a.orders), "total_fills": len(a.fills), "final_equity": a.equity_curve[-1]["equity"] if a.equity_curve else 100000.0,
                        "parity_verdict": "SKIPPED", "state_hash": "N/A",
                        "stage_matches": {}, "first_divergence": None}
             self.session_manager.update_session(self.replay_id, status="COMPLETED", progress_pct=100.0, summary=summary)
@@ -91,13 +94,15 @@ class ReplayRuntime:
             shutil.rmtree(run_snapshot, ignore_errors=True)
 
     async def _execute_single_pass(self, bars: list[dict[str, Any]], fill_model: str, slippage_bps: float,
-                                   pass_name: str, snapshot_db: Path, snapshot_models: Path) -> ReplayLedger:
+                                   pass_name: str, snapshot_db: Path, snapshot_models: Path,
+                                   volume_constrained: bool = False, max_volume_pct: float = 0.05, warmup_bars: int = 0) -> ReplayLedger:
         replay_bars = [b for b in bars if b.get("in_replay_window", True)]
         if not replay_bars:
             raise RuntimeError("No bars in requested replay window")
         first_ts = replay_bars[0]["ts_dt"]
         clock, data = ReplayClock(first_ts, always_open=False), ReplayDataManager(bars)
-        broker = ReplayBroker(float(getattr(self.settings, "paper_starting_cash", 100000.0)), slippage_bps, fill_model)
+        broker = ReplayBroker(float(getattr(self.settings, "paper_starting_cash", 100000.0)), slippage_bps, fill_model,
+                              volume_constrained=volume_constrained, max_volume_pct=max_volume_pct)
         ledger = ReplayLedger(f"{self.replay_id}:{pass_name}"); broker.attach_ledger(ledger)
         tmp_path = Path(tempfile.mkdtemp(prefix="alpha_replay_"))
         replay_db: Database | None = None
@@ -123,7 +128,7 @@ class ReplayRuntime:
                 engine.model = SignalModel(replay_models)
                 await self._initialize_engine(engine, clock, broker, data, ledger, replay_models)
             by_ts: dict[datetime, list[dict[str, Any]]] = defaultdict(list)
-            for bar in replay_bars: by_ts[bar["ts_dt"]].append(bar)
+            for bar in bars: by_ts[bar["ts_dt"]].append(bar)
 
             class ContextAwareDateTime(datetime):
                 @classmethod
@@ -148,16 +153,22 @@ class ReplayRuntime:
                 for idx, ts in enumerate(sorted(by_ts)):
                     if self.session_manager.is_cancelled(self.replay_id): raise RuntimeError("Replay cancelled")
                     clock.set_time(ts); data.set_time(ts)
-                    for bar in sorted(by_ts[ts], key=lambda b: b["symbol"]):
+                    ts_bars = by_ts[ts]
+                    is_replay_window = any(b.get("in_replay_window", True) for b in ts_bars)
+                    for bar in sorted(ts_bars, key=lambda b: b["symbol"]):
                         close = float(bar.get("close", bar.get("c")))
-                        broker.process_ohlc(bar["symbol"], float(bar.get("open", bar.get("o", close))), float(bar.get("high", bar.get("h", close))), float(bar.get("low", bar.get("l", close))), close, ts)
+                        vol = float(bar.get("volume", bar.get("v", 0.0)))
+                        broker.process_ohlc(bar["symbol"], float(bar.get("open", bar.get("o", close))),
+                                            float(bar.get("high", bar.get("h", close))),
+                                            float(bar.get("low", bar.get("l", close))), close, ts, volume=vol)
                     await engine._tick()
                     spawn = getattr(getattr(engine, "shadow_research", None), "spawn", None)
                     if spawn is not None and spawn.running:
                         await spawn.queue.join()
-                    ledger.production_ticks += 1
-                    acct, positions = await broker.account(), await broker.positions()
-                    ledger.record_equity(ts, acct.equity, acct.cash, acct.buying_power, len(positions))
+                    if is_replay_window:
+                        ledger.production_ticks += 1
+                        acct, positions = await broker.account(), await broker.positions()
+                        ledger.record_equity(ts, acct.equity, acct.cash, acct.buying_power, len(positions))
                     if idx % 100 == 0:
                         self.session_manager.update_session(self.replay_id, progress_pct=min(49.0, 5.0 + 44.0 * idx / max(1, len(by_ts))))
             await self._stop_replay_engine(engine)
