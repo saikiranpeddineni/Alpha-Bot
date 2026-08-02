@@ -833,7 +833,8 @@ class TradingEngine:
         except Exception:
             _is_regular_session = 9 * 60 + 30 <= et_mins <= 16 * 60
 
-        if _is_regular_session:
+        _is_replay = type(self.clock).__name__ == "ReplayClock"
+        if _is_regular_session and not _is_replay:
             for sym in self.watchlist:
                 sym_upper = sym.upper()
                 if sym_upper in new_closed and not new_closed[sym_upper].empty:
@@ -3646,7 +3647,7 @@ class TradingEngine:
                 any_fresh = any(symbols_fresh.values())
                 if not any_fresh:
                     diagnostics["market_data_fresh"] = False
-                    if self.mode != "demo":
+                    if self.mode != "demo" and type(self.clock).__name__ != "ReplayClock":
                         self.allow_new_entries = False
                     applog.warning(
                         "engine.heartbeat",
