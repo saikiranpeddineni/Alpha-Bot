@@ -228,7 +228,7 @@ class ReplayRuntime:
             original_on_bar = strategy.on_bar
             def observed_on_bar(ctx, symbol, df, _orig=original_on_bar, _name=strategy.name):
                 sig = _orig(ctx, symbol, df)
-                if sig is not None and clock.now_utc().strftime("%Y-%m-%d") >= start_date_str:
+                if sig is not None and (not ledger.start_date or clock.now_utc().strftime("%Y-%m-%d") >= ledger.start_date):
                     details = sig.model_dump(mode="json") if hasattr(sig, "model_dump") else {"strategy": _name, "action": str(getattr(sig, "action", "")), "price": getattr(sig, "price", None)}
                     ledger.record_event("STRATEGY_SIGNAL", clock.now_utc(), str(getattr(sig, "symbol", symbol)), details)
                 return sig
@@ -237,7 +237,7 @@ class ReplayRuntime:
         original_evaluate_entry = engine.risk.evaluate_entry
         def observed_evaluate_entry(signal, ctx, bars, now=None, kelly_override=None):
             decision = original_evaluate_entry(signal, ctx, bars, now=now, kelly_override=kelly_override)
-            if (now or clock.now_utc()).strftime("%Y-%m-%d") >= start_date_str:
+            if not ledger.start_date or (now or clock.now_utc()).strftime("%Y-%m-%d") >= ledger.start_date:
                 details = decision.model_dump(mode="json") if hasattr(decision, "model_dump") else {"allowed": getattr(decision, "allowed", None), "reason": getattr(decision, "reason", None), "qty": getattr(decision, "qty", None)}
                 details["candidate_id"] = getattr(signal, "candidate_id", None)
                 details["strategy"] = getattr(signal, "strategy", None)
