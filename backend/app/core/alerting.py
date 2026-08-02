@@ -63,6 +63,18 @@ class SlackAlerter:
         response = await self._client.post(self.webhook_url, json=payload)
         response.raise_for_status()
 
+    async def send_startup_ping(self):
+        if not self._client or not self.webhook_url:
+            return
+        
+        payload = {
+            "text": "🟢 *Alpha-Bot Engine Started* - Slack alerting is connected and live!"
+        }
+        try:
+            await self._client.post(self.webhook_url, json=payload)
+        except Exception as exc:
+            print(f"[SlackAlerter] Failed to send startup ping: {exc}")
+
 # Singleton for application lifecycle
 slack_alerter: Optional[SlackAlerter] = None
 
@@ -73,6 +85,9 @@ async def init_alerting(webhook_url: str):
         await slack_alerter.start()
         # Subscribe to global logger
         applog.subscribe(slack_alerter.handle_log)
+        
+        # Fire and forget startup ping
+        asyncio.create_task(slack_alerter.send_startup_ping())
 
 async def stop_alerting():
     global slack_alerter
