@@ -24,7 +24,8 @@ from app.pis import (
 from app.core.domain import Position
 
 
-def test_long_and_short_exit_harvest() -> None:
+@pytest.mark.asyncio
+async def test_long_and_short_exit_harvest() -> None:
     """Verify long and short positions manage exits correctly through PISEngineAdapter."""
     adapter = PISEngineAdapter()
     import pandas as pd
@@ -35,7 +36,7 @@ def test_long_and_short_exit_harvest() -> None:
         {"high": 106.0, "low": 104.0, "close": 105.0, "volume": 5000, "atr": 2.0}
     ])
 
-    order_long, dec_long = adapter.evaluate_position_exit(
+    order_long, dec_long = await adapter.evaluate_position_exit(
         position=pos_long, bar_df=df_long, initial_stop=95.0
     )
     assert dec_long.symbol == "AAPL"
@@ -47,14 +48,15 @@ def test_long_and_short_exit_harvest() -> None:
         {"high": 192.0, "low": 188.0, "close": 190.0, "volume": 8000, "atr": 4.0}
     ])
 
-    order_short, dec_short = adapter.evaluate_position_exit(
+    order_short, dec_short = await adapter.evaluate_position_exit(
         position=pos_short, bar_df=df_short, initial_stop=210.0
     )
     assert dec_short.symbol == "TSLA"
     assert dec_short.target_stop_loss <= 210.0
 
 
-def test_gap_open_and_down_scenarios() -> None:
+@pytest.mark.asyncio
+async def test_gap_open_and_down_scenarios() -> None:
     """Verify protection breach triggers FULL_EXIT on gap down for long position."""
     adapter = PISEngineAdapter()
     import pandas as pd
@@ -65,7 +67,7 @@ def test_gap_open_and_down_scenarios() -> None:
         {"high": 90.0, "low": 87.0, "close": 88.0, "volume": 20000, "atr": 3.0}
     ])
 
-    order, decision = adapter.evaluate_position_exit(
+    order, decision = await adapter.evaluate_position_exit(
         position=pos, bar_df=df_gap, initial_stop=95.0, current_stop=95.0
     )
 

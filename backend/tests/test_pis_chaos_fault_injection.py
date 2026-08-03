@@ -25,7 +25,8 @@ from app.pis import (
 )
 
 
-def test_corrupted_market_data_resilience() -> None:
+@pytest.mark.asyncio
+async def test_corrupted_market_data_resilience() -> None:
     """Verify PIS gracefully handles corrupted market data without state corruption."""
     adapter = PISEngineAdapter()
     pos = Position(symbol="AAPL", qty=100, avg_entry_price=150.0, market_price=152.0)
@@ -37,7 +38,7 @@ def test_corrupted_market_data_resilience() -> None:
     ])
 
     # Should not crash or produce non-finite decision metrics
-    order_req, decision = adapter.evaluate_position_exit(
+    order_req, decision = await adapter.evaluate_position_exit(
         position=pos,
         bar_df=df_corrupt,
         initial_stop=140.0,

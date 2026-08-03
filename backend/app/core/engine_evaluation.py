@@ -3,14 +3,20 @@
 from __future__ import annotations
 import asyncio
 import json
+import uuid
+from functools import partial
 from datetime import datetime, timedelta, timezone, UTC
 from typing import Any
 import pandas as pd
 from app.core.domain import Signal, SignalAction, Position, OrderRequest, OrderSide, OrderType, Order
 from app.core.logging import applog
-from app.indicators.ta import enrich
+from app.core.shadow_ledger import ShadowLedger
+from app.indicators.ta import enrich, compute_relative_strength
+from app.indicators.vwap_telemetry import compute_vwap_telemetry
+from app.indicators.slot_volume import SlotVolumeEngine
 from app.ai.regime import detect_regime
 from app.strategies import SignalPipeline, StrategyContext
+from app.strategies.evaluator import ParallelEvidenceEvaluator
 
 class TradingEngineEvaluationMixin:
     async def _evaluate_symbol(self, symbol: str, position, equity: float, now: datetime) -> list[tuple[Signal, pd.DataFrame]]:  # noqa: ANN001
@@ -39,6 +45,11 @@ class TradingEngineEvaluationMixin:
                 self._position_troughs[symbol] = position.avg_entry_price
                 self._position_initial_stops[symbol] = position.stop_loss
 
+            # Fetch live news sentiment if provider supports it
+            news_sentiment = 0.0
+            if hasattr(self.data, "get_news_sentiment"):
+                news_sentiment = await self.data.get_news_sentiment(symbol)
+
             # Route all positions (winners and losers) through PIS for local safety-net evaluation
             try:
                 pis_order, pis_decision = await self.pis_adapter.evaluate_position_exit(
@@ -47,6 +58,7 @@ class TradingEngineEvaluationMixin:
                     initial_stop=self._position_initial_stops.get(symbol),
                     take_profit=self._position_take_profits.get(symbol),
                     current_stop=None,
+                    news_sentiment=news_sentiment,
                 )
                 if pis_order is not None:
                     applog.info("engine", f"{symbol}: PIS Unified Exit triggered: {pis_order.reason}")
@@ -117,7 +129,6 @@ class TradingEngineEvaluationMixin:
             rs_score = None  # graceful fallback — pipeline treats None as neutral 50
 
         # Assign a unique candidate ID to all candidate entry signals first (shared UUID)
-        import uuid
         for sig in signals:
             if sig.action != SignalAction.EXIT:
                 if getattr(sig, "candidate_id", None) is None:
@@ -199,8 +210,6 @@ class TradingEngineEvaluationMixin:
                 except Exception as exc:
                     applog.error("engine.evaluator", f"ParallelEvidenceEvaluator failed for {symbol} {sig.strategy}: {exc}")
 
-        import asyncio
-        from functools import partial
         accepted, rejected = await asyncio.to_thread(
             partial(self.pipeline.process, symbol, df, signals, regime, sector_strength=rs_score)
         )

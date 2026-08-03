@@ -38,7 +38,7 @@ def make_fixed_dataset() -> list[dict]:
     return dataset
 
 
-def run_pipeline_iteration(dataset: list[dict]) -> list[dict]:
+async def run_pipeline_iteration(dataset: list[dict]) -> list[dict]:
     """Execute single pass of position evaluation over dataset."""
     config = PISConfig(history_max_len=100)
     service = PISService(config=config)
@@ -57,7 +57,7 @@ def run_pipeline_iteration(dataset: list[dict]) -> list[dict]:
 
     for i in range(1, len(dataset)):
         df = pd.DataFrame(dataset[: i + 1])
-        _, decision = adapter.evaluate_position_exit(
+        _, decision = await adapter.evaluate_position_exit(
             position=pos,
             bar_df=df,
             initial_stop=initial_stop,
@@ -77,16 +77,17 @@ def run_pipeline_iteration(dataset: list[dict]) -> list[dict]:
     return results
 
 
-def test_deterministic_regression_suite_5_runs() -> None:
+@pytest.mark.asyncio
+async def test_deterministic_regression_suite_5_runs() -> None:
     """Run 5 repeated iterations of pipeline over fixed dataset and assert 100% identity."""
     dataset = make_fixed_dataset()
 
-    base_run = run_pipeline_iteration(dataset)
+    base_run = await run_pipeline_iteration(dataset)
     assert len(base_run) > 0
 
     # Repeat 4 more times
     for run_idx in range(2, 6):
-        current_run = run_pipeline_iteration(dataset)
+        current_run = await run_pipeline_iteration(dataset)
         assert len(current_run) == len(base_run), f"Run {run_idx} length mismatch"
 
         for step_idx, (r_base, r_cur) in enumerate(zip(base_run, current_run)):

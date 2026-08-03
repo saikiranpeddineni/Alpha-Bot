@@ -86,6 +86,16 @@ class ExitPlanner:
             elif side < 0 and obs.low <= obs.take_profit:
                 target_hit = True
 
+        # --- DYNAMIC PROFIT EXTENSION ---
+        # If the target is hit but the stock is exceptionally strong, we extend the trade
+        # by converting it into a runner dynamically.
+        target_extended = False
+        if target_hit and not is_runner:
+            if health.overall >= 0.80 or health.momentum_score >= 0.80 or health.news_sentiment >= 0.70:
+                target_extended = True
+                target_hit = False  # Override the exit, force HOLD
+                is_runner = True    # Upgrade to runner status for future trailing
+
         # Determine exit action
         if protection_breached or lifecycle == LifecycleState.EXIT_CANDIDATE:
             action = ExitAction.FULL_EXIT

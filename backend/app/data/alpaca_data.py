@@ -8,6 +8,7 @@ backtesting and ML training.
 from __future__ import annotations
 
 import asyncio
+import random
 from datetime import UTC, datetime, timedelta
 
 import pandas as pd
@@ -49,6 +50,14 @@ class AlpacaDataProvider(DataProvider):
         except Exception:
             pass
         self._snapshot_fail_counts: dict[str, int] = {}  # consecutive parse-failure counts per symbol
+        self._news_cache: dict[str, tuple[float, datetime]] = {}  # symbol -> (sentiment_score, timestamp)
+        
+        # Initialize Sentiment Analyzer
+        try:
+            from app.pis.sentiment import NewsSentimentAnalyzer
+            self._sentiment_analyzer = NewsSentimentAnalyzer()
+        except ImportError:
+            self._sentiment_analyzer = None
 
     def _fetch_bars(self, symbol: str, timeframe: str, start: datetime, end: datetime) -> pd.DataFrame:
         from alpaca.data.enums import DataFeed
@@ -87,8 +96,8 @@ class AlpacaDataProvider(DataProvider):
             days = 5 if timeframe != "1Day" else 365
             start = end - timedelta(days=days)
 
-        retries = 5
-        backoff = 1.0
+        retries = 8
+        backoff = 2.0
         for attempt in range(retries):
             try:
                 df = await asyncio.to_thread(self._fetch_bars, symbol.upper(), timeframe, start, end)
@@ -114,17 +123,50 @@ class AlpacaDataProvider(DataProvider):
                     or "ssl" in exc_str                  # transient TLS handshake drops
                 )
                 if _is_transient and attempt < retries - 1:
-                    wait = backoff * (2 ** attempt)  # 1 s, 2 s, 4 s, 8 s
+                    wait = backoff * (2 ** attempt) + random.uniform(0.1, 1.0)
                     applog.warning(
                         "data.alpaca",
                         f"{symbol}: bars transient error (attempt {attempt + 1}/{retries},"
-                        f" retry in {wait:.0f}s): {exc}",
+                        f" retry in {wait:.1f}s): {exc}",
                     )
                     await asyncio.sleep(wait)
                     continue
                 applog.error("data.alpaca", f"{symbol}: bars failed: {exc}")
                 break
         return empty_bars()
+
+    async def get_news_sentiment(self, symbol: str) -> float:
+        """Fetches recent news for a symbol and returns a sentiment score, caching for 5 minutes."""
+        if not self._sentiment_analyzer:
+            return 0.0
+            
+        now = datetime.now(UTC)
+        if symbol in self._news_cache:
+            score, cached_time = self._news_cache[symbol]
+            if (now - cached_time).total_seconds() < 300:  # 5 minute cache
+                return score
+                
+        def fetch():
+            import requests
+            url = f"https://data.alpaca.markets/v1beta1/news?symbols={symbol}&limit=5"
+            headers = {
+                "APCA-API-KEY-ID": self._client._api_key,
+                "APCA-API-SECRET-KEY": self._client._secret_key
+            }
+            try:
+                resp = requests.get(url, headers=headers, timeout=5.0)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    news = data.get('news', [])
+                    return [n['headline'] for n in news]
+            except Exception as e:
+                applog.error("data.alpaca", f"News fetch failed for {symbol}: {e}")
+            return []
+            
+        headlines = await asyncio.to_thread(fetch)
+        score = self._sentiment_analyzer.analyze_headlines(headlines)
+        self._news_cache[symbol] = (score, now)
+        return score
 
     async def discover_assets(self) -> tuple[DiscoverableAsset, ...]:
         """Fetch Alpaca's active US-equity asset metadata for bounded discovery.

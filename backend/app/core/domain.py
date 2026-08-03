@@ -79,12 +79,7 @@ class Signal(BaseModel):
     discovery_source: str | None = None
     scanner_score: float | None = None
     scanner_auc: float | None = None
-    target_d_probability: float | None = None
-    target_d_gate_decision: str | None = None
-    target_d_disagreement: str | None = None
 
-    # Read-only compatibility evidence for the shadow-spawn bridge. These derive
-    # exclusively from existing production fields and do not change decisions.
     @property
     def side(self) -> str:
         if self.action == SignalAction.ENTER_LONG:

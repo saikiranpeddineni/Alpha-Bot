@@ -75,14 +75,16 @@ class TradeHealthEvaluator:
         # 4. Volume Score: volume presence
         volume_score = 0.7 if obs.volume > 0 else 0.5
 
-        # Weighted overall composite health
+        # Weighted overall composite health (inject news sentiment if extreme)
+        # If sentiment is very high, it boosts overall health. If very low, it drags it down.
+        sentiment_boost = obs.news_sentiment_score * 0.2
         overall = (
             trend_score * 0.45
             + momentum_score * 0.30
             + volatility_score * 0.15
             + volume_score * 0.10
         )
-        overall = max(0.0, min(1.0, overall))
+        overall = max(0.0, min(1.0, overall + sentiment_boost))
 
         return TradeHealth(
             overall=overall,
@@ -90,4 +92,5 @@ class TradeHealthEvaluator:
             momentum_score=momentum_score,
             volatility_score=volatility_score,
             volume_score=volume_score,
+            news_sentiment=obs.news_sentiment_score,
         )

@@ -12,7 +12,6 @@ class ProductionParityValidator:
         ("scanner_hash", "candidates"),
         ("strategy_hash", "signals"),
         ("ml_hash", "ml_decisions"),
-        ("spawn_hash", "spawn_decisions"),
         ("risk_hash", "risk_decisions"),
         ("order_hash", "orders"),
         ("fill_hash", "fills"),
