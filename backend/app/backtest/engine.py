@@ -148,7 +148,6 @@ def compute_decision_artifacts_manifest(
     models_dir: Path | None,
     active_policy: dict | None = None,
     challenger_policies: list | None = None,
-    spawned_strategies: list | None = None,
 ) -> tuple[dict, str]:
     import hashlib
     import json
@@ -158,7 +157,6 @@ def compute_decision_artifacts_manifest(
         "meta_label_models": {},
         "active_policy": active_policy or {},
         "challengers": challenger_policies or [],
-        "spawned_strategies": spawned_strategies or [],
     }
     h = hashlib.sha256()
 
@@ -179,7 +177,6 @@ def compute_decision_artifacts_manifest(
     # Fingerprint policy and challenger configuration
     h.update(json.dumps(active_policy or {}, sort_keys=True).encode())
     h.update(json.dumps(challenger_policies or [], sort_keys=True).encode())
-    h.update(json.dumps(spawned_strategies or [], sort_keys=True).encode())
 
     decision_artifacts_sha = h.hexdigest()
     return manifest, decision_artifacts_sha
