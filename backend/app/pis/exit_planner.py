@@ -68,16 +68,6 @@ class ExitPlanner:
             elif side < 0 and price >= target_stop:
                 protection_breached = True
 
-        # -----------------------------------------------------------------------
-        # Evidence Gate: suppress exits until minimum bars have been observed.
-        # Hard stop (PROTECTION_BREACH) always bypasses this gate — we never hold
-        # a position whose price has crossed its protective stop.
-        # -----------------------------------------------------------------------
-        evidence_gate_active = (
-            history_len < self.config.min_bars_before_exit
-            and not protection_breached
-        )
-
         # Check protection floor ratchet update
         protection_updated = False
         if obs.current_stop is not None and target_stop > 0:
@@ -107,17 +97,7 @@ class ExitPlanner:
                 is_runner = True    # Upgrade to runner status for future trailing
 
         # Determine exit action
-        # If the evidence gate is active (not enough bars yet), suppress all exits
-        # except PROTECTION_BREACH (hard stop). Let PIS observe and only output
-        # HOLD or UPDATE_PROTECTION during the minimum warmup window.
-        if evidence_gate_active:
-            if protection_updated:
-                action = ExitAction.UPDATE_PROTECTION
-                exit_ratio = 0.0
-            else:
-                action = ExitAction.HOLD
-                exit_ratio = 0.0
-        elif protection_breached or lifecycle == LifecycleState.EXIT_CANDIDATE:
+        if protection_breached or lifecycle == LifecycleState.EXIT_CANDIDATE:
             action = ExitAction.FULL_EXIT
             exit_ratio = 1.0
         elif target_hit and not is_runner:

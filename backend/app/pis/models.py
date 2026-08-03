@@ -234,11 +234,6 @@ class PISConfig:
     price_buffer_pct: float = 0.0002
     min_price_buffer_abs: float = 0.01
     profit_harvesting_mode: bool = True
-    # Minimum bars PIS must observe before it may trigger FULL_EXIT or PARTIAL_EXIT.
-    # During bars 1..N, PIS tracks health/thesis/protection but only outputs HOLD or
-    # UPDATE_PROTECTION.  PROTECTION_BREACH (hard stop hit) always overrides this gate.
-    # 10 bars = 10 minutes on 1-min bars — enough evidence for a real decision.
-    min_bars_before_exit: int = 10
 
     def validate(self) -> None:
         """Validate startup configuration boundaries.
@@ -260,5 +255,3 @@ class PISConfig:
             raise ValueError(f"min_breathing_room_r must be >= 0, got {self.min_breathing_room_r}")
         if self.health_distribution_threshold >= self.health_weakening_threshold:
             raise ValueError("health_distribution_threshold must be < health_weakening_threshold")
-        if self.min_bars_before_exit < 1:
-            raise ValueError(f"min_bars_before_exit must be >= 1, got {self.min_bars_before_exit}")
