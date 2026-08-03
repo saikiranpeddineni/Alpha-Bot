@@ -294,11 +294,42 @@ def main():
             "legacy_reason": p.get("exit_reason", ""),
         })
 
-    trades = [r for r in records
-              if r["entry_price"] and r["exit_price"] and r["entry_at"] and r["exit_at"]
-              and float(r["qty"]) > 0]
-    print(f"Valid trades with full entry/exit data: {len(trades)}")
+    # Step 1: keep only valid records with all required fields
+    records_valid = [
+        r for r in records
+        if r["entry_price"] and r["exit_price"] and r["entry_at"] and r["exit_at"]
+        and float(r["qty"]) > 0
+    ]
+
+    # Step 2: paper mode only — demo prices are synthetic and don't map to real bars
+    records_paper = [r for r in records_valid if r["mode"] == "paper"]
+
+    # Step 3: exclude raw broker fill records and manual closes
+    #         (strategy='alpaca' or 'manual' are not bot-generated positions)
+    BOT_STRATEGIES = {"orb", "momentum", "rsi2_reversion", "bb_squeeze",
+                      "vwap_reversion", "rsi_reversion", "mean_reversion"}
+    records_strategy = [r for r in records_paper
+                        if str(r.get("strategy", "")).lower() in BOT_STRATEGIES]
+
+    # Step 4: deduplicate — one unique completed position per (symbol, entry_at, side)
+    #         The trades table stores multiple order legs per position; we want exactly one.
+    seen = set()
+    trades = []
+    for r in records_strategy:
+        # Round entry_at to minute precision for dedup key
+        ea = str(r["entry_at"])[:16]
+        key = (r["symbol"], ea, r["side"])
+        if key not in seen:
+            seen.add(key)
+            trades.append(r)
+
+    print(f"\nRaw records from DB       : {len(records)}")
+    print(f"Valid (fields present)    : {len(records_valid)}")
+    print(f"Paper mode only           : {len(records_paper)}")
+    print(f"Bot strategy trades only  : {len(records_strategy)}")
+    print(f"Deduplicated positions    : {len(trades)}  ← these will be replayed")
     print(f"\nStarting replay through new PIS code...\n")
+
 
     bconn   = sqlite3.connect(str(QA_BARS_DB))
     results = []
