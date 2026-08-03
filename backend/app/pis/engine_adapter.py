@@ -43,6 +43,7 @@ class PISEngineAdapter:
         take_profit: Optional[float] = None,
         current_stop: Optional[float] = None,
         timestamp: Optional[datetime] = None,
+        news_sentiment: float = 0.0,
     ) -> Tuple[Optional[OrderRequest], PISDecision]:
         """Evaluate a position for discretionary exit and stop loss updates.
 
@@ -133,6 +134,7 @@ class PISEngineAdapter:
             current_stop=current_stop,
             take_profit=take_profit,
             r_multiple=r_multiple,
+            news_sentiment_score=news_sentiment,
         )
 
         from app.db.database import Database

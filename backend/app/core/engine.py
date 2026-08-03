@@ -33,8 +33,6 @@ from functools import partial
 import pandas as pd
 
 from app.ai.insights import InsightEngine
-from app.research.event_builder import candidate_event_from_signal, market_bar_event
-from app.research.shadow_runtime import ShadowResearchRuntime
 from app.ai.model import SignalModel
 from app.ai.regime import detect_regime
 from app.ai.trainer import ContinuousTrainer
@@ -119,13 +117,6 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         self.strategies: list[Strategy] = create_strategies(db.get_setting("strategies"))
 
         self.recent_orders: deque[Order] = deque(maxlen=200)
-        # One explicit production-to-research boundary. Research receives only
-        # immutable value snapshots and has no execution-result channel.
-        self.shadow_research = ShadowResearchRuntime(
-            db=self.db,
-            gemini_api_key=settings.gemini_api_key,
-            gemini_observation_sink=self._persist_gemini_shadow_observation,
-        )
         self._regimes: dict[str, Regime] = {}
         self._position_peaks: dict[str, float] = {}
         self._position_troughs: dict[str, float] = {}
@@ -439,7 +430,6 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         )
         self._last_train_date = None
         self.state = EngineState.RUNNING
-        await self.shadow_research.start()
         self._task = asyncio.create_task(self._run_loop(), name="trading-engine")
         applog.info(
             "engine",
@@ -490,15 +480,6 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                 await self._drain_fills(utcnow())
             except Exception as exc:  # noqa: BLE001
                 applog.error("engine", f"flatten on stop failed: {exc}")
-        shadow_runtime = getattr(self, "shadow_research", None)
-        shadow_stop = getattr(shadow_runtime, "stop", None) if shadow_runtime is not None else None
-        if callable(shadow_stop):
-            try:
-                stop_result = shadow_stop()
-                if inspect.isawaitable(stop_result):
-                    await stop_result
-            except Exception as exc:
-                applog.warning("engine", f"Shadow research stop failed open: {exc}")
         if self.state != EngineState.HALTED:
             self.state = EngineState.STOPPED
         applog.info("engine", "Engine stopped")
@@ -563,7 +544,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         try:
             get_session_close(now)
             is_trading_day = True
-        except ValueError:
+        except Exception:
             pass
 
         # Resolve durable ambiguous submissions before heartbeat evaluates broker/local
@@ -695,28 +676,6 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                     # Fresh bar arrived — clear gap flag
                     self._last_data_bar_ts[sym_upper] = now
                     self._data_gap_symbols.discard(sym_upper)
-                    # Mirror the exact completed market bar through the canonical
-                    # non-blocking research boundary. Never manufacture missing OHLC.
-                    try:
-                        bar_df = new_closed[sym_upper]
-                        last_row = bar_df.iloc[-1]
-                        bar_ts = bar_df.index[-1].to_pydatetime()
-                        if bar_ts.tzinfo is None:
-                            bar_ts = bar_ts.replace(tzinfo=timezone.utc)
-                        required = ("open", "high", "low", "close")
-                        if all(name in last_row and pd.notna(last_row[name]) for name in required):
-                            self.shadow_research.publish(market_bar_event(
-                                symbol=sym_upper,
-                                ts=bar_ts,
-                                open_=float(last_row["open"]),
-                                high=float(last_row["high"]),
-                                low=float(last_row["low"]),
-                                close=float(last_row["close"]),
-                                atr=float(last_row["atr14"]) if "atr14" in last_row and pd.notna(last_row["atr14"]) else None,
-                                rsi=float(last_row["rsi2"]) if "rsi2" in last_row and pd.notna(last_row["rsi2"]) else None,
-                            ))
-                    except Exception as exc:
-                        applog.debug("shadow_research", f"market-bar mirror failed open for {sym_upper}: {exc}")
                 elif sym_upper in self._last_data_bar_ts:
                     last_ts = self._last_data_bar_ts[sym_upper]
                     # Protect against overnight clock jumps in replay mode
@@ -941,39 +900,6 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                 # Re-inject pre-filtered rejections so they are properly mirrored and logged
                 decision_outcome.gated_entries.extend(pre_gated_entries)
 
-                # Mirror every post-allocation candidate once through the typed bus.
-                # This preserves Champion behavior: publishing is put_nowait/fail-open and
-                # no research result is read by portfolio, risk, or broker code.
-                approved_ids = {getattr(sig, "candidate_id", None) for sig, _ in decision_outcome.approved_entries}
-                gated_reasons = {getattr(sig, "candidate_id", None): reason for sig, reason in decision_outcome.gated_entries}
-                for ordinal, (sig, df) in enumerate(candidates):
-                    try:
-                        latest_row = df.iloc[-1] if not df.empty else None
-                        cid = getattr(sig, "candidate_id", None)
-                        approved = cid in approved_ids
-                        event = candidate_event_from_signal(
-                            sig,
-                            final_decision="accepted" if approved else "rejected",
-                            rejection_reason=None if approved else gated_reasons.get(cid, "portfolio/allocation rejected"),
-                            open_=float(latest_row["open"]) if latest_row is not None and "open" in latest_row and pd.notna(latest_row["open"]) else None,
-                            high=float(latest_row["high"]) if latest_row is not None and "high" in latest_row and pd.notna(latest_row["high"]) else None,
-                            low=float(latest_row["low"]) if latest_row is not None and "low" in latest_row and pd.notna(latest_row["low"]) else None,
-                            close=float(latest_row["close"]) if latest_row is not None and "close" in latest_row and pd.notna(latest_row["close"]) else None,
-                            atr=float(latest_row["atr14"]) if latest_row is not None and "atr14" in latest_row and pd.notna(latest_row["atr14"]) else None,
-                            rsi=float(latest_row["rsi2"]) if latest_row is not None and "rsi2" in latest_row and pd.notna(latest_row["rsi2"]) else None,
-                            meta_probability=getattr(sig, "meta_probability", None),
-                            portfolio_decision="PASS" if approved else "REJECT",
-                            equity=float(account.equity),
-                            cash=float(account.cash),
-                            buying_power=float(account.buying_power),
-                            vix=self._last_vix_value,
-                            vix_status=self._last_vix_status,
-                            ordinal=ordinal,
-                        )
-                        self.shadow_research.publish(event)
-                    except Exception as exc:
-                        applog.debug("shadow_research", f"candidate mirror failed open for {sig.symbol}: {exc}")
-
                 # Process gated/rejected entries
                 for sig, reason in decision_outcome.gated_entries:
                     applog.info("engine", f"{sig.symbol}: Portfolio Gate/Allocator rejected -- {reason}")
@@ -1060,6 +986,9 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                                     continue
 
                             client_order_id = decision.order.client_order_id
+                            if not client_order_id:
+                                client_order_id = f"ad-ent-{sig.symbol}-{sig.action.value}-{sig.strategy}-{now.strftime('%Y%m%d%H%M%S')}"
+                                decision.order.client_order_id = client_order_id
                             self.pending_reconciliation_orders[client_order_id] = {
                                 "symbol": decision.order.symbol.upper(),
                                 "client_order_id": client_order_id,
@@ -1526,7 +1455,6 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
             "trainer": self.trainer.status if self.trainer else {"training_in_progress": False, "last_trained": None, "last_result": {}},
             "live_trading_enabled": self.settings.enable_live_trading,
             "has_alpaca_keys": self.settings.has_alpaca_keys,
-            "shadow_research": self.shadow_research.telemetry(),
             "tick": self._tick_count,
             "last_error": self.last_error,
             "reconciliation_failed": getattr(self, "reconciliation_failed", False),
@@ -1934,6 +1862,9 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                     if not recovery_strategy or recovery_strategy in {"alpaca", "emergency_protection"}:
                         recovery_strategy = "reconciled"
 
+                    if not client_order_id:
+                        client_order_id = f"ad-rec-{p.symbol}-{side}-{now.strftime('%Y%m%d%H%M%S')}"
+                        
                     req = OrderRequest(
                         symbol=p.symbol,
                         side=side,
@@ -2887,7 +2818,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
             try:
                 get_session_close(now)
                 is_trading_day = True
-            except ValueError:
+            except Exception:
                 pass
 
             if is_trading_day and market_open_minutes <= market_minutes <= market_close_minutes and not is_synthetic:
@@ -3096,7 +3027,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                         await asyncio.to_thread(
                             self.db.save_portfolio_checkpoint, 
                             self.settings.mode, 
-                            self.portfolio.checkpoint(risk_state=self.risk_manager.get_risk_state() if self.risk_manager else {})
+                            self.portfolio.checkpoint(risk_state=self.risk.get_risk_state() if hasattr(self, "risk") and self.risk else {})
                         )
                     except Exception as exc:
                         applog.error("engine.heartbeat", f"Auto-reconciliation: Failed to commit checkpoint: {exc}")

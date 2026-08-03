@@ -182,9 +182,6 @@ class ReplayRuntime:
                                             float(bar.get("low", bar.get("l", close))), close, ts, volume=vol)
                     engine.allow_new_entries = is_replay_window
                     await engine._tick()
-                    spawn = getattr(getattr(engine, "shadow_research", None), "spawn", None)
-                    if spawn is not None and spawn.running:
-                        await spawn.queue.join()
                     if is_replay_window:
                         ledger.production_ticks += 1
                         acct, positions = await broker.account(), await broker.positions()
@@ -203,8 +200,6 @@ class ReplayRuntime:
 
     @staticmethod
     async def _stop_replay_engine(engine: TradingEngine) -> None:
-        coordinator = getattr(engine, "spawn_coordinator", None)
-        if coordinator is not None and getattr(coordinator, "running", False): await coordinator.stop()
         await asyncio.sleep(0)
 
     async def _initialize_engine(self, engine: TradingEngine, clock: ReplayClock, broker: ReplayBroker, data: ReplayDataManager, ledger: ReplayLedger, replay_models: Path) -> None:
@@ -248,7 +243,6 @@ class ReplayRuntime:
         account = await broker.account(); engine.portfolio.roll_session(clock.session_date(clock.now_utc()), account.equity)
         engine.portfolio.peak_equity = account.equity; engine.portfolio.mark_equity(account.equity, clock.now_utc())
         engine.state = EngineState.RUNNING; engine.publish = ledger.capture_publish
-        await engine.shadow_research.start()
 
     def _snapshot_source_database(self, target: Path) -> None:
         """Take one transactionally consistent DB snapshot for the entire A/B replay run."""
@@ -303,18 +297,16 @@ class ReplayRuntime:
 
     @staticmethod
     def _ensure_replay_schema_parity(db: Database) -> None:
-        required_columns = {"spawned_strategies": {"parent_policy_id":"VARCHAR(64)","policy_version":"VARCHAR(20)","config_snapshot_json":"TEXT","config_fingerprint":"VARCHAR(64)","created_from_candidate":"VARCHAR(64)","spawn_reason":"TEXT","execution_mode":"VARCHAR(20)","code_commit_sha":"VARCHAR(40)","model_manifest_sha":"VARCHAR(64)"}}
-        with db.engine.begin() as conn:
-            for table, columns in required_columns.items():
-                existing = {row[1] for row in conn.exec_driver_sql(f"PRAGMA table_info({table})").fetchall()}
-                if not existing: raise RuntimeError(f"Replay database missing required production table: {table}")
-                for name, sql_type in columns.items():
-                    if name not in existing: conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}")
+        pass
 
     @staticmethod
     def _clear_mutable_replay_tables(db: Database) -> None:
         with db.engine.begin() as conn:
-            for table in ("orders","trades","equity_snapshots","shadow_ledger","spawn_shadow_events"): conn.exec_driver_sql(f"DELETE FROM {table}")
+            for table in ("orders","trades","equity_snapshots","shadow_ledger"):
+                try:
+                    conn.exec_driver_sql(f"DELETE FROM {table}")
+                except Exception:
+                    pass
             conn.exec_driver_sql("DELETE FROM app_settings WHERE key IN ('pending_reconciliation_orders','heartbeat_write_check')")
 
     @staticmethod
@@ -332,12 +324,6 @@ class ReplayRuntime:
                     try: evidence = json.loads(evidence)
                     except Exception: evidence = {}
                 ledger.record_event("ML_DECISION", ts, row[1], {"ml_probability":payload.get("ml_probability"),"ml_gate_decision":payload.get("ml_gate_decision"),"meta_probability":payload.get("meta_probability"),"trade_score":payload.get("trade_score"),"gate_evidence":evidence})
-            for row in conn.exec_driver_sql("SELECT ts,symbol,payload_json FROM spawn_shadow_events ORDER BY ts,id").fetchall():
-                try: details = json.loads(row[2]) if row[2] else {}
-                except Exception: details = {}
-                ts = row[0] if isinstance(row[0], datetime) else datetime.fromisoformat(str(row[0]))
-                if start_date and ts.strftime("%Y-%m-%d") < start_date: continue
-                ledger.record_event("SPAWN_DECISION", ts, row[1], details)
             for row in conn.exec_driver_sql("SELECT exit_at,symbol,payload FROM trades ORDER BY exit_at,id").fetchall():
                 try: details = json.loads(row[2])
                 except Exception: continue
@@ -350,7 +336,7 @@ class ReplayRuntime:
         try: commit = subprocess.check_output(["git","rev-parse","HEAD"],text=True,stderr=subprocess.DEVNULL).strip()
         except Exception: commit = os.getenv("GIT_COMMIT_SHA","unknown")
         window=[b for b in bars if b.get("in_replay_window",True)]; syms=sorted({b["symbol"] for b in bars})
-        return {"replay_id":self.replay_id,"engine_commit":commit,"config_hash":hashlib.sha256(json.dumps(config,sort_keys=True).encode()).hexdigest(),"data_hash":digest,"bar_count_total":len(bars),"bar_count_replay_window":len(window),"symbols":syms,"first_timestamp":bars[0]["ts_dt"].isoformat(),"last_timestamp":bars[-1]["ts_dt"].isoformat(),"decision_path":"TradingEngine._tick","lookahead_policy":"strict_as_of","database_policy":"single_immutable_run_snapshot_cloned_per_pass","model_policy":"immutable_asof_snapshot_cloned_per_pass","spawn_policy":"production_coordinator_queue_drained_per_timestamp","clock_policy":"ReplayClock + engine/scanner/risk datetime binding","identity_policy":"deterministic replay-only UUID binding","context_memory_policy":"immutable_run_start_snapshot_no_replay_feedback","market_risk_policy":"historical SPY+QQQ+VIX required; no UNKNOWN substitution","strategy_observation_policy":"replay-only wrapper around production on_bar","risk_observation_policy":"replay-only wrapper around production evaluate_entry","fill_model":config["fill_model"],"slippage_bps":config["slippage_bps"]}
+        return {"replay_id":self.replay_id,"engine_commit":commit,"config_hash":hashlib.sha256(json.dumps(config,sort_keys=True).encode()).hexdigest(),"data_hash":digest,"bar_count_total":len(bars),"bar_count_replay_window":len(window),"symbols":syms,"first_timestamp":bars[0]["ts_dt"].isoformat(),"last_timestamp":bars[-1]["ts_dt"].isoformat(),"decision_path":"TradingEngine._tick","lookahead_policy":"strict_as_of","database_policy":"single_immutable_run_snapshot_cloned_per_pass","model_policy":"immutable_asof_snapshot_cloned_per_pass","clock_policy":"ReplayClock + engine/scanner/risk datetime binding","identity_policy":"deterministic replay-only UUID binding","context_memory_policy":"immutable_run_start_snapshot_no_replay_feedback","market_risk_policy":"historical SPY+QQQ+VIX required; no UNKNOWN substitution","strategy_observation_policy":"replay-only wrapper around production on_bar","risk_observation_policy":"replay-only wrapper around production evaluate_entry","fill_model":config["fill_model"],"slippage_bps":config["slippage_bps"]}
 
     @staticmethod
     def _assert_meaningful_execution(ledger: ReplayLedger) -> None:

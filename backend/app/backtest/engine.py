@@ -148,7 +148,6 @@ def compute_decision_artifacts_manifest(
     models_dir: Path | None,
     active_policy: dict | None = None,
     challenger_policies: list | None = None,
-    spawned_strategies: list | None = None,
 ) -> tuple[dict, str]:
     import hashlib
     import json
@@ -158,7 +157,6 @@ def compute_decision_artifacts_manifest(
         "meta_label_models": {},
         "active_policy": active_policy or {},
         "challengers": challenger_policies or [],
-        "spawned_strategies": spawned_strategies or [],
     }
     h = hashlib.sha256()
 
@@ -179,7 +177,6 @@ def compute_decision_artifacts_manifest(
     # Fingerprint policy and challenger configuration
     h.update(json.dumps(active_policy or {}, sort_keys=True).encode())
     h.update(json.dumps(challenger_policies or [], sort_keys=True).encode())
-    h.update(json.dumps(spawned_strategies or [], sort_keys=True).encode())
 
     decision_artifacts_sha = h.hexdigest()
     return manifest, decision_artifacts_sha
@@ -552,12 +549,6 @@ async def run_backtest(
         portfolio_allocator = CapitalAllocationOptimizer(
             kelly_fraction_cap=risk_cfg.kelly_fraction_cap
         )
-
-        from app.portfolio.sandbox_spawner import SpawnedSandboxExecutor
-        from app.db.database import Database
-        db_active = Database.active()
-        spawned_rows = db_active.get_active_spawned_strategies() if db_active else []
-        spawner_executor = SpawnedSandboxExecutor(spawned_rows)
 
         def account_ctx(now: datetime, pending_entries: list[str] | None = None) -> AccountContext:
             equity = broker.equity()
@@ -1068,17 +1059,6 @@ async def run_backtest(
                                 prefix = f"{symbol}_{sig.strategy}_{now.strftime('%Y%m%d_%H%M%S')}"
                                 sig.candidate_id = f"{prefix}_{uuid.uuid4().hex[:6]}".upper()
 
-                            sig_dict = {
-                                "symbol": sig.symbol,
-                                "strategy": sig.strategy,
-                                "action": sig.action.name if hasattr(sig.action, "name") else str(sig.action),
-                                "price": float(feature_row.get("close", 0.0)),
-                                "timestamp": now,
-                                "candidate_id": sig.candidate_id,
-                                "score": getattr(sig, "score", None),
-                            }
-                            spawner_executor.process_signal_for_children(sig_dict, now)
-
                     # Run ParallelEvidenceEvaluator out-of-band to capture the parallel evidence (CR-146)
                     parallel_evidences = {}
                     for sig in signals:
@@ -1403,7 +1383,6 @@ async def run_backtest(
         combined_provenance = dict(data.provenance) if data.provenance else {}
         combined_provenance["decision_artifacts_manifest"] = artifacts_manifest
         combined_provenance["model_eligibility_mode"] = params.model_eligibility_mode
-        combined_provenance["spawned_child_results"] = spawner_executor.finalize_all()
 
         result = BacktestResult(
             params=params.model_dump(mode="json"),

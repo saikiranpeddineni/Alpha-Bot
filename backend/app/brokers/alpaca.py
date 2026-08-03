@@ -40,7 +40,7 @@ _STATUS_MAP = {
     "new": OrderStatus.SUBMITTED,
     "accepted": OrderStatus.SUBMITTED,
     "pending_new": OrderStatus.SUBMITTED,
-    "partially_filled": OrderStatus.SUBMITTED,
+    "partially_filled": OrderStatus.PARTIALLY_FILLED,
     "filled": OrderStatus.FILLED,
     "canceled": OrderStatus.CANCELED,
     "expired": OrderStatus.CANCELED,

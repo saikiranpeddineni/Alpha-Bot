@@ -16,7 +16,6 @@ class ReplayLedger:
         self.candidates: list[dict[str, Any]] = []
         self.signals: list[dict[str, Any]] = []
         self.ml_decisions: list[dict[str, Any]] = []
-        self.spawn_decisions: list[dict[str, Any]] = []
         self.risk_decisions: list[dict[str, Any]] = []
         self.orders: list[dict[str, Any]] = []
         self.fills: list[dict[str, Any]] = []
@@ -37,7 +36,7 @@ class ReplayLedger:
         self.timeline.append(event)
         mapping = {
             "SCANNER_CANDIDATE": self.candidates, "STRATEGY_SIGNAL": self.signals,
-            "ML_DECISION": self.ml_decisions, "SPAWN_DECISION": self.spawn_decisions,
+            "ML_DECISION": self.ml_decisions,
             "RISK_DECISION": self.risk_decisions, "ORDER_SUBMITTED": self.orders,
             "FILL_EXECUTED": self.fills, "PROD_FILL_RECORDED": self.production_fills,
             "TRADE_CLOSED": self.trades,
@@ -82,16 +81,6 @@ class ReplayLedger:
 
     @classmethod
     def _canonicalize_stage_event(cls, event: dict[str, Any]) -> dict[str, Any]:
-        """Normalize replay instrumentation without hiding economic decisions.
-
-        Signal.ts is a domain-object construction timestamp whose default factory is
-        bound to core.domain.utcnow at import time. It is not the causal decision-bar
-        time. Replay records the authoritative simulated timestamp on the event and,
-        where available, decision_bar_timestamp_utc in the signal itself. Replacing
-        only the embedded construction ts prevents wall-clock instrumentation noise
-        from creating false A/B failures while preserving prices, direction, score,
-        gates, sizing, regime, and causal timestamps exactly.
-        """
         normalized = cls._sanitize(event)
         if not isinstance(normalized, dict):
             return normalized
@@ -114,7 +103,7 @@ class ReplayLedger:
     def compute_stage_hashes(self) -> dict[str, str]:
         stages = {
             "scanner_hash": self.candidates, "strategy_hash": self.signals, "ml_hash": self.ml_decisions,
-            "spawn_hash": self.spawn_decisions, "risk_hash": self.risk_decisions, "order_hash": self.orders,
+            "risk_hash": self.risk_decisions, "order_hash": self.orders,
             "fill_hash": self.fills, "trade_hash": self.trades, "equity_hash": self.equity_curve,
         }
         hashes = {name: self._stage_hash(value) for name, value in stages.items()}
@@ -123,7 +112,7 @@ class ReplayLedger:
 
     def to_payload(self) -> dict[str, Any]:
         return {"production_ticks": self.production_ticks, "candidates": self.candidates, "signals": self.signals,
-                "ml_decisions": self.ml_decisions, "spawn_decisions": self.spawn_decisions,
+                "ml_decisions": self.ml_decisions,
                 "risk_decisions": self.risk_decisions, "orders": self.orders, "fills": self.fills,
                 "production_fills": self.production_fills, "trades": self.trades,
                 "equity_curve": self.equity_curve, "timeline": self.timeline}

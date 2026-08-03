@@ -97,8 +97,6 @@ def _stub(engine: TradingEngine) -> None:
     engine.run_event_monitor = AsyncMock()
     engine._check_system_heartbeat = AsyncMock()
     engine._reconcile_pending_submissions = AsyncMock()
-    engine.shadow_research = MagicMock()
-    engine.shadow_research.publish = MagicMock()
     engine.insights = MagicMock()
     engine.publish = MagicMock()
     engine.clock = MagicMock()
@@ -193,6 +191,10 @@ async def test_tick_session_close_value_error_fails_closed(tmp_path):
     with (
         patch("app.core.engine.utcnow", return_value=_SESSION_TS),
         patch(
+            "app.core.engine.get_session_close",
+            side_effect=ValueError("not a trading session"),
+        ),
+        patch(
             "app.core.calendar_helper.get_session_close",
             side_effect=ValueError("not a trading session"),
         ),
@@ -218,6 +220,10 @@ async def test_tick_calendar_unexpected_exception_fallback(tmp_path):
     with (
         patch("app.core.engine.utcnow", return_value=_SESSION_TS),
         patch(
+            "app.core.engine.get_session_close",
+            side_effect=RuntimeError("network failure"),
+        ),
+        patch(
             "app.core.calendar_helper.get_session_close",
             side_effect=RuntimeError("network failure"),
         ),
@@ -242,6 +248,10 @@ async def test_tick_early_close_session(tmp_path):
     early_close_dt = datetime(2026, 11, 27, 18, 0, tzinfo=UTC).astimezone(ET_tz)
     with (
         patch("app.core.engine.utcnow", return_value=after_close),
+        patch(
+            "app.core.engine.get_session_close",
+            return_value=early_close_dt,
+        ),
         patch(
             "app.core.calendar_helper.get_session_close",
             return_value=early_close_dt,

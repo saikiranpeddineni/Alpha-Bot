@@ -329,7 +329,8 @@ def test_priority_9_numerical_stability() -> None:
 
 
 # Priority 10 — Adapter Hardening
-def test_priority_10_adapter_hardening() -> None:
+@pytest.mark.asyncio
+async def test_priority_10_adapter_hardening() -> None:
     """Verify PISEngineAdapter handles missing initial stop and casing normalization."""
     adapter = PISEngineAdapter()
     from app.core.domain import Position
@@ -340,7 +341,7 @@ def test_priority_10_adapter_hardening() -> None:
         {"high": 153.0, "low": 149.0, "close": 152.0, "volume": 10000, "atr": 2.5}
     ])
 
-    order_req, decision = adapter.evaluate_position_exit(
+    order_req, decision = await adapter.evaluate_position_exit(
         position=pos, bar_df=df, initial_stop=None
     )
     assert decision.symbol == "AAPL"

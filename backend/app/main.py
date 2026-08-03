@@ -46,6 +46,7 @@ from app.api.ws import EventHub
 from app.config import FRONTEND_DIST, Settings, get_settings
 from app.core.durable_engine import DurableTradingEngine
 from app.core.logging import applog, configure_std_logging
+from app.core.alerting import init_alerting, stop_alerting
 from app.db.database import Database
 
 
@@ -96,8 +97,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         hub.set_loop(asyncio.get_running_loop())
         await engine.ensure_data()
+        await init_alerting(settings.slack_webhook_url)
         applog.info("app", f"AlphaDesk v{__version__} ready -- mode={settings.mode}")
         yield
+        await stop_alerting()
         await engine.shutdown()
 
     app = FastAPI(

@@ -6,7 +6,7 @@ import json
 from datetime import datetime, timedelta, timezone, UTC
 from typing import Any
 import pandas as pd
-from app.core.domain import Signal, SignalAction, Position, OrderRequest, OrderSide, OrderType, Order
+from app.core.domain import Signal, SignalAction, Position, OrderRequest, OrderSide, OrderType, Order, utcnow
 from app.core.logging import applog
 from app.indicators.ta import enrich
 from app.ai.regime import detect_regime

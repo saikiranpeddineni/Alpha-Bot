@@ -9,7 +9,6 @@ from app.analytics.adaptive_profit_harvester import (
     adaptive_stop,
     replay_adaptive_harvest,
 )
-from app.research.spawn.spawn_virtual_portfolio import SpawnVirtualPortfolio
 
 
 def test_v2_trailing_stop_monotonicity_long():
@@ -46,53 +45,3 @@ def test_v2_trailing_stop_monotonicity_short():
     # Price moves against us -> stop MUST NOT move up (loosen)
     d2 = adaptive_stop(direction="short", entry_price=100.0, initial_stop=105.0, prior_peak=90.0, atr=1.0, prior_close=97.0, current_stop=d1.stop_price, config=cfg)
     assert d2.stop_price <= d1.stop_price, "Short stop moved backwards!"
-
-
-def test_intra_bar_ambiguity_stop_loss_precedence():
-    """When a single bar touches both stop loss and take profit, stop loss MUST take precedence."""
-    vp = SpawnVirtualPortfolio("test_ambiguity", 10000.0)
-    now = datetime(2026, 7, 24, 14, 0, tzinfo=timezone.utc)
-    
-    # Open LONG: entry=100, stop=95, target=110
-    vp.open_virtual_position("TEST", "long", 10, 100.0, 95.0, 110.0, now)
-    
-    # Single candle with low=90 (breaches 95 stop) and high=115 (breaches 110 target)
-    exit_rec = vp.update_ohlc_and_check_exits("TEST", o=100.0, h=115.0, l=90.0, c=92.0, now=now + timedelta(minutes=1))
-    
-    assert exit_rec is not None
-    assert exit_rec["exit_reason"] == "STOP_LOSS", f"Expected STOP_LOSS priority, got {exit_rec['exit_reason']}"
-    assert "TEST" not in vp.positions
-
-
-def test_capital_release_ordering():
-    """Verify position pop and capital release occur BEFORE new position open."""
-    vp = SpawnVirtualPortfolio("test_cap_order", 10000.0, {"max_open_positions": 1})
-    now = datetime(2026, 7, 24, 14, 0, tzinfo=timezone.utc)
-    
-    # Slot 1 used by POS1
-    vp.open_virtual_position("POS1", "long", 10, 100.0, 95.0, 110.0, now)
-    assert vp.can_open_position("POS2") is False
-    
-    # Close POS1
-    vp.close_virtual_position("POS1", 105.0, "TAKE_PROFIT", now + timedelta(minutes=5))
-    
-    # Capital and slot MUST be available for POS2 immediately
-    assert "POS1" not in vp.positions
-    assert vp.can_open_position("POS2") is True
-    pos2 = vp.open_virtual_position("POS2", "long", 10, 50.0, 48.0, 55.0, now + timedelta(minutes=6))
-    assert pos2 is not None
-
-
-def test_double_exit_prevention():
-    """Position pop prevents duplicate exit processing on the same symbol."""
-    vp = SpawnVirtualPortfolio("test_double_exit", 10000.0)
-    now = datetime(2026, 7, 24, 14, 0, tzinfo=timezone.utc)
-    vp.open_virtual_position("POS1", "long", 10, 100.0, 95.0, 110.0, now)
-    
-    # First exit succeeds
-    rec1 = vp.close_virtual_position("POS1", 95.0, "STOP_LOSS", now + timedelta(minutes=1))
-    assert rec1 is not None
-    
-    # Second exit attempt on closed position returns None
-    rec2 = vp.close_virtual_position("POS1", 95.0, "STOP_LOSS", now + timedelta(minutes=2))
-    assert rec2 is None

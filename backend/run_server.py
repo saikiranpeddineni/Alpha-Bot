@@ -53,22 +53,10 @@ if sys.platform == "win32":
 import uvicorn
 
 from app.config import REPO_ROOT, get_settings
-from app.db.schema_migrations import migrate_spawned_strategies
 
 
 def main() -> None:
     settings = get_settings()
-
-    # Older local databases may have spawned_strategies from before lineage
-    # metadata was added. Upgrade that table before FastAPI imports app.main and
-    # SpawnCoordinator performs its first ORM query. This migration is additive
-    # and idempotent; existing spawn rows and portfolio state are preserved.
-    migrated_columns = migrate_spawned_strategies(settings.resolved_db_path)
-    if migrated_columns:
-        print(
-            "[Database Migration] spawned_strategies upgraded: "
-            + ", ".join(migrated_columns)
-        )
 
     keyfile = REPO_ROOT / "key.pem"
     certfile = REPO_ROOT / "cert.pem"
