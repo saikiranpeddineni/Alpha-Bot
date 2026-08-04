@@ -609,11 +609,11 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                         self._scanner_task = asyncio.create_task(
                             self.run_market_scanner(is_intraday=False), name="market-scanner"
                         )
-            # Feature 1: Intraday watchlist refresh every 30 min during session
+            # Intraday watchlist refresh every 15 min during session (was 30 min)
             elif (
                 is_trading_day
-                and 9 * 60 + 30 <= et_mins <= 15 * 60 + 30  # 9:30 AM – 3:30 PM ET
-                and et_mins % 30 == 0
+                and 9 * 60 + 30 <= et_mins <= 15 * 60 + 45  # 9:30 AM – 3:45 PM ET (was 3:30 PM)
+                and et_mins % 15 == 0  # every 15 min (was every 30 min)
                 and self._last_intraday_scan_min != et_mins
             ):
                 self._last_intraday_scan_min = et_mins

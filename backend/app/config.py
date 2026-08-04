@@ -33,39 +33,39 @@ VALID_BROKERS = ("paper_sim", "alpaca")
 
 
 class RiskConfig(BaseModel):
-    """Runtime-tunable risk parameters. Defaults favor capital preservation."""
+    """Runtime-tunable risk parameters. Tuned for active capital utilization (4% daily target)."""
     entry_order_type: str = Field("market", pattern="^(market|limit)$")
-    risk_per_trade_pct: float = Field(0.5, ge=0.01, le=5.0)
+    risk_per_trade_pct: float = Field(1.0, ge=0.01, le=5.0)        # was 0.5 — 2× capital per trade
     max_position_pct: float = Field(20.0, ge=1.0, le=100.0)
-    max_open_positions: int = Field(4, ge=1, le=50)
-    max_daily_loss_pct: float = Field(2.0, ge=0.1, le=25.0)
+    max_open_positions: int = Field(8, ge=1, le=50)                  # was 4 — 2× concurrent exposure
+    max_daily_loss_pct: float = Field(3.0, ge=0.1, le=25.0)         # was 2.0 — room for higher position count
     max_drawdown_pct: float = Field(10.0, ge=1.0, le=50.0)
-    consecutive_loss_limit: int = Field(3, ge=1, le=20)
-    cooldown_minutes: int = Field(30, ge=1, le=390)
-    no_entry_minutes_before_close: int = Field(30, ge=0, le=180)
+    consecutive_loss_limit: int = Field(4, ge=1, le=20)              # was 3 — one more loss before pause
+    cooldown_minutes: int = Field(10, ge=1, le=390)                  # was 30 — faster recovery
+    no_entry_minutes_before_close: int = Field(15, ge=0, le=180)     # was 30 — more trading time
     flatten_minutes_before_close: int = Field(5, ge=0, le=60)
     min_price: float = Field(5.0, ge=0.0)
     min_avg_dollar_volume: float = Field(100_000.0, ge=0.0)
-    ml_confidence_threshold: float = Field(0.55, ge=0.0, le=1.0)
+    ml_confidence_threshold: float = Field(0.52, ge=0.0, le=1.0)    # was 0.55 — aligned to new AUC tier
     regime_ml_thresholds: dict[str, float] = Field(
         default={
-            "NORMAL": 0.40,
-            "CAUTION": 0.45,
+            "NORMAL": 0.38,
+            "CAUTION": 0.42,
             "STRESS": 0.50,
             "PANIC": 0.60,
         }
     )
-    min_specialist_auc: float = Field(0.52, ge=0.50, le=1.0)
+    min_specialist_auc: float = Field(0.50, ge=0.50, le=1.0)        # was 0.52
     min_stop_pct: float = Field(0.5, ge=0.0, le=5.0)
-    score_threshold_trend: float = Field(55.0, ge=0.0, le=100.0)
-    score_threshold_range: float = Field(70.0, ge=0.0, le=100.0)
-    score_threshold_volatile: float = Field(65.0, ge=0.0, le=100.0)
-    score_threshold_event: float = Field(75.0, ge=0.0, le=100.0)
-    kelly_fraction_cap: float = Field(0.15, ge=0.01, le=0.50)
-    max_positions_per_sector: int = Field(2, ge=1, le=10)
+    score_threshold_trend: float = Field(50.0, ge=0.0, le=100.0)    # was 55.0
+    score_threshold_range: float = Field(65.0, ge=0.0, le=100.0)    # was 70.0
+    score_threshold_volatile: float = Field(60.0, ge=0.0, le=100.0) # was 65.0
+    score_threshold_event: float = Field(70.0, ge=0.0, le=100.0)    # was 75.0
+    kelly_fraction_cap: float = Field(0.20, ge=0.01, le=0.50)       # was 0.15
+    max_positions_per_sector: int = Field(3, ge=1, le=10)           # was 2
     max_correlation_penalty: float = Field(0.5, ge=0.0, le=1.0)
-    harvest_risk_multiplier: float = Field(2.5, ge=1.0, le=5.0)
-    midday_score_boost: float = Field(15.0, ge=0.0, le=50.0)
+    harvest_risk_multiplier: float = Field(3.0, ge=1.0, le=5.0)     # was 2.5 — bigger A+ sizing
+    midday_score_boost: float = Field(10.0, ge=0.0, le=50.0)        # was 15.0 — lighter midday throttle
     midday_start_et: int = Field(690, ge=570, le=960)
     midday_end_et: int = Field(795, ge=570, le=960)
     rsi2_base_fallback_bypass_enabled: bool = Field(True)
@@ -74,7 +74,7 @@ class RiskConfig(BaseModel):
     bb_squeeze_base_fallback_bypass_enabled: bool = Field(True)
     bb_squeeze_base_fallback_bypass_start_et: int = Field(840, ge=570, le=960)
     bb_squeeze_base_fallback_bypass_end_et: int = Field(930, ge=570, le=960)
-    scanner_watchlist_ttl: int = Field(3, ge=1, le=30)
+    scanner_watchlist_ttl: int = Field(15, ge=1, le=30)             # was 3 — hold scanner symbols longer
     promotion_min_valid_observations: int = Field(30, ge=1, le=1000)
     promotion_min_win_rate_pct: float = Field(50.0, ge=0.0, le=100.0)
     promotion_min_expectancy_r: float = Field(0.1, ge=-1.0, le=10.0)
@@ -106,18 +106,18 @@ class Settings(BaseSettings):
     slack_webhook_url: str = Field("", validation_alias="SLACK_WEBHOOK_URL")
 
     entry_order_type: str = Field("market", validation_alias="ENTRY_ORDER_TYPE")
-    risk_per_trade_pct: float = Field(0.5, validation_alias="RISK_PER_TRADE_PCT")
+    risk_per_trade_pct: float = Field(1.0, validation_alias="RISK_PER_TRADE_PCT")           # was 0.5
     max_position_pct: float = Field(20.0, validation_alias="MAX_POSITION_PCT")
-    max_open_positions: int = Field(4, validation_alias="MAX_OPEN_POSITIONS")
-    max_daily_loss_pct: float = Field(2.0, validation_alias="MAX_DAILY_LOSS_PCT")
+    max_open_positions: int = Field(8, validation_alias="MAX_OPEN_POSITIONS")                # was 4
+    max_daily_loss_pct: float = Field(3.0, validation_alias="MAX_DAILY_LOSS_PCT")            # was 2.0
     max_drawdown_pct: float = Field(10.0, validation_alias="MAX_DRAWDOWN_PCT")
-    consecutive_loss_limit: int = Field(3, validation_alias="CONSECUTIVE_LOSS_LIMIT")
-    cooldown_minutes: int = Field(30, validation_alias="COOLDOWN_MINUTES")
-    no_entry_minutes_before_close: int = Field(30, validation_alias="NO_ENTRY_MINUTES_BEFORE_CLOSE")
+    consecutive_loss_limit: int = Field(4, validation_alias="CONSECUTIVE_LOSS_LIMIT")        # was 3
+    cooldown_minutes: int = Field(10, validation_alias="COOLDOWN_MINUTES")                   # was 30
+    no_entry_minutes_before_close: int = Field(15, validation_alias="NO_ENTRY_MINUTES_BEFORE_CLOSE")  # was 30
     flatten_minutes_before_close: int = Field(5, validation_alias="FLATTEN_MINUTES_BEFORE_CLOSE")
     min_price: float = Field(5.0, validation_alias="MIN_PRICE")
     min_avg_dollar_volume: float = Field(100_000.0, validation_alias="MIN_AVG_DOLLAR_VOLUME")
-    min_specialist_auc: float = Field(0.53, validation_alias="MIN_SPECIALIST_AUC")
+    min_specialist_auc: float = Field(0.50, validation_alias="MIN_SPECIALIST_AUC")           # was 0.53
     min_stop_pct: float = Field(0.5, validation_alias="MIN_STOP_PCT")
     kelly_fraction_cap: float = Field(0.15, validation_alias="KELLY_FRACTION_CAP")
     max_positions_per_sector: int = Field(2, validation_alias="MAX_POSITIONS_PER_SECTOR")
