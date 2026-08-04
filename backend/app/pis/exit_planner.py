@@ -113,6 +113,9 @@ class ExitPlanner:
         ):
             ceiling_harvested = True
 
+        # Check Early Thesis Invalidation Scratch Exit (Quadrant 2)
+        early_invalidation_breach = thesis.early_invalidation_detected
+
         # Check Extended Stagnation / Time-Decay Profit Harvesting
         # Requires true structural stall over substantial duration (>= 25 bars) without progress
         stagnation_harvest = (
@@ -137,7 +140,11 @@ class ExitPlanner:
             is_runner = True
 
         # Determine exit action
-        if protection_breached or lifecycle == LifecycleState.EXIT_CANDIDATE:
+        if early_invalidation_breach:
+            # Asymmetric Loss Reduction (Quadrant 2): Cut immediately at -0.25R to -0.35R
+            action = ExitAction.FULL_EXIT
+            exit_ratio = 1.0
+        elif protection_breached or lifecycle == LifecycleState.EXIT_CANDIDATE:
             action = ExitAction.FULL_EXIT
             exit_ratio = 1.0
         elif ceiling_harvested and has_scaled_out:
@@ -167,7 +174,9 @@ class ExitPlanner:
             lifecycle, health, thesis, protection_updated, is_runner
         )
 
-        if protection_breached:
+        if early_invalidation_breach:
+            reasons.append(ReasonCode.EARLY_THESIS_INVALIDATED)
+        elif protection_breached:
             reasons.append(ReasonCode.PROTECTION_BREACH)
         elif ceiling_harvested:
             reasons.append(ReasonCode.MAX_R_CEILING_REACHED)
@@ -199,5 +208,6 @@ class ExitPlanner:
                 "protection_breached": protection_breached,
                 "predicted_max_r": predicted_max_r,
                 "runner_probability": runner_probability,
+                "early_invalidation": early_invalidation_breach,
             },
         )

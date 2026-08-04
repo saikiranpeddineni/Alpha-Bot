@@ -8,7 +8,7 @@ from __future__ import annotations
 import math
 from typing import Optional, Tuple
 
-from app.pis.models import PISConfig, PositionObservation, TradeHealth
+from app.pis.models import MarketRegime, PISConfig, PositionObservation, TradeHealth
 
 
 class RunnerIntelligence:
@@ -22,6 +22,7 @@ class RunnerIntelligence:
         obs: PositionObservation,
         peak_r: float,
         health: TradeHealth,
+        regime: MarketRegime = MarketRegime.TREND_RUNNER,
     ) -> Tuple[float, float]:
         """Predict dynamic maximum R reachable (R_hat_max) and runner probability.
 
@@ -29,6 +30,7 @@ class RunnerIntelligence:
             obs: PositionObservation snapshot.
             peak_r: Peak R achieved so far.
             health: TradeHealth breakdown.
+            regime: Active MarketRegime classification.
 
         Returns:
             Tuple of (predicted_max_r: float, runner_probability: float).
@@ -52,19 +54,32 @@ class RunnerIntelligence:
         # 3. Composite Runner Probability P_runner in [0.0, 1.0]
         runner_prob = (0.40 * trend_factor) + (0.35 * mom_factor) + (0.25 * vol_factor)
 
-        # 4. Dynamic Expansion Multiplier
-        # When institutional volume and momentum confirm trend acceleration, expand capacity
-        if health.overall >= 0.70 and runner_prob >= 0.60:
-            expansion = 1.0 + (runner_prob * 1.50)  # Up to 2.5x expansion of baseline target
-            predicted_max_r = r_base * expansion
-        elif health.overall >= 0.55:
-            expansion = 1.0 + (runner_prob * 0.50)
+        # 4. Regime-Aware Dynamic Expansion Multiplier
+        if regime == MarketRegime.RANGE_BOUND:
+            # Range-bound regime: Cap ceiling to prevent giving back gains to mean reversion
+            predicted_max_r = min(1.50, r_base)
+            runner_prob = min(0.40, runner_prob * 0.50)
+        elif regime == MarketRegime.CHOPPY_DEFENSIVE:
+            # Choppy defensive regime: Conservative target
+            predicted_max_r = min(1.20, r_base)
+            runner_prob = min(0.30, runner_prob * 0.40)
+        elif regime == MarketRegime.VOLATILITY_EXPANSION:
+            # Volatility expansion: Moderate extension
+            expansion = 1.0 + (runner_prob * 0.75)
             predicted_max_r = r_base * expansion
         else:
-            predicted_max_r = r_base
+            # Trend Runner: Full exponential upside expansion
+            if health.overall >= 0.70 and runner_prob >= 0.60:
+                expansion = 1.0 + (runner_prob * 1.50)  # Up to 2.5x expansion of baseline target
+                predicted_max_r = r_base * expansion
+            elif health.overall >= 0.55:
+                expansion = 1.0 + (runner_prob * 0.50)
+                predicted_max_r = r_base * expansion
+            else:
+                predicted_max_r = r_base
 
         # 5. Peak R Ratchet: If the stock is already running strong, extend ceiling ahead of peak
-        if health.overall >= 0.75 and peak_r >= (predicted_max_r * 0.80):
+        if health.overall >= 0.75 and peak_r >= (predicted_max_r * 0.80) and regime == MarketRegime.TREND_RUNNER:
             predicted_max_r = max(predicted_max_r, peak_r + 1.00)
 
         max_cap = getattr(self.config, "max_r_cap", 8.0)
@@ -77,6 +92,7 @@ class RunnerIntelligence:
         obs: PositionObservation,
         peak_r: float,
         health: TradeHealth,
+        regime: MarketRegime = MarketRegime.TREND_RUNNER,
     ) -> Tuple[float, bool]:
         """Evaluate runner score [0.0, 1.0] and qualification status.
 
@@ -84,11 +100,12 @@ class RunnerIntelligence:
             obs: PositionObservation.
             peak_r: Peak R achieved.
             health: TradeHealth.
+            regime: Active MarketRegime.
 
         Returns:
             Tuple of (runner_score: float, is_qualified_runner: bool).
         """
-        predicted_max_r, runner_prob = self.predict_max_r(obs, peak_r, health)
+        predicted_max_r, runner_prob = self.predict_max_r(obs, peak_r, health, regime=regime)
 
         target_r = self.config.runner_qualification_r
         if target_r <= 0.0 or math.isnan(target_r):

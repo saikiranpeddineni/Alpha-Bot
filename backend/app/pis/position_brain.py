@@ -162,11 +162,15 @@ class PositionBrain:
 
         Returns:
             PISDecision output.
-
-        Raises:
-            PositionBrainClosedError: If brain is already closed.
-            ValueError: If observation is invalid or timestamps are non-monotonic.
         """
+        return self._observe_internal(obs)
+
+    def evaluate(self, obs: PositionObservation) -> PISDecision:
+        """Alias for observe(obs) to support evaluation pipelines."""
+        return self.observe(obs)
+
+    def _observe_internal(self, obs: PositionObservation) -> PISDecision:
+        """Internal observation processing with lock and validation."""
         with self._lock:
             if self._is_closed:
                 raise PositionBrainClosedError(f"Cannot observe closed PositionBrain for '{self.symbol}'")
@@ -221,23 +225,30 @@ class PositionBrain:
             news_sentiment=raw_health.news_sentiment,
         )
 
-        # 2. Thesis drift evaluation
-        thesis = self.authority.thesis_evaluator.evaluate(obs, trough_r, self._stagnation_counter, peak_r)
+        # 2. Market Regime Classification (Quadrant 1)
+        regime, regime_conf, regime_summary = self.authority.regime_classifier.classify_regime(
+            obs, self._history, health
+        )
 
-        # 3. Runner intelligence & Max R capacity prediction
+        # 3. Thesis drift evaluation with Asymmetric Early Invalidation (Quadrant 2)
+        thesis = self.authority.thesis_evaluator.evaluate(
+            obs, trough_r, self._stagnation_counter, peak_r, history_len=len(self._history)
+        )
+
+        # 4. Runner intelligence & Regime-Aware Max R capacity prediction (Quadrant 3)
         predicted_max_r, runner_prob = self.authority.runner_intelligence.predict_max_r(
-            obs, peak_r, health
+            obs, peak_r, health, regime=regime
         )
         runner_score, is_runner = self.authority.runner_intelligence.evaluate_runner_score(
-            obs, peak_r, health
+            obs, peak_r, health, regime=regime
         )
         if is_runner:
             self._runner_qualified = True
 
-        # 4. State transition rules with persistence confirmation (Priority 3)
+        # 5. State transition rules with persistence confirmation (Priority 3)
         self._update_lifecycle(health, thesis, peak_r)
 
-        # 5. Protection floor calculation with dynamic ceiling proximity (Priority 4)
+        # 6. Protection floor calculation with dynamic ceiling proximity (Priority 4)
         target_stop = self.authority.protection_planner.compute_protection_floor(
             obs=obs,
             peak_r=peak_r,
@@ -249,7 +260,7 @@ class PositionBrain:
         )
         self._current_stop_floor = target_stop
 
-        # 6. Exit planner synthesis with dynamic ceiling harvesting (Priority 13)
+        # 7. Exit planner synthesis with early scratch exits and dynamic ceiling harvesting (Quadrant 2 & 3)
         decision = self.authority.exit_planner.synthesize_decision(
             obs=obs,
             lifecycle=self.state_machine.current_state,
@@ -280,6 +291,51 @@ class PositionBrain:
                 predicted_max_r=predicted_max_r,
             )
             self._current_stop_floor = target_stop
+
+        # 8. Autonomous Trade Brainstorming & Reasoning Telemetry (Quadrant 4)
+        narrative = self.authority.reasoning_engine.generate_narrative(
+            obs=obs,
+            lifecycle=self.state_machine.current_state,
+            health=health,
+            thesis=thesis,
+            regime=regime,
+            regime_summary=regime_summary,
+            predicted_max_r=predicted_max_r,
+            runner_probability=runner_prob,
+            target_stop=target_stop,
+            peak_r=peak_r,
+            has_scaled_out=self._has_scaled_out,
+            action=decision.action,
+            reason_codes=decision.reason_codes,
+        )
+
+        # Inject regime and narrative into immutable PISDecision
+        decision = PISDecision(
+            timestamp=decision.timestamp,
+            symbol=decision.symbol,
+            action=decision.action,
+            target_stop_loss=decision.target_stop_loss,
+            exit_ratio=decision.exit_ratio,
+            reason_codes=decision.reason_codes,
+            health=decision.health,
+            thesis=decision.thesis,
+            runner_score=decision.runner_score,
+            confidence=decision.confidence,
+            lifecycle_state=decision.lifecycle_state,
+            evidence_coverage=decision.evidence_coverage,
+            peak_r=decision.peak_r,
+            trough_r=decision.trough_r,
+            predicted_max_r=predicted_max_r,
+            runner_probability=runner_prob,
+            market_regime=regime,
+            brainstorm_narrative=narrative,
+            metadata={
+                **decision.metadata,
+                "market_regime": regime.value,
+                "regime_summary": regime_summary,
+                "brainstorm_narrative": narrative,
+            },
+        )
 
         self._last_decision = decision
         return decision

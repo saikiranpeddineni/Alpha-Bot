@@ -37,6 +37,15 @@ class ExitAction(str, Enum):
     FULL_EXIT = "FULL_EXIT"
 
 
+class MarketRegime(str, Enum):
+    """Macro and microstructure market regime classification."""
+
+    TREND_RUNNER = "TREND_RUNNER"
+    RANGE_BOUND = "RANGE_BOUND"
+    VOLATILITY_EXPANSION = "VOLATILITY_EXPANSION"
+    CHOPPY_DEFENSIVE = "CHOPPY_DEFENSIVE"
+
+
 class ReasonCode(str, Enum):
     """Structured, explainable reason codes for PIS decisions."""
 
@@ -46,6 +55,7 @@ class ReasonCode(str, Enum):
     SCALE_OUT_TARGET = "SCALE_OUT_TARGET"
     PROTECTION_RATCHET = "PROTECTION_RATCHET"
     THESIS_DEGRADED = "THESIS_DEGRADED"
+    EARLY_THESIS_INVALIDATED = "EARLY_THESIS_INVALIDATED"
     HEALTH_EXHAUSTION = "HEALTH_EXHAUSTION"
     MAX_R_CEILING_REACHED = "MAX_R_CEILING_REACHED"
     DISTRIBUTION_DETECTED = "DISTRIBUTION_DETECTED"
@@ -165,6 +175,7 @@ class ThesisDrift:
     adverse_excursion_r: float
     stagnation_bars: int
     is_degraded: bool
+    early_invalidation_detected: bool = False
 
 
 @dataclass(frozen=True)
@@ -197,6 +208,8 @@ class PISDecision:
     trough_r: float
     predicted_max_r: float = 2.0
     runner_probability: float = 0.0
+    market_regime: MarketRegime = MarketRegime.TREND_RUNNER
+    brainstorm_narrative: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -244,6 +257,11 @@ class PISConfig:
     runner_wide_atr_mult: float = 2.00
     enable_dynamic_max_r: bool = True
     max_r_cap: float = 8.00
+    enable_market_regime_awareness: bool = True
+    enable_early_invalidation: bool = True
+    early_invalidation_max_bars: int = 5
+    early_invalidation_r_threshold: float = -0.55
+    enable_trade_reasoning_narrative: bool = True
 
     def validate(self) -> None:
         """Validate startup configuration boundaries.
