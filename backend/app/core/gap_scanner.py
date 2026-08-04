@@ -1,18 +1,26 @@
-"""Dynamic Pre-Market Gap Mover Scanner.
+"""Dynamic Market Opportunity Scanner.
 
-Queries Alpaca's snapshot/most-active endpoints each morning at 9:00 AM ET
-to identify the top pre-market movers. These gap names have the highest
-intraday momentum continuation probability and are injected directly into
-MarketScanner Stage 1 alongside the static MARKET_UNIVERSE.
+Combines three live data sources to feed MarketScanner Stage 1 with
+the highest-quality intraday candidates:
 
-Filters applied:
-- Price >= $5.00 (configurable via min_price)
-- Pre-market dollar volume >= $5M (configurable)
-- Gap >= 2.0% from prior close (configurable)
-- Not already in CANDIDATE_POOL (additive, not duplicate)
+1. Pre-Market Gap Movers (9:00 AM ET):
+   Stocks gapping 2%+ from prior close on pre-market volume ≥ $5M.
+   Sourced from Alpaca snapshot endpoint or daily bar computation.
 
-Fail-open: if Alpaca data is unavailable or pre-market is not active,
-returns empty list and falls back to static CANDIDATE_POOL silently.
+2. Top Daily Gainers (9:30 AM ET onwards):
+   Stocks up ≥ 2.5% on the day — ENTER_LONG momentum candidates.
+   Sourced from Alpaca screener /v1beta1/screener/stocks/movers.
+
+3. Top Daily Losers (9:30 AM ET onwards):
+   Stocks down ≤ -2.5% on the day — ENTER_SHORT breakdown candidates.
+   Sourced from Alpaca screener /v1beta1/screener/stocks/movers.
+
+All three are injected into MarketScanner Stage 1 alongside the
+static MARKET_UNIVERSE (278+ symbols), giving the scanner a combined
+pool of 350+ live, actively moving candidates per scan cycle.
+
+Fail-open: any individual source failure returns empty and falls back
+to the other sources without blocking the scanner pipeline.
 """
 
 from __future__ import annotations
@@ -36,33 +44,91 @@ _PREMARKET_FETCH_CONCURRENCY = 15
 
 
 class PreMarketGapScanner:
-    """Discovers pre-market momentum movers to supplement the static universe."""
+    """Discovers pre-market gap movers + intraday top gainers/losers."""
 
     def __init__(self, data_manager: DataManager, min_price: float = 5.0) -> None:
         self.data = data_manager
         self.min_price = min_price
         self._cache: list[str] = []
         self._cache_date: str | None = None
+        # Mover context: symbol -> {"direction": "gainer"|"loser", "change_pct": float}
+        self.mover_context: dict[str, dict] = {}
+        # Lazy-init TopMoversScanner to avoid circular import at module load
+        self._top_movers_scanner = None
 
     def _today(self) -> str:
         return datetime.now(UTC).strftime("%Y-%m-%d")
 
+    def _get_top_movers_scanner(self):
+        if self._top_movers_scanner is None:
+            from app.core.top_movers_scanner import TopMoversScanner
+            self._top_movers_scanner = TopMoversScanner(self.data, min_price=self.min_price)
+        return self._top_movers_scanner
+
     async def get_gap_movers(self) -> list[str]:
-        """Return today's cached gap mover list (fetched once per trading day).
+        """Return today's combined mover list from all three sources.
+
+        Sources combined:
+        - Pre-market gap movers (snapshots or bar-computed)
+        - Top daily gainers (ENTER_LONG candidates)
+        - Top daily losers  (ENTER_SHORT candidates)
 
         Returns:
-            List of gap mover ticker symbols, sorted by gap magnitude descending.
-            Empty list if pre-market data is unavailable.
+            Sorted list of all unique symbols from all three sources.
+            Empty list if all sources are unavailable.
         """
         today = self._today()
         if self._cache_date == today and self._cache:
             return list(self._cache)
 
-        movers = await self._fetch_gap_movers()
-        self._cache = movers
+        # Fetch all three sources concurrently
+        gap_task = asyncio.create_task(self._fetch_gap_movers())
+        movers_task = asyncio.create_task(self._fetch_top_movers())
+        gap_movers, top_movers_result = await asyncio.gather(gap_task, movers_task)
+
+        # Build combined deduped symbol list
+        all_symbols: set[str] = set(gap_movers)
+        all_symbols.update(top_movers_result.gainers)
+        all_symbols.update(top_movers_result.losers)
+
+        # Build/update mover context for direction tagging
+        new_context: dict[str, dict] = {}
+        for sym in gap_movers:
+            new_context[sym] = new_context.get(sym, {"source": "gap", "direction": "gainer"})
+        for sym in top_movers_result.gainers:
+            entry = top_movers_result.entries.get(sym)
+            new_context[sym] = {
+                "source": "top_gainer",
+                "direction": "gainer",
+                "change_pct": entry.change_pct if entry else 0.0,
+            }
+        for sym in top_movers_result.losers:
+            entry = top_movers_result.entries.get(sym)
+            new_context[sym] = {
+                "source": "top_loser",
+                "direction": "loser",
+                "change_pct": entry.change_pct if entry else 0.0,
+            }
+        self.mover_context = new_context
+
+        combined = sorted(all_symbols)
+        self._cache = combined
         self._cache_date = today
-        log.info(f"[GapScanner] Found {len(movers)} pre-market gap movers: {movers[:10]}")
-        return movers
+        log.info(
+            f"[GapScanner] Combined movers: {len(gap_movers)} gap | "
+            f"{len(top_movers_result.gainers)} gainers | "
+            f"{len(top_movers_result.losers)} losers → {len(combined)} total"
+        )
+        return combined
+
+    async def _fetch_top_movers(self):
+        """Fetch top gainers/losers via TopMoversScanner. Fail-open."""
+        try:
+            return await self._get_top_movers_scanner().get_movers()
+        except Exception as exc:
+            log.warning(f"[GapScanner] TopMovers fetch failed ({exc})")
+            from app.core.top_movers_scanner import TopMoversResult
+            return TopMoversResult(source="empty")
 
     async def _fetch_gap_movers(self) -> list[str]:
         """Fetch and score pre-market gap movers using available price data."""

@@ -195,11 +195,24 @@ class MomentumCross(Strategy):
             return None
 
         confidence = min(
-            0.85,
+            0.90,
             0.55
             + 0.05 * max(0.0, vol_z)
-            + 0.1 * (float(last["er20"]) if pd.notna(last.get("er20")) else 0.0),
+            + 0.1 * (float(last["er20"]) if pd.notna(last.get("er20")) else 0.0)
+            + (0.10 if ctx.mover_bias is not None else 0.0)  # +10% for confirmed movers
         )
+
+        # ---- Mover directional bias ----
+        # top_gainer → long bias only; top_loser → short bias only; None → both
+        bias = ctx.mover_bias   # "gainer" | "loser" | None
+        allow_long  = bias != "loser"   # neutrals + gainers can go long
+        allow_short = bias != "gainer"  # neutrals + losers can go short
+        if bias is not None:
+            self._debug(
+                ctx,
+                f"[momentum] MOVER_BIAS sym={symbol} bias={bias} "
+                f"chg={ctx.mover_change_pct:+.1f}% allow_long={allow_long} allow_short={allow_short}",
+            )
 
         # ---- MACD inflection detection ----
         hist_now = float(last["macd_hist"])
@@ -217,19 +230,21 @@ class MomentumCross(Strategy):
 
         # ---- Long candidate ----
         if (
-            last["ema9"] > last["ema20"]
+            allow_long
+            and last["ema9"] > last["ema20"]
             and close > float(last["vwap"])
             and p["rsi_min"] <= rsi <= p["rsi_max"]
             and self._valid_event(ctx, symbol, "long", current_bar_idx, df)
         ):
             stop = close - p["atr_stop_mult"] * atr
             self._consume_event(ctx, symbol, "long", current_time)
+            mover_tag = f" [top_gainer +{ctx.mover_change_pct:.1f}%]" if bias == "gainer" else ""
             return Signal(
                 symbol=symbol,
                 action=SignalAction.ENTER_LONG,
                 confidence=confidence,
                 strategy=self.name,
-                reason=f"EMA9>EMA20 above VWAP, MACD event confirmed, RSI {rsi:.0f}",
+                reason=f"EMA9>EMA20 above VWAP, MACD event confirmed, RSI {rsi:.0f}{mover_tag}",
                 price=close,
                 stop_loss=stop,
                 take_profit=None,
@@ -237,19 +252,21 @@ class MomentumCross(Strategy):
 
         # ---- Short candidate ----
         if (
-            last["ema9"] < last["ema20"]
+            allow_short
+            and last["ema9"] < last["ema20"]
             and close < float(last["vwap"])
             and (100.0 - p["rsi_max"]) <= rsi <= (100.0 - p["rsi_min"])
             and self._valid_event(ctx, symbol, "short", current_bar_idx, df)
         ):
             stop = close + p["atr_stop_mult"] * atr
             self._consume_event(ctx, symbol, "short", current_time)
+            mover_tag = f" [top_loser {ctx.mover_change_pct:.1f}%]" if bias == "loser" else ""
             return Signal(
                 symbol=symbol,
                 action=SignalAction.ENTER_SHORT,
                 confidence=confidence,
                 strategy=self.name,
-                reason=f"EMA9<EMA20 below VWAP, MACD event confirmed, RSI {rsi:.0f}",
+                reason=f"EMA9<EMA20 below VWAP, MACD event confirmed, RSI {rsi:.0f}{mover_tag}",
                 price=close,
                 stop_loss=stop,
                 take_profit=None,

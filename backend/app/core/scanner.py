@@ -196,23 +196,38 @@ class MarketScanner:
         )
         base_symbols = list(symbols)
 
-        # Inject gap movers for live scans only — fail-open (never blocks if unavailable)
+        # Inject gap+gainer+loser movers for live scans only — fail-open
         if as_of is None:
             try:
                 gap_movers = await self._gap_scanner.get_gap_movers()
                 if gap_movers:
                     existing = set(base_symbols)
                     new_movers = [s for s in gap_movers if s not in existing]
+                    gainers = [
+                        s for s in new_movers
+                        if self._gap_scanner.mover_context.get(s, {}).get("direction") == "gainer"
+                    ]
+                    losers = [
+                        s for s in new_movers
+                        if self._gap_scanner.mover_context.get(s, {}).get("direction") == "loser"
+                    ]
                     if new_movers:
                         applog.info(
                             "scanner",
-                            f"[GapScanner] Injecting {len(new_movers)} pre-market movers into Stage 1: {new_movers[:10]}",
+                            f"[Movers] Injecting {len(new_movers)} dynamic candidates into Stage 1: "
+                            f"{len(gainers)} gainers (long bias) | {len(losers)} losers (short bias) "
+                            f"| sample gainers={gainers[:5]} losers={losers[:5]}",
                         )
                     base_symbols = sorted(set(base_symbols) | set(gap_movers))
+                    # Propagate mover direction context for strategy directional bias
+                    if not hasattr(self, "mover_context"):
+                        self.mover_context: dict[str, dict] = {}
+                    self.mover_context.update(self._gap_scanner.mover_context)
             except Exception as exc:
-                applog.warning("scanner", f"[GapScanner] Injection failed ({exc}) — using static pool only")
+                applog.warning("scanner", f"[Movers] Injection failed ({exc}) — using static pool only")
 
         return base_symbols
+
 
     # ------------------------------------------------------------------
     # Global safety gate — multi-signal, fail-closed on UNKNOWN

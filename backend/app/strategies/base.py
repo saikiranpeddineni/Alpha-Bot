@@ -28,6 +28,11 @@ class StrategyContext:
     regime: Regime
     now: datetime
     debug_mode: bool = False
+    # Populated by scanner when a symbol is a known top gainer or loser.
+    # Values: "gainer" (long bias) | "loser" (short bias) | None (neutral)
+    mover_bias: str | None = None
+    # Raw % change for the mover (positive for gainers, negative for losers)
+    mover_change_pct: float = 0.0
 
 
 class Strategy(ABC):

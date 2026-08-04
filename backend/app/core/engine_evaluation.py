@@ -99,9 +99,20 @@ class TradingEngineEvaluationMixin:
             self._live_runner_floor.pop(symbol, None)
             self.pis_adapter.handle_position_closed(symbol)
 
-        sctx = StrategyContext(position=position, equity=equity, regime=regime, now=now)
+        # Look up mover bias from scanner context (top gainer → long bias, top loser → short bias)
+        _scanner = getattr(self, "_scanner", None) or getattr(self, "scanner", None)
+        _mover_ctx = getattr(_scanner, "mover_context", {}) if _scanner else {}
+        _mover_entry = _mover_ctx.get(symbol, {})
+        _mover_bias = _mover_entry.get("direction")   # "gainer" | "loser" | None
+        _mover_chg  = float(_mover_entry.get("change_pct", 0.0))
+
+        sctx = StrategyContext(
+            position=position, equity=equity, regime=regime, now=now,
+            mover_bias=_mover_bias, mover_change_pct=_mover_chg,
+        )
         signals = []
         for strat in self.strategies:
+
             if not strat.enabled:
                 continue
             decision = getattr(self, "last_safety_decision", None)
