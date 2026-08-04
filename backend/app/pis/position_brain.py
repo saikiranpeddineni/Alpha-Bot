@@ -91,6 +91,7 @@ class PositionBrain:
             self._last_decision: Optional[PISDecision] = None
             self._is_closed: bool = False
             self._stagnation_counter: int = 0
+            self._degradation_counter: int = 0
             self._runner_qualified: bool = False
             self._has_scaled_out: bool = False
             self._smoothed_health_score: Optional[float] = None
@@ -204,12 +205,12 @@ class PositionBrain:
         peak_r = self._profit_memory.peak_r
         trough_r = self._profit_memory.trough_r
 
-        # 1. Health evaluation with order-flow continuous EMA smoothing
+        # 1. Health evaluation with noise-filtering continuous EMA smoothing (alpha = 0.30 over 3-5 bars)
         raw_health = self.authority.health_evaluator.evaluate(obs, peak_r, trough_r)
         if self._smoothed_health_score is None:
             self._smoothed_health_score = raw_health.overall
         else:
-            self._smoothed_health_score = (0.60 * raw_health.overall) + (0.40 * self._smoothed_health_score)
+            self._smoothed_health_score = (0.30 * raw_health.overall) + (0.70 * self._smoothed_health_score)
 
         health = TradeHealth(
             overall=self._smoothed_health_score,
@@ -230,7 +231,7 @@ class PositionBrain:
         if is_runner:
             self._runner_qualified = True
 
-        # 4. State transition rules (Priority 3)
+        # 4. State transition rules with persistence confirmation (Priority 3)
         self._update_lifecycle(health, thesis, peak_r)
 
         # 5. Protection floor calculation (Priority 4 - Monotonic protection invariant)
@@ -283,11 +284,18 @@ class PositionBrain:
         thesis: ThesisDrift,
         peak_r: float,
     ) -> None:
-        """Determine and apply state transitions based on health and R metrics."""
+        """Determine and apply state transitions with persistence gating against noise."""
         current = self.state_machine.current_state
 
         if current == LifecycleState.CLOSED:
             return
+
+        # Track degradation persistence across consecutive bars
+        is_degraded_bar = thesis.is_degraded or health.overall < self.config.health_distribution_threshold
+        if is_degraded_bar:
+            self._degradation_counter += 1
+        else:
+            self._degradation_counter = 0
 
         target = current
 
@@ -295,40 +303,41 @@ class PositionBrain:
             if len(self._history) >= 2:
                 target = LifecycleState.DISCOVERY
         elif current == LifecycleState.DISCOVERY:
-            if thesis.is_degraded:
+            # Require persistence (>= 3 consecutive bars) before emergency exit
+            if self._degradation_counter >= 3:
                 target = LifecycleState.EXIT_CANDIDATE
+            elif is_degraded_bar or (len(self._history) >= 3 and health.overall <= self.config.health_weakening_threshold):
+                target = LifecycleState.WEAKENING
             elif health.overall >= self.config.health_validated_threshold and peak_r >= 0.75:
                 target = LifecycleState.VALIDATED
-            elif len(self._history) >= 3 and health.overall <= self.config.health_weakening_threshold:
-                target = LifecycleState.WEAKENING
         elif current == LifecycleState.VALIDATED:
-            if thesis.is_degraded:
+            if self._degradation_counter >= 3:
                 target = LifecycleState.EXIT_CANDIDATE
+            elif is_degraded_bar or health.overall <= self.config.health_weakening_threshold:
+                target = LifecycleState.WEAKENING
             elif health.overall >= self.config.health_accelerating_threshold and peak_r >= self.config.activation_mfe_r:
                 target = LifecycleState.ACCELERATING
-            elif health.overall <= self.config.health_weakening_threshold:
-                target = LifecycleState.WEAKENING
         elif current == LifecycleState.ACCELERATING:
             if peak_r >= self.config.runner_qualification_r and health.overall >= self.config.health_weakening_threshold:
                 target = LifecycleState.RUNNER
-            elif health.overall <= self.config.health_weakening_threshold:
+            elif is_degraded_bar or health.overall <= self.config.health_weakening_threshold:
                 target = LifecycleState.WEAKENING
         elif current == LifecycleState.RUNNER:
-            if health.overall < self.config.health_weakening_threshold:
-                target = LifecycleState.WEAKENING
-            elif health.overall < self.config.health_distribution_threshold:
+            if health.overall < self.config.health_distribution_threshold:
                 target = LifecycleState.DISTRIBUTION
+            elif health.overall < self.config.health_weakening_threshold:
+                target = LifecycleState.WEAKENING
         elif current == LifecycleState.WEAKENING:
-            if thesis.is_degraded or health.overall < self.config.health_distribution_threshold:
+            if self._degradation_counter >= 3:
                 target = LifecycleState.EXIT_CANDIDATE
             elif health.overall >= self.config.health_validated_threshold:
                 target = LifecycleState.VALIDATED
         elif current == LifecycleState.DISTRIBUTION:
-            if health.overall < 0.25 or thesis.is_degraded:
+            if self._degradation_counter >= 2 or health.overall < 0.20:
                 target = LifecycleState.EXIT_CANDIDATE
 
         if target != current and self.state_machine.can_transition_to(target):
-            self.state_machine.transition_to(target, f"Health={health.overall:.2f}, PeakR={peak_r:.2f}")
+            self.state_machine.transition_to(target, f"Health={health.overall:.2f}, PeakR={peak_r:.2f}, Degr={self._degradation_counter}")
 
     def close(self) -> None:
         """Clean up brain state and transition lifecycle to CLOSED (Priority 11).
@@ -360,6 +369,7 @@ class PositionBrain:
                 "current_stop_floor": self._current_stop_floor,
                 "runner_qualified": self._runner_qualified,
                 "stagnation_counter": self._stagnation_counter,
+                "degradation_counter": self._degradation_counter,
                 "is_closed": self._is_closed,
                 "last_timestamp": self._last_timestamp.isoformat(),
             }

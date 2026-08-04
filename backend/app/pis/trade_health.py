@@ -44,32 +44,38 @@ class TradeHealthEvaluator:
             current_r = 0.0
 
         if peak_r >= 0.60:
-            # Established Trend: measure retention of developed profit
-            retention = max(0.0, min(1.0, current_r / peak_r))
-            trend_score = retention
+            # Established Trend: evaluate retention relative to initial risk cushion
+            # Prevent single-bar pullbacks from crashing trend score to zero
+            retention = max(0.0, min(1.0, current_r / peak_r)) if peak_r > 0 else 0.5
+            trend_score = max(0.20, retention) if current_r > 0 else max(0.0, 0.20 + (current_r * 0.50))
         else:
             # Base Building / Discovery: evaluate health against initial risk boundary (-1.0R to +0.6R)
-            trend_score = max(0.0, min(1.0, 0.60 + (current_r * 0.50)))
+            # Give trade room to develop inside its risk envelope
+            trend_score = max(0.0, min(1.0, 0.60 + (current_r * 0.40)))
 
-        # 2. Momentum Score: close position relative to high/low bar range
+        # 2. Momentum Score: Noise-dampened intra-bar & directional evaluation
         bar_range = obs.high - obs.low
         if bar_range <= 1e-8 or math.isnan(bar_range) or math.isinf(bar_range):
-            momentum_score = 0.5
+            momentum_score = 0.55
+        elif bar_range < 0.35 * atr:
+            # Micro-consolidation bar (tight range noise): Treat as healthy consolidation
+            momentum_score = 0.65
         else:
             if obs.side > 0:  # Long
                 pos_in_bar = (obs.close - obs.low) / bar_range
             else:  # Short
                 pos_in_bar = (obs.high - obs.close) / bar_range
-            momentum_score = max(0.0, min(1.0, pos_in_bar))
+            # Dampen extreme 0.0/1.0 intra-bar spikes to preserve multi-bar trend context
+            momentum_score = max(0.15, min(0.95, (pos_in_bar * 0.70) + 0.15))
 
         # 3. Volatility Score: ratio of bar range to ATR (excessive range indicates exhaustion/distribution)
         vol_ratio = bar_range / atr
         if math.isnan(vol_ratio) or math.isinf(vol_ratio) or bar_range <= 1e-8:
-            volatility_score = 0.5
-        elif vol_ratio > 3.0:
-            volatility_score = 0.3
-        elif vol_ratio > 1.8:
-            volatility_score = 0.6
+            volatility_score = 0.70
+        elif vol_ratio > 3.5:
+            volatility_score = 0.35
+        elif vol_ratio > 2.0:
+            volatility_score = 0.60
         else:
             volatility_score = 0.85
 
@@ -77,19 +83,19 @@ class TradeHealthEvaluator:
         # Distinguish high-volume institutional selling (distribution) from low-volume absorption (consolidation)
         is_adverse_bar = (obs.side > 0 and obs.close < obs.high) or (obs.side < 0 and obs.close > obs.low)
         if obs.volume <= 0:
-            volume_score = 0.50
-        elif is_adverse_bar and vol_ratio > 2.0:
-            # Wide spread adverse bar on volume: distribution pressure
-            volume_score = 0.25
+            volume_score = 0.60
+        elif is_adverse_bar and vol_ratio > 2.5:
+            # Wide spread adverse bar on extreme expansion: distribution pressure
+            volume_score = 0.30
         elif is_adverse_bar:
-            # Normal pullback / consolidation
-            volume_score = 0.75
+            # Normal pullback / low-vol absorption: healthy consolidation
+            volume_score = 0.80
         else:
             # Favorable expansion on volume
-            volume_score = 0.85
+            volume_score = 0.90
 
         # Weighted overall composite health (inject news sentiment if extreme)
-        sentiment_boost = obs.news_sentiment_score * 0.20
+        sentiment_boost = obs.news_sentiment_score * 0.15
         overall = (
             trend_score * 0.45
             + momentum_score * 0.25
@@ -106,3 +112,4 @@ class TradeHealthEvaluator:
             volume_score=volume_score,
             news_sentiment=obs.news_sentiment_score,
         )
+

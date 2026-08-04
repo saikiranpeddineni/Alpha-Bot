@@ -40,8 +40,8 @@ class ThesisDriftEvaluator:
         if math.isnan(adverse_r) or math.isinf(adverse_r):
             adverse_r = 0.0
 
-        # Score component based on adverse excursion (0.0 = clean, 1.0 = severe adverse pressure)
-        adverse_penalty = max(0.0, min(1.0, adverse_r / 0.80))
+        # Score component based on adverse excursion (0.0 = clean, 1.0 = approaching stop boundary)
+        adverse_penalty = max(0.0, min(1.0, adverse_r / 1.00))
 
         # Stagnation component (0.0 = fresh/moving, 1.0 = completely stalled)
         max_bars = max(1, self.config.stagnation_max_bars)
@@ -51,11 +51,14 @@ class ThesisDriftEvaluator:
         drift_score = max(0.0, min(1.0, (adverse_penalty * 0.70) + (stagnation_penalty * 0.30)))
 
         # Structural invalidation:
-        # 1. Early sustained adverse breakdown (dropped >= 0.40R for >= 2 bars before establishing >0.50R trend)
-        # 2. General severe adverse excursion (>= 0.75R)
-        # 3. Complete momentum stagnation (>= max_bars)
-        early_adverse_breakdown = (adverse_r >= 0.40 and peak_r < 0.50 and stagnation_bars >= 2)
-        is_degraded = drift_score >= 0.50 or stagnation_bars >= max_bars or adverse_r >= 0.75 or early_adverse_breakdown
+        # 1. Severe adverse excursion approaching hard risk boundary (>= 0.90R)
+        # 2. Complete momentum stagnation (>= max_bars)
+        # 3. Composite drift score exceeding critical structural threshold (>= 0.70)
+        is_degraded = (
+            drift_score >= 0.70
+            or stagnation_bars >= max_bars
+            or adverse_r >= 0.90
+        )
 
         return ThesisDrift(
             drift_score=drift_score,

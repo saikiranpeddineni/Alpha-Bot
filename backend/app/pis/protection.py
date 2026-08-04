@@ -71,22 +71,9 @@ class AdaptiveProtectionPlanner:
             wide_trail = obs.close - (side * getattr(self.config, "runner_wide_atr_mult", 2.0) * obs.atr)
             candidate_floor = max(breakeven_floor, wide_trail) if side > 0 else min(breakeven_floor, wide_trail)
         elif peak_r < activation_r:
-            # Below activation threshold: keep initial stop or previous floor
+            # Below activation threshold: cleanly maintain initial stop loss or previous floor
+            # Preserves initial risk geometry and prevents sub-noise shakeouts
             candidate_floor = previous_floor if previous_floor is not None else initial_stop
-            
-            # Early Bailout Logic: Reduce loss without panic selling
-            if getattr(self.config, "enable_early_bailout", True):
-                # If health collapses or thesis is degraded, activate Bailout Mode natively
-                if health.overall < 0.3 or health.trend_score < 0.25:
-                    # Bailout Mode: tighten stop to ride any bounce but cut if dumping resumes
-                    bailout_buffer = max(obs.atr * 0.5, obs.close * 0.005)
-                    if side > 0:
-                        bailout_floor = obs.close - bailout_buffer
-                        # Enforce monotonicity: never loosen the stop
-                        candidate_floor = max(candidate_floor, bailout_floor)
-                    else:
-                        bailout_floor = obs.close + bailout_buffer
-                        candidate_floor = min(candidate_floor, bailout_floor)
         else:
             # 2. Dynamic giveback calculation based on peak R
             if peak_r >= self.config.runner_qualification_r:

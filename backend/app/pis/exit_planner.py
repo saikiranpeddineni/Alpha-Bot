@@ -90,32 +90,33 @@ class ExitPlanner:
             elif side < 0 and (obs.low <= obs.take_profit or (peak_r >= 1.50 and target_dist <= target_tolerance)):
                 target_hit = True
 
-        # Check Exhaustion / Rejection Wick at peak profit (>= 1.10R)
+        # Check Climax Reversal Exhaustion (Only on extreme extension >= 1.50R with wide-range blowoff wick)
         bar_range = obs.high - obs.low
-        exhaustion_wick = False
-        if peak_r >= 1.10 and bar_range >= 0.70 * obs.atr:
+        exhaustion_climax = False
+        if peak_r >= 1.50 and bar_range >= 2.0 * obs.atr:
             adverse_wick = (obs.high - obs.close) if side > 0 else (obs.close - obs.low)
             wick_ratio = adverse_wick / max(1e-6, bar_range)
-            if wick_ratio >= 0.45:
-                exhaustion_wick = True
+            if wick_ratio >= 0.60:
+                exhaustion_climax = True
 
-        # Check Stagnation / Time-Decay Profit Harvesting
-        # If position has been held >= 10 bars, is in profit (>= +0.35R), and momentum has stalled
+        # Check Extended Stagnation / Time-Decay Profit Harvesting
+        # Requires true structural stall over substantial duration (>= 25 bars) without progress
         stagnation_harvest = (
             not has_scaled_out
-            and history_len >= 10
-            and peak_r >= 0.35
+            and history_len >= 25
+            and thesis.stagnation_bars >= 20
+            and peak_r >= 0.50
             and obs.r_multiple >= 0.30
-            and health.momentum_score <= 0.40
+            and health.momentum_score <= 0.30
         )
 
         # --- TWO-STAGE 50/50 INSTITUTIONAL SCALE-OUT & RUNNER EXTENSION ---
-        # Stage 1: When target hit, peak R >= 1.0, or exhaustion wick forms, bank 50% profit.
+        # Stage 1: When target hit, peak R >= 1.0R, or genuine exhaustion climax, bank 50% profit.
         # Stage 2: Qualify remaining 50% as runner with breakeven floor + 2.0x ATR wide trailing stop.
         scale_out_triggered = False
         if getattr(self.config, "enable_scale_out", True) and not has_scaled_out:
             scale_out_r = getattr(self.config, "scale_out_target_r", 1.00)
-            if target_hit or peak_r >= scale_out_r or exhaustion_wick or stagnation_harvest:
+            if target_hit or peak_r >= scale_out_r or exhaustion_climax or stagnation_harvest:
                 scale_out_triggered = True
 
         if scale_out_triggered and not is_runner:
