@@ -177,3 +177,28 @@ def test_strategy_specific_cooldown_isolation(rm: RiskManager, bars):
     signal_b = Signal(symbol="MSFT", action=SignalAction.ENTER_LONG, strategy="strategy_b", reason="test", confidence=0.7)
     decision_b = rm.evaluate_entry(signal_b, ctx(), bars, now=now)
     assert decision_b.approved, decision_b.reason
+
+
+def test_entry_order_type_market_and_limit(risk_config, open_clock, bars):
+    from app.core.domain import OrderType
+    
+    # 1. Default is MARKET
+    rm_market = RiskManager(risk_config, open_clock)
+    assert rm_market.config.entry_order_type == "market"
+    dec_market = rm_market.evaluate_entry(long_signal(), ctx(), bars, now=MID_SESSION)
+    assert dec_market.approved
+    assert dec_market.order.order_type == OrderType.MARKET
+    assert dec_market.order.limit_price is None
+    assert dec_market.order.stop_loss is not None
+    assert dec_market.order.take_profit is not None
+
+    # 2. Configured as LIMIT
+    risk_config.entry_order_type = "limit"
+    rm_limit = RiskManager(risk_config, open_clock)
+    dec_limit = rm_limit.evaluate_entry(long_signal(), ctx(), bars, now=MID_SESSION)
+    assert dec_limit.approved
+    assert dec_limit.order.order_type == OrderType.LIMIT
+    assert dec_limit.order.limit_price is not None
+    assert dec_limit.order.stop_loss is not None
+    assert dec_limit.order.take_profit is not None
+

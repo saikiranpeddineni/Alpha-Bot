@@ -34,6 +34,7 @@ VALID_BROKERS = ("paper_sim", "alpaca")
 
 class RiskConfig(BaseModel):
     """Runtime-tunable risk parameters. Defaults favor capital preservation."""
+    entry_order_type: str = Field("market", pattern="^(market|limit)$")
     risk_per_trade_pct: float = Field(0.5, ge=0.01, le=5.0)
     max_position_pct: float = Field(20.0, ge=1.0, le=100.0)
     max_open_positions: int = Field(4, ge=1, le=50)
@@ -104,6 +105,7 @@ class Settings(BaseSettings):
     enable_live_trading: bool = Field(False, validation_alias="ENABLE_LIVE_TRADING")
     slack_webhook_url: str = Field("", validation_alias="SLACK_WEBHOOK_URL")
 
+    entry_order_type: str = Field("market", validation_alias="ENTRY_ORDER_TYPE")
     risk_per_trade_pct: float = Field(0.5, validation_alias="RISK_PER_TRADE_PCT")
     max_position_pct: float = Field(20.0, validation_alias="MAX_POSITION_PCT")
     max_open_positions: int = Field(4, validation_alias="MAX_OPEN_POSITIONS")
@@ -191,6 +193,7 @@ class Settings(BaseSettings):
     def risk_config(self) -> RiskConfig:
         """Build the canonical boot RiskConfig without silently dropping fields."""
         return RiskConfig(
+            entry_order_type=self.entry_order_type,
             risk_per_trade_pct=self.risk_per_trade_pct,
             max_position_pct=self.max_position_pct,
             max_open_positions=self.max_open_positions,

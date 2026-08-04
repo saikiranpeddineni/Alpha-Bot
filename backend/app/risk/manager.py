@@ -439,17 +439,23 @@ class RiskManager:
         if executable_stop <= 0 or executable_target <= 0:
             return RiskDecision(False, "broker-valid bracket geometry unavailable at current price")
 
-        max_slippage_pct = 0.0015
-        if side == OrderSide.BUY:
-            limit_price = round(price * (1 + max_slippage_pct), 2)
+        entry_type = str(getattr(self.config, "entry_order_type", "market") or "market").lower().strip()
+        if entry_type == "limit":
+            order_type = OrderType.LIMIT
+            max_slippage_pct = 0.0015
+            if side == OrderSide.BUY:
+                limit_price = round(price * (1 + max_slippage_pct), 2)
+            else:
+                limit_price = round(price * (1 - max_slippage_pct), 2)
         else:
-            limit_price = round(price * (1 - max_slippage_pct), 2)
+            order_type = OrderType.MARKET
+            limit_price = None
 
         order = OrderRequest(
             symbol=symbol,
             side=side,
             qty=qty,
-            order_type=OrderType.LIMIT,
+            order_type=order_type,
             limit_price=limit_price,
             stop_loss=executable_stop,
             take_profit=executable_target,
