@@ -26,6 +26,7 @@ from app.pis.models import (
     PISDecision,
     PositionObservation,
     SnapshotHistory,
+    TradeHealth,
 )
 from app.pis.profit_memory import ProfitMemoryState, ProfitMemoryTracker
 from app.pis.state_machine import PositionLifecycleStateMachine
@@ -90,6 +91,7 @@ class PositionBrain:
             self._is_closed: bool = False
             self._stagnation_counter: int = 0
             self._runner_qualified: bool = False
+            self._smoothed_health_score: Optional[float] = None
 
             # Initial evaluation
             self._evaluate_internal(initial_observation)
@@ -193,8 +195,21 @@ class PositionBrain:
         peak_r = self._profit_memory.peak_r
         trough_r = self._profit_memory.trough_r
 
-        # 1. Health evaluation (Priority 9 - numerical stability)
-        health = self.authority.health_evaluator.evaluate(obs, peak_r, trough_r)
+        # 1. Health evaluation with order-flow continuous EMA smoothing
+        raw_health = self.authority.health_evaluator.evaluate(obs, peak_r, trough_r)
+        if self._smoothed_health_score is None:
+            self._smoothed_health_score = raw_health.overall
+        else:
+            self._smoothed_health_score = (0.60 * raw_health.overall) + (0.40 * self._smoothed_health_score)
+
+        health = TradeHealth(
+            overall=self._smoothed_health_score,
+            trend_score=raw_health.trend_score,
+            momentum_score=raw_health.momentum_score,
+            volatility_score=raw_health.volatility_score,
+            volume_score=raw_health.volume_score,
+            news_sentiment=raw_health.news_sentiment,
+        )
 
         # 2. Thesis drift evaluation
         thesis = self.authority.thesis_evaluator.evaluate(obs, trough_r, self._stagnation_counter)

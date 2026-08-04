@@ -86,15 +86,12 @@ class ExitPlanner:
             elif side < 0 and obs.low <= obs.take_profit:
                 target_hit = True
 
-        # --- DYNAMIC PROFIT EXTENSION ---
-        # If the target is hit but the stock is exceptionally strong, we extend the trade
-        # by converting it into a runner dynamically.
-        target_extended = False
+        # --- INSTITUTIONAL 70/30 SCALE-OUT & RUNNER EXTENSION ---
+        # When target is reached: If position is strong/healthy, harvest 70% core profit
+        # and qualify the remaining 30% as an active trailing runner.
         if target_hit and not is_runner:
-            if health.overall >= 0.80 or health.momentum_score >= 0.80 or health.news_sentiment >= 0.70:
-                target_extended = True
-                target_hit = False  # Override the exit, force HOLD
-                is_runner = True    # Upgrade to runner status for future trailing
+            if health.overall >= 0.70 or health.momentum_score >= 0.75 or health.news_sentiment >= 0.50:
+                is_runner = True    # Upgrade to runner for trailing the remaining 30%
 
         # Determine exit action
         if protection_breached or lifecycle == LifecycleState.EXIT_CANDIDATE:
@@ -104,12 +101,12 @@ class ExitPlanner:
             action = ExitAction.FULL_EXIT
             exit_ratio = 1.0
         elif target_hit and is_runner:
-            # Let runners run, but secure 50% at target
+            # Institutional Scale-Out: Secure 70% core profit at target, trail 30% runner
             action = ExitAction.PARTIAL_EXIT
-            exit_ratio = 0.5
+            exit_ratio = 0.70
         elif lifecycle == LifecycleState.DISTRIBUTION and health.overall < self.config.health_distribution_threshold:
             action = ExitAction.PARTIAL_EXIT
-            exit_ratio = 0.5
+            exit_ratio = 0.50
         elif protection_updated:
             action = ExitAction.UPDATE_PROTECTION
             exit_ratio = 0.0
