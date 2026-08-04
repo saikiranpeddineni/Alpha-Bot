@@ -40,7 +40,7 @@ log = logging.getLogger(__name__)
 _GAP_MIN_DOLLAR_VOLUME = 5_000_000.0   # $5M pre-market DV
 _GAP_MIN_PCT = 2.0                     # 2% gap from prior close
 _GAP_MAX_RESULTS = 30                  # top 30 movers returned
-_PREMARKET_FETCH_CONCURRENCY = 15
+_PREMARKET_FETCH_CONCURRENCY = 10      # was 15 — reduced to share Alpaca rate limit budget
 
 
 class PreMarketGapScanner:

@@ -22,6 +22,61 @@ _TF_MAP = {"1Min": ("Minute", 1), "5Min": ("Minute", 5), "15Min": ("Minute", 15)
 
 _SNAPSHOT_SUPPRESS_AFTER = 2  # downgrade to DEBUG after this many consecutive failures
 
+# ---------------------------------------------------------------------------
+# Global rate limiter — shared across ALL concurrent bar fetches
+# Alpaca free tier: ~200 requests/min. We cap at 150/min (25% headroom).
+# Token-bucket: replenishes 150 tokens/min (one every 0.4s). Burst up to 20.
+# ---------------------------------------------------------------------------
+_RATE_LIMIT_PER_MIN: int = 150
+_RATE_BURST: int = 20
+_RATE_INTERVAL: float = 60.0 / _RATE_LIMIT_PER_MIN  # seconds between tokens
+
+
+class _TokenBucketRateLimiter:
+    """Simple async token-bucket rate limiter. Thread-safe via asyncio.Lock."""
+
+    def __init__(self, rate_per_min: int, burst: int) -> None:
+        self._interval = 60.0 / rate_per_min
+        self._burst = burst
+        self._tokens = float(burst)
+        self._last_refill = asyncio.get_event_loop().time() if asyncio._get_running_loop() else 0.0  # type: ignore[attr-defined]
+        self._lock: asyncio.Lock | None = None  # created lazily after event loop starts
+
+    def _get_lock(self) -> asyncio.Lock:
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
+
+    async def acquire(self) -> None:
+        """Block until a token is available, then consume it."""
+        lock = self._get_lock()
+        async with lock:
+            now = asyncio.get_event_loop().time()
+            elapsed = now - self._last_refill
+            self._tokens = min(self._burst, self._tokens + elapsed / self._interval)
+            self._last_refill = now
+            if self._tokens >= 1.0:
+                self._tokens -= 1.0
+                return
+            # Sleep for the time needed to accumulate one token
+            wait = (1.0 - self._tokens) * self._interval
+        await asyncio.sleep(wait)
+        # Re-acquire after sleep (token now available)
+        async with self._get_lock():
+            self._tokens = max(0.0, self._tokens - 1.0)
+            self._last_refill = asyncio.get_event_loop().time()
+
+
+# Module-level singleton — shared by all AlpacaDataProvider instances
+_global_rate_limiter: _TokenBucketRateLimiter | None = None
+
+
+def _get_rate_limiter() -> _TokenBucketRateLimiter:
+    global _global_rate_limiter  # noqa: PLW0603
+    if _global_rate_limiter is None:
+        _global_rate_limiter = _TokenBucketRateLimiter(_RATE_LIMIT_PER_MIN, _RATE_BURST)
+    return _global_rate_limiter
+
 
 class AlpacaDataProvider(DataProvider):
     name = "alpaca"
@@ -95,6 +150,9 @@ class AlpacaDataProvider(DataProvider):
         if start is None:
             days = 5 if timeframe != "1Day" else 365
             start = end - timedelta(days=days)
+
+        # Acquire rate-limit token before making the HTTP request
+        await _get_rate_limiter().acquire()
 
         retries = 8
         backoff = 2.0

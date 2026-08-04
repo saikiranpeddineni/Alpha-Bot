@@ -42,8 +42,8 @@ _MIN_DOLLAR_VOLUME = 2_000_000.0   # $2M daily dollar volume
 _MIN_GAINER_PCT = 2.5    # up ≥ 2.5% today
 _MIN_LOSER_PCT  = -2.5   # down ≤ -2.5% today
 
-# Concurrency for bar-based fallback
-_FALLBACK_CONCURRENCY = 20
+# Concurrency for bar-based fallback — shares the global Alpaca rate limiter
+_FALLBACK_CONCURRENCY = 10   # was 20 — reduced to avoid 429 cascades
 
 
 @dataclass

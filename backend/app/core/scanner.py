@@ -137,9 +137,12 @@ SYMBOL_SECTOR: dict[str, str] = {
 DEFENSIVE_WATCHLIST: list[str] = ["SPY", "QQQ", "DIA", "IWM", "GLD"]
 LARGE_CAP_ANCHORS: list[str] = ["NVDA", "TSLA", "AMD", "META", "AMZN", "AAPL", "MSFT", "PLTR", "SMCI", "COIN"]
 
-# Concurrency limits — scaled for larger universe
-_PREFILTER_CONCURRENCY = 35
-_ML_CONCURRENCY = 10
+# Concurrency limits — tuned to stay under Alpaca's ~200 req/min free-tier limit.
+# At 278+ symbols the scanner fires in batches. With concurrency=15 and avg
+# 300ms per bar fetch, we hit ~180 req/min peak — safely under the 200/min limit.
+# Raising this caused "too many requests" (429) cascades with 278-symbol universe.
+_PREFILTER_CONCURRENCY = 15   # was 35 — reduced to avoid Alpaca 429 rate limit
+_ML_CONCURRENCY = 8           # unchanged
 
 # Selection parameters — tuned for higher trade frequency
 _TECH_SCORE_TOP_N = 40   # was 25 — more candidates reach Stage 3
