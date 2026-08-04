@@ -22,6 +22,7 @@ class ThesisDriftEvaluator:
         obs: PositionObservation,
         trough_r: float,
         stagnation_bars: int,
+        peak_r: float = 0.0,
     ) -> ThesisDrift:
         """Evaluate thesis drift for a position observation.
 
@@ -29,6 +30,7 @@ class ThesisDriftEvaluator:
             obs: PositionObservation snapshot.
             trough_r: Lowest R-multiple recorded for position.
             stagnation_bars: Count of consecutive bars with flat/no progress.
+            peak_r: Highest R-multiple recorded for position.
 
         Returns:
             ThesisDrift object.
@@ -38,17 +40,22 @@ class ThesisDriftEvaluator:
         if math.isnan(adverse_r) or math.isinf(adverse_r):
             adverse_r = 0.0
 
-        # Score component based on adverse excursion (0.0 = terrible, 1.0 = no adverse excursion)
-        adverse_penalty = max(0.0, min(1.0, adverse_r / 2.0))
+        # Score component based on adverse excursion (0.0 = clean, 1.0 = severe adverse pressure)
+        adverse_penalty = max(0.0, min(1.0, adverse_r / 0.80))
 
-        # Stagnation component (0.0 = terrible, 1.0 = fresh/moving)
+        # Stagnation component (0.0 = fresh/moving, 1.0 = completely stalled)
         max_bars = max(1, self.config.stagnation_max_bars)
         stagnation_penalty = max(0.0, min(1.0, stagnation_bars / max_bars))
 
         # Composite drift score [0.0, 1.0] where higher = worse degradation
-        drift_score = max(0.0, min(1.0, (adverse_penalty * 0.6) + (stagnation_penalty * 0.4)))
+        drift_score = max(0.0, min(1.0, (adverse_penalty * 0.70) + (stagnation_penalty * 0.30)))
 
-        is_degraded = drift_score >= 0.5 or stagnation_bars >= max_bars or adverse_r >= 1.5
+        # Structural invalidation:
+        # 1. Early sustained adverse breakdown (dropped >= 0.40R for >= 2 bars before establishing >0.50R trend)
+        # 2. General severe adverse excursion (>= 0.75R)
+        # 3. Complete momentum stagnation (>= max_bars)
+        early_adverse_breakdown = (adverse_r >= 0.40 and peak_r < 0.50 and stagnation_bars >= 2)
+        is_degraded = drift_score >= 0.50 or stagnation_bars >= max_bars or adverse_r >= 0.75 or early_adverse_breakdown
 
         return ThesisDrift(
             drift_score=drift_score,

@@ -212,7 +212,7 @@ class PositionBrain:
         )
 
         # 2. Thesis drift evaluation
-        thesis = self.authority.thesis_evaluator.evaluate(obs, trough_r, self._stagnation_counter)
+        thesis = self.authority.thesis_evaluator.evaluate(obs, trough_r, self._stagnation_counter, peak_r)
 
         # 3. Runner intelligence
         runner_score, is_runner = self.authority.runner_intelligence.evaluate_runner_score(
@@ -269,12 +269,16 @@ class PositionBrain:
             if len(self._history) >= 2:
                 target = LifecycleState.DISCOVERY
         elif current == LifecycleState.DISCOVERY:
-            if health.overall >= self.config.health_validated_threshold and peak_r >= 0.75:
+            if thesis.is_degraded:
+                target = LifecycleState.EXIT_CANDIDATE
+            elif health.overall >= self.config.health_validated_threshold and peak_r >= 0.75:
                 target = LifecycleState.VALIDATED
-            elif health.overall <= self.config.health_weakening_threshold:
+            elif len(self._history) >= 3 and health.overall <= self.config.health_weakening_threshold:
                 target = LifecycleState.WEAKENING
         elif current == LifecycleState.VALIDATED:
-            if health.overall >= self.config.health_accelerating_threshold and peak_r >= self.config.activation_mfe_r:
+            if thesis.is_degraded:
+                target = LifecycleState.EXIT_CANDIDATE
+            elif health.overall >= self.config.health_accelerating_threshold and peak_r >= self.config.activation_mfe_r:
                 target = LifecycleState.ACCELERATING
             elif health.overall <= self.config.health_weakening_threshold:
                 target = LifecycleState.WEAKENING
@@ -289,8 +293,8 @@ class PositionBrain:
             elif health.overall < self.config.health_distribution_threshold:
                 target = LifecycleState.DISTRIBUTION
         elif current == LifecycleState.WEAKENING:
-            if health.overall < self.config.health_distribution_threshold or thesis.is_degraded:
-                target = LifecycleState.DISTRIBUTION
+            if thesis.is_degraded or health.overall < self.config.health_distribution_threshold:
+                target = LifecycleState.EXIT_CANDIDATE
             elif health.overall >= self.config.health_validated_threshold:
                 target = LifecycleState.VALIDATED
         elif current == LifecycleState.DISTRIBUTION:

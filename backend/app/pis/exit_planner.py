@@ -86,24 +86,33 @@ class ExitPlanner:
             elif side < 0 and obs.low <= obs.take_profit:
                 target_hit = True
 
+        # Check Exhaustion / Rejection Wick at peak profit (>= 1.10R)
+        bar_range = obs.high - obs.low
+        exhaustion_wick = False
+        if peak_r >= 1.10 and bar_range >= 0.70 * obs.atr:
+            adverse_wick = (obs.high - obs.close) if side > 0 else (obs.close - obs.low)
+            wick_ratio = adverse_wick / max(1e-6, bar_range)
+            if wick_ratio >= 0.45:
+                exhaustion_wick = True
+
         # --- INSTITUTIONAL 70/30 SCALE-OUT & RUNNER EXTENSION ---
-        # When target is reached: If position is strong/healthy, harvest 70% core profit
-        # and qualify the remaining 30% as an active trailing runner.
-        if target_hit and not is_runner:
-            if health.overall >= 0.70 or health.momentum_score >= 0.75 or health.news_sentiment >= 0.50:
-                is_runner = True    # Upgrade to runner for trailing the remaining 30%
+        # When target is reached or exhaustion wick forms:
+        # Secure 70% core profit and qualify the remaining 30% as an active trailing runner.
+        scale_out_triggered = (target_hit or exhaustion_wick)
+        if scale_out_triggered and not is_runner:
+            is_runner = True
 
         # Determine exit action
         if protection_breached or lifecycle == LifecycleState.EXIT_CANDIDATE:
             action = ExitAction.FULL_EXIT
             exit_ratio = 1.0
+        elif scale_out_triggered and is_runner:
+            # Institutional Scale-Out: Secure 70% core profit at target/exhaustion, trail 30% runner
+            action = ExitAction.PARTIAL_EXIT
+            exit_ratio = 0.70
         elif target_hit and not is_runner:
             action = ExitAction.FULL_EXIT
             exit_ratio = 1.0
-        elif target_hit and is_runner:
-            # Institutional Scale-Out: Secure 70% core profit at target, trail 30% runner
-            action = ExitAction.PARTIAL_EXIT
-            exit_ratio = 0.70
         elif lifecycle == LifecycleState.DISTRIBUTION and health.overall < self.config.health_distribution_threshold:
             action = ExitAction.PARTIAL_EXIT
             exit_ratio = 0.50
