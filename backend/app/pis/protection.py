@@ -100,36 +100,36 @@ class AdaptiveProtectionPlanner:
                     giveback_pct = max(min_giveback, base_giveback - decay)
             else:
                 # Dynamic Exhaustion Prediction: Health-Aware Profit Locking
-                base = self.config.giveback_pct_maturing
+                # As peak_r expands (>1.0R), progressively reduce giveback allowance to lock high R gains
+                r_scaling = max(0.0, (peak_r - 1.0) * 0.15)
+                base = max(0.12, self.config.giveback_pct_maturing - r_scaling)
                 
-                # 1. Parabolic Exhaustion Override (Chandelier Snapping)
-                # If volatility explodes (score <= 0.2 means range > 3x ATR) and trend is extended, snap the stop!
-                if health.volatility_score <= 0.2 and peak_r > 1.5:
-                    giveback_pct = min(base, 0.15)
+                # 1. Parabolic Climax Override (Tighten stop aggressively when extended)
+                if peak_r >= 1.50 and health.overall < 0.65:
+                    giveback_pct = max(0.10, base * 0.70)  # Lock 90% of peak gain on exhaustion!
+                elif health.volatility_score <= 0.2 and peak_r > 1.5:
+                    giveback_pct = min(base, 0.12)
                 # 2. Healthy Trend (Breathe)
                 elif health.overall >= 0.8:
-                    giveback_pct = max(base, 0.60)
+                    giveback_pct = min(0.35, max(base, 0.25))
                 # 3. Exhaustion Top / Rejection (Choke)
                 elif health.overall <= 0.4:
-                    giveback_pct = min(base, 0.20)
-                # 4. Smooth Interpolation (0.4 to 0.8 health -> 20% to 60% giveback)
+                    giveback_pct = min(base, 0.15)
+                # 4. Smooth Interpolation
                 else:
-                    giveback_pct = 0.20 + (0.60 - 0.20) * ((health.overall - 0.4) / (0.8 - 0.4))
+                    giveback_pct = max(0.12, base)
 
-            giveback_allowance_r = max(self.config.min_breathing_room_r, peak_r * giveback_pct)
+            atr_r_buffer = 0.45 * (obs.atr / max(1e-6, risk))
+            giveback_allowance_r = max(self.config.min_breathing_room_r, atr_r_buffer, peak_r * giveback_pct)
             locked_r = max(self.config.min_locked_r, peak_r - giveback_allowance_r)
 
             # Raw desired floor from R-multiple locking
             desired_floor = entry + side * locked_r * risk
 
-            # 3. Buffer relative to completed close to prevent noise whip
-            px_buffer = max(self.config.min_price_buffer_abs, obs.close * self.config.price_buffer_pct)
+            # 3. Ensure floor does not cross below breakeven once locked
             if side > 0:
-                desired_floor = min(desired_floor, obs.close - px_buffer)
-                # Ensure floor is at least breakeven + minimal locked risk
                 desired_floor = max(desired_floor, entry + (risk * self.config.min_locked_r))
             else:
-                desired_floor = max(desired_floor, obs.close + px_buffer)
                 desired_floor = min(desired_floor, entry - (risk * self.config.min_locked_r))
 
             candidate_floor = desired_floor
