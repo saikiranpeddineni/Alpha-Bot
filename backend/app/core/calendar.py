@@ -20,7 +20,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
-from app.core.logging import applog
+from app.core.applog import applog
 
 if TYPE_CHECKING:
     pass

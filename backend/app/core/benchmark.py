@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from typing import Literal
 import pandas as pd
 from datetime import UTC, datetime, timedelta
-from app.core.logging import applog
+from app.core.applog import applog
 
 @dataclass
 class BenchmarkTrade:

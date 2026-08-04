@@ -14,7 +14,7 @@ import httpx
 
 from app.ai.regime import REGIME_LABELS
 from app.core.domain import InsightItem, Regime, Signal
-from app.core.logging import applog
+from app.core.applog import applog
 
 
 class InsightEngine:

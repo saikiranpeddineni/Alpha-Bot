@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.core.logging import applog
+from app.core.applog import applog
 
 # Minimum statistical sample size before any adaptation is allowed.
 # N < 30: no adaptation (noise-to-signal ratio too high)

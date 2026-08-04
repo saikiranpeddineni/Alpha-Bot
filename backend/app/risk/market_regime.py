@@ -58,7 +58,7 @@ async def _safe_history(
         applog.debug("market_regime", f"_safe_history failed for {symbol}: {exc}")
         return pd.DataFrame()
 
-from app.core.logging import applog
+from app.core.applog import applog
 
 
 # ---------------------------------------------------------------------------

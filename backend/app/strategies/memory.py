@@ -5,7 +5,7 @@ import json
 import math
 from datetime import UTC, datetime
 from app.db.database import Database
-from app.core.logging import applog
+from app.core.applog import applog
 
 
 # Strategy-specific evaluation horizons for canonical realized_r attribution.

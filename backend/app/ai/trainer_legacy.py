@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pandas as pd
 
-from app.core.logging import applog
+from app.core.applog import applog
 
 if TYPE_CHECKING:
     from app.ai.model import SignalModel

@@ -9,7 +9,7 @@ from typing import Any
 import pandas as pd
 
 from app.core.domain import Regime, Signal, SignalAction
-from app.core.logging import applog
+from app.core.applog import applog
 from app.ai.features import latest_feature_row
 from app.ai.prediction import ExcursionEstimate
 

@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone, UTC
 from typing import Any
 import pandas as pd
 from app.core.domain import Signal, SignalAction, Position, OrderRequest, OrderSide, OrderType, Order
-from app.core.logging import applog
+from app.core.applog import applog
 from app.core.shadow_ledger import ShadowLedger
 from app.indicators.ta import enrich, compute_relative_strength
 from app.indicators.vwap_telemetry import compute_vwap_telemetry

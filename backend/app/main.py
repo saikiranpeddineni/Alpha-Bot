@@ -45,7 +45,7 @@ from app.api.replay import router as replay_router
 from app.api.ws import EventHub
 from app.config import FRONTEND_DIST, Settings, get_settings
 from app.core.durable_engine import DurableTradingEngine
-from app.core.logging import applog, configure_std_logging
+from app.core.applog import applog, configure_std_logging
 from app.core.alerting import init_alerting, stop_alerting
 from app.db.database import Database
 

@@ -27,7 +27,7 @@ from typing import Any
 from fastapi import WebSocket, WebSocketDisconnect
 from fastapi.encoders import jsonable_encoder
 
-from app.core.logging import applog
+from app.core.applog import applog
 
 # Sentinel object placed in a client queue to signal the send-loop to exit.
 _CLOSE = object()

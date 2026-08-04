@@ -28,7 +28,7 @@ from app.core.domain import (
     OrderType,
     Position,
 )
-from app.core.logging import applog
+from app.core.applog import applog
 
 if TYPE_CHECKING:
     from app.config import Settings

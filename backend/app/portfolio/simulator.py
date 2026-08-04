@@ -14,7 +14,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from app.core.logging import applog
+from app.core.applog import applog
 
 # Sectors map matching allocator.py
 _SECTOR_MAP: dict[str, str] = {

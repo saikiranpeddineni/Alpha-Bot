@@ -30,7 +30,7 @@ from app.brokers.paper import PaperBroker
 from app.config import RiskConfig
 from app.core.clock import MarketClock
 from app.core.domain import SignalAction, TradeRecord, new_id, utcnow, OrderStatus
-from app.core.logging import applog
+from app.core.applog import applog
 from app.data.manager import DataManager
 from app.data.base import HistoricalDataCoverageError
 from app.portfolio.tracker import PortfolioTracker

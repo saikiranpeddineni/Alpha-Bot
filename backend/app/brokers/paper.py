@@ -28,7 +28,7 @@ from app.core.domain import (
     Position,
     utcnow,
 )
-from app.core.logging import applog
+from app.core.applog import applog
 
 
 class PaperBroker(Broker):

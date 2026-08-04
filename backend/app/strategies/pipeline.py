@@ -23,7 +23,7 @@ from app.ai.model import SignalModel
 from app.ai.prediction import TradeScoreEngine
 from app.config import RiskConfig, Settings, get_settings
 from app.core.domain import Regime, Signal, SignalAction
-from app.core.logging import applog
+from app.core.applog import applog
 
 REGIME_WEIGHTS: dict[str, dict[Regime, float]] = {
     "orb": {Regime.TREND_UP: 1.15, Regime.TREND_DOWN: 1.15, Regime.RANGE: 0.70, Regime.VOLATILE: 1.00},

@@ -30,7 +30,7 @@ from app.core.domain import (
     SignalAction,
     TradeRecord,
 )
-from app.core.logging import applog
+from app.core.applog import applog
 
 PDT_EQUITY_MIN = 25_000.0
 PDT_MAX_DAY_TRADES = 3  # allowed day trades in any rolling 5-business-day window

@@ -14,7 +14,7 @@ from datetime import UTC, datetime, timedelta
 import pandas as pd
 
 from app.core.domain import Quote
-from app.core.logging import applog
+from app.core.applog import applog
 from app.core.universe_discovery import DiscoverableAsset
 from app.data.base import DataProvider, empty_bars, normalize_bars
 

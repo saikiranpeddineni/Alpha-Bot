@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from app.core.domain import TradeRecord
-from app.core.logging import applog
+from app.core.applog import applog
 
 
 @dataclass

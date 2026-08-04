@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 
 from app.core.domain import Position, Signal, SignalAction
-from app.core.logging import applog
+from app.core.applog import applog
 
 _SECTOR_MAP: dict[str, str] = {
     "AAPL": "TECH", "MSFT": "TECH", "NVDA": "TECH", "AMD": "TECH",

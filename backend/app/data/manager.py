@@ -13,7 +13,7 @@ from pathlib import Path
 import pandas as pd
 
 from app.core.domain import Quote
-from app.core.logging import applog
+from app.core.applog import applog
 from app.data.base import DataProvider, empty_bars, resample_bars, timeframe_delta, HistoricalDataCoverageError, CachePolicy
 from app.data.store import BarCache
 from app.data.synthetic import SyntheticProvider

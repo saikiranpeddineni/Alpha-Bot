@@ -26,7 +26,7 @@ from enum import Enum
 import numpy as np
 import pandas as pd
 
-from app.core.logging import applog
+from app.core.applog import applog
 from app.core.scanner_discovery_input import resolve_stage1_symbols
 from app.core.universe_discovery import DiscoveryCoordinator
 from app.ai.features import FEATURE_COLUMNS, build_training_set

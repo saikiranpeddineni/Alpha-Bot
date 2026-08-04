@@ -10,7 +10,7 @@ from datetime import datetime
 
 from app.core.domain import Order, OrderStatus, OrderType
 from app.core.engine import TradingEngine
-from app.core.logging import applog
+from app.core.applog import applog
 
 
 class DurableTradingEngine(TradingEngine):

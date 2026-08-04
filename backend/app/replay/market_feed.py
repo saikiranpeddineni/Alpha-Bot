@@ -46,7 +46,7 @@ class ReplayMarketFeed:
         import shutil
         from app.config import get_settings
         from app.data.alpaca_data import AlpacaDataProvider
-        from app.core.logging import applog
+        from app.core.applog import applog
         from datetime import timedelta
         
         # Check if fallback scratch file should be copied to establish initial cache

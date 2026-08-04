@@ -1,7 +1,7 @@
 import asyncio
 import httpx
 from typing import Optional
-from app.core.logging import LogEntry, applog
+from app.core.applog import LogEntry, applog
 
 class SlackAlerter:
     def __init__(self, webhook_url: str):

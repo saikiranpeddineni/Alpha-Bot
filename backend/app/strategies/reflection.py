@@ -6,7 +6,7 @@ from datetime import datetime, UTC
 from pathlib import Path
 from typing import Any
 from app.db.database import Database
-from app.core.logging import applog
+from app.core.applog import applog
 from app.strategies.memory import _canonical_realized_r
 from app.config import DATA_DIR
 

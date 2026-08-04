@@ -21,7 +21,7 @@ from app.replay.ledger import ReplayLedger
 from app.replay.market_feed import ReplayDataManager, ReplayMarketFeed
 from app.replay.parity_validator import ProductionParityValidator
 from app.replay.session import ReplaySessionManager
-from app.core.logging import applog
+from app.core.applog import applog
 
 
 class ReplayRuntime:

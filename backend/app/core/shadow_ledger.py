@@ -8,7 +8,7 @@ from datetime import datetime
 import pandas as pd
 import numpy as np
 
-from app.core.logging import applog
+from app.core.applog import applog
 from app.core.phase import classify_clock_phase, classify_market_behavior
 from app.core.watchlist_mapper import OpportunityMapper, OpportunityClass
 

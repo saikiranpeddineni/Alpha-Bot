@@ -12,7 +12,7 @@ import joblib
 
 from app.ai.generation import AtomicSpecialistStore, TrainingCoordinator
 from app.ai.trainer_legacy import ContinuousTrainer as _LegacyContinuousTrainer
-from app.core.logging import applog
+from app.core.applog import applog
 
 
 class ContinuousTrainer(_LegacyContinuousTrainer):

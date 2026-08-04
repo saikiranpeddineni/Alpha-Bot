@@ -27,7 +27,7 @@ import pandas as pd
 
 from app.ai.features import FEATURE_COLUMNS, build_mae_mfe_dataset, build_training_set
 from app.core.domain import Regime
-from app.core.logging import applog
+from app.core.applog import applog
 
 def predict_proba_safe(clf, x: pd.DataFrame):
     """Predict proba safely matching the feature names contract of the fitted classifier."""

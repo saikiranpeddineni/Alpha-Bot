@@ -22,7 +22,6 @@ from collections import deque
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone, UTC
 from typing import Any
-from unittest.mock import MagicMock
 from zoneinfo import ZoneInfo
 import math
 from types import SimpleNamespace
@@ -53,7 +52,7 @@ from app.core.domain import (
     SignalAction,
     utcnow,
 )
-from app.core.logging import applog
+from app.core.applog import applog
 from app.core.entry_reservations import SameCycleEntryReservations
 from app.data.manager import DataManager, make_provider
 from app.db.database import Database
@@ -1846,7 +1845,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                         existing = await existing
                     if (
                         existing
-                        and not isinstance(existing, MagicMock)
+                        and not hasattr(existing, '_mock_name')  # not a test mock
                         and getattr(existing, "status", None) not in (OrderStatus.CANCELED, OrderStatus.REJECTED, OrderStatus.FILLED)
                     ):
                         applog.info("engine.protection", f"#41: Recovery stop {existing.id} already active for {p.symbol}")
@@ -2938,16 +2937,19 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         # Monitor 7: Buying power
         if diagnostics["broker_connected"]:
             try:
-                raw_bp = getattr(account, "buying_power", None)
-                if raw_bp is None or isinstance(raw_bp, MagicMock):
-                    raw_bp = getattr(account, "cash", 10000.0)
-                buying_power = float(raw_bp) if not isinstance(raw_bp, MagicMock) else 10000.0
-                
+                try:
+                    raw_bp = getattr(account, "buying_power", None)
+                    if raw_bp is None:
+                        raw_bp = getattr(account, "cash", 10000.0)
+                    buying_power = float(raw_bp)
+                except (TypeError, ValueError):
+                    buying_power = 10000.0
+
                 raw_thresh = getattr(self.settings, "min_buying_power_threshold", 1000.0)
-                if isinstance(raw_thresh, MagicMock) or raw_thresh is None:
+                try:
+                    bp_threshold = float(raw_thresh) if raw_thresh is not None else 1000.0
+                except (TypeError, ValueError):
                     bp_threshold = 1000.0
-                else:
-                    bp_threshold = float(raw_thresh)
 
                 if buying_power < bp_threshold:
                     diagnostics["buying_power_ok"] = False

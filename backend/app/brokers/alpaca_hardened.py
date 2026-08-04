@@ -15,7 +15,7 @@ from app.brokers.alpaca_hardening import (
 )
 from app.brokers.base import BrokerTimeoutError
 from app.core.domain import Order, OrderRequest, OrderSide, OrderStatus, OrderType
-from app.core.logging import applog
+from app.core.applog import applog
 
 
 async def _paginate_orders(client: object, request: object, label: str = "get_orders") -> list:

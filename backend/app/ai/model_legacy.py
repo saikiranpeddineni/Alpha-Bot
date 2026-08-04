@@ -25,7 +25,7 @@ import pandas as pd
 from app.ai.features import FEATURE_COLUMNS, build_training_set
 from app.ai.prediction import WalkForwardValidator
 from app.core.domain import SignalAction
-from app.core.logging import applog
+from app.core.applog import applog
 
 MODEL_FILE = "signal_model.joblib"
 META_FILE = "signal_model.meta.json"

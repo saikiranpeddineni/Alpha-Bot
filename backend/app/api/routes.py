@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 
 from app.backtest.engine import BacktestParams, BacktestResult, run_backtest
 from app.core.domain import OrderRequest, OrderSide, OrderType, utcnow
-from app.core.logging import applog
+from app.core.applog import applog
 
 router = APIRouter(prefix="/api")
 _promotion_lock = asyncio.Lock()
