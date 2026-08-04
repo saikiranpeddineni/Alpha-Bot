@@ -119,7 +119,11 @@ class AdaptiveProtectionPlanner:
                 else:
                     giveback_pct = max(0.12, base)
 
-            atr_r_buffer = 0.85 * (obs.atr / max(1e-6, risk))
+            runner_threshold = getattr(self.config, "hyper_runner_threshold_r", 1.50)
+            if peak_r >= runner_threshold and health.overall >= 0.70:
+                atr_r_buffer = 1.25 * (obs.atr / max(1e-6, risk))
+            else:
+                atr_r_buffer = 0.85 * (obs.atr / max(1e-6, risk))
             giveback_allowance_r = max(self.config.min_breathing_room_r, atr_r_buffer, peak_r * giveback_pct)
             locked_r = max(self.config.min_locked_r, peak_r - giveback_allowance_r)
 
