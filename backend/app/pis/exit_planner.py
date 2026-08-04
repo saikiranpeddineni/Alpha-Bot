@@ -78,12 +78,14 @@ class ExitPlanner:
         elif target_stop > 0 and abs(target_stop - obs.initial_stop) > 1e-4:
             protection_updated = True
 
-        # Check profit target breach
+        # Check profit target breach (with near-target climax tolerance when peak_r >= 1.50R)
         target_hit = False
         if obs.take_profit is not None and obs.take_profit > 0:
-            if side > 0 and obs.high >= obs.take_profit:
+            target_dist = (obs.take_profit - obs.high) if side > 0 else (obs.low - obs.take_profit)
+            target_tolerance = max(0.05, 0.20 * obs.atr)
+            if side > 0 and (obs.high >= obs.take_profit or (peak_r >= 1.50 and target_dist <= target_tolerance)):
                 target_hit = True
-            elif side < 0 and obs.low <= obs.take_profit:
+            elif side < 0 and (obs.low <= obs.take_profit or (peak_r >= 1.50 and target_dist <= target_tolerance)):
                 target_hit = True
 
         # Check Exhaustion / Rejection Wick at peak profit (>= 1.10R)

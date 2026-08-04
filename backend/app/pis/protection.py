@@ -119,7 +119,7 @@ class AdaptiveProtectionPlanner:
                 else:
                     giveback_pct = max(0.12, base)
 
-            atr_r_buffer = 0.45 * (obs.atr / max(1e-6, risk))
+            atr_r_buffer = 0.85 * (obs.atr / max(1e-6, risk))
             giveback_allowance_r = max(self.config.min_breathing_room_r, atr_r_buffer, peak_r * giveback_pct)
             locked_r = max(self.config.min_locked_r, peak_r - giveback_allowance_r)
 
