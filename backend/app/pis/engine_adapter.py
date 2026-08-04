@@ -72,7 +72,7 @@ class PISEngineAdapter:
             high_px = float(latest["high"])
             low_px = float(latest["low"])
             vol_px = float(latest.get("volume", 0.0))
-            atr_px = float(latest.get("atr14", close_px * 0.02))  # Safe 2% ATR default fallback
+            atr_px = float(latest.get("atr14", latest.get("atr", latest.get("atr_14", close_px * 0.02))))
         except Exception as e:
             logger.warning(f"PIS bar extraction fallback for {symbol}: {e}")
             close_px = float(position.current_price or position.avg_entry_price)

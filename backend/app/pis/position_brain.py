@@ -224,7 +224,10 @@ class PositionBrain:
         # 2. Thesis drift evaluation
         thesis = self.authority.thesis_evaluator.evaluate(obs, trough_r, self._stagnation_counter, peak_r)
 
-        # 3. Runner intelligence
+        # 3. Runner intelligence & Max R capacity prediction
+        predicted_max_r, runner_prob = self.authority.runner_intelligence.predict_max_r(
+            obs, peak_r, health
+        )
         runner_score, is_runner = self.authority.runner_intelligence.evaluate_runner_score(
             obs, peak_r, health
         )
@@ -234,7 +237,7 @@ class PositionBrain:
         # 4. State transition rules with persistence confirmation (Priority 3)
         self._update_lifecycle(health, thesis, peak_r)
 
-        # 5. Protection floor calculation (Priority 4 - Monotonic protection invariant)
+        # 5. Protection floor calculation with dynamic ceiling proximity (Priority 4)
         target_stop = self.authority.protection_planner.compute_protection_floor(
             obs=obs,
             peak_r=peak_r,
@@ -242,10 +245,11 @@ class PositionBrain:
             previous_floor=self._current_stop_floor,
             allow_relaxation=False,
             has_scaled_out=self._has_scaled_out,
+            predicted_max_r=predicted_max_r,
         )
         self._current_stop_floor = target_stop
 
-        # 6. Exit planner synthesis (Priority 13 - Explainability)
+        # 6. Exit planner synthesis with dynamic ceiling harvesting (Priority 13)
         decision = self.authority.exit_planner.synthesize_decision(
             obs=obs,
             lifecycle=self.state_machine.current_state,
@@ -258,6 +262,8 @@ class PositionBrain:
             trough_r=trough_r,
             history_len=len(self._history),
             has_scaled_out=self._has_scaled_out,
+            predicted_max_r=predicted_max_r,
+            runner_probability=runner_prob,
         )
 
         if decision.action == ExitAction.PARTIAL_EXIT:
@@ -271,6 +277,7 @@ class PositionBrain:
                 previous_floor=self._current_stop_floor,
                 allow_relaxation=False,
                 has_scaled_out=True,
+                predicted_max_r=predicted_max_r,
             )
             self._current_stop_floor = target_stop
 

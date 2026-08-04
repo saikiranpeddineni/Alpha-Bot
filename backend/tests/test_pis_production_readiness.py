@@ -335,7 +335,7 @@ async def test_priority_10_adapter_hardening() -> None:
     adapter = PISEngineAdapter()
     from app.core.domain import Position
 
-    pos = Position(symbol="aapl", qty=100, avg_entry_price=150.0, market_price=152.0)
+    pos = Position(symbol="adpt", qty=100, avg_entry_price=150.0, market_price=152.0)
     import pandas as pd
     df = pd.DataFrame([
         {"high": 153.0, "low": 149.0, "close": 152.0, "volume": 10000, "atr": 2.5}
@@ -344,7 +344,7 @@ async def test_priority_10_adapter_hardening() -> None:
     order_req, decision = await adapter.evaluate_position_exit(
         position=pos, bar_df=df, initial_stop=None
     )
-    assert decision.symbol == "AAPL"
+    assert decision.symbol == "ADPT"
     assert decision.action in (ExitAction.HOLD, ExitAction.UPDATE_PROTECTION)
 
 

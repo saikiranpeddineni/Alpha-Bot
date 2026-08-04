@@ -36,6 +36,7 @@ class AdaptiveProtectionPlanner:
         previous_floor: Optional[float] = None,
         allow_relaxation: bool = False,
         has_scaled_out: bool = False,
+        predicted_max_r: float = 2.0,
     ) -> float:
         """Compute the updated protection floor for a position.
 
@@ -44,7 +45,8 @@ class AdaptiveProtectionPlanner:
             peak_r: Peak R-multiple achieved during position life.
             previous_floor: Existing protective stop floor price, if any.
             allow_relaxation: If True, bypasses strict monotonicity (default False).
-            has_scaled_out: If True, position has locked initial profit; uses breakeven + wide ATR trail.
+            has_scaled_out: If True, position has locked initial profit; uses breakeven + adaptive ATR trail.
+            predicted_max_r: Predicted dynamic maximum R capacity.
 
         Returns:
             Calculated stop loss price (float).
@@ -65,18 +67,32 @@ class AdaptiveProtectionPlanner:
         # 1. Base activation threshold check
         activation_r = min(1.0, max(0.75, self.config.activation_mfe_r * 0.60))
 
+        # Dynamic ceiling proximity ratio [0.0, 1.0+]
+        proximity = peak_r / max(1.0, predicted_max_r) if predicted_max_r > 0 else 0.50
+
         # 0. Scaled-Out Runner Mode
         if has_scaled_out:
             breakeven_floor = entry + (side * max(self.config.min_locked_r, 0.05) * risk)
-            wide_trail = obs.close - (side * getattr(self.config, "runner_wide_atr_mult", 2.0) * obs.atr)
+            
+            # Dynamic trailing multiplier based on predicted ceiling proximity
+            if proximity >= 0.85:
+                # In target ceiling zone: tighten trail to 1.0x ATR to harvest peak R
+                trail_mult = min(1.2, getattr(self.config, "runner_wide_atr_mult", 2.0) * 0.60)
+            elif proximity >= 0.65:
+                trail_mult = getattr(self.config, "runner_wide_atr_mult", 2.0) * 0.80
+            else:
+                # Early runner phase: allow maximum breathing room (2.0x ATR)
+                trail_mult = getattr(self.config, "runner_wide_atr_mult", 2.0)
+                
+            wide_trail = obs.close - (side * trail_mult * obs.atr)
             candidate_floor = max(breakeven_floor, wide_trail) if side > 0 else min(breakeven_floor, wide_trail)
         elif peak_r < activation_r:
             # Below activation threshold: cleanly maintain initial stop loss or previous floor
             # Preserves initial risk geometry and prevents sub-noise shakeouts
             candidate_floor = previous_floor if previous_floor is not None else initial_stop
         else:
-            # 2. Dynamic giveback calculation based on peak R
-            if peak_r >= self.config.runner_qualification_r:
+            # 2. Dynamic giveback calculation based on peak R and predicted capacity
+            if peak_r >= self.config.runner_qualification_r or proximity >= 0.75:
                 r_excess = peak_r - self.config.runner_qualification_r
                 
                 # Health-Aware Decay:
@@ -88,8 +104,11 @@ class AdaptiveProtectionPlanner:
                 base_giveback = self.config.giveback_pct_runner
                 min_giveback = getattr(self.config, "giveback_pct_hyper_runner_min", 0.10)
                 
-                if getattr(self.config, "profit_harvesting_mode", False) and health.overall >= 0.8:
-                    giveback_pct = 0.45  # Let it breathe heavily to capture 25% runs
+                # Proximity compression: If approaching predicted ceiling, tighten giveback
+                if proximity >= 0.85:
+                    giveback_pct = max(min_giveback, 0.15)
+                elif getattr(self.config, "profit_harvesting_mode", False) and health.overall >= 0.8:
+                    giveback_pct = 0.45  # Let it breathe heavily to capture extended runs
                 else:
                     giveback_pct = max(min_giveback, base_giveback - decay)
             else:
@@ -99,7 +118,7 @@ class AdaptiveProtectionPlanner:
                 base = max(0.12, self.config.giveback_pct_maturing - r_scaling)
                 
                 # 1. Parabolic Climax Override (Tighten stop aggressively when extended)
-                if peak_r >= 1.50 and health.overall < 0.65:
+                if peak_r >= 1.50 and (health.overall < 0.65 or proximity >= 0.85):
                     giveback_pct = max(0.10, base * 0.70)  # Lock 90% of peak gain on exhaustion!
                 elif health.volatility_score <= 0.2 and peak_r > 1.5:
                     giveback_pct = min(base, 0.12)
@@ -114,7 +133,7 @@ class AdaptiveProtectionPlanner:
                     giveback_pct = max(0.12, base)
 
             runner_threshold = getattr(self.config, "hyper_runner_threshold_r", 1.50)
-            if peak_r >= runner_threshold and health.overall >= 0.70:
+            if peak_r >= runner_threshold and health.overall >= 0.70 and proximity < 0.80:
                 atr_r_buffer = 1.25 * (obs.atr / max(1e-6, risk))
             else:
                 atr_r_buffer = 0.85 * (obs.atr / max(1e-6, risk))

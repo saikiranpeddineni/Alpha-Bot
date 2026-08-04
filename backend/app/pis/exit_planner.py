@@ -40,6 +40,8 @@ class ExitPlanner:
         trough_r: float,
         history_len: int,
         has_scaled_out: bool = False,
+        predicted_max_r: float = 2.0,
+        runner_probability: float = 0.0,
     ) -> PISDecision:
         """Synthesize final PISDecision.
 
@@ -55,6 +57,8 @@ class ExitPlanner:
             trough_r: Trough R achieved.
             history_len: Count of history observations.
             has_scaled_out: True if position has already executed its first-stage scale out.
+            predicted_max_r: Predicted maximum R capacity.
+            runner_probability: Quant runner probability score [0.0, 1.0].
 
         Returns:
             Immutable PISDecision.
@@ -90,7 +94,7 @@ class ExitPlanner:
             elif side < 0 and (obs.low <= obs.take_profit or (peak_r >= 1.50 and target_dist <= target_tolerance)):
                 target_hit = True
 
-        # Check Climax Reversal Exhaustion (Only on extreme extension >= 1.50R with wide-range blowoff wick)
+        # Check Climax Reversal Exhaustion (On extreme extension >= 1.50R with wide-range blowoff wick)
         bar_range = obs.high - obs.low
         exhaustion_climax = False
         if peak_r >= 1.50 and bar_range >= 2.0 * obs.atr:
@@ -98,6 +102,16 @@ class ExitPlanner:
             wick_ratio = adverse_wick / max(1e-6, bar_range)
             if wick_ratio >= 0.60:
                 exhaustion_climax = True
+
+        # Check Predicted Max-R Ceiling Exhaustion Harvesting
+        # Triggered when position reaches its predicted max R ceiling with signs of momentum exhaustion
+        ceiling_harvested = False
+        if (
+            predicted_max_r > 0
+            and peak_r >= (predicted_max_r * 0.95)
+            and (health.overall <= 0.60 or health.momentum_score <= 0.35 or exhaustion_climax)
+        ):
+            ceiling_harvested = True
 
         # Check Extended Stagnation / Time-Decay Profit Harvesting
         # Requires true structural stall over substantial duration (>= 25 bars) without progress
@@ -112,7 +126,7 @@ class ExitPlanner:
 
         # --- TWO-STAGE 50/50 INSTITUTIONAL SCALE-OUT & RUNNER EXTENSION ---
         # Stage 1: When target hit, peak R >= 1.0R, or genuine exhaustion climax, bank 50% profit.
-        # Stage 2: Qualify remaining 50% as runner with breakeven floor + 2.0x ATR wide trailing stop.
+        # Stage 2: Qualify remaining 50% as runner with breakeven floor + adaptive ATR trail.
         scale_out_triggered = False
         if getattr(self.config, "enable_scale_out", True) and not has_scaled_out:
             scale_out_r = getattr(self.config, "scale_out_target_r", 1.00)
@@ -124,6 +138,10 @@ class ExitPlanner:
 
         # Determine exit action
         if protection_breached or lifecycle == LifecycleState.EXIT_CANDIDATE:
+            action = ExitAction.FULL_EXIT
+            exit_ratio = 1.0
+        elif ceiling_harvested and has_scaled_out:
+            # Full harvest of runner at predicted max R ceiling
             action = ExitAction.FULL_EXIT
             exit_ratio = 1.0
         elif scale_out_triggered:
@@ -143,7 +161,6 @@ class ExitPlanner:
             action = ExitAction.HOLD
             exit_ratio = 0.0
 
-
         # Build evidence coverage and reason codes
         coverage = EvidenceEvaluator.compute_coverage(history_len, health, thesis)
         reasons = EvidenceEvaluator.build_reason_codes(
@@ -152,6 +169,8 @@ class ExitPlanner:
 
         if protection_breached:
             reasons.append(ReasonCode.PROTECTION_BREACH)
+        elif ceiling_harvested:
+            reasons.append(ReasonCode.MAX_R_CEILING_REACHED)
         elif scale_out_triggered:
             reasons.append(ReasonCode.SCALE_OUT_TARGET)
         elif target_hit:
@@ -172,9 +191,13 @@ class ExitPlanner:
             evidence_coverage=coverage,
             peak_r=peak_r,
             trough_r=trough_r,
+            predicted_max_r=predicted_max_r,
+            runner_probability=runner_probability,
             metadata={
                 "is_runner": is_runner,
                 "protection_updated": protection_updated,
                 "protection_breached": protection_breached,
+                "predicted_max_r": predicted_max_r,
+                "runner_probability": runner_probability,
             },
         )

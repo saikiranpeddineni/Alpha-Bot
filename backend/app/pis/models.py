@@ -47,6 +47,7 @@ class ReasonCode(str, Enum):
     PROTECTION_RATCHET = "PROTECTION_RATCHET"
     THESIS_DEGRADED = "THESIS_DEGRADED"
     HEALTH_EXHAUSTION = "HEALTH_EXHAUSTION"
+    MAX_R_CEILING_REACHED = "MAX_R_CEILING_REACHED"
     DISTRIBUTION_DETECTED = "DISTRIBUTION_DETECTED"
     PROTECTION_BREACH = "PROTECTION_BREACH"
     MANUAL_OVERRIDE = "MANUAL_OVERRIDE"
@@ -194,6 +195,8 @@ class PISDecision:
     evidence_coverage: EvidenceCoverage
     peak_r: float
     trough_r: float
+    predicted_max_r: float = 2.0
+    runner_probability: float = 0.0
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -239,6 +242,8 @@ class PISConfig:
     scale_out_ratio: float = 0.50
     scale_out_target_r: float = 1.00
     runner_wide_atr_mult: float = 2.00
+    enable_dynamic_max_r: bool = True
+    max_r_cap: float = 8.00
 
     def validate(self) -> None:
         """Validate startup configuration boundaries.
