@@ -132,7 +132,7 @@ class ExitPlanner:
         # Stage 2: Qualify remaining 50% as runner with breakeven floor + adaptive ATR trail.
         scale_out_triggered = False
         if getattr(self.config, "enable_scale_out", True) and not has_scaled_out:
-            scale_out_r = getattr(self.config, "scale_out_target_r", 1.00)
+            scale_out_r = getattr(self.config, "scale_out_target_r", 2.00)  # Delayed from 1.0R to 2.0R to maximize expectancy
             if target_hit or peak_r >= scale_out_r or exhaustion_climax or stagnation_harvest:
                 scale_out_triggered = True
 
@@ -155,9 +155,6 @@ class ExitPlanner:
             # Stage 1 Scale-Out: Secure 50% core profit, trail remaining 50% as runner
             action = ExitAction.PARTIAL_EXIT
             exit_ratio = getattr(self.config, "scale_out_ratio", 0.50)
-        elif target_hit and not has_scaled_out and not getattr(self.config, "enable_scale_out", True):
-            action = ExitAction.FULL_EXIT
-            exit_ratio = 1.0
         elif lifecycle == LifecycleState.DISTRIBUTION and health.overall < self.config.health_distribution_threshold:
             action = ExitAction.PARTIAL_EXIT
             exit_ratio = 0.50

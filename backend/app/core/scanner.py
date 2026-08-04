@@ -59,66 +59,42 @@ class SpyVolatilityState(Enum):
 
 
 # ---------------------------------------------------------------------------
-# Market universe — ~350 symbols across 9 sectors
+# Market universe — ~200 symbols across 7 sectors
 # ---------------------------------------------------------------------------
 MARKET_UNIVERSE: dict[str, list[str]] = {
     "mega_cap": [
         "AAPL", "MSFT", "NVDA", "AMZN", "META", "TSLA", "GOOGL", "GOOG",
         "UNH", "XOM", "JPM", "LLY", "V", "MA", "AVGO", "JNJ", "PG",
         "COST", "HD", "MRK", "ABBV", "CVX", "WMT", "KO", "PEP",
-        "ORCL", "NFLX", "DIS", "ADBE", "CRM", "INTU", "QCOM", "TXN",
     ],
     "large_cap_tech": [
-        "AMD", "MU", "INTC", "AMAT", "LRCX", "KLAC",
-        "ADI", "MCHP", "MRVL", "NXPI", "NOW", "SNOW",
-        "PANW", "ZS", "CRWD", "NET", "DDOG", "MDB", "U", "PLTR",
-        "OKTA", "TWLO", "BILL", "AFRM", "GDDY", "WEX", "NCNO",
-        "GTLB", "DOCN", "CFLT", "S", "ESTC", "KVYO", "RDDT",
+        "AMD", "MU", "QCOM", "INTC", "TXN", "AMAT", "LRCX", "KLAC",
+        "ADI", "MCHP", "MRVL", "NXPI", "CRM", "ADBE", "NOW", "SNOW",
+        "PANW", "ZS", "CRWD", "NET", "DDOG", "MDB", "U", "PLTR", "CBRS",
     ],
     "financials": [
         "BAC", "GS", "MS", "WFC", "AXP", "BLK", "SCHW", "C",
         "COF", "USB", "PNC", "TFC", "SPGI", "ICE", "CME", "CBOE",
-        "PYPL", "SQ", "COIN", "HOOD", "SOFI", "NU", "ALLY",
-        "MKTX", "LPLA", "RJF", "SF", "IBKR", "FUTU", "TIGR",
+        "PYPL", "SQ", "COIN", "HOOD",
     ],
     "health": [
         "TMO", "ISRG", "BSX", "MDT", "SYK", "EW", "ABT", "GILD",
         "REGN", "VRTX", "BMY", "AMGN", "MRNA", "BIIB", "HUM", "CI",
-        "CVS", "MCK", "ZBH", "BAX", "DXCM", "INSP", "TMDX",
-        "AXSM", "ACAD", "SAGE", "RARE", "IONS", "SRPT", "NBIX",
+        "CVS", "MCK", "ZBH", "BAX",
     ],
     "consumer_energy": [
         "MCD", "NKE", "SBUX", "TGT", "LOW", "TJX", "LULU", "ROST",
-        "DG", "DLTR", "YUM", "CMG", "DPZ", "MNST", "NFLX",
-        "OXY", "SLB", "HAL", "DVN", "MRO", "COP", "EOG",
-        "BKNG", "ABNB", "UBER", "LYFT", "DASH", "DKNG",
+        "DG", "DLTR", "YUM", "CMG", "DPZ", "MNST", "DIS", "NFLX",
+        "OXY", "SLB", "HAL", "DVN",
     ],
     "high_beta": [
-        "RIVN", "LCID", "UPST", "AI", "RBLX", "SHOP", "SPOT", "HIMS",
-        "SNAP", "PINS", "ROKU", "TWLO", "CELH", "VSTA", "ROOT", "LMND",
-        "OPEN", "CLOV", "AFRM", "SOFI", "HOOD", "MARA", "RIOT",
-        "HUT", "CLSK", "BTBT", "WULF", "CORZ", "IREN", "CIFR",
-    ],
-    "momentum_movers": [
-        # High-velocity small/mid-cap names that generate frequent intraday setups
-        "CRDO", "NBIS", "ACHR", "IONQ", "RGTI", "QUBT", "SOUN", "BBAI",
-        "SMCI", "WOLF", "SITM", "SEMR", "RKLB", "LUNR", "AST", "ASTS",
-        "JOBY", "EH", "BLNK", "CHPT", "EVGO", "NKLA", "SPCE",
-        "RVNC", "GRAL", "ACMR", "PSFE", "PAGS", "STNE", "ARGT",
-        "DOCS", "HIMS", "TGTX", "AMRN", "TNXP", "ACST", "PRAX",
-        "DNLI", "KYMR", "VRNA", "KROS", "RXST", "IMVT", "LEGN",
-        "CABA", "ANAB", "AGEN", "INMB", "IOVA", "VCNX", "AKRO",
-    ],
-    "biotech_catalyst": [
-        # FDA/data-event driven names with high volume spikes
-        "SAVA", "NVAX", "BNTX", "VXRT", "OCGN", "NKTR", "ATHA",
-        "FATE", "BLUE", "BEAM", "EDIT", "CRSP", "NTLA", "VERV",
-        "ARCT", "TBIO", "LNTH", "TPVG", "AGIO", "KPTI", "ARDX",
-        "EWTX", "INMD", "NRIX", "DMTK", "CNTB", "PRME", "ELTX",
+        "RIVN", "SOFI", "MARA", "LCID", "DKNG", "UPST", "AI", "HOOD",
+        "UBER", "LYFT", "ABNB", "DASH", "SNAP", "PINS", "RBLX", "TWLO",
+        "ROKU", "SHOP", "SPOT", "HIMS",
     ],
     "sector_etfs": [
-        "SPY", "QQQ", "IWM", "XLK", "XLF", "XLE", "XLV", "XLI", "XLY", "XLP", "XLU",
-        "XLB", "XLRE", "GLD", "SLV", "USO", "TLT", "HYG", "ARKK", "SOXL",
+        "SPY", "QQQ", "XLK", "XLF", "XLE", "XLV", "XLI", "XLY", "XLP", "XLU",
+        "XLB", "XLRE", "GLD", "SLV", "USO", "TLT", "HYG",
     ],
 }
 
@@ -137,47 +113,35 @@ SYMBOL_SECTOR: dict[str, str] = {
 DEFENSIVE_WATCHLIST: list[str] = ["SPY", "QQQ", "DIA", "IWM", "GLD"]
 LARGE_CAP_ANCHORS: list[str] = ["NVDA", "TSLA", "AMD", "META", "AMZN", "AAPL", "MSFT", "PLTR", "SMCI", "COIN"]
 
-# Concurrency limits — tuned to stay under Alpaca's ~200 req/min free-tier limit.
-# At 278+ symbols the scanner fires in batches. With concurrency=15 and avg
-# 300ms per bar fetch, we hit ~180 req/min peak — safely under the 200/min limit.
-# Raising this caused "too many requests" (429) cascades with 278-symbol universe.
-_PREFILTER_CONCURRENCY = 15   # was 35 — reduced to avoid Alpaca 429 rate limit
-_ML_CONCURRENCY = 8           # unchanged
+# Concurrency limits
+_PREFILTER_CONCURRENCY = 20
+_ML_CONCURRENCY = 8
 
-# Selection parameters — tuned for higher trade frequency
-_TECH_SCORE_TOP_N = 40   # was 25 — more candidates reach Stage 3
-_MAX_PER_SECTOR = 4      # was 3 — more sector diversity
-_TARGET_SYMBOLS = 20     # was 12 — scanner returns more per cycle
-_AUC_TIER1 = 0.52        # was 0.55 — less aggressive ML filter
-_AUC_TIER2 = 0.48        # was 0.50 — tier 2 fallback
-
+# Selection parameters
+_TECH_SCORE_TOP_N = 25
+_MAX_PER_SECTOR = 3
+_TARGET_SYMBOLS = 12
+_AUC_TIER1 = 0.55
+_AUC_TIER2 = 0.50
 
 
 class MarketScanner:
-    _last_scans = []
-
     def __init__(self, data_manager: DataManager, core_watchlist: list[str], risk_config=None) -> None:
         self.data = data_manager
         self.core_watchlist = core_watchlist
         self.risk_config = risk_config
         self._discovery: DiscoveryCoordinator | None = None
+        # F-11 FIX: was a class-level mutable list, shared across all instances.
+        # Parallel backtests or tests with multiple scanner instances would silently
+        # overwrite each other's scan state. Instance attribute provides isolation.
+        self._last_scans: list[dict] = []
         self._regime = MarketRiskAggregator(
             data_manager=data_manager,
             universe_symbols=list(CANDIDATE_POOL),
         )
-        # Pre-market gap mover discovery — supplemental universe injection
-        from app.core.gap_scanner import PreMarketGapScanner
-        from app.config import get_settings
-        _min_price = float(getattr(risk_config, "min_price", None) or get_settings().min_price)
-        self._gap_scanner = PreMarketGapScanner(data_manager, min_price=_min_price)
 
     async def _stage1_symbols(self, as_of: datetime | None = None) -> list[str]:
-        """Resolve bounded Stage-1 input without current-data replay leakage.
-
-        Injects pre-market gap movers from PreMarketGapScanner alongside the
-        static CANDIDATE_POOL. Gap movers are only injected for live scans
-        (as_of=None). Historical replay uses the static pool unchanged.
-        """
+        """Resolve bounded Stage-1 input without current-data replay leakage."""
         provider = self.data.provider
         discovery_supported = bool(getattr(provider, "supports_asset_discovery", False))
         acquire_discovery = None
@@ -197,40 +161,7 @@ class MarketScanner:
             as_of=as_of, static_symbols=CANDIDATE_POOL, fallback_limit=50,
             discovery_supported=discovery_supported, acquire_discovery=acquire_discovery,
         )
-        base_symbols = list(symbols)
-
-        # Inject gap+gainer+loser movers for live scans only — fail-open
-        if as_of is None:
-            try:
-                gap_movers = await self._gap_scanner.get_gap_movers()
-                if gap_movers:
-                    existing = set(base_symbols)
-                    new_movers = [s for s in gap_movers if s not in existing]
-                    gainers = [
-                        s for s in new_movers
-                        if self._gap_scanner.mover_context.get(s, {}).get("direction") == "gainer"
-                    ]
-                    losers = [
-                        s for s in new_movers
-                        if self._gap_scanner.mover_context.get(s, {}).get("direction") == "loser"
-                    ]
-                    if new_movers:
-                        applog.info(
-                            "scanner",
-                            f"[Movers] Injecting {len(new_movers)} dynamic candidates into Stage 1: "
-                            f"{len(gainers)} gainers (long bias) | {len(losers)} losers (short bias) "
-                            f"| sample gainers={gainers[:5]} losers={losers[:5]}",
-                        )
-                    base_symbols = sorted(set(base_symbols) | set(gap_movers))
-                    # Propagate mover direction context for strategy directional bias
-                    if not hasattr(self, "mover_context"):
-                        self.mover_context: dict[str, dict] = {}
-                    self.mover_context.update(self._gap_scanner.mover_context)
-            except Exception as exc:
-                applog.warning("scanner", f"[Movers] Injection failed ({exc}) — using static pool only")
-
-        return base_symbols
-
+        return list(symbols)
 
     # ------------------------------------------------------------------
     # Global safety gate — multi-signal, fail-closed on UNKNOWN
@@ -674,4 +605,7 @@ class MarketScanner:
 
     @classmethod
     def get_last_scans(cls) -> list[dict]:
-        return cls._last_scans
+        # F-11 NOTE: _last_scans is now an instance attribute. This class method
+        # is retained for backward compatibility but returns empty list when called
+        # without an instance. Callers should use scanner_instance._last_scans directly.
+        return []

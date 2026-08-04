@@ -85,13 +85,17 @@ def build_training_set(
     if feats.empty:
         return pd.DataFrame(columns=FEATURE_COLUMNS), pd.Series(dtype=int)
     fwd_ret = feats["close"].shift(-horizon_bars) / feats["close"] - 1.0
-    
-    # Purge forward returns that cross a calendar day
+
+    # Purge forward returns that cross a calendar day.
+    # F-05 FIX: Both sides explicitly cast to numpy arrays to avoid silent
+    # pandas/numpy broadcast misalignment when comparing DatetimeIndex.date
+    # (numpy array) against a shifted dt.date Series (pandas Series).
+    et_dates = np.array(feats.index.tz_convert(ET).date)
     et_series = pd.Series(feats.index.tz_convert(ET), index=feats.index)
-    shifted_et_series = et_series.shift(-horizon_bars)
-    mask_same_day = feats.index.tz_convert(ET).date == shifted_et_series.dt.date
+    shifted_et_dates = np.array(et_series.shift(-horizon_bars).dt.date)
+    mask_same_day = et_dates == shifted_et_dates
     fwd_ret.loc[~mask_same_day] = np.nan
-    
+
     if side == "short":
         label = (fwd_ret * 100.0 < -threshold_pct).astype(int)
     else:

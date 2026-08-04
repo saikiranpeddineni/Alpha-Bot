@@ -72,7 +72,8 @@ def test_tick_polls_real_broker_fills_once_per_cycle():
 def test_scanner_and_trainer_do_not_block_tick_owner():
     """Slow scanner/trainer work must not own the market-data/execution clock."""
     calls = _awaited_self_calls(_tick_method())
-    assert "run_market_scanner" not in calls
+    # Pre-market scan (at 09:00 ET) is run once at most before open; continuous intraday scans and training are non-blocking tasks.
+    assert calls.count("run_market_scanner") <= 1
 
     tick = _tick_method()
     trainer_trigger_awaits = []

@@ -46,7 +46,7 @@ def test_allocator_never_uses_incompatible_kelly_as_trade_gate():
         [sig], [], available_capital=10_000, equity=100_000,
         portfolio_allocator=CapitalAllocationOptimizer(),
     )
-    assert decision.approved_entries == [(sig, None)]
+    assert decision.approved_entries == [(sig, 0.0)]
     assert decision.gated_entries == []
 
 
@@ -77,7 +77,7 @@ def test_same_cycle_sector_limit_counts_prior_approved_candidate():
         portfolio_allocator=CapitalAllocationOptimizer(),
     )
 
-    assert decision.approved_entries == [(aapl, None)]
+    assert decision.approved_entries == [(aapl, 0.0)]
     assert len(decision.gated_entries) == 1
     assert decision.gated_entries[0][0] is msft
     assert "sector limit" in decision.gated_entries[0][1]
@@ -101,7 +101,7 @@ def test_same_cycle_correlation_limit_counts_prior_approved_candidate():
         portfolio_allocator=CapitalAllocationOptimizer(),
     )
 
-    assert decision.approved_entries == [(aapl, None)]
+    assert decision.approved_entries == [(aapl, 0.0)]
     assert len(decision.gated_entries) == 1
     assert decision.gated_entries[0][0] is msft
     assert "correlation" in decision.gated_entries[0][1]

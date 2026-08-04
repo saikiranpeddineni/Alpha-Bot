@@ -6,7 +6,7 @@ import json
 from datetime import datetime, timedelta, timezone, UTC
 from typing import Any
 import pandas as pd
-from app.core.domain import Signal, SignalAction, Position, OrderRequest, OrderSide, OrderType, Order, utcnow
+from app.core.domain import EngineState, Signal, SignalAction, Position, OrderRequest, OrderSide, OrderType, Order, utcnow
 from app.core.applog import applog
 from app.indicators.ta import enrich
 from app.ai.regime import detect_regime
@@ -102,8 +102,6 @@ class TradingEngineHaltsMixin:
                     self._pending_close_symbols.add(position.symbol.upper())
                 await self.broker.flatten_all(reason="end of day")
                 
-                # Wait for fills to arrive and clear positions
-                import asyncio
                 for _ in range(10):
                     await asyncio.sleep(1.0)
                     await self._drain_fills(now)
@@ -126,7 +124,8 @@ class TradingEngineHaltsMixin:
                 self.last_error = ""
             applog.info("engine", "End-of-day liquidation authoritatively complete")
             # Explicitly clear out all PIS memory states for the next session
-            self.pis_adapter.service.close_all()
+            if hasattr(self, "pis_adapter") and self.pis_adapter and hasattr(self.pis_adapter, "service"):
+                self.pis_adapter.service.close_all()
             
             # Refresh contextual aggregate memory at EOD
             try:

@@ -27,6 +27,11 @@ class BollingerBandSqueeze(Strategy):
 
     def on_bar(self, ctx: StrategyContext, symbol: str, df: pd.DataFrame) -> Signal | None:
         p = self.params
+        # F-12 FIX: Guard must be at top — was previously checked after the expensive
+        # 5-bar squeeze loop, vol/atr validation, and EMA filter — wasting CPU when
+        # a position is already open. Short-circuit immediately.
+        if ctx.position is not None:
+            return None
         lb = int(p["width_percentile_lookback"])
         if len(df) < lb + 5:
             return None
@@ -80,9 +85,6 @@ class BollingerBandSqueeze(Strategy):
                 return None
 
         confidence = min(0.85, 0.55 + 0.08 * max(0.0, vol_z))
-
-        if ctx.position is not None:
-            return None
 
         if crossed_up:
             stop = close - p["atr_stop_mult"] * atr

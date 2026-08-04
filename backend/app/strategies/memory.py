@@ -316,3 +316,8 @@ def get_episodic_nearest_neighbors(
     scored_neighbors.sort(key=lambda x: x["distance"])
     return scored_neighbors[:k]
 
+def get_adaptive_ml_threshold(base_threshold: float, exp_info: dict) -> float:
+    return base_threshold
+
+def get_adaptive_signal_score(base_score: float, exp_info: dict) -> float:
+    return base_score

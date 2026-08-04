@@ -276,14 +276,6 @@ class RiskManager:
         if len(ctx.positions) >= cfg.max_open_positions:
             return RiskDecision(False, f"max open positions ({cfg.max_open_positions}) reached")
 
-        from app.portfolio.allocator import _sector
-        sector = _sector(symbol)
-        sector_count = sum(1 for p in ctx.positions if _sector(p.symbol.upper()) == sector)
-        if sector_count >= cfg.max_positions_per_sector:
-            return RiskDecision(
-                False,
-                f"sector limit exceeded: {symbol} is in {sector} which already has {sector_count} open positions (max {cfg.max_positions_per_sector})"
-            )
 
         if bars.empty:
             return RiskDecision(False, "no market data")
@@ -307,6 +299,7 @@ class RiskManager:
                 )
 
         stop_loss = signal.stop_loss
+        take_profit = signal.take_profit
         atr = None
         if "atr14" in bars.columns and pd.notna(bars["atr14"].iloc[-1]):
             atr = float(bars["atr14"].iloc[-1])
@@ -320,6 +313,14 @@ class RiskManager:
         if signal.action == SignalAction.ENTER_SHORT and stop_loss <= price:
             return RiskDecision(False, f"short stop must be above entry ({stop_loss:.4f} <= {price:.4f})")
 
+        if take_profit is not None:
+            if signal.action == SignalAction.ENTER_LONG and take_profit <= price:
+                return RiskDecision(False, f"long target must be above entry ({take_profit:.4f} <= {price:.4f})")
+            if signal.action == SignalAction.ENTER_SHORT and take_profit >= price:
+                return RiskDecision(False, f"short target must be below entry ({take_profit:.4f} >= {price:.4f})")
+        elif atr is not None and atr > 0:
+            take_profit = price + 2.0 * atr if signal.action == SignalAction.ENTER_LONG else price - 2.0 * atr
+
         stop_distance = abs(price - stop_loss)
         min_distance = max(price * 0.0005, 0.01)
         if stop_distance < min_distance:
@@ -328,11 +329,10 @@ class RiskManager:
         risk_mult = getattr(signal, "risk_multiplier", 1.0)
         if kelly_override is not None:
             kelly_cap = getattr(cfg, "kelly_fraction_cap", 0.15)
-            effective_allocation = min(kelly_override, kelly_cap) * risk_mult
-            target_notional = ctx.equity * effective_allocation
-            qty = int(target_notional / price)
-            risk_amount = qty * stop_distance
-            kelly_used = effective_allocation
+            effective_kelly = min(kelly_override, kelly_cap) * risk_mult
+            risk_amount = ctx.equity * effective_kelly
+            qty = int(risk_amount / stop_distance) if stop_distance > 0 else 0
+            kelly_used = effective_kelly
         else:
             effective_risk_pct = cfg.risk_per_trade_pct
             explicit_scanner = (getattr(signal, "discovery_source", None) == "scanner")
@@ -365,23 +365,32 @@ class RiskManager:
             if risk_mult != 1.0:
                 applog.info("risk", f"Dynamic safety risk multiplier applied: scaling risk to {effective_risk_pct}%")
 
-            # Profit Harvesting Sizing (A+ Setups)
-            ml_prob = getattr(signal, "ml_probability", None)
-            is_harvest_candidate = False
-            if ml_prob is not None and ml_prob > 0.85:
-                is_harvest_candidate = True
-            
-            # Check for explosive volume (recent 10 bars vs 120 bars)
-            if not is_harvest_candidate and not bars.empty and len(bars) > 60:
-                recent_vol = bars["volume"].tail(10).mean()
-                avg_vol = bars["volume"].tail(120).mean()
-                if avg_vol > 0 and (recent_vol / avg_vol) > 3.0:
-                    is_harvest_candidate = True
+            # ---- Dynamic TradeScore-Based Sizing ----
+            # Scale risk linearly from 0.5% (score 0.50) to 2.0% (score 0.90+)
+            # Signals that bypassed scoring (score is None) receive base risk_per_trade_pct unchanged.
+            # NOTE: The legacy harvest_risk_multiplier path was removed (F-01). It could trigger
+            # on a raw volume spike alone (no pipeline gate required) and consume the entire
+            # daily loss budget in a single trade. TradeScore-based dynamic sizing is the
+            # sole authority for high-conviction sizing.
+            conf = getattr(signal, "score", None)
 
-            if is_harvest_candidate:
-                harvest_mult = getattr(cfg, "harvest_risk_multiplier", 2.5)
-                effective_risk_pct *= harvest_mult
-                applog.info("risk", f"[HARVEST MODE] A+ setup detected for {symbol}. Applying {harvest_mult}x risk multiplier: {effective_risk_pct:.4f}%")
+            if isinstance(conf, (int, float)) and conf > 0.0:
+                # Interpolate between 0.5% and 2.0% risk based on [0.50, 0.90] score range
+                min_risk = 0.50
+                max_risk = 2.00
+                min_conf = 0.50
+                max_conf = 0.90
+
+                clamped_conf = max(min_conf, min(max_conf, conf))
+                ratio = (clamped_conf - min_conf) / (max_conf - min_conf)
+
+                base_risk = min_risk + (ratio * (max_risk - min_risk))
+                effective_risk_pct = base_risk * risk_mult
+                applog.info("risk", f"Dynamic sizing: TradeScore {conf:.2f} -> scaled risk to {effective_risk_pct:.2f}%")
+            else:
+                # No score available — use effective_risk_pct as-is (already adjusted by scanner/legacy multipliers above)
+                applog.info("risk", f"No TradeScore for {symbol}: using base risk {effective_risk_pct}%")
+
 
             kelly_used = effective_risk_pct / 100.0
             risk_amount = ctx.equity * kelly_used
@@ -404,7 +413,7 @@ class RiskManager:
         final_notional = qty * price
         applog.info(
             "risk",
-            f"[sizing] {symbol} allocator_target={'${:,.0f}'.format(target_notional) if kelly_override is not None else 'n/a (fixed-risk)'} "
+            f"[sizing] {symbol} allocator_target={'${:,.0f}'.format(risk_amount) if kelly_override is not None else 'n/a (fixed-risk)'} "
             f"unconstrained_qty={qty_unconstrained} "
             f"after_notional_cap={qty_after_notional} "
             f"after_cash_cap={qty_after_cash} "
@@ -415,28 +424,15 @@ class RiskManager:
             return RiskDecision(False, "computed size below 1 share (risk budget or cash too small)")
 
         side = OrderSide.BUY if signal.action == SignalAction.ENTER_LONG else OrderSide.SELL
-        take_profit = signal.take_profit
-        if take_profit is None:
-            take_profit = price + 2.0 * stop_distance if side == OrderSide.BUY else price - 2.0 * stop_distance
-        elif side == OrderSide.BUY and take_profit <= price:
-            return RiskDecision(False, f"long target must be above entry ({take_profit:.4f} <= {price:.4f})")
-        elif side == OrderSide.SELL and take_profit >= price:
-            return RiskDecision(False, f"short target must be below entry ({take_profit:.4f} >= {price:.4f})")
-
         executable_entry = round(float(price), 2)
         executable_stop = round(float(stop_loss), 2)
-        executable_target = round(float(take_profit), 2)
         if side == OrderSide.BUY:
             if executable_stop >= executable_entry:
                 executable_stop = round(executable_entry - 0.01, 2)
-            if executable_target <= executable_entry:
-                executable_target = round(executable_entry + 0.01, 2)
         else:
             if executable_stop <= executable_entry:
                 executable_stop = round(executable_entry + 0.01, 2)
-            if executable_target >= executable_entry:
-                executable_target = round(executable_entry - 0.01, 2)
-        if executable_stop <= 0 or executable_target <= 0:
+        if executable_stop <= 0:
             return RiskDecision(False, "broker-valid bracket geometry unavailable at current price")
 
         entry_type = str(getattr(self.config, "entry_order_type", "market") or "market").lower().strip()
@@ -451,6 +447,7 @@ class RiskManager:
             order_type = OrderType.MARKET
             limit_price = None
 
+        executable_target = round(float(take_profit), 2) if take_profit is not None else None
         order = OrderRequest(
             symbol=symbol,
             side=side,

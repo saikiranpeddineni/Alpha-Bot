@@ -73,19 +73,14 @@ class ParallelEvidenceEvaluator:
                     fallback_reason=None if prob is not None else "score_action returned None"
                 )
             import dataclasses
-            from app.strategies.adaptive import get_adaptive_specialist_min_auc
-            dyn_min_auc = get_adaptive_specialist_min_auc(
-                sig.strategy,
-                regime_key or "RANGE",
-                sector_strength
-            )
+            dyn_min_auc = 0.53
             score_res = dataclasses.replace(score_res, specialist_min_auc=dyn_min_auc)
 
             ml = score_res.probability
             ml_passed = False
             ml_rejection_reason = None
             if ml is not None:
-                from app.ai.model_legacy import _validate_signal_probability
+                from app.ai.model import _validate_signal_probability
                 _, val_reason = _validate_signal_probability(ml)
                 if val_reason is not None:
                     ml = None

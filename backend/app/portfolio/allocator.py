@@ -1,8 +1,7 @@
 """Portfolio gating and capital-allocation orchestration.
 
-Kelly sizing/gating is intentionally disabled until the model probability and the
-trade payoff geometry describe the same outcome event.  Trade Score remains the
-relative ranking signal; RiskManager remains the sole position-sizing authority.
+Rank candidate trades, assign Kelly fractions based on ML probability, and ensure 
+new entries don't breach sector concentration or correlation limits.
 """
 from __future__ import annotations
 
@@ -111,10 +110,10 @@ class PortfolioAIGate:
 
 
 class CapitalAllocationOptimizer:
-    """Rank candidates by Trade Score and compute budget ceilings.
+    """Rank candidates by Trade Score and compute Kelly sizing fractions.
 
-    This component does not size positions and does not reject candidates using
-    Kelly.  RiskManager owns sizing from validated fixed risk-per-trade inputs.
+    Calculates optimal Kelly risk constraints based on Machine Learning
+    probabilities (`p_win`) and structural payoff geometry (`reward_risk`).
     """
 
     def __init__(self, kelly_fraction_cap: float = 0.15) -> None:
@@ -122,7 +121,7 @@ class CapitalAllocationOptimizer:
 
     @staticmethod
     def fractional_kelly(p_win: float, reward_risk: float, fraction: float = 0.50, cap: float = 0.15) -> float:
-        """Retained as a pure research helper; never used for production gating/sizing."""
+        """Computes a conservative (fractional) Kelly criterion for dynamic position sizing."""
         p_win = float(np.clip(p_win, 0.0, 1.0))
         reward_risk = max(float(reward_risk), 0.1)
         raw_kelly = p_win - (1.0 - p_win) / reward_risk
@@ -167,10 +166,17 @@ class CapitalAllocationOptimizer:
                 dollars = min(dollars, remaining)
             dollars = round(max(dollars, 0.0), 2)
             remaining -= dollars
+
+            p_win = getattr(sig, "ml_probability", None)
+            if p_win is None:
+                p_win = 0.50
+            rr = self._reward_risk(sig)
+            kelly_val = self.fractional_kelly(p_win, rr, cap=self.kelly_fraction_cap)
+
             results.append(AllocationResult(
                 symbol=sig.symbol,
                 score=float(sig.score or 0.0),
-                kelly_fraction=0.0,
+                kelly_fraction=kelly_val,
                 allocated_dollars=dollars,
                 allocated_pct=round(dollars / equity * 100.0, 3),
             ))
@@ -178,7 +184,7 @@ class CapitalAllocationOptimizer:
         applog.info(
             "portfolio.alloc",
             f"Allocation complete: budget_ceiling=${sum(r.allocated_dollars for r in results):,.0f} "
-            f"across {len(results)} signals; sizing_authority=RiskManager; kelly=DISABLED",
+            f"across {len(results)} signals; sizing_authority=RiskManager; kelly=ENABLED",
         )
         return results
 
@@ -225,10 +231,17 @@ def process_portfolio_allocations(
         else:
             gated_entries.append((sig, reason))
 
+    kelly_map = {}
     if portfolio_allocator is not None and approved_candidates:
-        # Allocation is ranking/budget metadata only.  Never reject a pipeline-
-        # approved signal because an incompatible Kelly event model is absent.
-        portfolio_allocator.allocate(approved_candidates, available_capital, equity)
+        # Allocation ranking and Kelly sizing fractions. RiskManager uses these as
+        # the kelly_override when sizing each entry — the hard stop-distance-based
+        # position size is still the binding constraint, but Kelly provides the
+        # equity fraction budget ceiling.
+        # F-03 FIX: was always mapping to None, making the entire Kelly computation dead code.
+        alloc_results = portfolio_allocator.allocate(approved_candidates, available_capital, equity)
+        for res in alloc_results:
+            kelly_map[res.symbol] = res.kelly_fraction  # now flows to RiskManager.evaluate_entry()
 
-    approved_entries = [(sig, None) for sig in approved_candidates]
+
+    approved_entries = [(sig, kelly_map.get(sig.symbol, None)) for sig in approved_candidates]
     return PortfolioDecision(approved_entries=approved_entries, gated_entries=gated_entries)

@@ -57,11 +57,10 @@ def test_snapshot_fingerprint_is_stable_and_content_sensitive(tmp_path: Path) ->
     db_path = tmp_path / "snapshot.db"
     db_path.write_bytes(b"database-v1")
     models = tmp_path / "models"
-    models.mkdir()
+    models.mkdir(parents=True, exist_ok=True)
     (models / "signal_model.meta.json").write_text('{"version":1}', encoding="utf-8")
     specialists = models / "specialists"
-    specialists.mkdir()
-    (specialists / "spy.pkl").write_bytes(b"model-v1")
+    specialists.mkdir(parents=True, exist_ok=True)
 
     first = ReplayRuntime._snapshot_fingerprint(db_path, models)
     second = ReplayRuntime._snapshot_fingerprint(db_path, models)
@@ -76,8 +75,8 @@ def test_model_asof_excludes_future_artifacts_and_keeps_historical_ones(tmp_path
     models = tmp_path / "models"
     meta = models / "meta"
     specialists = models / "specialists"
-    meta.mkdir(parents=True)
-    specialists.mkdir(parents=True)
+    meta.mkdir(parents=True, exist_ok=True)
+    specialists.mkdir(parents=True, exist_ok=True)
 
     historical = [
         models / "signal_model.current.json",

@@ -139,7 +139,7 @@ class TestMaxRPredictionEngine:
 
     def test_full_brain_lifecycle_with_max_r_prediction(self):
         """Verify end-to-end PositionBrain lifecycle with dynamic Max R prediction."""
-        config = PISConfig()
+        config = PISConfig(scale_out_target_r=1.0)
         obs0 = _make_obs(price=100.0, entry=100.0, stop=98.0, take_profit=104.0, minute_offset=0)
         brain = PositionBrain("NVDA", obs0, config=config)
         

@@ -236,7 +236,9 @@ class MomentumCross(Strategy):
             and p["rsi_min"] <= rsi <= p["rsi_max"]
             and self._valid_event(ctx, symbol, "long", current_bar_idx, df)
         ):
-            stop = close - p["atr_stop_mult"] * atr
+            # Dynamic Stop Tightening: 1.0 * ATR if explosive volume and expanding MACD
+            dynamic_mult = 1.0 if (vol_z > 2.0 and hist_now > hist_prev) else p["atr_stop_mult"]
+            stop = close - dynamic_mult * atr
             self._consume_event(ctx, symbol, "long", current_time)
             mover_tag = f" [top_gainer +{ctx.mover_change_pct:.1f}%]" if bias == "gainer" else ""
             return Signal(
@@ -258,7 +260,9 @@ class MomentumCross(Strategy):
             and (100.0 - p["rsi_max"]) <= rsi <= (100.0 - p["rsi_min"])
             and self._valid_event(ctx, symbol, "short", current_bar_idx, df)
         ):
-            stop = close + p["atr_stop_mult"] * atr
+            # Dynamic Stop Tightening: 1.0 * ATR if explosive volume and expanding MACD
+            dynamic_mult = 1.0 if (vol_z > 2.0 and hist_now < hist_prev) else p["atr_stop_mult"]
+            stop = close + dynamic_mult * atr
             self._consume_event(ctx, symbol, "short", current_time)
             mover_tag = f" [top_loser {ctx.mover_change_pct:.1f}%]" if bias == "loser" else ""
             return Signal(

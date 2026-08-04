@@ -445,6 +445,7 @@ def test_verify_broker_protective_stops_undersized_and_take_profit_preservation(
     """Verify under-sized stop is canceled/replaced while take-profit limit order is preserved."""
     from app.core.domain import Position, Order, OrderSide, OrderType, OrderStatus
     engine = client.app.state.engine
+    engine.risk_config.bypass_rule41 = False
     setup_healthy_mocks(engine)
 
     pos_long = Position(symbol="MU", qty=21.0, avg_entry_price=100.0, market_price=100.0)
@@ -497,6 +498,7 @@ def test_verify_broker_protective_stops_cancellation_failure_aborts_submit(clien
     """Verify that if canceling an under-sized stop fails, recovery submit is safely aborted."""
     from app.core.domain import Position, Order, OrderSide, OrderType, OrderStatus
     engine = client.app.state.engine
+    engine.risk_config.bypass_rule41 = False
     setup_healthy_mocks(engine)
 
     pos_long = Position(symbol="MU", qty=21.0, avg_entry_price=100.0, market_price=100.0)
@@ -526,6 +528,7 @@ def test_verify_broker_protective_stops_short_position_symmetry(client):
     """Verify protective stop recovery for SHORT positions (BUY stop above entry)."""
     from app.core.domain import Position, Order, OrderSide, OrderType, OrderStatus
     engine = client.app.state.engine
+    engine.risk_config.bypass_rule41 = False
     setup_healthy_mocks(engine)
 
     pos_short = Position(symbol="AAPL", qty=-15.0, avg_entry_price=150.0, market_price=150.0)

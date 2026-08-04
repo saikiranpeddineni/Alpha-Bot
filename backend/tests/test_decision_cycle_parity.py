@@ -16,7 +16,7 @@ def test_live_decision_cycle_awaits_scanner_and_event_state_before_poll_and_deci
     assert "create_task(self.run_market_scanner" not in source
     assert "create_task(self.run_event_monitor" in source
     loop = source[source.index("Pre-market scanner trigger time reached"):]
-    _ordered(loop, "self.run_market_scanner(is_intraday=False)", "create_task(self.run_event_monitor(now), name=\"event-monitor\")", "new_closed = await self.data.poll(self.watchlist)", "await self._drain_fills(now)", "self.portfolio.roll_session(session, account.equity)", "halt = self.risk.check_halts(ctx, now=now)", "entries = await self._evaluate_symbol")
+    _ordered(loop, "self.run_market_scanner(is_intraday=False)", "create_task(self.run_event_monitor(now), name=\"event-monitor\")", "new_closed = await self.data.poll(", "await self._drain_fills(now)", "self.portfolio.roll_session(session, account.equity)", "halt = self.risk.check_halts(ctx, now=now)", "entries = await self._evaluate_symbol")
 
 
 def test_replay_processes_and_drains_boundary_fills_before_session_roll_and_decisions():

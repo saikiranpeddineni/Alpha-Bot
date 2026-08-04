@@ -106,13 +106,13 @@ class _FakeBroker:
         self.submitted_orders.append(order)
         return order
 
-    async def close_position(self, symbol: str, reason: str = "manual") -> Order | None:
+    async def close_position(self, symbol: str, reason: str = "manual", qty: float | None = None) -> Order | None:
         self.closed_positions.append((symbol, reason))
         return Order(
             id=f"close-{symbol}",
             symbol=symbol,
             side=OrderSide.SELL,
-            qty=10,
+            qty=qty if qty is not None else 10,
             order_type=OrderType.MARKET,
             status=OrderStatus.FILLED,
         )
@@ -224,7 +224,11 @@ async def test_reconciliation_failure_blocks_entries_but_allows_exits(tmp_path, 
     broker.should_fail_positions = False
 
     real_reconcile = engine._reconcile_positions
-    engine._reconcile_positions = lambda positions: None  # keep flag True
+
+    async def fake_reconcile(positions):
+        pass
+
+    engine._reconcile_positions = fake_reconcile  # keep flag True
 
     await engine._tick()
 

@@ -253,7 +253,7 @@ class PISConfig:
     profit_harvesting_mode: bool = True
     enable_scale_out: bool = True
     scale_out_ratio: float = 0.50
-    scale_out_target_r: float = 1.00
+    scale_out_target_r: float = 2.00
     runner_wide_atr_mult: float = 2.00
     enable_dynamic_max_r: bool = True
     max_r_cap: float = 8.00

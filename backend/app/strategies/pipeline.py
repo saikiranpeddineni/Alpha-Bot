@@ -142,12 +142,14 @@ class SignalPipeline:
                                                fallback_reason=None if prob is not None else "score_action returned None")
             ml = score_res.probability
             if ml is not None:
-                from app.ai.model_legacy import _validate_signal_probability
-                _, reason = _validate_signal_probability(ml)
+                from app.ai.model import _validate_signal_probability
+                valid_ml, reason = _validate_signal_probability(ml)
                 if reason is not None:
                     ml = None
                     from dataclasses import replace
                     score_res = replace(score_res, probability=None, specialist_status="INVALID_SCORE", fallback_reason=reason)
+                else:
+                    ml = valid_ml
             applog.info("pipeline", f"{symbol}: model_source={score_res.model_source} | specialist_status={score_res.specialist_status} | "
                         f"specialist_auc={f'{score_res.specialist_auc:.4f}' if isinstance(score_res.specialist_auc, (int, float)) else score_res.specialist_auc} | "
                         f"specialist_min_auc={f'{score_res.specialist_min_auc:.4f}' if isinstance(score_res.specialist_min_auc, (int, float)) else score_res.specialist_min_auc} | "
@@ -212,9 +214,13 @@ class SignalPipeline:
                 if sig.action == SignalAction.ENTER_SHORT:
                     if sig.stop_loss is None:
                         sig.stop_loss = round(entry_price * (1 + excursion.suggested_stop_pct / 100.0), 4)
+                    if sig.take_profit is None:
+                        sig.take_profit = round(entry_price * (1 - excursion.suggested_target_pct / 100.0), 4)
                 else:
                     if sig.stop_loss is None:
                         sig.stop_loss = round(entry_price * (1 - excursion.suggested_stop_pct / 100.0), 4)
+                    if sig.take_profit is None:
+                        sig.take_profit = round(entry_price * (1 + excursion.suggested_target_pct / 100.0), 4)
                 original_stop = sig.stop_loss
                 original_target = sig.take_profit
                 min_stop_pct = get_settings().risk_config().min_stop_pct

@@ -16,9 +16,27 @@ class _GetOrdersRequest:
 
 def _install_fake_alpaca(monkeypatch):
     alpaca = ModuleType("alpaca")
+    alpaca.__path__ = []
     trading = ModuleType("alpaca.trading")
+    trading.__path__ = []
     client = ModuleType("alpaca.trading.client")
     requests = ModuleType("alpaca.trading.requests")
+    common = ModuleType("alpaca.common")
+    common.__path__ = []
+    exceptions = ModuleType("alpaca.common.exceptions")
+    enums = ModuleType("alpaca.common.enums")
+
+    class APIError(Exception):
+        pass
+
+    class Sort:
+        ASC = "asc"
+        DESC = "desc"
+
+    exceptions.APIError = APIError
+    common.exceptions = exceptions
+    enums.Sort = Sort
+    common.enums = enums
 
     class TradingClient:
         def __init__(self, *args, **kwargs):
@@ -30,6 +48,9 @@ def _install_fake_alpaca(monkeypatch):
     monkeypatch.setitem(sys.modules, "alpaca.trading", trading)
     monkeypatch.setitem(sys.modules, "alpaca.trading.client", client)
     monkeypatch.setitem(sys.modules, "alpaca.trading.requests", requests)
+    monkeypatch.setitem(sys.modules, "alpaca.common", common)
+    monkeypatch.setitem(sys.modules, "alpaca.common.exceptions", exceptions)
+    monkeypatch.setitem(sys.modules, "alpaca.common.enums", enums)
 
 
 def _order(qty: float, status: str = "partially_filled", *, oid: str = "order-1", side: str = "buy"):

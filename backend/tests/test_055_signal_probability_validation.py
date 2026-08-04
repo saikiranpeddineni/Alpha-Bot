@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
-from app.ai.model_legacy import (
+from app.ai.model import (
     ScoreActionResult,
     SignalModel,
     _validate_signal_probability,

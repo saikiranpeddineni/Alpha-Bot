@@ -82,7 +82,7 @@ class RunnerIntelligence:
         if health.overall >= 0.75 and peak_r >= (predicted_max_r * 0.80) and regime == MarketRegime.TREND_RUNNER:
             predicted_max_r = max(predicted_max_r, peak_r + 1.00)
 
-        max_cap = getattr(self.config, "max_r_cap", 8.0)
+        max_cap = getattr(self.config, "max_r_cap", 20.0)  # Uncapped from 8.0R to allow extreme trend runners
         predicted_max_r = min(max_cap, round(predicted_max_r, 2))
 
         return predicted_max_r, round(runner_prob, 3)

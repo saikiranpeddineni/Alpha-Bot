@@ -6,8 +6,7 @@ from pathlib import Path
 import pytest
 
 from app.ai.generation import AtomicGenerationStore, TrainingCoordinator
-from app.ai.trainer import ContinuousTrainer
-from app.ai.trainer_legacy import ContinuousTrainer as _LegacyContinuousTrainer
+from app.ai.trainer import ContinuousTrainer, _LegacyContinuousTrainer
 
 
 class _Data:

@@ -47,6 +47,7 @@ from app.core.domain import (
     OrderSide,
     OrderStatus,
     OrderType,
+    Position,
     ProtectionState,
     Regime,
     SignalAction,
@@ -375,7 +376,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         # Restore strategy mapping & reconstruct portfolio lots for active positions from database
         try:
             positions = await self.broker.positions()
-            await self._reconcile_positions(positions)
+            self._reconcile_positions(positions)
         except Exception as exc:
             self.reconciliation_failed = True
             applog.error("engine", f"Failed to restore and reconcile active positions: {exc}")
@@ -604,10 +605,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                 
                 if is_trading_day:
                     applog.info("engine", "Pre-market scanner trigger time reached (>= 09:00 ET)")
-                    if self._scanner_task is None or self._scanner_task.done():
-                        self._scanner_task = asyncio.create_task(
-                            self.run_market_scanner(is_intraday=False), name="market-scanner"
-                        )
+                    await self.run_market_scanner(is_intraday=False)
             # Intraday watchlist refresh every 15 min during session (was 30 min)
             elif (
                 is_trading_day
@@ -714,9 +712,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         try:
             account = await self.broker.account()
             positions = await self.broker.positions()
-            if getattr(self, "reconciliation_failed", False):
-                applog.info("engine", "Reconciliation state was uncertain. Re-attempting position reconciliation...")
-                await self._reconcile_positions(positions)
+            self._reconcile_positions(positions)
             if positions and not getattr(self, "reconciliation_failed", False):
                 await self.verify_broker_protective_stops(positions)
 
@@ -836,15 +832,29 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
             self._last_evaluated_symbol_count = len(symbols_to_evaluate)
             if symbols_to_evaluate:
                 self._last_evaluation_at = now
+            
+            effective_positions = list(positions)
+
             for symbol in symbols_to_evaluate:
                 # fix(#86): skip new ENTRY signals for symbols with active market-data gaps
                 sym_upper = symbol.upper()
                 if sym_upper in self._data_gap_symbols and sym_upper not in pos_by_symbol:
                     applog.debug("engine", f"#86: Skipping {sym_upper} entry evaluation \u2014 market-data gap active")
                     continue
-                entries = await self._evaluate_symbol(symbol, pos_by_symbol.get(symbol), account.equity, now)
+                entries = await self._evaluate_symbol(symbol, pos_by_symbol.get(symbol), account.equity, now, effective_positions=effective_positions)
                 if self.state == EngineState.RUNNING and allow_entries:
                     candidates.extend(entries)
+                    for sig, _ in entries:
+                        if sig.action != SignalAction.EXIT:
+                            effective_positions.append(
+                                Position(
+                                    symbol=sig.symbol.upper(),
+                                    qty=1.0,
+                                    avg_entry_price=sig.price or 1.0,
+                                    market_price=sig.price or 1.0,
+                                    strategy=sig.strategy
+                                )
+                            )
 
             if candidates:
                 from app.portfolio.allocator import process_portfolio_allocations
@@ -1063,16 +1073,23 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                 )
 
         # 6. mark equity + persist
-        if not getattr(self, "reconciliation_failed", False) and new_closed:
+        # F-04 FIX: Only re-fetch account if fills were drained this tick, which
+        # is the only in-tick event that materially changes broker-side equity.
+        # Unconditional re-fetch on every bar tick doubled Alpaca API consumption
+        # against the 200 req/min budget.
+        _fills_drained = getattr(self, "_fills_drained_this_tick", False)
+        if _fills_drained and not getattr(self, "reconciliation_failed", False):
             try:
                 account = await self.broker.account()
             except Exception as exc:
                 self.reconciliation_failed = True
-                applog.error("engine", f"Failed to fetch account during mark equity: {exc}")
+                applog.error("engine", f"Failed to fetch account after fill drain: {exc}")
+        self._fills_drained_this_tick = False  # reset for next tick
 
         self.portfolio.mark_equity(account.equity, now)
         if self._tick_count % EQUITY_PERSIST_EVERY_TICKS == 0:
             await asyncio.to_thread(self.db.save_equity, account.equity, account.cash, self.mode, now)
+
 
         # 7. broadcast
         self._broadcast_tick(account, now, new_closed, positions)
@@ -1080,13 +1097,21 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
 
 
 
+    async def _evaluate_symbol(self, symbol: str, position, equity: float, now: datetime, effective_positions: list[Position] | None = None) -> list[tuple[Signal, pd.DataFrame]]:
+        # Live safety net: when target reached (high_val >= target for long, low_val <= target for short), original strategy take-profit triggered
+        # Non-tradable reference/risk symbol excluded from strategy evaluation (e.g. VIX)
+        return await super()._evaluate_symbol(symbol, position, equity, now, effective_positions=effective_positions)
+
     async def _drain_fills(self, now: datetime) -> None:
         assert self.broker and self.portfolio and self.risk
         fills = self.broker.drain_fills()
         if not fills:
             return
+        # F-04: signal that fills were processed this tick so the equity re-fetch fires
+        self._fills_drained_this_tick = True
         # fix(#51): enforce causal replay order — sort by (ts ASC, order_id, cumulative_qty ASC)
         fills = sorted(fills, key=lambda f: (f.ts, f.order_id or "", getattr(f, "cumulative_qty", 0.0) or 0.0))
+
 
         order_by_id = {}
         for o in self.recent_orders:
@@ -1542,6 +1567,105 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
 
         return True
 
+    def _reconcile_positions(self, positions: list[Position]) -> None:
+        """Reconcile local lots to authoritative broker positions without erasing matching lot state."""
+        broker_symbols = {p.symbol for p in positions if abs(float(p.qty)) > 1e-9}
+        for local_symbol in list(self.portfolio._lots):
+            if local_symbol not in broker_symbols:
+                self.portfolio._lots.pop(local_symbol, None)
+                self._position_take_profits.pop(local_symbol, None)
+                self._position_peaks.pop(local_symbol, None)
+
+        for p in positions:
+            existing_lot = self.portfolio._lots.get(p.symbol)
+            if existing_lot is not None:
+                qty_matches = abs(float(existing_lot.qty) - float(p.qty)) <= 1e-9
+                price_scale = max(1.0, abs(float(p.avg_entry_price)))
+                avg_matches = abs(float(existing_lot.avg_price) - float(p.avg_entry_price)) <= 1e-8 * price_scale
+                if qty_matches and avg_matches:
+                    # Fill processing already established the same economic lot. Keep
+                    # its original/current stop, initial R, strategy and entry timestamp.
+                    p.strategy = existing_lot.strategy
+                    continue
+
+            strat = "manual"
+            if hasattr(self.broker, "_symbol_strategies"):
+                db_strat = self.db.get_latest_entry_order_strategy(p.symbol, self.mode)
+                if db_strat:
+                    self.broker._symbol_strategies[p.symbol] = db_strat
+                    strat = db_strat
+                    applog.info("engine", f"Restored strategy '{db_strat}' for active position {p.symbol}")
+
+            # Position ownership comes from the latest true ENTRY, never from a
+            # newer emergency/protective order.  This keeps UI attribution and
+            # strategy-specific exit management bound to the strategy that opened
+            # the surviving position.
+            entry_payload = self.db.get_latest_entry_order_payload(p.symbol, self.mode)
+            if not isinstance(entry_payload, dict):
+                entry_payload = None
+            fallback_payload = self.db.get_latest_order_payload(p.symbol, self.mode)
+            if not isinstance(fallback_payload, dict):
+                fallback_payload = None
+            order_payload = entry_payload or fallback_payload
+            if entry_payload and entry_payload.get("strategy"):
+                strat = str(entry_payload["strategy"])
+                p.strategy = strat
+                if hasattr(self.broker, "_symbol_strategies"):
+                    self.broker._symbol_strategies[p.symbol] = strat
+            stop_loss = None
+            take_profit = None
+            initial_risk = None
+            opened_at = p.opened_at if hasattr(p, "opened_at") and p.opened_at else datetime.now(UTC)
+            if order_payload:
+                stop_loss_val = order_payload.get("stop_loss")
+                take_profit = order_payload.get("take_profit")
+                take_profit_val = take_profit
+                try:
+                    stop_loss = float(stop_loss_val) if stop_loss_val is not None else None
+                except (TypeError, ValueError):
+                    stop_loss = None
+                try:
+                    take_profit = float(take_profit_val) if take_profit_val is not None else None
+                except (TypeError, ValueError):
+                    take_profit = None
+                if stop_loss and stop_loss > 0:
+                    initial_risk = abs(p.avg_entry_price - stop_loss)
+                if take_profit is not None and float(take_profit) > 0:
+                    self._position_take_profits[p.symbol] = float(take_profit)
+                    p.take_profit = float(take_profit)
+                submitted_at_str = order_payload.get("submitted_at")
+                if submitted_at_str:
+                    try:
+                        opened_at = datetime.fromisoformat(submitted_at_str)
+                    except Exception:
+                        pass
+
+            # fix(#41): local DB stop_loss metadata is stored for initial lot tracking,
+            # but MUST NOT count as proof of authoritative broker-side protection.
+            if stop_loss is None or stop_loss <= 0:
+                stop_pct = 0.015  # 1.5% conservative protective fallback
+                if p.qty > 0:
+                    stop_loss = round(p.avg_entry_price * (1.0 - stop_pct), 4)
+                else:
+                    stop_loss = round(p.avg_entry_price * (1.0 + stop_pct), 4)
+                initial_risk = abs(p.avg_entry_price - stop_loss)
+
+            from app.portfolio.tracker import _OpenLot
+            self.portfolio._lots[p.symbol] = _OpenLot(
+                qty=p.qty,
+                avg_price=p.avg_entry_price,
+                entry_ts=opened_at,
+                strategy=strat,
+                stop_loss=stop_loss,
+                initial_risk_per_share=initial_risk,
+            )
+            applog.info(
+                "engine",
+                f"Reconstructed portfolio lot for {p.symbol}: qty={p.qty}, "
+                f"avg_price={p.avg_entry_price}, strategy={strat}, stop_loss={stop_loss}",
+            )
+        self.reconciliation_failed = False
+
     async def verify_broker_protective_stops(
         self,
         active_positions: list[Position],
@@ -1552,8 +1676,8 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         Exits and entries remain disabled until open_orders() independently confirms
         an active OrderType.STOP with valid directional geometry and sufficient quantity.
         """
-        # Bypass Rule 41 to allow the Profit Intelligence System (PIS) to handle exits
-        bypass_rule41 = getattr(self.risk_config, "bypass_rule41", True)
+        risk_config = getattr(self, "risk_config", None)
+        bypass_rule41 = getattr(risk_config, "bypass_rule41", False) if risk_config is not None else False
         if bypass_rule41:
             return {p.symbol: True for p in active_positions}
 
@@ -3001,52 +3125,17 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
 
         confirmed_bad = self._position_reconciliation_mismatch_streak >= 2 or self._order_reconciliation_mismatch_streak >= 2
         if confirmed_bad:
-            if self._position_reconciliation_mismatch_streak >= 2 and hasattr(self.portfolio, "_lots"):
-                # AUTO RECONCILIATION
-                applog.warning("engine.heartbeat", "Auto-reconciling durable portfolio to match broker truth.")
-                ghosts = [s for s in db_syms if s not in broker_syms]
-                for ghost in ghosts:
-                    applog.warning("engine.heartbeat", f"Auto-reconciliation: Purging ghost position {ghost} not found on broker.")
-                    self.portfolio._lots.pop(ghost, None)
-                
-                orphans = [s for s in broker_syms if s not in db_syms]
-                if orphans:
-                    from app.portfolio.tracker import _OpenLot
-                    bp_map = {p.symbol: p for p in broker_positions}
-                    for orphan in orphans:
-                        p = bp_map.get(orphan)
-                        if p:
-                            applog.warning("engine.heartbeat", f"Auto-reconciliation: Adopting orphan position {orphan} from broker.")
-                            self.portfolio._lots[orphan] = _OpenLot(
-                                qty=float(p.qty),
-                                avg_price=float(getattr(p, "avg_entry_price", 0.0)),
-                                entry_ts=now,
-                                strategy="reconciled"
-                            )
-                
-                if self.db:
-                    try:
-                        await asyncio.to_thread(
-                            self.db.save_portfolio_checkpoint, 
-                            self.settings.mode, 
-                            self.portfolio.checkpoint(risk_state=self.risk.get_risk_state() if hasattr(self, "risk") and self.risk else {})
-                        )
-                    except Exception as exc:
-                        applog.error("engine.heartbeat", f"Auto-reconciliation: Failed to commit checkpoint: {exc}")
-                
-                self._position_reconciliation_mismatch_streak = 0
+            self.reconciliation_mismatch = True
+            self.allow_new_entries = False
+            if self.system_health != "HALTED":
+                self.system_health = "SAFE_MODE"
+        elif diagnostics["broker_connected"] and not position_bad and not order_bad:
+            if self.reconciliation_mismatch:
                 self.reconciliation_mismatch = False
                 self.allow_new_entries = True
                 if self.system_health == "SAFE_MODE":
                     self.system_health = "NORMAL"
-                applog.info("engine.heartbeat", "Auto-reconciliation complete; engine restored to NORMAL health.")
-            else:
-                self.reconciliation_mismatch = True
-                self.allow_new_entries = False
-                if self.system_health != "HALTED":
-                    self.system_health = "SAFE_MODE"
-        elif diagnostics["broker_connected"] and not position_bad and not order_bad:
-            if self.reconciliation_mismatch:
+                applog.info("engine.heartbeat", "Reconciliation restored. Leaving SAFE_MODE.")
                 applog.info("engine.heartbeat", "Broker/local reconciliation restored; clearing reconciliation SAFE_MODE latch")
             self.reconciliation_mismatch = False
             diagnostics["positions_reconciled"] = True

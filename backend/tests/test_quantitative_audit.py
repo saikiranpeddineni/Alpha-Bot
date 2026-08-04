@@ -38,8 +38,11 @@ import sklearn.metrics
 # ---------------------------------------------------------------------------
 # Test 1: Kelly Sizing Probability Input Fix
 # ---------------------------------------------------------------------------
-def test_kelly_is_disabled_due_to_incompatibility():
-    """Verify that current 15-bar ML probability never enters Kelly calculation, returning None."""
+def test_kelly_fraction_flows_to_risk_manager():
+    """Verify that the Kelly fraction computed by CapitalAllocationOptimizer flows through
+    process_portfolio_allocations and is returned as a non-None float override.
+    F-03 fix: previously the kelly_fraction was always discarded (set to None);
+    now it correctly flows to the risk manager for position sizing."""
     optimizer = CapitalAllocationOptimizer(kelly_fraction_cap=0.15)
     
     # Create signal
@@ -56,7 +59,8 @@ def test_kelly_is_disabled_due_to_incompatibility():
         score=0.80
     )
     
-    # process_portfolio_allocations should always return None for the Kelly override
+    # F-03: process_portfolio_allocations should now return a non-None Kelly override
+    # when the optimizer computes a meaningful fraction.
     decision = process_portfolio_allocations(
         signals=[signal],
         positions=[],
@@ -67,8 +71,11 @@ def test_kelly_is_disabled_due_to_incompatibility():
     )
     
     assert len(decision.approved_entries) == 1
-    # Verify that the Kelly override value is None (disabled)
-    assert decision.approved_entries[0][1] is None
+    # Kelly override must now be a float (not None) after F-03 fix
+    kelly_override = decision.approved_entries[0][1]
+    assert kelly_override is not None, "F-03: kelly_fraction must flow through (not be discarded as None)"
+    assert isinstance(kelly_override, float), f"Expected float, got {type(kelly_override)}"
+    assert 0.0 < kelly_override <= 0.15, f"Kelly fraction {kelly_override} out of expected cap range"
 
 
 # ---------------------------------------------------------------------------
@@ -325,10 +332,14 @@ def test_backtest_uses_shared_allocation_path():
         portfolio_allocator=mock_allocator
     )
     
-    # Assertions: Kelly overrides must be None since Kelly position sizing is disabled
+    # Assertions: Kelly overrides must now be floats (F-03 fix: kelly_fraction correctly flows through)
     assert len(decision.approved_entries) == 2
-    assert decision.approved_entries[0] == (signal_a, None)
-    assert decision.approved_entries[1] == (signal_b, None)
+    # Each entry should have (signal, kelly_fraction) where kelly_fraction is a float
+    assert decision.approved_entries[0][0] == signal_a
+    assert decision.approved_entries[1][0] == signal_b
+    # Verify the kelly values come from AllocationResult (0.10 for AAPL, 0.12 for MSFT per mock)
+    assert decision.approved_entries[0][1] == pytest.approx(0.10, abs=1e-6)
+    assert decision.approved_entries[1][1] == pytest.approx(0.12, abs=1e-6)
     assert len(decision.gated_entries) == 0
 
 

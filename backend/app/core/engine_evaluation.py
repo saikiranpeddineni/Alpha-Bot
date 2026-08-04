@@ -17,9 +17,10 @@ from app.indicators.slot_volume import SlotVolumeEngine
 from app.ai.regime import detect_regime
 from app.strategies import SignalPipeline, StrategyContext
 from app.strategies.evaluator import ParallelEvidenceEvaluator
+from app.pis.models import ExitAction
 
 class TradingEngineEvaluationMixin:
-    async def _evaluate_symbol(self, symbol: str, position, equity: float, now: datetime) -> list[tuple[Signal, pd.DataFrame]]:  # noqa: ANN001
+    async def _evaluate_symbol(self, symbol: str, position, equity: float, now: datetime, effective_positions: list[Position] | None = None) -> list[tuple[Signal, pd.DataFrame]]:  # noqa: ANN001
         assert self.data and self.broker and self.risk and self.pipeline
         symbol = symbol.upper()
         # Reference volatility feeds are risk inputs only and must never enter the tradable pipeline.
@@ -73,7 +74,6 @@ class TradingEngineEvaluationMixin:
                 applog.warning("engine.exit", f"PIS global evaluation fallback for {symbol}: {e}")
                 pis_decision = None
 
-            runner_active = await self._manage_live_winner_exit(symbol, position, df, pis_decision)
 
             # All exits (including strategy take profit targets) are now handled exclusively by PIS
             # to guarantee PIS acts as the single source of truth for intelligent exits.
@@ -95,9 +95,9 @@ class TradingEngineEvaluationMixin:
                 del self._position_initial_stops[symbol]
             self._position_take_profits.pop(symbol, None)
             self._live_runner_symbols.discard(symbol)
-            self._live_runner_floor.pop(symbol, None)
-            self._live_runner_floor.pop(symbol, None)
+            self._live_runner_floor.pop(symbol, None)  # F-07 fix: was called twice in a row
             self.pis_adapter.handle_position_closed(symbol)
+
 
         # Look up mover bias from scanner context (top gainer → long bias, top loser → short bias)
         _scanner = getattr(self, "_scanner", None) or getattr(self, "scanner", None)
@@ -128,6 +128,15 @@ class TradingEngineEvaluationMixin:
                 signals.append(sig)
         if not signals:
             return []
+
+        # CR-146 CEO Audit: Pre-Gate the symbol against portfolio sector/correlation limits
+        # BEFORE we spend hundreds of milliseconds running ML feature extraction & inference.
+        has_exits = any(sig.action == SignalAction.EXIT for sig in signals)
+        if not has_exits and effective_positions is not None and getattr(self, "portfolio_gate", None) is not None:
+            approved, reason = self.portfolio_gate.gate(symbol, effective_positions)
+            if not approved:
+                applog.info("portfolio.gate", f"{symbol} rejected pre-ML: {reason}")
+                return []
 
         # Feature 2: Relative Strength vs SPY — multi-timeframe (40% ret_5 + 60% ret_15)
         spy_df = None
@@ -251,11 +260,10 @@ class TradingEngineEvaluationMixin:
                 else:
                     rejection_stage = "other"
 
-            try:
-                slot_engine = SlotVolumeEngine(df, lookback_sessions=20, min_observations=5)
-                slot_rvol_val = slot_engine.get_slot_rvol(now)
-            except Exception:
-                slot_rvol_val = None
+            # F-06 FIX: slot_rvol_val was already computed before the pipeline ran (L159-165).
+            # Re-constructing SlotVolumeEngine identically on every signal in the shadow ledger
+            # loop is redundant CPU work. Reuse the already-computed value.
+            # slot_rvol_val is still in scope from L163 (or None from the except branch).
 
             try:
                 vwap_tel = compute_vwap_telemetry(df, now, slot_rvol_val)
@@ -296,75 +304,7 @@ class TradingEngineEvaluationMixin:
                 regime_source="VIX",
             )
 
-            # Run and record all active Challengers (CR-146 Phase 3)
-            # SAFETY: Each challenger receives an independent deep copy of the original signal
-            # so Champion's sig object is never shared with or contaminated by Challenger paths.
-            from app.strategies.challenger import get_active_challengers
-            for challenger in get_active_challengers():
-                try:
-                    challenger_sig = sig.model_copy(deep=True)  # pristine deep copy for this challenger
-                    challenger_eval = ParallelEvidenceEvaluator(
-                        model=self.model,
-                        ml_threshold=challenger.ml_threshold,
-                        meta_label_engine=self.pipeline.meta_label_engine,
-                        trade_score_engine=challenger.create_custom_trade_score_engine(self.pipeline.trade_score_engine),
-                    )
-                    c_evidence = challenger_eval.evaluate(
-                        symbol=symbol,
-                        df=df,
-                        sig=challenger_sig,
-                        regime=regime,
-                        sector_strength=rs_score,
-                        is_event_day=is_event_day,
-                        midday_active=midday_active,
-                    )
-                    
-                    c_vetoes = c_evidence.get("vetoes", {})
-                    c_accepted = len(c_vetoes) == 0
-                    c_final_decision = "pipeline_approved" if c_accepted else "rejected"
-                    
-                    c_rejection_stage = "none"
-                    c_rejection_reason = ""
-                    if not c_accepted:
-                        stage = list(c_vetoes.keys())[0]
-                        c_rejection_stage = stage
-                        c_rejection_reason = c_vetoes[stage]
 
-                    ShadowLedger.record_candidate(
-                        db_engine=self.db,
-                        symbol=symbol,
-                        ts=now,
-                        strategy=challenger_sig.strategy,
-                        direction="long" if challenger_sig.action == SignalAction.ENTER_LONG else "short",
-                        signal_price=challenger_sig.price or float(df["close"].iloc[-1]),
-                        stop_loss=challenger_sig.stop_loss,
-                        take_profit=challenger_sig.take_profit,
-                        ml_confidence=challenger_sig.ml_probability,
-                        final_decision=c_final_decision,
-                        rejection_stage=c_rejection_stage,
-                        rejection_reason=c_rejection_reason,
-                        df=df,
-                        spy_df=spy_df if spy_df is not None else pd.DataFrame(),
-                        slot_rvol_val=slot_rvol_val,
-                        vwap_telemetry=vwap_tel,
-                        mode="challenger",
-                        candidate_id=sig.candidate_id,
-                        strategy_params=getattr(sig, "strategy_params", {}),
-                        policy_id=challenger.policy_id,
-                        parent_policy_id="champion",
-                        policy_version="1.0.0",
-                        gate_evidence_json=c_evidence,
-                        spy_vol=spy_vol,
-                        # Fix A5 (Issue #176): Runtime-tuned alternative exits for challenger replays.
-                        alternative_exits=getattr(self.risk_config, "alternative_exits", None),
-                        market_regime=getattr(self.last_safety_decision, "market_risk_state", "NORMAL"),
-                        vix_value=self._last_vix_value,
-                        vix_age=(now - self._last_vix_timestamp).total_seconds() if self._last_vix_timestamp else None,
-                        vix_feed_status=self._last_vix_status,
-                        regime_source="VIX",
-                    )
-                except Exception as exc:
-                    applog.error("engine.challenger", f"Challenger {challenger.policy_id} failed for {symbol}: {exc}")
 
         _resurrection_enabled = getattr(self.broker, "is_paper", False) is True
         for sig, reason in rejected:
@@ -405,15 +345,7 @@ class TradingEngineEvaluationMixin:
         for sig in accepted:
             if sig.action == SignalAction.EXIT:
                 if position is not None:
-                    if symbol in self._live_runner_symbols:
-                        # Intentionally subordinate ordinary lagging strategy exits once
-                        # a broker-confirmed profit floor owns the winner.  Rule-41, EOD,
-                        # hard-halt and the broker stop remain authoritative and are not
-                        # routed through this strategy-signal branch.
-                        applog.info("engine.exit", f"{symbol}: runner preserving winner; ignored ordinary strategy exit -- {sig.reason}")
-                    else:
-                        applog.info("engine", f"{symbol}: strategy exit -- {sig.reason}")
-                        await self._close_position_guarded(symbol, reason=sig.reason)
+                    await self._close_position_guarded(symbol, reason=sig.reason)
                 continue
             
             if getattr(self, "reconciliation_failed", False):

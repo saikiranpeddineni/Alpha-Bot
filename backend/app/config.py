@@ -49,14 +49,19 @@ class RiskConfig(BaseModel):
     ml_confidence_threshold: float = Field(0.52, ge=0.0, le=1.0)    # was 0.55 — aligned to new AUC tier
     regime_ml_thresholds: dict[str, float] = Field(
         default={
-            "NORMAL": 0.38,
-            "CAUTION": 0.42,
-            "STRESS": 0.50,
-            "PANIC": 0.60,
+            # F-02 FIX: Previous NORMAL=0.38, CAUTION=0.42 were below random chance (0.50),
+            # producing negative EV at realistic 1.5:1 R/R (EV = 0.38*1.5 - 0.62*1.0 = -0.05R).
+            # All thresholds now require the model to show positive expected value before
+            # a signal is accepted. Thresholds tighten under stress/panic regimes.
+            "NORMAL": 0.50,
+            "CAUTION": 0.52,
+            "STRESS": 0.55,
+            "PANIC": 0.62,
         }
     )
     min_specialist_auc: float = Field(0.50, ge=0.50, le=1.0)        # was 0.52
     min_stop_pct: float = Field(0.5, ge=0.0, le=5.0)
+    bypass_rule41: bool = Field(False, description="Bypass Rule 41 to allow PIS exits")
     score_threshold_trend: float = Field(50.0, ge=0.0, le=100.0)    # was 55.0
     score_threshold_range: float = Field(65.0, ge=0.0, le=100.0)    # was 70.0
     score_threshold_volatile: float = Field(60.0, ge=0.0, le=100.0) # was 65.0

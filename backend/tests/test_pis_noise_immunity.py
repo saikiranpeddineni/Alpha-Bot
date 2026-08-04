@@ -69,7 +69,7 @@ def _make_obs(
 
 def test_opening_pullback_does_not_shake_out():
     """A normal -0.40R pullback on bar 2 must NOT trigger an emergency exit."""
-    cfg = PISConfig()
+    cfg = PISConfig(scale_out_target_r=1.0)
     obs0 = _make_obs(price=100.0, close=100.0, t_offset_sec=0)
     brain = PositionBrain("TEST", obs0, config=cfg)
 

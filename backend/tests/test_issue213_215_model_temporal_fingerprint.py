@@ -6,7 +6,7 @@ from app.backtest.engine import compute_decision_artifacts_manifest, BacktestPar
 def test_decision_artifacts_manifest_fingerprint(tmp_path):
     """Verify that changing any model file, policy, or challenger changes decision_artifacts_sha256."""
     models_dir = tmp_path / "models"
-    models_dir.mkdir()
+    models_dir.mkdir(parents=True, exist_ok=True)
 
     # Create dummy base model files
     (models_dir / "signal_model_long.joblib").write_bytes(b"long_v1")

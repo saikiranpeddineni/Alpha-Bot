@@ -381,9 +381,9 @@ class TestSpecialistFallback:
         assert res_missing.probability == 0.65
         assert res_missing.fallback_reason is None
 
-        # Test Case 2: Low-AUC Specialist (< 0.53) -> Falls back to base model (REJECTED_LOW_AUC)
+        # Test Case 2: Low-AUC Specialist (< min_auc) -> Falls back to base model (REJECTED_LOW_AUC)
         low_auc_spec = {
-            "auc": 0.51,
+            "auc": 0.45,
             "trained_at": "2026-07-06",
             "n_samples": 100,
             "n_positive": 50,
@@ -440,7 +440,7 @@ class TestSpecialistFallback:
         side_auc_spec = {
             "auc": 0.58,
             "auc_long": 0.58,
-            "auc_short": 0.51,  # below 0.53 threshold
+            "auc_short": 0.45,  # below min_auc threshold
             "trained_at": "2026-07-06",
             "n_samples": 100,
             "n_positive": 50,

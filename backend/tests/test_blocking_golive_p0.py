@@ -44,9 +44,12 @@ class TestIssue41ProtectiveExitRecovery:
         engine.db.get_latest_order_payload.return_value = None
         engine.mode = "paper"
         engine.reconciliation_failed = False
+        engine.risk_config = MagicMock()
+        engine.risk_config.bypass_rule41 = False
         return engine
 
-    def test_synthesizes_protective_stop_when_missing(self):
+    @pytest.mark.asyncio
+    async def test_synthesizes_protective_stop_when_missing(self):
         """#41: When no stop loss in DB, _reconcile_positions must synthesize a 1.5% stop."""
         from app.core.engine import TradingEngine
         engine = self._make_engine_with_portfolio()
@@ -61,7 +64,8 @@ class TestIssue41ProtectiveExitRecovery:
         expected_stop = round(200.0 * (1.0 - 0.015), 4)
         assert abs(lot.stop_loss - expected_stop) < 1e-6
 
-    def test_preserves_existing_stop_from_db(self):
+    @pytest.mark.asyncio
+    async def test_preserves_existing_stop_from_db(self):
         """#41: When a valid stop loss exists in DB payload, it must be preserved."""
         from app.core.engine import TradingEngine
         engine = self._make_engine_with_portfolio()
@@ -74,7 +78,8 @@ class TestIssue41ProtectiveExitRecovery:
         assert lot is not None
         assert abs(lot.stop_loss - 185.0) < 1e-6
 
-    def test_synthesizes_stop_for_short_position(self):
+    @pytest.mark.asyncio
+    async def test_synthesizes_stop_for_short_position(self):
         """#41: Short position gets a stop ABOVE avg_entry_price."""
         from app.core.engine import TradingEngine
         engine = self._make_engine_with_portfolio()

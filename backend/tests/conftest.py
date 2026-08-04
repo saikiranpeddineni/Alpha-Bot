@@ -8,8 +8,16 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from app.config import RiskConfig
+from app.config import RiskConfig, _replay_models_dir
 from app.core.clock import MarketClock
+
+@pytest.fixture(autouse=True)
+def temp_models_dir(tmp_path):
+    models_dir = tmp_path / "models"
+    models_dir.mkdir(parents=True, exist_ok=True)
+    token = _replay_models_dir.set(models_dir)
+    yield
+    _replay_models_dir.reset(token)
 
 # A Tuesday, mid-session: 10:30 ET == 15:30 UTC (EST would be different; this
 # date is in EST -- Jan 6, 2026 -- so 10:30 ET == 15:30 UTC).

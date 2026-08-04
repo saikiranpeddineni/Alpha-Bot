@@ -38,6 +38,9 @@ import pandas as pd
 async def _safe_history(
     data: Any, symbol: str, timeframe: str, start: datetime, end: datetime, prefer_cache: bool = True
 ) -> pd.DataFrame:
+    # F-10 FIX: applog import was at module level AFTER this function, causing NameError
+    # if _safe_history raised before the module finished loading. Import inline at use point.
+    from app.core.applog import applog
     if data is None:
         return pd.DataFrame()
     try:
@@ -364,7 +367,7 @@ class MarketRiskAggregator:
             errors = 0
             for sym in self._universe[:20]:  # cap at 20 for latency
                 try:
-                    df = await _safe_history(self._data, sym, "1Min", start, T, prefer_cache=True)
+                    df = await _safe_history(self._data, sym, "1D", start, T, prefer_cache=True)
                     if is_pre_market and not df.empty:
                         last_date = df.index[-1].date()
                         if last_date == now_et.date():
@@ -449,7 +452,7 @@ class MarketRiskAggregator:
             errors = 0
             for sym in self._universe[:20]:
                 try:
-                    df = await _safe_history(self._data, sym, "1Min", start, T, prefer_cache=True)
+                    df = await _safe_history(self._data, sym, "1D", start, T, prefer_cache=True)
                     if is_pre_market and not df.empty:
                         last_date = df.index[-1].date()
                         if last_date == now_et.date():

@@ -73,11 +73,15 @@ class ThesisDriftEvaluator:
 
         # Structural invalidation:
         # 1. Early thesis failure within entry window (Quadrant 2)
-        # 2. Severe adverse excursion approaching hard risk boundary (>= 0.90R)
-        # 3. Complete momentum stagnation (>= max_bars)
-        # 4. Composite drift score exceeding critical structural threshold (>= 0.70)
+        # 2. Time-Decay Loss Harvesting: prolonged bleed without recovery (>= 15 bars at <= -0.4R)
+        # 3. Severe adverse excursion approaching hard risk boundary (>= 0.90R)
+        # 4. Complete momentum stagnation (>= max_bars)
+        # 5. Composite drift score exceeding critical structural threshold (>= 0.70)
+        time_decay_bleed = (history_len >= 15 and obs.r_multiple <= -0.40)
+
         is_degraded = (
             early_invalidation
+            or time_decay_bleed
             or drift_score >= 0.70
             or stagnation_bars >= max_bars
             or adverse_r >= 0.90

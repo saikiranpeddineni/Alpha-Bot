@@ -17,6 +17,7 @@ from collections.abc import Callable
 import asyncio
 import hashlib
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 from pydantic import BaseModel, Field
@@ -708,7 +709,7 @@ async def run_backtest(
             session = clock.session_date(now)
 
             # Daily Morning Scan & Correlation Matrix Update (at 9:00 AM ET)
-            from zoneinfo import ZoneInfo
+            # F-15 FIX: ZoneInfo import moved to module level (was imported per-bar in the hot loop).
             now_et = now.astimezone(ZoneInfo("America/New_York"))
             today_date = now_et.date()
             et_mins = now_et.hour * 60 + now_et.minute
@@ -900,7 +901,6 @@ async def run_backtest(
                 risk.roll_session(session)
 
             # Update midday filter status (aligned with live engine)
-            from zoneinfo import ZoneInfo
             now_et = now.astimezone(ZoneInfo("America/New_York"))
             et_mins = now_et.hour * 60 + now_et.minute
             is_midday = risk_cfg.midday_start_et <= et_mins <= risk_cfg.midday_end_et
@@ -1296,7 +1296,6 @@ async def run_backtest(
         actual_data_start = all_ts[0].to_pydatetime() if all_ts else None
         actual_data_end = all_ts[-1].to_pydatetime() if all_ts else None
         
-        from zoneinfo import ZoneInfo
         ET_TZ = ZoneInfo("America/New_York")
         curr_d = params.start.astimezone(ET_TZ).date()
         end_d = params.end.astimezone(ET_TZ).date()

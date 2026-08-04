@@ -48,23 +48,41 @@ _STATUS_MAP = {
 }
 
 
-async def _call(fn, *args, timeout: float = _API_TIMEOUT, label: str = "", **kwargs):
-    """Run a synchronous Alpaca SDK call in a thread with a bounded timeout.
+async def _call(fn, *args, timeout: float = _API_TIMEOUT, label: str = "", max_rate_retries: int = 3, **kwargs):
+    """Run a synchronous Alpaca SDK call in a thread with a bounded timeout and rate-limit resilience.
 
     Raises BrokerTimeoutError (not asyncio.TimeoutError) so callers can
     distinguish this from other failures without catching the base exception.
     """
-    try:
-        return await asyncio.wait_for(
-            asyncio.to_thread(fn, *args, **kwargs),
-            timeout=timeout,
-        )
-    except asyncio.TimeoutError as exc:
-        msg = f"Alpaca API call timed out after {timeout:.0f}s"
-        if label:
-            msg += f" [{label}]"
-        applog.error("broker.alpaca", msg)
-        raise BrokerTimeoutError(msg) from exc
+    for attempt in range(max_rate_retries + 1):
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(fn, *args, **kwargs),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError as exc:
+            msg = f"Alpaca API call timed out after {timeout:.0f}s"
+            if label:
+                msg += f" [{label}]"
+            applog.error("broker.alpaca", msg)
+            raise BrokerTimeoutError(msg) from exc
+        except Exception as exc:
+            err_str = str(exc).lower()
+            is_rate_limit = (
+                "429" in err_str
+                or "too many requests" in err_str
+                or getattr(exc, "status_code", None) == 429
+                or getattr(exc, "code", None) == 429
+            )
+            if is_rate_limit and attempt < max_rate_retries:
+                backoff = (2 ** attempt) * 0.5 + 0.1
+                applog.warning(
+                    "broker.alpaca",
+                    f"Alpaca rate limit encountered [{label}], backing off for {backoff:.2f}s (attempt {attempt + 1}/{max_rate_retries})",
+                )
+                await asyncio.sleep(backoff)
+                continue
+            raise
 
 
 async def _paginate_orders(client: object, request: object, label: str = "get_orders") -> list:
