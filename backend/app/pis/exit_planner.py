@@ -39,6 +39,7 @@ class ExitPlanner:
         peak_r: float,
         trough_r: float,
         history_len: int,
+        has_scaled_out: bool = False,
     ) -> PISDecision:
         """Synthesize final PISDecision.
 
@@ -53,6 +54,7 @@ class ExitPlanner:
             peak_r: Peak R achieved.
             trough_r: Trough R achieved.
             history_len: Count of history observations.
+            has_scaled_out: True if position has already executed its first-stage scale out.
 
         Returns:
             Immutable PISDecision.
@@ -100,13 +102,22 @@ class ExitPlanner:
         # Check Stagnation / Time-Decay Profit Harvesting
         # If position has been held >= 10 bars, is in profit (>= +0.35R), and momentum has stalled
         stagnation_harvest = (
-            history_len >= 10 and peak_r >= 0.35 and obs.r_multiple >= 0.30 and health.momentum_score <= 0.40
+            not has_scaled_out
+            and history_len >= 10
+            and peak_r >= 0.35
+            and obs.r_multiple >= 0.30
+            and health.momentum_score <= 0.40
         )
 
-        # --- INSTITUTIONAL 85/15 SCALE-OUT & RUNNER EXTENSION ---
-        # When target is reached, exhaustion wick forms, or stagnation harvest activates:
-        # Secure 85% core profit and qualify the remaining 15% as an active trailing runner.
-        scale_out_triggered = (target_hit or exhaustion_wick or stagnation_harvest)
+        # --- TWO-STAGE 50/50 INSTITUTIONAL SCALE-OUT & RUNNER EXTENSION ---
+        # Stage 1: When target hit, peak R >= 1.0, or exhaustion wick forms, bank 50% profit.
+        # Stage 2: Qualify remaining 50% as runner with breakeven floor + 2.0x ATR wide trailing stop.
+        scale_out_triggered = False
+        if getattr(self.config, "enable_scale_out", True) and not has_scaled_out:
+            scale_out_r = getattr(self.config, "scale_out_target_r", 1.00)
+            if target_hit or peak_r >= scale_out_r or exhaustion_wick or stagnation_harvest:
+                scale_out_triggered = True
+
         if scale_out_triggered and not is_runner:
             is_runner = True
 
@@ -114,11 +125,11 @@ class ExitPlanner:
         if protection_breached or lifecycle == LifecycleState.EXIT_CANDIDATE:
             action = ExitAction.FULL_EXIT
             exit_ratio = 1.0
-        elif scale_out_triggered and is_runner:
-            # Institutional Scale-Out: Secure 85% core profit at target/exhaustion, trail 15% runner
+        elif scale_out_triggered:
+            # Stage 1 Scale-Out: Secure 50% core profit, trail remaining 50% as runner
             action = ExitAction.PARTIAL_EXIT
-            exit_ratio = 0.85
-        elif target_hit and not is_runner:
+            exit_ratio = getattr(self.config, "scale_out_ratio", 0.50)
+        elif target_hit and not has_scaled_out and not getattr(self.config, "enable_scale_out", True):
             action = ExitAction.FULL_EXIT
             exit_ratio = 1.0
         elif lifecycle == LifecycleState.DISTRIBUTION and health.overall < self.config.health_distribution_threshold:
@@ -131,6 +142,7 @@ class ExitPlanner:
             action = ExitAction.HOLD
             exit_ratio = 0.0
 
+
         # Build evidence coverage and reason codes
         coverage = EvidenceEvaluator.compute_coverage(history_len, health, thesis)
         reasons = EvidenceEvaluator.build_reason_codes(
@@ -139,6 +151,8 @@ class ExitPlanner:
 
         if protection_breached:
             reasons.append(ReasonCode.PROTECTION_BREACH)
+        elif scale_out_triggered:
+            reasons.append(ReasonCode.SCALE_OUT_TARGET)
         elif target_hit:
             reasons.append(ReasonCode.HEALTHY_TREND)
 

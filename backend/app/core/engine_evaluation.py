@@ -61,12 +61,13 @@ class TradingEngineEvaluationMixin:
                     news_sentiment=news_sentiment,
                 )
                 if pis_order is not None:
-                    applog.info("engine", f"{symbol}: PIS Unified Exit triggered: {pis_order.reason}")
-                    await self._close_position_guarded(symbol, reason=pis_order.reason)
-                    self._position_peaks.pop(symbol, None)
-                    self._position_troughs.pop(symbol, None)
-                    self._position_initial_stops.pop(symbol, None)
-                    self._position_take_profits.pop(symbol, None)
+                    applog.info("engine", f"{symbol}: PIS Unified Exit triggered: {pis_order.reason} (qty={pis_order.qty})")
+                    await self._close_position_guarded(symbol, reason=pis_order.reason, qty=pis_order.qty)
+                    if pis_decision is None or pis_decision.action == ExitAction.FULL_EXIT or pis_order.qty >= abs(position.qty) - 1e-6:
+                        self._position_peaks.pop(symbol, None)
+                        self._position_troughs.pop(symbol, None)
+                        self._position_initial_stops.pop(symbol, None)
+                        self._position_take_profits.pop(symbol, None)
                     return []
             except Exception as e:
                 applog.warning("engine.exit", f"PIS global evaluation fallback for {symbol}: {e}")

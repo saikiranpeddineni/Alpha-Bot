@@ -35,11 +35,19 @@ class PISExecutionAdapter:
         # Determine side (opposite of position side)
         order_side = OrderSide.SELL if obs.side > 0 else OrderSide.BUY
 
+        import math
+
         # Quantity to close
         if decision.action == ExitAction.FULL_EXIT or decision.exit_ratio >= 1.0:
             qty_to_close = abs(obs.qty)
         else:
-            qty_to_close = round(obs.qty * decision.exit_ratio, 6)
+            raw_qty = obs.qty * decision.exit_ratio
+            if float(obs.qty).is_integer():
+                qty_to_close = float(math.floor(raw_qty))
+                if qty_to_close <= 0:
+                    qty_to_close = min(1.0, float(obs.qty))
+            else:
+                qty_to_close = round(raw_qty, 4)
         if qty_to_close <= 0:
             return None
 

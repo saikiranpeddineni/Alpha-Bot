@@ -751,7 +751,7 @@ class AlpacaBroker(Broker):
         except Exception as exc:  # noqa: BLE001
             applog.warning("broker.alpaca", f"cancel_all failed: {exc}")
 
-    async def close_position(self, symbol: str, reason: str = "manual") -> Order | None:
+    async def close_position(self, symbol: str, reason: str = "manual", qty: float | None = None) -> Order | None:
         try:
             # First, fetch and cancel any outstanding open orders for this symbol to release held quantities
             try:
@@ -767,15 +767,26 @@ class AlpacaBroker(Broker):
             except Exception as e:
                 applog.warning("broker.alpaca", f"Failed to cancel open orders for {symbol} before close: {e}")
 
-            raw = await _call(self._client.close_position, symbol.upper(), label=f"close_position/{symbol}")
+            if qty is not None and qty > 0:
+                from alpaca.trading.requests import ClosePositionRequest
+                qty_str = str(int(qty)) if float(qty).is_integer() else str(round(qty, 4))
+                raw = await _call(
+                    self._client.close_position,
+                    symbol.upper(),
+                    ClosePositionRequest(qty=qty_str),
+                    label=f"close_position_partial/{symbol}"
+                )
+            else:
+                raw = await _call(self._client.close_position, symbol.upper(), label=f"close_position/{symbol}")
             self._meta[str(raw.id)] = ("engine", reason)
-            applog.trade("broker.alpaca", f"Closing {symbol} ({reason})")
+            applog.trade("broker.alpaca", f"Closing {symbol} ({reason}{f', qty={qty}' if qty else ''})")
             return self._to_order(raw)
         except BrokerTimeoutError:
             applog.warning("broker.alpaca", f"close_position {symbol} timed out; state is ambiguous")
             return None
         except Exception as exc:  # noqa: BLE001
             applog.warning("broker.alpaca", f"close {symbol} failed: {exc}")
+            return None
     async def is_shortable(self, symbol: str) -> bool:
         if self._shorting_enabled is False:
             return False

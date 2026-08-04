@@ -61,11 +61,12 @@ class ReplayBroker(Broker):
     async def cancel_all(self) -> None:
         for oid in list(self._resting): await self.cancel(oid)
 
-    async def close_position(self, symbol: str, reason: str="manual") -> Order | None:
+    async def close_position(self, symbol: str, reason: str="manual", qty: float | None = None) -> Order | None:
         pos=self._positions.get(symbol.upper())
         if pos is None or abs(pos.qty)<=1e-12: return None
         side=OrderSide.SELL if pos.qty>0 else OrderSide.BUY
-        return await self.submit(OrderRequest(symbol=symbol.upper(),qty=abs(pos.qty),side=side,order_type=OrderType.MARKET,
+        close_qty = min(abs(pos.qty), qty) if qty is not None and qty > 0 else abs(pos.qty)
+        return await self.submit(OrderRequest(symbol=symbol.upper(),qty=close_qty,side=side,order_type=OrderType.MARKET,
                                               client_order_id=self._id(f"close_{symbol.upper()}"),strategy=pos.strategy,reason=reason))
     async def flatten_all(self, reason: str="flatten") -> list[Order]:
         out=[]

@@ -307,16 +307,17 @@ class PaperBroker(Broker):
             return True
         return False
 
-    async def close_position(self, symbol: str, reason: str = "manual") -> Order | None:
+    async def close_position(self, symbol: str, reason: str = "manual", qty: float | None = None) -> Order | None:
         symbol = symbol.upper()
         pos = self._positions.get(symbol)
         if pos is None or abs(pos.qty) < 1e-9:
             return None
         side = OrderSide.SELL if pos.qty > 0 else OrderSide.BUY
+        close_qty = min(abs(pos.qty), qty) if qty is not None and qty > 0 else abs(pos.qty)
         req = OrderRequest(
             symbol=symbol,
             side=side,
-            qty=abs(pos.qty),
+            qty=close_qty,
             order_type=OrderType.MARKET,
             strategy=pos.strategy,
             reason=reason,
@@ -327,7 +328,7 @@ class PaperBroker(Broker):
             client_order_id=req.client_order_id,
             symbol=symbol,
             side=side,
-            qty=abs(pos.qty),
+            qty=close_qty,
             order_type=OrderType.MARKET,
             strategy=pos.strategy,
             reason=reason,

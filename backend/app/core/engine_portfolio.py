@@ -13,7 +13,7 @@ from app.ai.regime import detect_regime
 from app.strategies import SignalPipeline, StrategyContext
 
 class TradingEnginePortfolioMixin:
-    async def _close_position_guarded(self, symbol: str, reason: str) -> None:
+    async def _close_position_guarded(self, symbol: str, reason: str, qty: float | None = None) -> None:
         """Close a position, skipping if a close order is already in-flight for this symbol."""
         if not hasattr(self, "_pending_close_symbols"):
             self._pending_close_symbols = set()
@@ -24,12 +24,15 @@ class TradingEnginePortfolioMixin:
         self._flattening_symbols.add(symbol)
         self._pending_close_symbols.add(symbol)
         try:
-            order = await self.broker.close_position(symbol, reason=reason)
+            order = await self.broker.close_position(symbol, reason=reason, qty=qty)
             # If close failed immediately (None returned), release the guard so retries work
             if order is None:
                 self._pending_close_symbols.discard(symbol)
         finally:
             self._flattening_symbols.discard(symbol)
+            if qty is not None:
+                self._pending_close_symbols.discard(symbol)
+
 
     async def _manage_live_winner_exit(self, symbol: str, position: Any, df: pd.DataFrame, decision: Any) -> bool:
         """Promote/ratchet a proven LIVE winner using PIS single discretionary exit authority."""

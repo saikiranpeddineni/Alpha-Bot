@@ -43,6 +43,7 @@ class ReasonCode(str, Enum):
     INITIAL_ENTRY = "INITIAL_ENTRY"
     HEALTHY_TREND = "HEALTHY_TREND"
     RUNNER_QUALIFIED = "RUNNER_QUALIFIED"
+    SCALE_OUT_TARGET = "SCALE_OUT_TARGET"
     PROTECTION_RATCHET = "PROTECTION_RATCHET"
     THESIS_DEGRADED = "THESIS_DEGRADED"
     HEALTH_EXHAUSTION = "HEALTH_EXHAUSTION"
@@ -234,6 +235,10 @@ class PISConfig:
     price_buffer_pct: float = 0.0002
     min_price_buffer_abs: float = 0.01
     profit_harvesting_mode: bool = True
+    enable_scale_out: bool = True
+    scale_out_ratio: float = 0.50
+    scale_out_target_r: float = 1.00
+    runner_wide_atr_mult: float = 2.00
 
     def validate(self) -> None:
         """Validate startup configuration boundaries.
@@ -255,3 +260,10 @@ class PISConfig:
             raise ValueError(f"min_breathing_room_r must be >= 0, got {self.min_breathing_room_r}")
         if self.health_distribution_threshold >= self.health_weakening_threshold:
             raise ValueError("health_distribution_threshold must be < health_weakening_threshold")
+        if not (0.0 < self.scale_out_ratio <= 1.0):
+            raise ValueError(f"scale_out_ratio must be between 0 and 1, got {self.scale_out_ratio}")
+        if self.scale_out_target_r <= 0.0:
+            raise ValueError(f"scale_out_target_r must be > 0, got {self.scale_out_target_r}")
+        if self.runner_wide_atr_mult <= 0.0:
+            raise ValueError(f"runner_wide_atr_mult must be > 0, got {self.runner_wide_atr_mult}")
+

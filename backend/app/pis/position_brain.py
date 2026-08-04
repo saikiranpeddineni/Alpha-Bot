@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from app.pis.authority import PISAuthority
 from app.pis.models import (
+    ExitAction,
     LifecycleState,
     PISConfig,
     PISDecision,
@@ -91,6 +92,7 @@ class PositionBrain:
             self._is_closed: bool = False
             self._stagnation_counter: int = 0
             self._runner_qualified: bool = False
+            self._has_scaled_out: bool = False
             self._smoothed_health_score: Optional[float] = None
 
             # Initial evaluation
@@ -101,6 +103,13 @@ class PositionBrain:
         """Check if brain is closed."""
         with self._lock:
             return self._is_closed
+
+    @property
+    def has_scaled_out(self) -> bool:
+        """Check if position has executed first-stage scale-out."""
+        with self._lock:
+            return self._has_scaled_out
+
 
     @property
     def lifecycle(self) -> LifecycleState:
@@ -231,6 +240,7 @@ class PositionBrain:
             health=health,
             previous_floor=self._current_stop_floor,
             allow_relaxation=False,
+            has_scaled_out=self._has_scaled_out,
         )
         self._current_stop_floor = target_stop
 
@@ -246,10 +256,26 @@ class PositionBrain:
             peak_r=peak_r,
             trough_r=trough_r,
             history_len=len(self._history),
+            has_scaled_out=self._has_scaled_out,
         )
+
+        if decision.action == ExitAction.PARTIAL_EXIT:
+            self._has_scaled_out = True
+            self._runner_qualified = True
+            # Recompute stop floor with runner mode active
+            target_stop = self.authority.protection_planner.compute_protection_floor(
+                obs=obs,
+                peak_r=peak_r,
+                health=health,
+                previous_floor=self._current_stop_floor,
+                allow_relaxation=False,
+                has_scaled_out=True,
+            )
+            self._current_stop_floor = target_stop
 
         self._last_decision = decision
         return decision
+
 
     def _update_lifecycle(
         self,

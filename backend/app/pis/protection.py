@@ -35,6 +35,7 @@ class AdaptiveProtectionPlanner:
         health: TradeHealth,
         previous_floor: Optional[float] = None,
         allow_relaxation: bool = False,
+        has_scaled_out: bool = False,
     ) -> float:
         """Compute the updated protection floor for a position.
 
@@ -43,6 +44,7 @@ class AdaptiveProtectionPlanner:
             peak_r: Peak R-multiple achieved during position life.
             previous_floor: Existing protective stop floor price, if any.
             allow_relaxation: If True, bypasses strict monotonicity (default False).
+            has_scaled_out: If True, position has locked initial profit; uses breakeven + wide ATR trail.
 
         Returns:
             Calculated stop loss price (float).
@@ -63,7 +65,12 @@ class AdaptiveProtectionPlanner:
         # 1. Base activation threshold check
         activation_r = min(1.0, max(0.75, self.config.activation_mfe_r * 0.60))
 
-        if peak_r < activation_r:
+        # 0. Scaled-Out Runner Mode
+        if has_scaled_out:
+            breakeven_floor = entry + (side * max(self.config.min_locked_r, 0.05) * risk)
+            wide_trail = obs.close - (side * getattr(self.config, "runner_wide_atr_mult", 2.0) * obs.atr)
+            candidate_floor = max(breakeven_floor, wide_trail) if side > 0 else min(breakeven_floor, wide_trail)
+        elif peak_r < activation_r:
             # Below activation threshold: keep initial stop or previous floor
             candidate_floor = previous_floor if previous_floor is not None else initial_stop
             
