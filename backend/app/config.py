@@ -143,7 +143,7 @@ class Settings(BaseSettings):
     ml_horizon_bars: int = Field(15, validation_alias="ML_HORIZON_BARS")
     gemini_api_key: str = Field("", validation_alias=AliasChoices("GEMINI_API_KEY", "GOOGLE_API_KEY"))
     anthropic_api_key: str = Field("", validation_alias="ANTHROPIC_API_KEY")
-    walk_forward_train_days: int = Field(60, validation_alias="WALK_FORWARD_TRAIN_DAYS")
+    walk_forward_train_days: int = Field(120, validation_alias="WALK_FORWARD_TRAIN_DAYS")
     walk_forward_val_days: int = Field(10, validation_alias="WALK_FORWARD_VAL_DAYS")
     walk_forward_min_windows: int = Field(3, validation_alias="WALK_FORWARD_MIN_WINDOWS")
     trade_score_w1: float = Field(0.30, validation_alias="TRADE_SCORE_W1")

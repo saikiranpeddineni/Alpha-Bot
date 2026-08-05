@@ -2,7 +2,8 @@
 
 Architecture:
   - Fires at ~16:15 ET after market close (configurable)
-  - Fetches 60 days of 1-minute data for all active watchlist symbols in parallel
+  - Fetches 365 days of 1-minute data for all active watchlist symbols in parallel
+    (served directly from the local bars_cache.db SQLite cache -- no extra API calls)
   - Retrains the global SignalModel on combined data
   - Trains per-symbol specialist models in parallel (asyncio.to_thread for CPU work)
   - Only promotes a new model if it shows measurable AUC improvement (>= 0.002)
@@ -34,7 +35,7 @@ if TYPE_CHECKING:
 class _LegacyContinuousTrainer:
     """Parallel daily background trainer with model promotion gating."""
 
-    FETCH_DAYS = 60          # How many days of history to train on
+    FETCH_DAYS = 365         # How many days of history to train on (served from local bars_cache.db)
     FETCH_CONCURRENCY = 10   # Parallel API calls during data fetch
     TRAIN_CONCURRENCY = 8    # Parallel specialist model training jobs
     PROMOTE_THRESHOLD = 0.002  # Min AUC improvement required to promote
