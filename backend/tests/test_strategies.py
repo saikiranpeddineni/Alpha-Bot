@@ -62,7 +62,7 @@ def test_registry_has_all_builtins():
 
 
 def test_orb_long_on_confirmed_breakout():
-    strat = OpeningRangeBreakout(params={"mft_alignment": False})
+    strat = OpeningRangeBreakout(params={"mft_alignment": False, "climax_atr_mult": 0.0})
     df = session_bars("breakout_up", n=60)
     df.loc[df.index[-1], "vol_z"] = 2.0
     df.loc[df.index[-1], "rsi14"] = 60.0

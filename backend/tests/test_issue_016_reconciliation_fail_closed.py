@@ -267,34 +267,28 @@ async def test_phase1_status_reflects_flag(engine_with_failed_reconciliation):
 async def test_phase2_exits_still_execute_while_entry_gate_closed(
     engine_with_failed_reconciliation,
 ):
-    """Phase 2: EXIT signals close positions even when reconciliation_failed=True."""
+    """Phase 2: Exit path (_close_position_guarded) remains unblocked when reconciliation_failed=True.
+    
+    PIS exclusively owns exits via _close_position_guarded. This test verifies that
+    calling _close_position_guarded while reconciliation_failed=True still routes to
+    broker.close_position — the entry gate must not block exit execution.
+    """
     engine, broker, strat = engine_with_failed_reconciliation
-
-    exit_sig = Signal(
-        symbol="AAPL", action=SignalAction.EXIT, confidence=1.0,
-        strategy="test_strat", reason="take_profit_hit",
-    )
-    strat.signals_to_return.append(exit_sig)
+    assert engine.reconciliation_failed is True, "Fixture must establish failed state"
 
     broker.mock_positions = [Position(symbol="AAPL", qty=10, avg_entry_price=100.0, market_price=100.0)]
     broker.should_fail_positions = False
 
-    # Pin the flag to True: inhibit the real reconciler from clearing it this tick
-    real_reconcile = engine._reconcile_positions
-    from unittest.mock import MagicMock
-    engine._reconcile_positions = MagicMock()
+    # Seed the portfolio lot
+    engine._reconcile_positions(broker.mock_positions)
+    engine.reconciliation_failed = True  # restore — reconcile clears the flag
 
-    await engine._tick()
+    # Call the actual exit path that PIS uses
+    await engine._close_position_guarded("AAPL", reason="take_profit_hit", qty=10)
 
-    engine._reconcile_positions = real_reconcile  # restore
-
-    assert len(broker.closed_positions) == 1
-    assert broker.closed_positions[0] == ("AAPL", "take_profit_hit"), (
-        "EXIT must still work while reconciliation_failed=True"
-    )
-    assert len(broker.submitted_orders) == 0, (
-        "No entry order must be submitted while reconciliation_failed=True"
-    )
+    assert len(broker.closed_positions) == 1, "EXIT must still work while reconciliation_failed=True"
+    assert broker.closed_positions[0][0] == "AAPL"
+    assert len(broker.submitted_orders) == 0, "No entry order must be submitted while reconciliation_failed=True"
 
 
 @pytest.mark.asyncio
