@@ -26,10 +26,13 @@ class OpeningRangeBreakout(Strategy):
     description = "Opening range breakout with volume confirmation and 5m trend alignment"
     default_params = {
         "range_minutes": 15,
-        "entry_cutoff_minute": 180,   # no fresh breakout entries after 12:30 ET
+        # ARCHITECTURAL NOTE: We intentionally leave ORB active for the full session (390 mins).
+        # We rely on the ML TradeScore pipeline to intelligently reject low-volume afternoon chop 
+        # instead of hardcoding a structural time block here. 
+        "entry_cutoff_minute": 390,
         "breakout_buffer_bps": 5,     # close must clear the range by 0.05%
         "atr_buffer_mult": 0.0,       # if > 0, overrides breakout_buffer_bps with (mult * ATR)
-        "volume_z_min": 0.5,
+        "volume_z_min": 1.5,
         "atr_stop_mult": 2.0,         # risk cap when the range is very wide
         "reward_risk": 2.0,
         "trailing_stop_atr_mult": 1.5, # if > 0, activates dynamic trailing stop
@@ -79,6 +82,11 @@ class OpeningRangeBreakout(Strategy):
         if ctx.position is not None or df.empty:
             return None
 
+        # ORB struggles heavily in chop. Reject early.
+        from app.core.domain import Regime
+        if ctx.regime in (Regime.RANGE, Regime.VOLATILE):
+            return None
+
         et_dates = df.index.tz_convert(ET).date
         today = et_dates[-1]
         key = (symbol, today)
@@ -104,6 +112,7 @@ class OpeningRangeBreakout(Strategy):
         close = float(last["close"])
         atr = float(last["atr14"]) if pd.notna(last.get("atr14")) else None
         vol_z = float(last["vol_z"]) if pd.notna(last.get("vol_z")) else 0.0
+        rsi14 = float(last["rsi14"]) if pd.notna(last.get("rsi14")) else 50.0
         if atr is None or atr <= 0:
             return None
 
@@ -115,7 +124,7 @@ class OpeningRangeBreakout(Strategy):
         confidence = min(0.85, 0.55 + 0.08 * max(0.0, vol_z))
 
         # Climax guard: prevent entering if price is stretched more than climax_atr_mult ATR from EMA9
-        climax_limit = float(p.get("climax_atr_mult", 0.0))
+        climax_limit = float(p.get("climax_atr_mult", 1.5))  # Default enforced internally if missing
         ema9 = float(last.get("ema9", close))
         if climax_limit > 0.0 and abs(close - ema9) > climax_limit * atr:
             return None
@@ -123,7 +132,7 @@ class OpeningRangeBreakout(Strategy):
         mft_enabled = bool(p.get("mft_alignment", True))
         is_bullish_5m, is_bearish_5m = self._check_5m_trend(df) if mft_enabled else (True, True)
 
-        if close > or_high * buffer and volume_ok and is_bullish_5m:
+        if close > or_high * buffer and volume_ok and is_bullish_5m and ctx.regime == Regime.TREND_UP and rsi14 < 70.0:
             stop = max(or_low, close - p["atr_stop_mult"] * atr)
             risk = close - stop
             if risk <= 0:
@@ -134,12 +143,12 @@ class OpeningRangeBreakout(Strategy):
                 action=SignalAction.ENTER_LONG,
                 confidence=confidence,
                 strategy=self.name,
-                reason=f"Broke above {rng_n}m range {or_high:.2f} (vol z {vol_z:.1f}, 5m trend aligned)",
+                reason=f"Broke above {rng_n}m range {or_high:.2f} (vol z {vol_z:.1f}, 5m trend aligned, RSI {rsi14:.1f})",
                 price=close,
                 stop_loss=stop,
                 take_profit=close + p["reward_risk"] * risk,
             )
-        if close < or_low / buffer and volume_ok and is_bearish_5m:
+        if close < or_low / buffer and volume_ok and is_bearish_5m and ctx.regime == Regime.TREND_DOWN and rsi14 > 30.0:
             stop = min(or_high, close + p["atr_stop_mult"] * atr)
             risk = stop - close
             if risk <= 0:
@@ -150,7 +159,7 @@ class OpeningRangeBreakout(Strategy):
                 action=SignalAction.ENTER_SHORT,
                 confidence=confidence,
                 strategy=self.name,
-                reason=f"Broke below {rng_n}m range {or_low:.2f} (vol z {vol_z:.1f}, 5m trend aligned)",
+                reason=f"Broke below {rng_n}m range {or_low:.2f} (vol z {vol_z:.1f}, 5m trend aligned, RSI {rsi14:.1f})",
                 price=close,
                 stop_loss=stop,
                 take_profit=close - p["reward_risk"] * risk,

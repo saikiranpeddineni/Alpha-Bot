@@ -54,6 +54,12 @@ async def _call(fn, *args, timeout: float = _API_TIMEOUT, label: str = "", max_r
     Raises BrokerTimeoutError (not asyncio.TimeoutError) so callers can
     distinguish this from other failures without catching the base exception.
     """
+    try:
+        from app.data.alpaca_data import _get_rate_limiter
+        await _get_rate_limiter().acquire()
+    except Exception as exc:
+        applog.warning("broker.alpaca", f"Failed to acquire global rate limiter: {exc}")
+
     for attempt in range(max_rate_retries + 1):
         try:
             return await asyncio.wait_for(
@@ -61,6 +67,14 @@ async def _call(fn, *args, timeout: float = _API_TIMEOUT, label: str = "", max_r
                 timeout=timeout,
             )
         except asyncio.TimeoutError as exc:
+            if attempt < max_rate_retries:
+                backoff = (2 ** attempt) * 0.5 + 0.1
+                applog.warning(
+                    "broker.alpaca",
+                    f"Alpaca API call timed out [{label}], backing off for {backoff:.2f}s (attempt {attempt + 1}/{max_rate_retries})",
+                )
+                await asyncio.sleep(backoff)
+                continue
             msg = f"Alpaca API call timed out after {timeout:.0f}s"
             if label:
                 msg += f" [{label}]"

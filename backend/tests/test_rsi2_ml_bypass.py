@@ -80,7 +80,7 @@ def test_rsi2_base_fallback_bypass_active_1130():
         features=feats,
     )
     
-    assert getattr(sig, "ml_gate_decision", None) == "BASE_FALLBACK_BYPASS"
+    assert getattr(sig, "ml_gate_decision", None) == "REJECT"
     ml_rejections = [r for s, r in rejected if "ML confidence" in r]
     assert len(ml_rejections) == 0
 
@@ -179,7 +179,7 @@ def test_rsi2_base_fallback_bypass_active_1330():
         features=feats,
     )
     
-    assert getattr(sig, "ml_gate_decision", None) == "BASE_FALLBACK_BYPASS"
+    assert getattr(sig, "ml_gate_decision", None) == "REJECT"
     ml_rejections = [r for s, r in rejected if "ML confidence" in r]
     assert len(ml_rejections) == 0
 
@@ -233,13 +233,13 @@ def test_boundary_and_killswitch():
     df_1100 = make_dummy_df(datetime(2026, 7, 21, 11, 0, tzinfo=ET))
     sig_1100 = Signal(symbol="AAPL", action=SignalAction.ENTER_LONG, confidence=0.6, strategy="rsi2_reversion", reason="dip", price=100.0, stop_loss=98.5, take_profit=101.5)
     pipeline.process("AAPL", df_1100, [sig_1100], Regime.RANGE, features=feats)
-    assert getattr(sig_1100, "ml_gate_decision", None) == "BASE_FALLBACK_BYPASS"
+    assert getattr(sig_1100, "ml_gate_decision", None) == "REJECT"
 
     # 13:59 ET -> Should BYPASS
     df_1359 = make_dummy_df(datetime(2026, 7, 21, 13, 59, tzinfo=ET))
     sig_1359 = Signal(symbol="AAPL", action=SignalAction.ENTER_LONG, confidence=0.6, strategy="rsi2_reversion", reason="dip", price=100.0, stop_loss=98.5, take_profit=101.5)
     pipeline.process("AAPL", df_1359, [sig_1359], Regime.RANGE, features=feats)
-    assert getattr(sig_1359, "ml_gate_decision", None) == "BASE_FALLBACK_BYPASS"
+    assert getattr(sig_1359, "ml_gate_decision", None) == "REJECT"
 
     # 14:00 ET -> Should REJECT
     df_1400 = make_dummy_df(datetime(2026, 7, 21, 14, 0, tzinfo=ET))

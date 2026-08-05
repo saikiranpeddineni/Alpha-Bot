@@ -65,7 +65,7 @@ class AdaptiveProtectionPlanner:
             return initial_stop
 
         # 1. Base activation threshold check
-        activation_r = min(1.0, max(0.75, self.config.activation_mfe_r * 0.60))
+        activation_r = self.config.activation_mfe_r
 
         # Dynamic ceiling proximity ratio [0.0, 1.0+]
         proximity = peak_r / max(1.0, predicted_max_r) if predicted_max_r > 0 else 0.50
@@ -134,10 +134,22 @@ class AdaptiveProtectionPlanner:
 
             runner_threshold = getattr(self.config, "hyper_runner_threshold_r", 1.50)
             if peak_r >= runner_threshold and health.overall >= 0.70 and proximity < 0.80:
-                atr_r_buffer = 1.25 * (obs.atr / max(1e-6, risk))
+                atr_r_buffer = 2.0 * (obs.atr / max(1e-6, risk))
             else:
-                atr_r_buffer = 0.85 * (obs.atr / max(1e-6, risk))
-            giveback_allowance_r = max(self.config.min_breathing_room_r, atr_r_buffer, peak_r * giveback_pct)
+                atr_r_buffer = 1.5 * (obs.atr / max(1e-6, risk))
+                
+            # If health is degrading or we are exhausted, we must allow the trailing stop to choke tighter 
+            # than the min_breathing_room. Otherwise the max() function blinds the PIS exhaustion logic.
+            dynamic_min_breathing = self.config.min_breathing_room_r
+            dynamic_atr_buffer = atr_r_buffer
+            
+            if health.overall < 0.50 or (peak_r >= 1.50 and health.overall < 0.65):
+                # Scale down the mandatory buffers so we can choke
+                health_factor = max(0.2, health.overall)
+                dynamic_min_breathing *= health_factor
+                dynamic_atr_buffer *= health_factor
+                
+            giveback_allowance_r = max(dynamic_min_breathing, dynamic_atr_buffer, peak_r * giveback_pct)
             locked_r = max(self.config.min_locked_r, peak_r - giveback_allowance_r)
 
             # Raw desired floor from R-multiple locking

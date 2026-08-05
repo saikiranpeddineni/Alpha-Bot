@@ -454,8 +454,7 @@ async def post_backtest(body: BacktestBody, request: Request) -> dict:
             elif name in db_strats:
                 merged_strategies[name] = db_strats[name]
             else:
-                default_enabled = False if name == "rsi2_reversion" else True
-                merged_strategies[name] = {"enabled": default_enabled, "params": {}}
+                merged_strategies[name] = {"enabled": True, "params": {}}
 
         params = BacktestParams(
             symbols=[s.upper() for s in body.symbols],

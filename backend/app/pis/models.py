@@ -240,7 +240,7 @@ class PISConfig:
     giveback_pct_hyper_runner_min: float = 0.10
     hyper_runner_decay_rate: float = 0.05
     giveback_pct_maturing: float = 0.45
-    min_breathing_room_r: float = 0.60
+    min_breathing_room_r: float = 1.00
     min_locked_r: float = 0.05
     health_weakening_threshold: float = 0.55
     health_distribution_threshold: float = 0.35

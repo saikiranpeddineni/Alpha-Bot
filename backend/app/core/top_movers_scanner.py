@@ -67,10 +67,12 @@ class TopMoversResult:
 class TopMoversScanner:
     """Discovers top daily gainers and losers for long/short entry candidacy."""
 
-    def __init__(self, data_manager: DataManager, min_price: float = _MIN_PRICE) -> None:
+    def __init__(self, data_manager: DataManager, min_price: float = _MIN_PRICE, cache_ttl_minutes: int = 15) -> None:
         self.data = data_manager
         self.min_price = min_price
+        self.cache_ttl = timedelta(minutes=cache_ttl_minutes)
         self._cache: TopMoversResult | None = None
+        self._cache_time: datetime | None = None
         self._cache_date: str | None = None
 
     def _today(self) -> str:
@@ -79,15 +81,20 @@ class TopMoversScanner:
     async def get_movers(self) -> TopMoversResult:
         """Return today's cached top gainers and losers.
 
-        Returns cached result if already fetched today. Fetches fresh otherwise.
+        Returns cached result if fetched recently. Fetches fresh otherwise.
         Always returns a valid TopMoversResult (never raises).
         """
+        now = datetime.now(UTC)
         today = self._today()
-        if self._cache_date == today and self._cache is not None:
-            return self._cache
+        
+        # Use 15-minute TTL to allow intraday discovery of fresh momentum runners
+        if self._cache is not None and self._cache_time is not None:
+            if self._cache_date == today and (now - self._cache_time) < self.cache_ttl:
+                return self._cache
 
         result = await self._fetch_movers()
         self._cache = result
+        self._cache_time = now
         self._cache_date = today
         log.info(
             f"[TopMovers] {len(result.gainers)} gainers | {len(result.losers)} losers "

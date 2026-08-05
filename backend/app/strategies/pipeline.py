@@ -81,22 +81,8 @@ class SignalPipeline:
 
     def should_enforce_ml_veto(self, strategy: str, action: SignalAction, model_source: str,
                                specialist_status: str, mins_et: int) -> bool:
-        cfg = getattr(self.trade_score_engine, "risk_config", None)
-        if cfg is None:
-            return True
-        is_base = (model_source.upper() in ("BASE", "BASE_FALLBACK") or
-                   specialist_status in ("NO_ARTIFACT", "SPECIALIST_INFERENCE_FAILED", "REJECTED_LOW_AUC",
-                                         "TEMPORAL_BYPASS", "INVALID_SCORE"))
-        if getattr(cfg, "rsi2_base_fallback_bypass_enabled", True):
-            start = getattr(cfg, "rsi2_base_fallback_bypass_start_et", 660)
-            end = getattr(cfg, "rsi2_base_fallback_bypass_end_et", 840)
-            if strategy == "rsi2_reversion" and action == SignalAction.ENTER_LONG and is_base and start <= mins_et < end:
-                return False
-        if getattr(cfg, "bb_squeeze_base_fallback_bypass_enabled", True):
-            start = getattr(cfg, "bb_squeeze_base_fallback_bypass_start_et", 840)
-            end = getattr(cfg, "bb_squeeze_base_fallback_bypass_end_et", 930)
-            if strategy == "bb_squeeze" and action == SignalAction.ENTER_SHORT and is_base and start <= mins_et < end:
-                return False
+        # We now strictly trust the AI pipeline. 
+        # All manual bypass hacks have been removed.
         return True
 
     def process(self, symbol: str, df: pd.DataFrame, signals: list[Signal], regime: Regime,

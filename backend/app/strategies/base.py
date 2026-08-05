@@ -78,6 +78,5 @@ def create_strategies(overrides: dict[str, dict] | None = None) -> list[Strategy
     out: list[Strategy] = []
     for name, cls in REGISTRY.items():
         cfg = overrides.get(name, {})
-        default_enabled = False if name == "rsi2_reversion" else True
-        out.append(cls(params=cfg.get("params"), enabled=cfg.get("enabled", default_enabled)))
+        out.append(cls(params=cfg.get("params"), enabled=cfg.get("enabled", True)))
     return out

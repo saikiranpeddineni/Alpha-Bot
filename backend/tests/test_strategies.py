@@ -62,17 +62,19 @@ def test_registry_has_all_builtins():
 
 
 def test_orb_long_on_confirmed_breakout():
-    strat = OpeningRangeBreakout()
+    strat = OpeningRangeBreakout(params={"mft_alignment": False})
     df = session_bars("breakout_up", n=60)
-    sig = strat.on_bar(ctx(), "TEST", df)
+    df.loc[df.index[-1], "vol_z"] = 2.0
+    df.loc[df.index[-1], "rsi14"] = 60.0
+    sig = strat.on_bar(ctx(regime=Regime.TREND_UP), "TEST", df)
     assert sig is not None
     assert sig.action == SignalAction.ENTER_LONG
     assert sig.stop_loss < float(df["close"].iloc[-1])
     assert sig.take_profit > float(df["close"].iloc[-1])
     # One attempt per session
-    assert strat.on_bar(ctx(), "TEST", df) is None
+    assert strat.on_bar(ctx(regime=Regime.TREND_UP), "TEST", df) is None
     strat.reset()
-    assert strat.on_bar(ctx(), "TEST", df) is not None
+    assert strat.on_bar(ctx(regime=Regime.TREND_UP), "TEST", df) is not None
 
 
 def test_orb_no_signal_inside_range():

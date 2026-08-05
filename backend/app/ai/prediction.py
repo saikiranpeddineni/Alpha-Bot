@@ -33,21 +33,66 @@ def predict_proba_safe(clf, x: pd.DataFrame):
     """Predict proba safely matching the feature names contract of the fitted classifier."""
     if hasattr(clf, "feature_names_in_"):
         cols = list(clf.feature_names_in_)
-        if list(x.columns) != cols and len(x.columns) == len(cols):
-            x = pd.DataFrame(x.to_numpy(), columns=cols)
+        missing = [c for c in cols if c not in x.columns]
+        if missing or list(x.columns) != cols:
+            x_safe = x.copy(deep=False)
+            if missing:
+                import numpy as np
+                for m in missing:
+                    x_safe[m] = np.nan
+            return clf.predict_proba(x_safe[cols])
         return clf.predict_proba(x)
-    else:
-        return clf.predict_proba(x.to_numpy())
+        
+    # ==================================================================================================
+    # WARNING TO FUTURE AI AGENTS: DO NOT REVERT THIS LEGACY ARTIFACT FALLBACK!
+    # Legacy models on disk were saved without `.feature_names_in_`. If you revert this, 
+    # any live deployments running old nameless models will instantly CRASH with a ValueError 
+    # (e.g. "X has 19 features, expecting 18") the moment a new feature is added to FEATURE_COLUMNS.
+    # This block safely slices or pads DataFrames to perfectly match the nameless model's expected size.
+    # ==================================================================================================
+    if hasattr(clf, "n_features_in_"):
+        expected_n = clf.n_features_in_
+        if len(x.columns) > expected_n:
+            return clf.predict_proba(x.iloc[:, :expected_n].to_numpy())
+        elif len(x.columns) < expected_n:
+            import numpy as np
+            x_safe = x.copy(deep=False)
+            for i in range(len(x.columns), expected_n):
+                x_safe[f"__missing_{i}"] = np.nan
+            return clf.predict_proba(x_safe.to_numpy())
+            
+    return clf.predict_proba(x.to_numpy())
 
 def predict_safe(reg, x: pd.DataFrame):
     """Predict safely matching the feature names contract of the fitted regressor."""
     if hasattr(reg, "feature_names_in_"):
         cols = list(reg.feature_names_in_)
-        if list(x.columns) != cols and len(x.columns) == len(cols):
-            x = pd.DataFrame(x.to_numpy(), columns=cols)
+        missing = [c for c in cols if c not in x.columns]
+        if missing or list(x.columns) != cols:
+            x_safe = x.copy(deep=False)
+            if missing:
+                import numpy as np
+                for m in missing:
+                    x_safe[m] = np.nan
+            return reg.predict(x_safe[cols])
         return reg.predict(x)
-    else:
-        return reg.predict(x.to_numpy())
+        
+    # ==================================================================================================
+    # WARNING TO FUTURE AI AGENTS: DO NOT REVERT THIS LEGACY ARTIFACT FALLBACK!
+    # See explanation in predict_proba_safe above. This prevents catastrophic crashes on legacy nameless artifacts.
+    # ==================================================================================================
+    if hasattr(reg, "n_features_in_"):
+        expected_n = reg.n_features_in_
+        if len(x.columns) > expected_n:
+            return reg.predict(x.iloc[:, :expected_n].to_numpy())
+        elif len(x.columns) < expected_n:
+            import numpy as np
+            x_safe = x.copy(deep=False)
+            for i in range(len(x.columns), expected_n):
+                x_safe[f"__missing_{i}"] = np.nan
+            return reg.predict(x_safe.to_numpy())
+            
+    return reg.predict(x.to_numpy())
 
 if TYPE_CHECKING:
     from app.config import RiskConfig, Settings
@@ -395,7 +440,7 @@ class WalkForwardValidator:
             clf = _make_classifier("lgbm")
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                clf.fit(X_all.to_numpy(), y_all.to_numpy())
+                clf.fit(X_all, y_all)
             return WalkForwardResult(
                 best_classifier=clf,
                 best_name="lgbm",
@@ -421,8 +466,8 @@ class WalkForwardValidator:
                     clf = _make_classifier(name)
                     with warnings.catch_warnings():
                         warnings.simplefilter("ignore")
-                        clf.fit(X_tr.to_numpy(), y_tr.to_numpy())
-                    proba = clf.predict_proba(X_va.to_numpy())[:, 1]
+                        clf.fit(X_tr, y_tr)
+                    proba = clf.predict_proba(X_va)[:, 1]
                     m = _trading_metrics(y_va.to_numpy(), proba)
                     model_window_metrics[name].append(m)
                 except Exception as exc:  # noqa: BLE001
@@ -464,7 +509,7 @@ class WalkForwardValidator:
         best_clf = _make_classifier(best_name)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            best_clf.fit(X_all.to_numpy(), y_all.to_numpy())
+            best_clf.fit(X_all, y_all)
 
         return WalkForwardResult(
             best_classifier=best_clf,
@@ -1348,13 +1393,13 @@ class ExcursionRegressors:
                 max_iter=200, learning_rate=0.08, max_depth=5,
                 l2_regularization=1.0, random_state=42,
             )
-            mae_reg.fit(X_all.to_numpy(), mae_all.to_numpy())
+            mae_reg.fit(X_all, mae_all)
 
             mfe_reg = HistGradientBoostingRegressor(
                 max_iter=200, learning_rate=0.08, max_depth=5,
                 l2_regularization=1.0, random_state=42,
             )
-            mfe_reg.fit(X_all.to_numpy(), mfe_all.to_numpy())
+            mfe_reg.fit(X_all, mfe_all)
 
         try:
             import joblib
@@ -1368,7 +1413,7 @@ class ExcursionRegressors:
         self._trained = True
 
         # Compute in-sample MAE mean for logging
-        mae_pred = mae_reg.predict(X_all.to_numpy())
+        mae_pred = mae_reg.predict(X_all)
         mae_err = float(np.abs(mae_pred - mae_all.to_numpy()).mean())
 
         applog.info(

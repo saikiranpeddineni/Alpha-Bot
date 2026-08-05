@@ -26,12 +26,19 @@ class Rsi2Reversion(Strategy):
         "reward_risk": 1.5,
         "enable_shorts": False,         # if True, sells RSI(2) rips below falling EMA50
         "trailing_stop_atr_mult": 1.5,  # if > 0, activates dynamic trailing stop
+        "vol_z_max": 1.0,               # prevent dip-buying high volume institutional selling
     }
 
     def on_bar(self, ctx: StrategyContext, symbol: str, df: pd.DataFrame) -> Signal | None:
         p = self.params
         if len(df) < 70:
             return None
+            
+        from app.core.domain import Regime
+        if ctx.regime != Regime.TREND_UP and not p.get("enable_shorts", False):
+            # Only dip-buy in broader uptrends unless shorts are enabled
+            return None
+            
         last = df.iloc[-1]
         if any(pd.isna(last.get(c)) for c in ("rsi2", "ema50", "atr14")):
             return None
@@ -52,27 +59,31 @@ class Rsi2Reversion(Strategy):
         if atr <= 0:
             return None
 
-        if rsi2 <= p["rsi2_entry"] and close > float(ema50.iloc[-1]) and ema_rising:
+        ema9 = float(last.get("ema9", close))
+        ema20 = float(last.get("ema20", close))
+        vol_z = float(last.get("vol_z", 0.0))
+
+        if rsi2 <= p["rsi2_entry"] and ema9 > ema20 > float(ema50.iloc[-1]) and ema_rising and vol_z <= p.get("vol_z_max", 1.0) and ctx.regime == Regime.TREND_UP:
             stop = close - p["atr_stop_mult"] * atr
             return Signal(
                 symbol=symbol,
                 action=SignalAction.ENTER_LONG,
                 confidence=min(0.8, 0.55 + (p["rsi2_entry"] - rsi2) * 0.04),
                 strategy=self.name,
-                reason=f"RSI(2) {rsi2:.1f} dip above rising EMA50",
+                reason=f"RSI(2) {rsi2:.1f} low-vol dip above aligned EMAs",
                 price=close,
                 stop_loss=stop,
                 take_profit=close + p["reward_risk"] * (close - stop),
             )
 
-        if p.get("enable_shorts", False) and rsi2 >= (100.0 - p["rsi2_entry"]) and close < float(ema50.iloc[-1]) and ema_falling:
+        if p.get("enable_shorts", False) and rsi2 >= (100.0 - p["rsi2_entry"]) and ema9 < ema20 < float(ema50.iloc[-1]) and ema_falling and vol_z <= p.get("vol_z_max", 1.0) and ctx.regime == Regime.TREND_DOWN:
             stop = close + p["atr_stop_mult"] * atr
             return Signal(
                 symbol=symbol,
                 action=SignalAction.ENTER_SHORT,
                 confidence=min(0.8, 0.55 + (rsi2 - (100.0 - p["rsi2_entry"])) * 0.04),
                 strategy=self.name,
-                reason=f"RSI(2) {rsi2:.1f} rip below falling EMA50",
+                reason=f"RSI(2) {rsi2:.1f} low-vol rip below aligned EMAs",
                 price=close,
                 stop_loss=stop,
                 take_profit=close - p["reward_risk"] * (stop - close),

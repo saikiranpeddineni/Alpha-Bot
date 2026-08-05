@@ -316,8 +316,24 @@ def get_episodic_nearest_neighbors(
     scored_neighbors.sort(key=lambda x: x["distance"])
     return scored_neighbors[:k]
 
-def get_adaptive_ml_threshold(base_threshold: float, exp_info: dict) -> float:
-    return base_threshold
+def get_adaptive_ml_threshold(base_threshold: float, exp_info: dict, sctx=None) -> float:
+    threshold = base_threshold
+    
+    # Apply dynamic opening slippage handicap
+    if sctx is not None:
+        try:
+            from zoneinfo import ZoneInfo
+            now_et = sctx.now.astimezone(ZoneInfo("America/New_York"))
+            mins_et = now_et.hour * 60 + now_et.minute
+            mins_since_open = mins_et - (9 * 60 + 30)
+            
+            if 0 <= mins_since_open < 15:
+                # Force AI to have a much higher confidence to survive the violent $4 slippage
+                threshold += 0.15
+        except Exception:
+            pass
+            
+    return threshold
 
 def get_adaptive_signal_score(base_score: float, exp_info: dict) -> float:
     return base_score

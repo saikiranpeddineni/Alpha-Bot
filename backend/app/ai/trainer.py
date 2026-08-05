@@ -255,24 +255,29 @@ class _LegacyContinuousTrainer:
         if not X_tr_s.empty and not X_va_s.empty:
             assert X_tr_s.index.max() < X_va_s.index.min(), f"Short temporal split violated: {X_tr_s.index.max()} >= {X_va_s.index.min()}"
 
-        # ---- Fit Models ----
+        # ==================================================================================================
+        # WARNING TO FUTURE AI AGENTS: DO NOT CAST X_tr or y_tr TO NUMPY!
+        # Do NOT use `.to_numpy()` here. Passing the raw Pandas DataFrame natively into `fit()` is
+        # absolutely critical to ensure `scikit-learn` burns the exact column names into `feature_names_in_`.
+        # Stripping the DataFrame creates nameless legacy artifacts that crash on schema migrations!
+        # ==================================================================================================
         clf_l = HistGradientBoostingClassifier(
             max_iter=300, learning_rate=0.06, max_depth=6,
             l2_regularization=1.0, early_stopping=True, random_state=42,
         )
-        clf_l.fit(X_tr.to_numpy(), y_tr.to_numpy())
+        clf_l.fit(X_tr, y_tr)
 
         clf_s = HistGradientBoostingClassifier(
             max_iter=300, learning_rate=0.06, max_depth=6,
             l2_regularization=1.0, early_stopping=True, random_state=42,
         )
-        clf_s.fit(X_tr_s.to_numpy(), y_tr_s.to_numpy())
+        clf_s.fit(X_tr_s, y_tr_s)
 
         # Evaluate
         def _safe_auc(clf, X_val, y_val):
             if y_val.nunique() < 2:
                 return 0.5
-            proba = clf.predict_proba(X_val.to_numpy())[:, 1]
+            proba = clf.predict_proba(X_val)[:, 1]
             return float(roc_auc_score(y_val, proba))
 
         auc_l = _safe_auc(clf_l, X_va, y_va)
@@ -399,24 +404,28 @@ class _LegacyContinuousTrainer:
         X_tr_s, y_tr_s = X_s[mask_s], y_s[mask_s]
         X_va_s, y_va_s = X_s.iloc[split_s:], y_s.iloc[split_s:]
 
+        # ==================================================================================================
+        # WARNING TO FUTURE AI AGENTS: DO NOT CAST TO NUMPY!
+        # See explanation above. Models must be fitted with pure Pandas DataFrames.
+        # ==================================================================================================
         clf_l = HistGradientBoostingClassifier(
             max_iter=150, learning_rate=0.08, max_depth=5,
             l2_regularization=1.0, early_stopping=True, random_state=42,
         )
         if not X_tr_l.empty:
-            clf_l.fit(X_tr_l.to_numpy(), y_tr_l.to_numpy())
+            clf_l.fit(X_tr_l, y_tr_l)
 
         clf_s = HistGradientBoostingClassifier(
             max_iter=150, learning_rate=0.08, max_depth=5,
             l2_regularization=1.0, early_stopping=True, random_state=42,
         )
         if not X_tr_s.empty:
-            clf_s.fit(X_tr_s.to_numpy(), y_tr_s.to_numpy())
+            clf_s.fit(X_tr_s, y_tr_s)
 
         def _auc(clf, X_val, y_val) -> float:
             if y_val.nunique() < 2:
                 return 0.5
-            return float(roc_auc_score(y_val, clf.predict_proba(X_val.to_numpy())[:, 1]))
+            return float(roc_auc_score(y_val, clf.predict_proba(X_val)[:, 1]))
 
         auc_l = _auc(clf_l, X_va_l, y_va_l) if not X_va_l.empty and not X_tr_l.empty else 0.5
         auc_s = _auc(clf_s, X_va_s, y_va_s) if not X_va_s.empty and not X_tr_s.empty else 0.5

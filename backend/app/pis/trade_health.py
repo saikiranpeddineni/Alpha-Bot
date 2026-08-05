@@ -95,7 +95,9 @@ class TradeHealthEvaluator:
             volume_score = 0.90
 
         # Weighted overall composite health (inject news sentiment if extreme)
-        sentiment_boost = obs.news_sentiment_score * 0.15
+        # BUGFIX: Sentiment is naturally long-biased (1.0 = Bullish). We MUST multiply by trade side!
+        # If we are SHORT (-1) and news is Bullish (+1), sentiment_boost is -0.15 (Health Degrades)
+        sentiment_boost = obs.news_sentiment_score * obs.side * 0.15
         overall = (
             trend_score * 0.45
             + momentum_score * 0.25

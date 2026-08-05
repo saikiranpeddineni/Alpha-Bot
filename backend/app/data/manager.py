@@ -100,17 +100,45 @@ class DataManager:
             self.provider.advance()  # type: ignore[attr-defined]
 
         new_closed: dict[str, pd.DataFrame] = {}
+        
+        # Split symbols by provider
+        yahoo_symbols = []
+        default_symbols = []
         for symbol in extended:
             symbol = symbol.upper()
+            if symbol in ("VIX", "^VIX") and not self.is_synthetic:
+                yahoo_symbols.append(symbol)
+            else:
+                default_symbols.append(symbol)
+                
+        # Batch fetch from default provider if supported
+        tails = {}
+        multi_supported = hasattr(self.provider, "get_multi_bars")
+        if multi_supported and default_symbols:
             try:
-                provider = self.provider
-                if symbol in ("VIX", "^VIX") and not self.is_synthetic:
-                    from app.data.yahoo import YahooProvider
-                    provider = YahooProvider()
-                tail = await provider.get_bars(symbol, "1Min", limit=30)
-            except Exception as exc:  # noqa: BLE001
+                tails.update(await self.provider.get_multi_bars(default_symbols, "1Min", limit=30))
+            except Exception as exc:
+                applog.warning("data", f"Batched poll failed: {exc}")
+                # Do NOT fall back to sequential loop; it will spam the API and cause massive async latency.
+        
+        # Fetch sequentially only if batching is NOT supported.
+        # If batching is supported, any missing symbol simply has no data right now.
+        if not multi_supported:
+            for symbol in default_symbols:
+                if symbol not in tails:
+                    try:
+                        tails[symbol] = await self.provider.get_bars(symbol, "1Min", limit=30)
+                    except Exception as exc:
+                        applog.warning("data", f"{symbol}: poll failed: {exc}")
+                    
+        for symbol in yahoo_symbols:
+            try:
+                from app.data.yahoo import YahooProvider
+                tails[symbol] = await YahooProvider().get_bars(symbol, "1Min", limit=30)
+            except Exception as exc:
                 applog.warning("data", f"{symbol}: poll failed: {exc}")
-                continue
+
+        for symbol, tail in tails.items():
             if tail.empty:
                 continue
             current = self._frames.get(symbol, empty_bars())

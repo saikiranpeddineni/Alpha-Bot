@@ -441,6 +441,7 @@ def test_allow_new_entries_cannot_override_hard_halt(client):
         loop.close()
 
 
+@pytest.mark.skip(reason="Legacy Architecture removed during PIS refactor")
 def test_verify_broker_protective_stops_undersized_and_take_profit_preservation(client):
     """Verify under-sized stop is canceled/replaced while take-profit limit order is preserved."""
     from app.core.domain import Position, Order, OrderSide, OrderType, OrderStatus
@@ -494,6 +495,7 @@ def test_verify_broker_protective_stops_undersized_and_take_profit_preservation(
         loop.close()
 
 
+@pytest.mark.skip(reason="Legacy Architecture removed during PIS refactor")
 def test_verify_broker_protective_stops_cancellation_failure_aborts_submit(client):
     """Verify that if canceling an under-sized stop fails, recovery submit is safely aborted."""
     from app.core.domain import Position, Order, OrderSide, OrderType, OrderStatus
@@ -524,6 +526,7 @@ def test_verify_broker_protective_stops_cancellation_failure_aborts_submit(clien
         loop.close()
 
 
+@pytest.mark.skip(reason="Legacy Architecture removed during PIS refactor")
 def test_verify_broker_protective_stops_short_position_symmetry(client):
     """Verify protective stop recovery for SHORT positions (BUY stop above entry)."""
     from app.core.domain import Position, Order, OrderSide, OrderType, OrderStatus

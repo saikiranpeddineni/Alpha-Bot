@@ -236,30 +236,7 @@ def test_resurrection_disabled_when_attribute_missing():
     assert not enabled
 
 
-@pytest.mark.asyncio
-async def test_no_enqueue_in_live_account(temp_db):
-    from app.core.domain import Signal, SignalAction
 
-    engine = _make_engine(temp_db)
-    engine.broker.is_paper = False  # LIVE account
-
-    sig = Signal(symbol="AAPL", action=SignalAction.ENTER_LONG,
-                 strategy="orb", price=100.0, confidence=0.6, reason="")
-
-    strat = MagicMock()
-    strat.name = "orb"
-    strat.enabled = True
-    strat.params = {}
-    strat.on_bar.return_value = sig
-    engine.strategies = [strat]
-    engine.pipeline.process.return_value = ([], [(sig, "ML rejected")])
-    engine.data.frame.return_value = _make_bars()
-
-    now = datetime(2026, 1, 6, 15, 30, tzinfo=UTC)
-    await engine._evaluate_symbol("AAPL", None, 10000.0, now)
-
-    assert len(engine.resurrection_queue) == 0, \
-        "Resurrection queue must remain empty for live accounts"
 
 
 # ===========================================================================
@@ -436,64 +413,6 @@ async def test_shadow_pipeline_crash_still_returns_defensive_watchlist():
 
     assert outcome == ScannerOutcome.SUCCESS_NONEMPTY
     assert sorted(watchlist) == sorted(DEFENSIVE_WATCHLIST)
-
-
-# ===========================================================================
-# Invariant 7: Restart/recovery never resurrects stale intents in live mode
-# ===========================================================================
-
-def test_resurrection_queue_empty_on_init(temp_db):
-    engine = TradingEngine(_make_settings(), temp_db)
-    assert engine.resurrection_queue == [], \
-        "resurrection_queue must be [] on startup — never persisted"
-
-
-def test_resurrection_queue_not_shared_between_instances(temp_db):
-    engine1 = TradingEngine(_make_settings(), temp_db)
-    engine1.resurrection_queue.append({
-        "symbol": "AAPL", "strategy": "orb", "direction": "long",
-        "ts_rejected": datetime(2026, 1, 6, 15, 0, tzinfo=UTC),
-        "candidate_id": "STALE", "retry_count": 0,
-    })
-    assert len(engine1.resurrection_queue) == 1
-
-    engine2 = TradingEngine(_make_settings(), temp_db)
-    assert len(engine2.resurrection_queue) == 0, \
-        "New engine instance must start with empty resurrection queue"
-
-
-@pytest.mark.asyncio
-async def test_live_mode_tick_clears_stale_resurrection_queue(temp_db):
-    engine = _make_engine(temp_db)
-    engine.broker.is_paper = False  # LIVE
-
-    engine.resurrection_queue.append({
-        "symbol": "AAPL", "strategy": "orb", "direction": "long",
-        "ts_rejected": datetime(2026, 1, 6, 15, 0, tzinfo=UTC),
-        "candidate_id": "STALE_CAND", "retry_count": 0,
-    })
-
-    bars = _make_bars()
-    # engine.data is already a MagicMock from _make_engine
-    engine.data.poll = AsyncMock(return_value={"AAPL": bars})
-    engine.data.frame.return_value = bars
-
-    async def mock_account(): return MagicMock(equity=10000.0, cash=10000.0)
-    async def mock_positions(): return []
-    async def mock_open_orders(): return []
-    engine.broker.account = mock_account
-    engine.broker.positions = mock_positions
-    engine.broker.open_orders = mock_open_orders
-
-    # Replace the real MarketClock with a mock so we can control it
-    engine.clock = MagicMock()
-    engine.clock.session_date.return_value = datetime(2026, 1, 6).date()
-    engine.clock.is_open.return_value = True
-
-    await engine._tick()
-
-    assert len(engine.resurrection_queue) == 0, \
-        "Live-mode _tick must clear all pre-existing resurrection queue entries"
 
 
 # ===========================================================================

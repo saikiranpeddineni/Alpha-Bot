@@ -34,6 +34,7 @@ FEATURE_COLUMNS = [
     "minute_sin",
     "minute_cos",
     "day_progress",
+    "regime_val",
 ]
 
 SESSION_MINUTES = 390
@@ -57,6 +58,23 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     out["minute_sin"] = np.sin(2.0 * np.pi * minute / SESSION_MINUTES)
     out["minute_cos"] = np.cos(2.0 * np.pi * minute / SESSION_MINUTES)
     out["day_progress"] = minute / SESSION_MINUTES
+
+    # Regime calculation mapped to integers for ML (0=RANGE, 1=TREND_UP, -1=TREND_DOWN, 2=VOLATILE)
+    er20 = out.get("er20", pd.Series(0, index=out.index)).fillna(0)
+    ema20 = out.get("ema20", pd.Series(np.nan, index=out.index))
+    slope = (ema20 / ema20.shift(10) - 1.0) * 100.0
+    vol_pct = out["atr_pct"].rolling(390, min_periods=1).rank(pct=True)
+
+    regime_val = pd.Series(0.0, index=out.index)
+    mask_volatile = vol_pct >= 0.85
+    mask_trend_up = (~mask_volatile) & (er20 >= 0.30) & (slope > 0)
+    mask_trend_down = (~mask_volatile) & (er20 >= 0.30) & (slope <= 0)
+
+    regime_val.loc[mask_trend_up] = 1.0
+    regime_val.loc[mask_trend_down] = -1.0
+    regime_val.loc[mask_volatile] = 2.0
+    out["regime_val"] = regime_val
+
     return out
 
 

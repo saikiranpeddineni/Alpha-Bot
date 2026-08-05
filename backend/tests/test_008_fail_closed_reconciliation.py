@@ -210,15 +210,15 @@ async def test_reconciliation_failure_blocks_entries_but_allows_exits(tmp_path, 
     assert engine.reconciliation_failed is True
     assert engine.status()["reconciliation_failed"] is True
 
-    # ── 2. EXIT signals must still execute despite reconciliation failure ───
+    # ── 2. PIS EXIT triggers must still execute despite reconciliation failure ───
     strat = _FakeStrategy()
     engine.strategies = [strat]
 
-    exit_sig = Signal(
-        symbol="AAPL", action=SignalAction.EXIT, confidence=1.0,
-        strategy="test_strat", reason="take_profit_hit",
-    )
-    strat.signals_to_return.append(exit_sig)
+    async def fake_pis_evaluate(*args, **kwargs):
+        from types import SimpleNamespace
+        return SimpleNamespace(symbol="AAPL", qty=10, reason="take_profit_hit"), None
+
+    engine.pis_adapter.evaluate_position_exit = fake_pis_evaluate
 
     broker.mock_positions = [Position(symbol="AAPL", qty=10, avg_entry_price=100.0, market_price=100.0)]
     broker.should_fail_positions = False

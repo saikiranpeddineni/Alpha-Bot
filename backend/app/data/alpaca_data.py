@@ -136,6 +136,85 @@ class AlpacaDataProvider(DataProvider):
             df = df.xs(symbol, level="symbol")
         return normalize_bars(df[["open", "high", "low", "close", "volume"]])
 
+    def _fetch_multi_bars(self, symbols: list[str], timeframe: str, start: datetime, end: datetime) -> dict[str, pd.DataFrame]:
+        from alpaca.data.enums import DataFeed
+        from alpaca.data.requests import StockBarsRequest
+        from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+
+        unit_name, amount = _TF_MAP[timeframe]
+        tf = TimeFrame(amount, TimeFrameUnit.Minute if unit_name == "Minute" else TimeFrameUnit.Day)
+        # API allows max 10000 symbols, we batch externally if needed
+        req = StockBarsRequest(
+            symbol_or_symbols=symbols,
+            timeframe=tf,
+            start=start,
+            end=end,
+            feed=DataFeed.IEX,
+        )
+        result = self._client.get_stock_bars(req)
+        df = result.df
+        out = {}
+        if df is None or df.empty:
+            return {s: empty_bars() for s in symbols}
+        
+        # If multiple symbols were returned, Alpaca returns a MultiIndex (symbol, timestamp)
+        for s in symbols:
+            if isinstance(df.index, pd.MultiIndex):
+                if s in df.index.levels[0]:
+                    sub_df = df.xs(s, level="symbol")
+                    out[s] = normalize_bars(sub_df[["open", "high", "low", "close", "volume"]])
+                else:
+                    out[s] = empty_bars()
+            else:
+                # Fallback if only 1 symbol came back in total
+                out[s] = normalize_bars(df[["open", "high", "low", "close", "volume"]])
+        return out
+
+    async def get_multi_bars(
+        self,
+        symbols: list[str],
+        timeframe: str = "1Min",
+        start: datetime | None = None,
+        end: datetime | None = None,
+        limit: int | None = None,
+    ) -> dict[str, pd.DataFrame]:
+        if not symbols:
+            return {}
+        if timeframe not in _TF_MAP:
+            raise ValueError(f"Unsupported timeframe {timeframe!r}")
+        end = end or datetime.now(UTC)
+        if start is None:
+            days = 5 if timeframe != "1Day" else 365
+            start = end - timedelta(days=days)
+
+        await _get_rate_limiter().acquire()
+
+        retries = 8
+        backoff = 2.0
+        for attempt in range(retries):
+            try:
+                # Alpaca limits multi-bar requests; if symbols list is large we may want to chunk it.
+                # Standard scanner is ~30 symbols, which easily fits in a single request (limit 10000).
+                dfs = await asyncio.to_thread(self._fetch_multi_bars, [s.upper() for s in symbols], timeframe, start, end)
+                if limit:
+                    return {s: d.iloc[-limit:] for s, d in dfs.items()}
+                return dfs
+            except Exception as exc:
+                exc_str = str(exc).lower()
+                _is_transient = (
+                    "too many requests" in exc_str or "429" in exc_str
+                    or "getaddrinfo" in exc_str or "nameresolutionerror" in exc_str
+                    or "remote end closed" in exc_str or "remotedisconnected" in exc_str
+                    or "connection aborted" in exc_str or "connection reset" in exc_str
+                    or "timeout" in exc_str or "ssl" in exc_str
+                )
+                if _is_transient and attempt < retries - 1:
+                    await asyncio.sleep(backoff)
+                    backoff = min(60.0, backoff * 1.5)
+                else:
+                    applog.error("data", f"Batched fetch failed after {attempt+1} attempts: {exc}")
+                    raise
+
     async def get_bars(
         self,
         symbol: str,

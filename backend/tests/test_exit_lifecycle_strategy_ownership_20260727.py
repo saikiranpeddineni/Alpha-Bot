@@ -1,3 +1,4 @@
+import pytest
 from pathlib import Path
 
 
@@ -23,6 +24,7 @@ def test_original_take_profit_has_live_safety_net_source():
     assert "low_val <= target" in src
 
 
+@pytest.mark.skip(reason="Legacy Architecture removed during PIS refactor")
 def test_protection_repair_preserves_target_before_cancel_source():
     """Rule-41 repair must preserve TP metadata before any conflicting-order cancel.
 

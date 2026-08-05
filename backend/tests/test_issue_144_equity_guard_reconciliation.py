@@ -223,7 +223,8 @@ async def test_exits_work_while_reconciliation_failed(engine_with_failed_reconci
     broker.should_fail_positions = False
 
     real_reconcile = engine._reconcile_positions
-    engine._reconcile_positions = lambda positions: None
+    from unittest.mock import AsyncMock
+    engine._reconcile_positions = AsyncMock()
 
     await engine._tick()
 
@@ -254,7 +255,8 @@ async def test_entries_blocked_while_reconciliation_failed(engine_with_failed_re
     broker.should_fail_positions = False
 
     real_reconcile = engine._reconcile_positions
-    engine._reconcile_positions = lambda positions: None
+    from unittest.mock import AsyncMock
+    engine._reconcile_positions = AsyncMock()
 
     await engine._tick()
 

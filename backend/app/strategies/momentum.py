@@ -50,6 +50,7 @@ class MomentumCross(Strategy):
         "trailing_stop_atr_mult": 1.5,
         "htf_trend_filter": False,
         "midday_block": False,
+        "min_minutes_since_open": 5,
     }
 
     # ------------------------------------------------------------------
@@ -172,12 +173,14 @@ class MomentumCross(Strategy):
             # Let the PIS manage exits (trailing stops and momentum decay)
             return None
 
-        # ---- Optional time filter ----
-        if p.get("midday_block", False):
-            from zoneinfo import ZoneInfo
-            now_et = ctx.now.astimezone(ZoneInfo("America/New_York"))
-            if 11 * 60 + 30 <= now_et.hour * 60 + now_et.minute <= 13 * 60 + 30:
-                return None
+        # ---- Time and Slippage Guards ----
+        from zoneinfo import ZoneInfo
+        now_et = ctx.now.astimezone(ZoneInfo("America/New_York"))
+        mins_et = now_et.hour * 60 + now_et.minute
+
+        # Optional midday block
+        if p.get("midday_block", False) and (11 * 60 + 30 <= mins_et <= 13 * 60 + 30):
+            return None
 
         # ---- HTF trend filter ----
         if p.get("htf_trend_filter", False) and (crossed_up or crossed_down):

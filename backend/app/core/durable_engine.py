@@ -100,7 +100,7 @@ class DurableTradingEngine(TradingEngine):
                     f"Failed to persist terminal order state for {fill.order_id}: {exc}",
                 )
 
-    async def _close_position_guarded(self, symbol: str, reason: str) -> None:
+    async def _close_position_guarded(self, symbol: str, reason: str, qty: float | None = None) -> None:
         """Canonical duplicate-close guard plus immediate close-order persistence."""
         if not hasattr(self, "_pending_close_symbols"):
             self._pending_close_symbols = set()
@@ -111,7 +111,7 @@ class DurableTradingEngine(TradingEngine):
         self._flattening_symbols.add(symbol)
         self._pending_close_symbols.add(symbol)
         try:
-            order = await self.broker.close_position(symbol, reason=reason)
+            order = await self.broker.close_position(symbol, reason=reason, qty=qty)
             if order is None:
                 self._pending_close_symbols.discard(symbol)
                 return

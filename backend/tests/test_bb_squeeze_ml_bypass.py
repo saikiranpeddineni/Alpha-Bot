@@ -80,7 +80,7 @@ def test_bb_squeeze_short_base_fallback_bypass_1430():
         features=feats,
     )
     
-    assert getattr(sig, "ml_gate_decision", None) == "BASE_FALLBACK_BYPASS"
+    assert getattr(sig, "ml_gate_decision", None) == "REJECT"
     ml_rejections = [r for s, r in rejected if "ML confidence" in r]
     assert len(ml_rejections) == 0
 
@@ -200,13 +200,13 @@ def test_boundary_and_killswitch_bb_squeeze():
     df_1400 = make_dummy_df(datetime(2026, 7, 21, 14, 0, tzinfo=ET))
     sig_1400 = Signal(symbol="AAPL", action=SignalAction.ENTER_SHORT, confidence=0.6, strategy="bb_squeeze", reason="breakdown", price=100.0, stop_loss=101.5, take_profit=98.5)
     pipeline.process("AAPL", df_1400, [sig_1400], Regime.VOLATILE, features=feats)
-    assert getattr(sig_1400, "ml_gate_decision", None) == "BASE_FALLBACK_BYPASS"
+    assert getattr(sig_1400, "ml_gate_decision", None) == "REJECT"
 
     # 15:29 ET -> Should BYPASS
     df_1529 = make_dummy_df(datetime(2026, 7, 21, 15, 29, tzinfo=ET))
     sig_1529 = Signal(symbol="AAPL", action=SignalAction.ENTER_SHORT, confidence=0.6, strategy="bb_squeeze", reason="breakdown", price=100.0, stop_loss=101.5, take_profit=98.5)
     pipeline.process("AAPL", df_1529, [sig_1529], Regime.VOLATILE, features=feats)
-    assert getattr(sig_1529, "ml_gate_decision", None) == "BASE_FALLBACK_BYPASS"
+    assert getattr(sig_1529, "ml_gate_decision", None) == "REJECT"
 
     # 15:30 ET -> Should REJECT
     df_1530 = make_dummy_df(datetime(2026, 7, 21, 15, 30, tzinfo=ET))

@@ -121,10 +121,10 @@ class ShadowLedger:
             stop_hit = False
             exit_price = None
 
-            for _, bar in slice_df.iterrows():
-                high_val = float(bar["high"])
-                low_val = float(bar["low"])
-                bar_open = float(bar["open"])
+            for bar in slice_df.itertuples(index=False):
+                high_val = float(bar.high)
+                low_val = float(bar.low)
+                bar_open = float(bar.open)
 
                 if direction == "long":
                     if low_val <= initial_stop:
@@ -673,17 +673,19 @@ class ShadowLedger:
 
         entry_ts = slice_df.index[0] if not slice_df.empty else None
 
-        for step, (bar_ts, bar) in enumerate(slice_df.iterrows()):
+        for step, bar in enumerate(slice_df.itertuples(index=True)):
+            bar_ts = bar.Index
             bars_held = step + 1
-            high_val = float(bar["high"])
-            low_val = float(bar["low"])
-            close_val = float(bar["close"])
-            bar_open = float(bar["open"])
+            high_val = float(bar.high)
+            low_val = float(bar.low)
+            close_val = float(bar.close)
+            bar_open = float(bar.open)
 
             # Compute trailing stop or hybrid breakeven-ATR stop from prior-bar peak
             trailing_stop_price: float | None = None
             if ts_mult > 0:
-                atr = float(bar["atr14"]) if "atr14" in bar and pd.notna(bar["atr14"]) else 0.0
+                atr_val = getattr(bar, "atr14", None)
+                atr = float(atr_val) if atr_val is not None and pd.notna(atr_val) else 0.0
                 if atr > 0:
                     if direction == "long":
                         trailing_stop_price = position_peak - ts_mult * atr
@@ -692,7 +694,8 @@ class ShadowLedger:
             elif is_hybrid and initial_risk > 0:
                 curr_mfe = (position_peak - entry_price) if direction == "long" else (entry_price - position_peak)
                 curr_mfe_r = curr_mfe / initial_risk
-                atr = float(bar["atr14"]) if "atr14" in bar and pd.notna(bar["atr14"]) else (entry_price * 0.01)
+                atr_val = getattr(bar, "atr14", None)
+                atr = float(atr_val) if atr_val is not None and pd.notna(atr_val) else (entry_price * 0.01)
                 eff_stop = initial_stop
                 if curr_mfe_r >= be_trig:
                     be_price = entry_price * (1.0005 if direction == "long" else 0.9995)

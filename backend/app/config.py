@@ -61,7 +61,6 @@ class RiskConfig(BaseModel):
     )
     min_specialist_auc: float = Field(0.50, ge=0.50, le=1.0)        # was 0.52
     min_stop_pct: float = Field(0.5, ge=0.0, le=5.0)
-    bypass_rule41: bool = Field(False, description="Bypass Rule 41 to allow PIS exits")
     score_threshold_trend: float = Field(50.0, ge=0.0, le=100.0)    # was 55.0
     score_threshold_range: float = Field(65.0, ge=0.0, le=100.0)    # was 70.0
     score_threshold_volatile: float = Field(60.0, ge=0.0, le=100.0) # was 65.0

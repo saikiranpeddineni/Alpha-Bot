@@ -65,11 +65,37 @@ def predict_proba_safe(clf, x: pd.DataFrame):
     """Predict proba safely matching the feature names contract of the fitted classifier."""
     if hasattr(clf, "feature_names_in_"):
         cols = list(clf.feature_names_in_)
-        if list(x.columns) != cols and len(x.columns) == len(cols):
-            x = pd.DataFrame(x.to_numpy(), columns=cols)
+        missing = [c for c in cols if c not in x.columns]
+        if missing or list(x.columns) != cols:
+            x_safe = x.copy(deep=False)
+            if missing:
+                import numpy as np
+                for m in missing:
+                    x_safe[m] = np.nan
+            return clf.predict_proba(x_safe[cols])
         return clf.predict_proba(x)
-    else:
-        return clf.predict_proba(x.to_numpy())
+        
+    # ==================================================================================================
+    # WARNING TO FUTURE AI AGENTS: DO NOT REVERT THIS LEGACY ARTIFACT FALLBACK!
+    # Legacy models on disk were saved without `.feature_names_in_`. If you revert this, 
+    # any live deployments running old nameless models will instantly CRASH with a ValueError 
+    # (e.g. "X has 19 features, expecting 18") the moment a new feature is added to FEATURE_COLUMNS.
+    # This block safely slices or pads DataFrames to perfectly match the nameless model's expected size.
+    # ==================================================================================================
+    
+    # HOLISTIC FALLBACK FOR NAMELESS LEGACY ARTIFACTS
+    if hasattr(clf, "n_features_in_"):
+        expected_n = clf.n_features_in_
+        if len(x.columns) > expected_n:
+            return clf.predict_proba(x.iloc[:, :expected_n].to_numpy())
+        elif len(x.columns) < expected_n:
+            import numpy as np
+            x_safe = x.copy(deep=False)
+            for i in range(len(x.columns), expected_n):
+                x_safe[f"__missing_{i}"] = np.nan
+            return clf.predict_proba(x_safe.to_numpy())
+            
+    return clf.predict_proba(x.to_numpy())
 
 
 def _sigmoid(z: float) -> float:
@@ -535,8 +561,8 @@ class _LegacySignalModel:
         X_s = pd.concat(xs_short)
         y_s = pd.concat(ys_short)
 
-        new_long.fit(X_l.to_numpy(), y_l.to_numpy())
-        new_short.fit(X_s.to_numpy(), y_s.to_numpy())
+        new_long.fit(X_l, y_l)
+        new_short.fit(X_s, y_s)
 
         if save_to_disk:
             try:
@@ -635,7 +661,7 @@ class _LegacySignalModel:
             split = int(len(X_all) * 0.70)
             if split < 50 or len(X_all) - split < 20:
                 return float("nan")
-            proba = clf.predict_proba(X_all.iloc[split:].to_numpy())[:, 1]
+            proba = clf.predict_proba(X_all.iloc[split:])[:, 1]
             y_val = y_all.iloc[split:]
             if y_val.nunique() < 2:
                 return float("nan")

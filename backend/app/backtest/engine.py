@@ -1044,7 +1044,7 @@ async def run_backtest(
                                     f"expectancy={exp_info['expectancy']}, shrunk_expectancy={exp_info['shrunk_expectancy']}"
                                 )
                                 
-                                dyn_ml_threshold = get_adaptive_ml_threshold(pipeline.ml_threshold, exp_info)
+                                dyn_ml_threshold = get_adaptive_ml_threshold(pipeline.ml_threshold, exp_info, sctx)
                                 adaptive_ml_thresholds[sig.candidate_id] = dyn_ml_threshold
                                 
                                 if sig.score is not None:

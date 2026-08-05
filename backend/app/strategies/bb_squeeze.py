@@ -23,6 +23,7 @@ class BollingerBandSqueeze(Strategy):
         "reward_risk": 2.0,
         "trailing_stop_atr_mult": 1.5,
         "use_trend_filter": True,
+        "min_minutes_since_open": 5,
     }
 
     def on_bar(self, ctx: StrategyContext, symbol: str, df: pd.DataFrame) -> Signal | None:
@@ -32,6 +33,14 @@ class BollingerBandSqueeze(Strategy):
         # a position is already open. Short-circuit immediately.
         if ctx.position is not None:
             return None
+
+        # Block the violently erratic opening auction
+        from zoneinfo import ZoneInfo
+        now_et = ctx.now.astimezone(ZoneInfo("America/New_York"))
+        mins_since_open = (now_et.hour * 60 + now_et.minute) - (9 * 60 + 30)
+        if mins_since_open < p.get("min_minutes_since_open", 5):
+            return None
+
         lb = int(p["width_percentile_lookback"])
         if len(df) < lb + 5:
             return None

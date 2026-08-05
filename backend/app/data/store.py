@@ -43,11 +43,11 @@ class BarCache:
             (
                 symbol.upper(),
                 timeframe,
-                int(ts.timestamp()),
-                float(r["open"]), float(r["high"]), float(r["low"]),
-                float(r["close"]), float(r["volume"]),
+                int(row.Index.timestamp()),
+                float(row.open), float(row.high), float(row.low),
+                float(row.close), float(row.volume),
             )
-            for ts, r in df.iterrows()
+            for row in df.itertuples(index=True)
         ]
         with self._lock:
             self._conn.executemany(

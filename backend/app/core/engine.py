@@ -123,14 +123,6 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         self._position_initial_stops: dict[str, float | None] = {}
         # Original strategy target survives broker protection repair/reconciliation.
         self._position_take_profits: dict[str, float] = {}
-        # PR #271 V2 Adaptive Harvesting: Isolated Shadow State Store (NON-AUTHORITATIVE)
-        self._v2_shadow_states: dict[str, dict] = {}
-        # LIVE exit ownership.  This is deliberately separate from V2 shadow.
-        # A symbol enters this set only after Alpaca confirms BOTH the extended TP
-        # and a non-loss/profit-lock stop.  Until then all legacy exit safety nets
-        # remain authoritative.
-        self._live_runner_symbols: set[str] = set()
-        self._live_runner_floor: dict[str, float] = {}
         self.pis_adapter: PISEngineAdapter = PISEngineAdapter()
         self._last_scan_date = None
         self._last_train_date = None
@@ -145,7 +137,6 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         self._trades_since_insight = 0
         self._pending_close_symbols: set[str] = set()  # symbols with in-flight close order
         self.trainer: ContinuousTrainer | None = None
-        self.resurrection_queue: list[dict] = []
         self._last_heartbeat_hour: int | None = None
         self._last_heartbeat_week: int | None = None
         # fix(#45): in-flight flatten guard — deduplicate concurrent flatten for same symbol
@@ -713,9 +704,6 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
             account = await self.broker.account()
             positions = await self.broker.positions()
             self._reconcile_positions(positions)
-            if positions and not getattr(self, "reconciliation_failed", False):
-                await self.verify_broker_protective_stops(positions)
-
         except Exception as exc:
             self.reconciliation_failed = True
             applog.error("engine", f"Failed to fetch account/positions during tick: {exc}. Marking reconciliation uncertain.")
@@ -812,18 +800,6 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
             heartbeat_allows_entries = decision.allow_new_entries if decision is not None else True
             allow_entries = bool(heartbeat_allows_entries and self.allow_new_entries)
 
-            # Process resurrected signals from queue (CR-146 Phase 4)
-            # SAFETY: Resurrection uses stale signal price/SL/TP from the original rejection tick.
-            # Enabled only for paper/shadow sessions. Live sessions skip entirely to avoid stale orders.
-            _resurrection_enabled = getattr(self.broker, "is_paper", False) is True
-            resurrected = []
-            if _resurrection_enabled and self.state == EngineState.RUNNING and allow_entries:
-                resurrected = await self._process_resurrection_queue(account.equity, now, positions=positions)
-            elif self.resurrection_queue:
-                if not _resurrection_enabled or self.state != EngineState.RUNNING or not allow_entries:
-                    self.resurrection_queue.clear()
-            candidates.extend(resurrected)
-
             symbols_to_evaluate = list(new_closed.keys())
             self._last_closed_bar_symbol_count = len(symbols_to_evaluate)
             if self.state != EngineState.RUNNING or not allow_entries:
@@ -887,6 +863,13 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                     if any(info["symbol"] == sym_upper for info in self.pending_reconciliation_orders.values()):
                         pre_gated_entries.append((sig, f"order locally pending for {sym_upper}"))
                         continue
+
+                    # Prevent budget starvation for unborrowable shorts
+                    if sig.action == SignalAction.ENTER_SHORT:
+                        is_short = await self.broker.is_shortable(sig.symbol)
+                        if not is_short:
+                            pre_gated_entries.append((sig, "Asset is not shortable at broker"))
+                            continue
 
                     pre_check = self.risk.is_entry_permitted(sig, now=now)
                     if not pre_check.approved:
@@ -983,16 +966,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                                     await self._update_shadow_decision(sig.candidate_id, "rejected", decision.reason, "risk_gate")
                                 continue
 
-                            # Check if asset is shortable before submitting short entries
-                            if sig.action == SignalAction.ENTER_SHORT:
-                                is_short = await self.broker.is_shortable(sig.symbol)
-                                if not is_short:
-                                    reason = "Asset is not shortable at broker"
-                                    applog.info("engine", f"{sig.symbol.upper()}: entry rejected — {reason}")
-                                    self.publish("insight", self.insights.on_signal(sig, gated=True, gate_reason=reason).model_dump(mode="json"))
-                                    if getattr(sig, "candidate_id", None) is not None:
-                                        await self._update_shadow_decision(sig.candidate_id, "rejected", reason, "broker_gate")
-                                    continue
+                            # (Asset shortability was already checked in the pre-filter to prevent budget starvation)
 
                             client_order_id = decision.order.client_order_id
                             if not client_order_id:
@@ -1189,66 +1163,6 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                 if local_lot is None or abs(float(getattr(local_lot, "qty", 0.0))) < 1e-9:
                     self._pending_close_symbols.discard(symbol)
             if trade is not None:
-                # PR #271 V2 Shadow Harvest: Finalize counterfactual comparison metadata
-                st = self._v2_shadow_states.pop(symbol, None)
-                if st is not None:
-                    try:
-                        obs_complete = st.get("observation_complete", True)
-                        init_r = st.get("initial_risk") or abs(trade.entry_price - (st.get("initial_stop") or trade.entry_price)) or 1.0
-                        actual_r = trade.pnl / (init_r * abs(trade.qty) if trade.qty else init_r)
-                        if trade.r_multiple is not None:
-                            actual_r = trade.r_multiple
-
-                        v2_realized_r = st.get("shadow_realized_r")
-                        if v2_realized_r is None:
-                            v2_exit_px = trade.exit_price
-                            sh_pnl = (v2_exit_px - trade.entry_price) if trade.side == "long" else (trade.entry_price - v2_exit_px)
-                            v2_realized_r = sh_pnl / init_r
-                            v2_exit_ts = str(trade.exit_at)
-                            v2_exit_reason = f"real_trade_closed ({trade.exit_reason})"
-                        else:
-                            v2_exit_px = st.get("shadow_exit_price")
-                            v2_exit_ts = st.get("shadow_exit_ts")
-                            v2_exit_reason = st.get("shadow_exit_reason")
-
-                        delta_r = (v2_realized_r - actual_r) if obs_complete and v2_realized_r is not None and actual_r is not None else None
-                        mfe_r = st.get("mfe_r", 0.0)
-                        giveback_r = max(0.0, mfe_r - v2_realized_r) if obs_complete and v2_realized_r is not None else None
-                        winner_capture = ((v2_realized_r / mfe_r) if v2_realized_r > 0 and mfe_r > 0 else 0.0) if obs_complete and v2_realized_r is not None else None
-
-                        if not hasattr(trade, "metadata") or trade.metadata is None:
-                            trade.metadata = {}
-
-                        trade.metadata["v2_shadow_harvest"] = {
-                            "is_authoritative": False,
-                            "policy_version": "v2_giveback_confirmed",
-                            "observation_complete": obs_complete,
-                            "observation_started_at": st.get("observation_started_at"),
-                            "incomplete_reason": st.get("incomplete_reason"),
-                            "symbol": symbol,
-                            "strategy": trade.strategy,
-                            "direction": trade.side,
-                            "entry_price": trade.entry_price,
-                            "entry_at": str(trade.entry_at),
-                            "original_initial_stop": st["initial_stop"],
-                            "initial_risk": init_r,
-                            "v2_final_harvest_state": st.get("harvest_state"),
-                            "v2_final_proposed_stop": st.get("proposed_stop"),
-                            "v2_shadow_exit_price": v2_exit_px,
-                            "v2_shadow_exit_timestamp": v2_exit_ts,
-                            "v2_shadow_exit_reason": v2_exit_reason,
-                            "v2_realized_r": round(v2_realized_r, 4) if obs_complete and v2_realized_r is not None else None,
-                            "v2_mfe_r": round(mfe_r, 4),
-                            "v2_mae_r": round(st.get("mae_r", 0.0), 4),
-                            "v2_winner_capture_ratio": round(winner_capture, 4) if obs_complete and winner_capture is not None else None,
-                            "v2_giveback_r": round(giveback_r, 4) if obs_complete and giveback_r is not None else None,
-                            "baseline_realized_r": round(actual_r, 4) if obs_complete and actual_r is not None else None,
-                            "delta_r": round(delta_r, 4) if obs_complete and delta_r is not None else None,
-                            "v2_state_history": st.get("state_history", []),
-                        }
-                    except Exception as exc:
-                        applog.warning("engine.v2_shadow", f"Failed to attach V2 shadow harvest metadata: {exc}")
-
                 self.perf_tracker.update(trade, now=now)
                 await asyncio.to_thread(self.db.save_trade, trade, self.mode)
                 self.publish("trade", trade.model_dump(mode="json"))
@@ -1666,370 +1580,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
             )
         self.reconciliation_failed = False
 
-    async def verify_broker_protective_stops(
-        self,
-        active_positions: list[Position],
-    ) -> dict[str, bool]:
-        """Audit active positions against broker open_orders for protective stops.
 
-        Fix(#41): Enforces authoritative broker-side protective stops.
-        Exits and entries remain disabled until open_orders() independently confirms
-        an active OrderType.STOP with valid directional geometry and sufficient quantity.
-        """
-        risk_config = getattr(self, "risk_config", None)
-        bypass_rule41 = getattr(risk_config, "bypass_rule41", False) if risk_config is not None else False
-        if bypass_rule41:
-            return {p.symbol: True for p in active_positions}
-
-        if not hasattr(self, "_protection_state"):
-            self._protection_state: dict[str, ProtectionState] = {}
-
-        if not active_positions:
-            return {}
-
-        try:
-            open_orders = await self.broker.open_orders()
-        except Exception as exc:
-            applog.error("engine.protection", f"#41: Failed to fetch open orders from broker: {exc}")
-            self.allow_new_entries = False
-            if self.system_health not in ("HALTED", "SAFE_MODE"):
-                self.system_health = "DEGRADED"
-            return {p.symbol: False for p in active_positions}
-
-        protection_status: dict[str, bool] = {}
-        unprotected: list[Position] = []
-
-        for p in active_positions:
-            sym = p.symbol
-            is_long = p.qty > 0
-            expected_side = OrderSide.SELL if is_long else OrderSide.BUY
-            required_qty = abs(p.qty)
-
-            symbol_exit_orders = [
-                o for o in open_orders
-                if o.symbol == sym
-                and o.side == expected_side
-                and o.status not in (
-                    OrderStatus.CANCELED,
-                    OrderStatus.REJECTED,
-                    OrderStatus.FILLED,
-                )
-            ]
-
-            matching_stop = None
-            for o in symbol_exit_orders:
-                if TradingEngine._is_valid_protective_stop(self, o, p):
-                    matching_stop = o
-                    break
-
-            if matching_stop is not None:
-                verified_stop_price = matching_stop.stop_price or 0.0
-                protection_status[sym] = True
-                self._protection_state[sym] = ProtectionState.PROTECTED
-                p.stop_loss = verified_stop_price
-                if self.portfolio and sym in self.portfolio._lots:
-                    self.portfolio._lots[sym].stop_loss = verified_stop_price
-                # Populate broker-confirmed take-profit when an active exit limit exists.
-                for exit_order in symbol_exit_orders:
-                    limit_px = getattr(exit_order, "limit_price", None)
-                    if (
-                        exit_order.order_type == OrderType.LIMIT
-                        and limit_px is not None
-                        and ((p.qty > 0 and limit_px > p.avg_entry_price) or (p.qty < 0 and limit_px < p.avg_entry_price))
-                    ):
-                        p.take_profit = limit_px
-                        break
-                stop_str = f"{verified_stop_price:.4f}" if verified_stop_price else "N/A"
-                applog.info(
-                    "engine.protection",
-                    f"#41: VERIFIED broker-side protective stop for {sym}: "
-                    f"stop_price={stop_str}, order_id={matching_stop.id}",
-                )
-            else:
-                protection_status[sym] = False
-                unprotected.append(p)
-                if self._protection_state.get(sym) not in {
-                    ProtectionState.AWAITING_STOP_CONFIRMATION,
-                    ProtectionState.AWAITING_CANCEL_CONFIRMATION,
-                    ProtectionState.AMBIGUOUS,
-                    ProtectionState.RECOVERY_REJECTED,
-                }:
-                    self._protection_state[sym] = ProtectionState.UNPROTECTED
-                applog.warning(
-                    "engine.protection",
-                    f"#41 CRITICAL: Position {sym} (qty={p.qty}, avg_price={p.avg_entry_price}) "
-                    "LACKS verified broker-side protective stop order! Local/DB metadata rejected as proof.",
-                )
-
-        if unprotected:
-            self.allow_new_entries = False
-            current_health = getattr(self, "system_health", "NORMAL")
-            if current_health not in ("HALTED", "SAFE_MODE"):
-                self.system_health = "DEGRADED"
-
-            for p in unprotected:
-                if p.symbol in getattr(self, "_pending_close_symbols", set()) or p.symbol in getattr(self, "_flattening_symbols", set()):
-                    continue
-
-                state = self._protection_state.get(p.symbol)
-                side = OrderSide.SELL if p.qty > 0 else OrderSide.BUY
-                required_qty = abs(p.qty)
-
-                # Alpaca bracket exits are not active until the entry parent is
-                # completely filled.  A partially-filled bracket therefore leaves
-                # a real position temporarily unprotected.  Freeze exposure first:
-                # cancel the still-fillable entry parent, wait for broker confirmation,
-                # then recover a standalone stop sized to the authoritative position.
-                entry_side = OrderSide.BUY if p.qty > 0 else OrderSide.SELL
-                partial_bracket_entries = [
-                    o for o in open_orders
-                    if o.symbol == p.symbol
-                    and o.side == entry_side
-                    and str(getattr(o, "order_class", "") or "").lower() == "bracket"
-                    and str(getattr(o, "leg", "") or "").lower() == "entry"
-                    and o.status == OrderStatus.PARTIALLY_FILLED
-                    and float(getattr(o, "filled_qty", 0.0) or 0.0) > 0
-                    and float(getattr(o, "remaining_qty", 0.0) or 0.0) > 1e-9
-                ]
-                if partial_bracket_entries:
-                    if state == ProtectionState.AWAITING_CANCEL_CONFIRMATION:
-                        applog.info(
-                            "engine.protection",
-                            f"#41: Waiting for partial bracket entry cancellation confirmation for {p.symbol}; "
-                            f"{len(partial_bracket_entries)} parent order(s) still open.",
-                        )
-                        continue
-                    cancel_failed = False
-                    for parent in partial_bracket_entries:
-                        try:
-                            c_res = self.broker.cancel(parent.id)
-                            if inspect.isawaitable(c_res):
-                                await c_res
-                            applog.warning(
-                                "engine.protection",
-                                f"#41: Partial bracket entry {parent.id} for {p.symbol} has "
-                                f"filled={parent.filled_qty}/{parent.qty}; requested cancellation of remaining "
-                                "entry quantity before protective-stop recovery.",
-                            )
-                        except Exception as cancel_exc:
-                            cancel_failed = True
-                            applog.error(
-                                "engine.protection",
-                                f"#41: Failed to cancel partial bracket entry {parent.id} for {p.symbol}: {cancel_exc}",
-                            )
-                    if not cancel_failed:
-                        self._protection_state[p.symbol] = ProtectionState.AWAITING_CANCEL_CONFIRMATION
-                    continue
-
-                symbol_exit_orders = [
-                    o for o in open_orders
-                    if o.symbol == p.symbol
-                    and o.side == side
-                    and o.status not in (
-                        OrderStatus.CANCELED,
-                        OrderStatus.REJECTED,
-                        OrderStatus.FILLED,
-                    )
-                ]
-
-                # Check if we were awaiting cancel confirmation: if no conflicting exit orders remain, cancellation is confirmed
-                if state == ProtectionState.AWAITING_CANCEL_CONFIRMATION:
-                    conflicting = [
-                        o for o in symbol_exit_orders
-                        if not TradingEngine._is_valid_protective_stop(self, o, p)
-                        and str(getattr(o, "order_class", "") or "").lower() not in {"bracket", "oco", "oto"}
-                    ]
-                    if conflicting:
-                        applog.info(
-                            "engine.protection",
-                            f"#41: Waiting for broker cancellation confirmation for {p.symbol}; "
-                            f"{len(conflicting)} exit order(s) still active on broker.",
-                        )
-                        continue
-                    else:
-                        applog.info(
-                            "engine.protection",
-                            f"#41: Broker cancellation confirmed for {p.symbol}. Proceeding to submit replacement stop.",
-                        )
-                        state = ProtectionState.UNPROTECTED
-                        self._protection_state[p.symbol] = ProtectionState.UNPROTECTED
-
-                if state in {
-                    ProtectionState.AWAITING_STOP_CONFIRMATION,
-                    ProtectionState.AMBIGUOUS,
-                    ProtectionState.RECOVERY_REJECTED,
-                }:
-                    applog.info(
-                        "engine.protection",
-                        f"#41: Recovery already pending/backed off for {p.symbol} (state={state}); "
-                        "waiting for broker reconciliation.",
-                    )
-                    continue
-
-                try:
-                    cancellation_failed = False
-                    cancellation_pending = False
-                    recovery_blocked = False
-
-                    for o in symbol_exit_orders:
-                        st_px = getattr(o, "stop_price", None)
-                        limit_px = getattr(o, "limit_price", None)
-                        leg = str(getattr(o, "leg", "") or "").lower()
-                        order_class = str(getattr(o, "order_class", "") or "").lower()
-
-                        is_stop_order = (
-                            o.order_type in (OrderType.STOP, OrderType.STOP_LIMIT)
-                            or leg in {"stop", "stop_loss"}
-                        )
-
-                        is_take_profit = (
-                            o.order_type == OrderType.LIMIT
-                            and limit_px is not None
-                            and limit_px > 0
-                            and not is_stop_order
-                            and (
-                                (p.qty > 0 and limit_px > p.avg_entry_price)
-                                or (p.qty < 0 and limit_px < p.avg_entry_price)
-                            )
-                        )
-
-                        is_bracket_or_oco_parent = (
-                            order_class in {"bracket", "oco", "oto"}
-                            and not is_stop_order
-                            and not is_take_profit
-                        )
-
-                        if is_take_profit and limit_px is not None:
-                            # Preserve target metadata.
-                            tp_map = getattr(self, "_position_take_profits", None)
-                            if isinstance(tp_map, dict):
-                                tp_map[p.symbol] = float(limit_px)
-                            p.take_profit = float(limit_px)
-                            if order_class in {"bracket", "oco", "oto"}:
-                                continue
-
-                        if is_bracket_or_oco_parent:
-                            applog.warning(
-                                "engine.protection",
-                                f"#41: Broker-managed exit parent {o.id} detected for {p.symbol}; "
-                                "not cancelling automatically.",
-                            )
-                            recovery_blocked = True
-                            continue
-
-                        try:
-                            c_res = self.broker.cancel(o.id)
-                            if inspect.isawaitable(c_res):
-                                await c_res
-                            self._protection_state[p.symbol] = ProtectionState.AWAITING_CANCEL_CONFIRMATION
-                            applog.warning(
-                                "engine.protection",
-                                f"#41: Requested cancellation of conflicting/unverified exit order {o.id} "
-                                f"for {p.symbol} (qty={o.qty}) before submitting recovery stop.",
-                            )
-                            cancellation_pending = True
-                        except Exception as cancel_exc:
-                            cancellation_failed = True
-                            applog.error(
-                                "engine.protection",
-                                f"#41: Failed to cancel conflicting exit order {o.id} for {p.symbol}: {cancel_exc}",
-                            )
-
-                    if cancellation_failed or recovery_blocked or cancellation_pending:
-                        if cancellation_pending:
-                            applog.info(
-                                "engine.protection",
-                                f"#41: Waiting for broker cancellation confirmation for {p.symbol} "
-                                "before submitting recovery stop.",
-                            )
-                        continue
-
-                    stop_px, stop_source = TradingEngine._resolve_recovery_stop(self, p)
-
-                    # Pre-submission geometry validation
-                    if p.qty > 0 and stop_px >= p.market_price:
-                        applog.error(
-                            "engine.protection",
-                            f"#41: Pre-submission geometry failure for LONG {p.symbol}: "
-                            f"stop={stop_px} >= market={p.market_price}. Submission aborted.",
-                        )
-                        continue
-                    elif p.qty < 0 and stop_px <= p.market_price:
-                        applog.error(
-                            "engine.protection",
-                            f"#41: Pre-submission geometry failure for SHORT {p.symbol}: "
-                            f"stop={stop_px} <= market={p.market_price}. Submission aborted.",
-                        )
-                        continue
-
-                    client_order_id = f"protect-{p.symbol}-{int(p.avg_entry_price * 100)}-{int(stop_px * 100)}"
-                    get_fn = getattr(self.broker, "get_order_by_client_id", None)
-                    existing = get_fn(client_order_id) if get_fn else None
-                    if inspect.isawaitable(existing):
-                        existing = await existing
-                    if (
-                        existing
-                        and not hasattr(existing, '_mock_name')  # not a test mock
-                        and getattr(existing, "status", None) not in (OrderStatus.CANCELED, OrderStatus.REJECTED, OrderStatus.FILLED)
-                    ):
-                        applog.info("engine.protection", f"#41: Recovery stop {existing.id} already active for {p.symbol}")
-                        continue
-
-                    recovery_strategy = getattr(p, "strategy", None)
-                    if not isinstance(recovery_strategy, str):
-                        recovery_strategy = None
-                    if self.portfolio and p.symbol in self.portfolio._lots:
-                        lot_strategy = getattr(self.portfolio._lots[p.symbol], "strategy", None)
-                        if isinstance(lot_strategy, str) and lot_strategy:
-                            recovery_strategy = lot_strategy
-                    if not recovery_strategy or recovery_strategy in {"alpaca", "emergency_protection"}:
-                        recovery_strategy = "reconciled"
-
-                    if not client_order_id:
-                        client_order_id = f"ad-rec-{p.symbol}-{side}-{now.strftime('%Y%m%d%H%M%S')}"
-                        
-                    req = OrderRequest(
-                        symbol=p.symbol,
-                        side=side,
-                        qty=required_qty,
-                        order_type=OrderType.STOP,
-                        stop_price=stop_px,
-                        client_order_id=client_order_id,
-                        strategy=recovery_strategy,
-                        reason=f"emergency_protection: fix(#41) protective stop recovery source={stop_source}",
-                    )
-                    applog.info(
-                        "engine.protection",
-                        f"#41: Submitting recovery protective STOP for {p.symbol} at {stop_px:.4f} "
-                        f"(source={stop_source}, client_id={client_order_id})",
-                    )
-                    s_res = self.broker.submit(req)
-                    rec_order = await s_res if inspect.isawaitable(s_res) else s_res
-
-                    protection_status[p.symbol] = False
-                    if rec_order is None or getattr(rec_order, "status", None) == OrderStatus.REJECTED:
-                        self._protection_state[p.symbol] = ProtectionState.RECOVERY_REJECTED
-                        applog.error(
-                            "engine.protection",
-                            f"#41: Recovery STOP rejected for {p.symbol}",
-                        )
-                        continue
-                    else:
-                        self._protection_state[p.symbol] = ProtectionState.AWAITING_STOP_CONFIRMATION
-                        applog.info(
-                            "engine.protection",
-                            f"#41: RECOVERY_SUBMITTED symbol={p.symbol} order_id={getattr(rec_order, 'id', 'N/A')} "
-                            f"stop={stop_px:.4f} source={stop_source} awaiting_broker_verification=true",
-                        )
-                except Exception as rec_exc:
-                    applog.error("engine.protection", f"#41: Failed to submit recovery protective stop for {p.symbol}: {rec_exc}")
-
-        if not all(protection_status.values()):
-            self.allow_new_entries = False
-            if self.system_health not in ("HALTED", "SAFE_MODE"):
-                self.system_health = "DEGRADED"
-
-        return protection_status
 
 
     async def _reconcile_pending_submissions(self, now: datetime | None = None) -> None:
@@ -2765,127 +2316,6 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
             observations = []
         observations.append(observation)
         self.db.set_setting(key, observations[-200:])
-
-    async def _process_resurrection_queue(
-        self, account_equity: float, now: datetime, positions: list | None = None
-    ) -> list[tuple[Signal, pd.DataFrame]]:
-        """Processes the resurrection queue, re-evaluating vetoed signals.
-        Returns a list of resurrected candidate signal tuples (sig, df).
-        """
-        if not self.resurrection_queue:
-            return []
-
-        resurrected = []
-        active_queue = []
-        TTL_MINUTES = 30
-        MAX_RETRIES = 3
-
-        from datetime import UTC
-        for item in self.resurrection_queue:
-            ts_rejected = item["ts_rejected"]
-            dt_now = now.astimezone(UTC) if now.tzinfo else now.replace(tzinfo=UTC)
-            dt_rejected = ts_rejected.astimezone(UTC) if ts_rejected.tzinfo else ts_rejected.replace(tzinfo=UTC)
-            if (dt_now - dt_rejected).total_seconds() / 60.0 > TTL_MINUTES:
-                applog.info("engine.resurrection", f"Resurrected candidate {item['symbol']} expired (TTL {TTL_MINUTES}m hit).")
-                continue
-
-            if item["retry_count"] >= MAX_RETRIES:
-                applog.info("engine.resurrection", f"Resurrected candidate {item['symbol']} reached max retries ({MAX_RETRIES}).")
-                continue
-
-            symbol = item["symbol"].upper()
-            strategy_name = item["strategy"]
-            if symbol in {s.upper() for s in self._vix_symbols()}:
-                applog.warning("engine.resurrection", f"Dropping non-tradable reference symbol {symbol} from resurrection queue")
-                continue
-
-            # Find the originating strategy
-            strat = None
-            for s in self.strategies:
-                if s.name == strategy_name:
-                    strat = s
-                    break
-
-            if strat is None or not strat.enabled:
-                applog.warning("engine.resurrection", f"Strategy {strategy_name} not found or disabled for resurrection.")
-                continue
-
-            try:
-                # Fetch recent window
-                df = enrich(self.data.frame(symbol, "1Min", limit=600))
-                if df is None or df.empty:
-                    active_queue.append(item)
-                    continue
-
-                # Run strategy on fresh bar
-                if positions is not None:
-                    pos_by_symbol = {p.symbol: p for p in positions}
-                elif self.portfolio and hasattr(self.portfolio, "open_positions"):
-                    pos_by_symbol = self.portfolio.open_positions()
-                else:
-                    pos_by_symbol = {}
-                spy_df = enrich(self.data.frame("SPY", "1Min", limit=600))
-                rs_score = compute_relative_strength(df, spy_df)
-                regime, _ = detect_regime(df)
-
-                from app.strategies.base import StrategyContext
-                sctx = StrategyContext(position=pos_by_symbol.get(symbol), equity=account_equity, regime=regime, now=now)
-                fresh_sig = strat.on_bar(sctx, symbol, df)
-                if fresh_sig is None:
-                    applog.debug("engine.resurrection", f"{symbol} {strategy_name}: Strategy no longer produces a signal on current bar.")
-                    continue
-
-                # Verify direction matches original intent
-                expected_action = SignalAction.ENTER_LONG if item["direction"] == "long" else SignalAction.ENTER_SHORT
-                if fresh_sig.action != expected_action:
-                    applog.debug("engine.resurrection", f"{symbol} {strategy_name}: Fresh signal action {fresh_sig.action} does not match original direction.")
-                    continue
-
-                # Assign fresh candidate ID and link to the parent candidate ID
-                import uuid
-                prefix = f"{symbol}_{fresh_sig.strategy}_{now.strftime('%Y%m%d_%H%M%S')}"
-                fresh_sig.candidate_id = f"{prefix}_{uuid.uuid4().hex[:6]}".upper()
-                fresh_sig.parent_candidate_id = item["candidate_id"]
-                fresh_sig.strategy_params = getattr(strat, "params", {})
-
-                # Re-run pipeline process on fresh signal
-                accepted, rejected = await asyncio.to_thread(
-                    partial(self.pipeline.process, symbol, df, [fresh_sig], regime, sector_strength=rs_score)
-                )
-
-                if fresh_sig in accepted:
-                    item["retry_count"] += 1
-                    applog.info(
-                        "engine.resurrection",
-                        f"SUCCESS: Resurrected candidate {symbol} {fresh_sig.strategy} {fresh_sig.action} passed all gates! "
-                        f"Submitting for allocation (retry {item['retry_count']}/{MAX_RETRIES})."
-                    )
-
-                    await self._update_shadow_decision(
-                        candidate_id=fresh_sig.candidate_id,
-                        final_decision="pipeline_approved",
-                        rejection_reason="",
-                        rejection_stage="none",
-                    )
-                    # Also update the parent candidate record to mark it as resurrected/approved
-                    if "candidate_id" in item:
-                        await self._update_shadow_decision(
-                            candidate_id=item["candidate_id"],
-                            final_decision="pipeline_approved",
-                            rejection_reason="",
-                            rejection_stage="none",
-                        )
-
-                    resurrected.append((fresh_sig, df))
-                else:
-                    item["retry_count"] += 1
-                    active_queue.append(item)
-            except Exception as exc:
-                applog.error("engine.resurrection", f"Failed re-evaluation of {symbol}: {exc}")
-                active_queue.append(item)
-
-        self.resurrection_queue = active_queue
-        return resurrected
 
     async def _check_system_heartbeat(self, now: datetime) -> None:
         """Runs the unified safety/system heartbeat health checks."""

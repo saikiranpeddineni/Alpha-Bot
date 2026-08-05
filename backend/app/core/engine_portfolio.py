@@ -121,12 +121,10 @@ class TradingEnginePortfolioMixin:
             # fix(#41): local DB stop_loss metadata is stored for initial lot tracking,
             # but MUST NOT count as proof of authoritative broker-side protection.
             if stop_loss is None or stop_loss <= 0:
-                stop_pct = 0.015  # 1.5% conservative protective fallback
-                if p.qty > 0:
-                    stop_loss = round(p.avg_entry_price * (1.0 - stop_pct), 4)
-                else:
-                    stop_loss = round(p.avg_entry_price * (1.0 + stop_pct), 4)
-                initial_risk = abs(p.avg_entry_price - stop_loss)
+                applog.error("engine.risk", f"CRITICAL: Position {p.symbol} has no authoritative broker-side stop-loss! Flattening immediately.")
+                asyncio.create_task(self._close_position_guarded(p.symbol, reason="CRITICAL: Missing broker-side stop-loss", qty=abs(p.qty)))
+                stop_loss = 0.0
+                initial_risk = 0.0
 
             from app.portfolio.tracker import _OpenLot
             self.portfolio._lots[p.symbol] = _OpenLot(

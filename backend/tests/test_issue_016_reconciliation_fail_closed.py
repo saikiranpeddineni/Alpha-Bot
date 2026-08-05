@@ -281,7 +281,8 @@ async def test_phase2_exits_still_execute_while_entry_gate_closed(
 
     # Pin the flag to True: inhibit the real reconciler from clearing it this tick
     real_reconcile = engine._reconcile_positions
-    engine._reconcile_positions = lambda positions: None
+    from unittest.mock import MagicMock
+    engine._reconcile_positions = MagicMock()
 
     await engine._tick()
 
@@ -314,7 +315,8 @@ async def test_phase3_entries_blocked_while_reconciliation_failed(
 
     # Pin the flag to True so entries stay blocked this tick
     real_reconcile = engine._reconcile_positions
-    engine._reconcile_positions = lambda positions: None
+    from unittest.mock import MagicMock
+    engine._reconcile_positions = MagicMock()
 
     await engine._tick()
 

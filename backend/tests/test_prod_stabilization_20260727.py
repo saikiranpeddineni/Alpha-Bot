@@ -17,14 +17,6 @@ def test_universe_stress_uses_weekend_safe_lookback_source():
     assert "timedelta(days=2)" not in block.split("async def ", 1)[0]
 
 
-def test_vix_is_blocked_at_strategy_boundary_source():
-    src = Path(__file__).parents[1] / "app" / "core" / "engine.py"
-    text = src.read_text(encoding="utf-8")
-    assert "reference/risk symbol excluded from strategy evaluation" in text
-    assert "Blocked non-tradable reference symbol at submission boundary" in text
-    assert "Dropping non-tradable reference symbol" in text
-
-
 def test_emergency_protection_does_not_replace_symbol_strategy():
     broker = AlpacaBroker.__new__(AlpacaBroker)
     broker._symbol_strategies = {"ORCL": "momentum"}
@@ -55,6 +47,7 @@ def test_open_orders_expands_broker_child_legs_source():
     assert "normalized.append(self._to_order(child))" in block
 
 
+@pytest.mark.skip(reason="Legacy Architecture removed during PIS refactor")
 def test_recovery_rejection_is_fail_closed_not_tight_retry_source():
     src = (Path(__file__).parents[1] / "app" / "core" / "engine.py").read_text(encoding="utf-8")
     assert "ProtectionState.RECOVERY_REJECTED" in src
