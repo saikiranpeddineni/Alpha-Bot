@@ -52,8 +52,8 @@ def dummy_features() -> pd.Series:
     return pd.Series({col: 1.0 for col in FEATURE_COLUMNS})
 
 
-def test_rsi2_base_fallback_bypass_active_1130():
-    """Test 1: RSI2 LONG at 11:30 ET with BASE_FALLBACK ML < 0.52 -> Advisory bypass, NOT rejected by ml_gate."""
+def test_rsi2_base_fallback_veto_enforced_1130():
+    """Test 1: RSI2 LONG at 11:30 ET with BASE_FALLBACK ML < 0.52 -> Strictly REJECTED by ml_gate."""
     mock_model = DummySignalModel(prob=0.38, model_source="BASE", specialist_status="NO_ARTIFACT")
     pipeline = SignalPipeline(model=mock_model, ml_threshold=0.52)
     
@@ -82,7 +82,7 @@ def test_rsi2_base_fallback_bypass_active_1130():
     
     assert getattr(sig, "ml_gate_decision", None) == "REJECT"
     ml_rejections = [r for s, r in rejected if "ML confidence" in r]
-    assert len(ml_rejections) == 0
+    assert len(ml_rejections) == 1
 
 
 def test_rsi2_real_model_not_bypassed_1130():
@@ -151,8 +151,8 @@ def test_momentum_base_fallback_not_bypassed_1130():
     assert len(ml_rejections) == 1
 
 
-def test_rsi2_base_fallback_bypass_active_1330():
-    """Test 4: RSI2 LONG at 13:30 ET with BASE_FALLBACK ML < 0.52 -> Advisory bypass active inside 11:00-14:00 ET window."""
+def test_rsi2_base_fallback_veto_enforced_1330():
+    """Test 4: RSI2 LONG at 13:30 ET with BASE_FALLBACK ML < 0.52 -> Strictly REJECTED by ml_gate."""
     mock_model = DummySignalModel(prob=0.38, model_source="BASE", specialist_status="NO_ARTIFACT")
     pipeline = SignalPipeline(model=mock_model, ml_threshold=0.52)
     
@@ -181,7 +181,7 @@ def test_rsi2_base_fallback_bypass_active_1330():
     
     assert getattr(sig, "ml_gate_decision", None) == "REJECT"
     ml_rejections = [r for s, r in rejected if "ML confidence" in r]
-    assert len(ml_rejections) == 0
+    assert len(ml_rejections) == 1
 
 
 def test_rsi2_base_fallback_outside_window_1430():
@@ -217,38 +217,25 @@ def test_rsi2_base_fallback_outside_window_1430():
     assert len(ml_rejections) == 1
 
 
-def test_boundary_and_killswitch():
-    """Boundary & Kill-switch tests for 11:00 - 14:00 ET window."""
+def test_strict_ml_veto_across_times():
+    """Verify ML gate vetoes weak signals strictly across all time horizons."""
     mock_model = DummySignalModel(prob=0.38, model_source="BASE", specialist_status="NO_ARTIFACT")
     pipeline = SignalPipeline(model=mock_model, ml_threshold=0.52)
     feats = dummy_features()
     
-    # 10:59 ET -> Should REJECT
-    df_1059 = make_dummy_df(datetime(2026, 7, 21, 10, 59, tzinfo=ET))
-    sig_1059 = Signal(symbol="AAPL", action=SignalAction.ENTER_LONG, confidence=0.6, strategy="rsi2_reversion", reason="dip", price=100.0, stop_loss=98.5, take_profit=101.5)
-    pipeline.process("AAPL", df_1059, [sig_1059], Regime.RANGE, features=feats)
-    assert getattr(sig_1059, "ml_gate_decision", None) == "REJECT"
+    times = [
+        datetime(2026, 7, 21, 9, 35, tzinfo=ET),
+        datetime(2026, 7, 21, 10, 59, tzinfo=ET),
+        datetime(2026, 7, 21, 11, 0, tzinfo=ET),
+        datetime(2026, 7, 21, 13, 59, tzinfo=ET),
+        datetime(2026, 7, 21, 14, 0, tzinfo=ET),
+        datetime(2026, 7, 21, 15, 45, tzinfo=ET),
+    ]
     
-    # 11:00 ET -> Should BYPASS
-    df_1100 = make_dummy_df(datetime(2026, 7, 21, 11, 0, tzinfo=ET))
-    sig_1100 = Signal(symbol="AAPL", action=SignalAction.ENTER_LONG, confidence=0.6, strategy="rsi2_reversion", reason="dip", price=100.0, stop_loss=98.5, take_profit=101.5)
-    pipeline.process("AAPL", df_1100, [sig_1100], Regime.RANGE, features=feats)
-    assert getattr(sig_1100, "ml_gate_decision", None) == "REJECT"
-
-    # 13:59 ET -> Should BYPASS
-    df_1359 = make_dummy_df(datetime(2026, 7, 21, 13, 59, tzinfo=ET))
-    sig_1359 = Signal(symbol="AAPL", action=SignalAction.ENTER_LONG, confidence=0.6, strategy="rsi2_reversion", reason="dip", price=100.0, stop_loss=98.5, take_profit=101.5)
-    pipeline.process("AAPL", df_1359, [sig_1359], Regime.RANGE, features=feats)
-    assert getattr(sig_1359, "ml_gate_decision", None) == "REJECT"
-
-    # 14:00 ET -> Should REJECT
-    df_1400 = make_dummy_df(datetime(2026, 7, 21, 14, 0, tzinfo=ET))
-    sig_1400 = Signal(symbol="AAPL", action=SignalAction.ENTER_LONG, confidence=0.6, strategy="rsi2_reversion", reason="dip", price=100.0, stop_loss=98.5, take_profit=101.5)
-    pipeline.process("AAPL", df_1400, [sig_1400], Regime.RANGE, features=feats)
-    assert getattr(sig_1400, "ml_gate_decision", None) == "REJECT"
-
-    # Kill-switch test: rsi2_base_fallback_bypass_enabled = False -> Should REJECT
-    pipeline.trade_score_engine.risk_config.rsi2_base_fallback_bypass_enabled = False
-    sig_ks = Signal(symbol="AAPL", action=SignalAction.ENTER_LONG, confidence=0.6, strategy="rsi2_reversion", reason="dip", price=100.0, stop_loss=98.5, take_profit=101.5)
-    pipeline.process("AAPL", df_1100, [sig_ks], Regime.RANGE, features=feats)
-    assert getattr(sig_ks, "ml_gate_decision", None) == "REJECT"
+    for dt in times:
+        df = make_dummy_df(dt)
+        sig = Signal(symbol="AAPL", action=SignalAction.ENTER_LONG, confidence=0.6, strategy="rsi2_reversion", reason="dip", price=100.0, stop_loss=98.5, take_profit=101.5)
+        accepted, rejected = pipeline.process("AAPL", df, [sig], Regime.RANGE, features=feats)
+        assert getattr(sig, "ml_gate_decision", None) == "REJECT"
+        assert len(rejected) >= 1
+        assert any("ML confidence" in r for _, r in rejected)

@@ -422,8 +422,7 @@ class AlpacaDataProvider(DataProvider):
                             ts = getattr(prev, "timestamp", None)
 
                     if price is None:
-                        applog.debug("data.alpaca", f"{symbol}: no trade or bar price available in snapshot")
-                        continue
+                        raise ValueError("no trade or bar price available in snapshot")
 
                     prev_close = _valid_float(getattr(prev, "close", None)) if prev is not None else None
                     if prev_close is None:

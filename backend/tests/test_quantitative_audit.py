@@ -106,30 +106,32 @@ def test_trainer_temporal_split_and_purge(tmp_path):
     
     trainer = ContinuousTrainer(MagicMock(), mock_model, MagicMock())
     
-    # Capture the train/val splits by patching HistGradientBoostingClassifier's fit method
+    # Capture the train/val splits by patching WalkForwardValidator.run
     captured_train_long = []
     captured_train_short = []
-    
-    class MockClassifier:
-        def __init__(self, **kwargs):
-            pass
-        def fit(self, X, y):
-            # Capture the data passed to fit
-            if len(captured_train_long) == 0:
-                captured_train_long.append((X, y))
-            else:
-                captured_train_short.append((X, y))
-            return self
-        def predict_proba(self, X):
-            # Return dummy probabilities
-            return np.ones((len(X), 2)) * 0.5
-    
-    with patch.object(sklearn.ensemble, "HistGradientBoostingClassifier", MockClassifier), \
+
+    def mock_wfv_run(dfs_subset, side="long"):
+        mock_clf = MagicMock()
+        mock_clf.predict_proba.return_value = np.ones((500, 2)) * 0.5
+        if side == "long":
+            captured_train_long.append(dfs_subset)
+        else:
+            captured_train_short.append(dfs_subset)
+        from app.ai.prediction import WalkForwardResult
+        return WalkForwardResult(
+            best_classifier=mock_clf,
+            best_name="lgbm",
+            summary={},
+            windows_evaluated=0,
+            side=side,
+        )
+
+    with patch("app.ai.prediction.WalkForwardValidator.run", side_effect=mock_wfv_run), \
          patch.object(sklearn.metrics, "roc_auc_score", return_value=0.60), \
          patch("joblib.dump") as mock_dump:
-        
+
         trainer._fit_global_sync({"AAPL": df})
-        
+
         # Verify that we split long and short
         assert len(captured_train_long) == 1
         assert len(captured_train_short) == 1
@@ -138,7 +140,7 @@ def test_trainer_temporal_split_and_purge(tmp_path):
         from zoneinfo import ZoneInfo
         from app.ai.features import build_training_set
         
-        X_l, y_l = build_training_set(df, horizon_bars=15, threshold_pct=0.10, side="long")
+        X_l, y_l, _w_l = build_training_set(df, horizon_bars=15, threshold_pct=0.10, side="long")
         X_l = X_l.sort_index()
         
         ET = ZoneInfo("America/New_York")

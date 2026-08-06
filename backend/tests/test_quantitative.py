@@ -238,7 +238,7 @@ class TestSettingsWeights:
     def test_walk_forward_defaults(self):
         from app.config import Settings
         s = Settings()
-        assert s.walk_forward_train_days == 60
+        assert s.walk_forward_train_days == 120
         assert s.walk_forward_val_days == 10
         assert s.walk_forward_min_windows == 3
 
