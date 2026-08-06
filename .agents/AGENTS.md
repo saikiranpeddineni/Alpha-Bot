@@ -2,67 +2,25 @@
 
 # Git Branching & Merge Policy (Mandatory)
 
-## Branch Creation Rules
+## Core Branching Rules
 
-1. **NEVER commit directly to `master` or `main`.**
-2. **NEVER merge anything into `master` without my explicit approval.**
-3. At the beginning of each workday:
-
-   * Check today's date.
-   * If a branch for today's work already exists, **reuse that branch**.
-   * Do **NOT** create multiple feature branches on the same day unless I explicitly request it.
-4. If no branch exists for today, create a single branch using the following naming convention:
-
-```
-feature/YYYY-MM-DD-short-description
-```
-
-Examples:
-
-```
-feature/2026-08-02-runtime-fixes
-feature/2026-08-02-shadow-analytics
-feature/2026-08-02-portfolio-replay
-feature/2026-08-02-risk-engine
-```
-
-Use a short, descriptive name representing the primary work for that day.
+1. **Active Branch Naming**: All work uses branches starting from `Alphadesk_01` (incrementing only when explicitly instructed).
+2. **Persistent Branching Across Days**: Continue on the same branch (e.g. `Alphadesk_01`) across consecutive days.
+3. **NEVER create or switch to a new branch** unless I explicitly instruct you to do so.
+4. **NEVER commit directly to `master` or `main`.**
+5. **NEVER merge anything into `master`** without my explicit instruction.
 
 ---
 
-## Daily Workflow
+## Daily & Continuous Workflow
 
-For every coding session:
-
-1. Determine today's date.
-2. Check existing local and remote branches.
-3. If today's branch exists:
-
-   * Checkout that branch.
-   * Continue all work there.
-4. If today's branch does not exist:
-
-   * Create it.
-   * Switch to it.
-5. Keep **all commits for that day's work** on the same branch.
-6. Do **NOT** create additional branches during the day unless I explicitly instruct you to do so.
-
----
-
-## Merge Policy
-
-* Never merge into `master` automatically.
-* Never delete branches automatically.
-* Never squash, rebase, or merge without my approval.
-* When work is complete, stop after committing and pushing the feature branch.
-
-Instead ask:
-
-> "Today's work has been committed and pushed to `<branch-name>`. Would you like me to:
->
-> 1. Open a Pull Request
-> 2. Merge into master
-> 3. Keep the branch open for more work?"
+For every coding session and change:
+1. Work exclusively on the active branch (e.g. `Alphadesk_01`).
+2. Add proper code documentation/comments for any modifications made.
+3. Commit the changes to the active branch with clear, descriptive commit messages.
+4. Push the commit to the git remote branch.
+5. Do NOT merge to master.
+6. Seamlessly continue to the next task or change on the same branch.
 
 ---
 
