@@ -157,7 +157,10 @@ class _LegacyContinuousTrainer:
             async with semaphore:
                 try:
                     df = await self.data.history(sym, "1Min", start, end, prefer_cache=True)
-                    if df.empty or len(df) < 1000:
+                    # Require at least 20k bars (~51 trading days) for meaningful model training.
+                    # 1000 was dangerously low — a symbol with <3 days of data produces garbage features.
+                    if df.empty or len(df) < 20_000:
+                        applog.debug("trainer", f"Fetch skipped for {sym}: only {len(df)} bars (need >= 20,000)")
                         return sym, None
                     return sym, df
                 except Exception as exc:
@@ -188,8 +191,8 @@ class _LegacyContinuousTrainer:
         xs_l, ys_l, xs_s, ys_s = [], [], [], []
         for sym, df in dfs.items():
             try:
-                X_l, y_l = build_training_set(df, horizon_bars=15, threshold_pct=0.10, side="long")
-                X_s, y_s = build_training_set(df, horizon_bars=15, threshold_pct=0.10, side="short")
+                X_l, y_l, _w_l = build_training_set(df, horizon_bars=15, threshold_pct=0.10, side="long")
+                X_s, y_s, _w_s = build_training_set(df, horizon_bars=15, threshold_pct=0.10, side="short")
                 if len(X_l) >= 200:
                     xs_l.append(X_l); ys_l.append(y_l)
                 if len(X_s) >= 200:
@@ -226,7 +229,13 @@ class _LegacyContinuousTrainer:
             X_va, y_va = X_l.iloc[split_l:], y_l.iloc[split_l:]
 
         if not X_tr.empty and not X_va.empty:
-            assert X_tr.index.max() < X_va.index.min(), f"Long temporal split violated: {X_tr.index.max()} >= {X_va.index.min()}"
+            if X_tr.index.max() >= X_va.index.min():
+                applog.error(
+                    "trainer",
+                    f"Long temporal split violated: train_max={X_tr.index.max()} >= val_min={X_va.index.min()} "
+                    f"— aborting global training to prevent data leakage",
+                )
+                return float(self.model.meta.get("validation_auc") or 0.5)
 
         # ---- Short Side Data Preparation (Temporal Split & Purge) ----
         X_s = pd.concat(xs_s).sort_index()
@@ -254,7 +263,13 @@ class _LegacyContinuousTrainer:
             X_va_s, y_va_s = X_s.iloc[split_s:], y_s.iloc[split_s:]
 
         if not X_tr_s.empty and not X_va_s.empty:
-            assert X_tr_s.index.max() < X_va_s.index.min(), f"Short temporal split violated: {X_tr_s.index.max()} >= {X_va_s.index.min()}"
+            if X_tr_s.index.max() >= X_va_s.index.min():
+                applog.error(
+                    "trainer",
+                    f"Short temporal split violated: train_max={X_tr_s.index.max()} >= val_min={X_va_s.index.min()} "
+                    f"— aborting global training to prevent data leakage",
+                )
+                return float(self.model.meta.get("validation_auc") or 0.5)
 
         # ==================================================================================================
         # WARNING TO FUTURE AI AGENTS: DO NOT CAST X_tr or y_tr TO NUMPY!
@@ -262,19 +277,36 @@ class _LegacyContinuousTrainer:
         # absolutely critical to ensure `scikit-learn` burns the exact column names into `feature_names_in_`.
         # Stripping the DataFrame creates nameless legacy artifacts that crash on schema migrations!
         # ==================================================================================================
-        clf_l = HistGradientBoostingClassifier(
-            max_iter=300, learning_rate=0.06, max_depth=6,
-            l2_regularization=1.0, early_stopping=True, random_state=42,
-        )
-        clf_l.fit(X_tr, y_tr)
+        from app.ai.prediction import WalkForwardValidator
+        from app.config import get_settings
+        
+        # Prevent data leakage: The WFV must ONLY see the training portion of the data.
+        # Otherwise, the final WFV model will be trained on the promotion gate's holdout set,
+        # artificially inflating the AUC and bypassing the promotion gate.
+        dfs_tr_l = {}
+        for sym, df in dfs.items():
+            mask = df.index < (val_start_dt - purge_horizon)
+            if mask.any():
+                dfs_tr_l[sym] = df[mask]
 
-        clf_s = HistGradientBoostingClassifier(
-            max_iter=300, learning_rate=0.06, max_depth=6,
-            l2_regularization=1.0, early_stopping=True, random_state=42,
-        )
-        clf_s.fit(X_tr_s, y_tr_s)
+        dfs_tr_s = {}
+        for sym, df in dfs.items():
+            mask = df.index < (val_start_dt_s - purge_horizon)
+            if mask.any():
+                dfs_tr_s[sym] = df[mask]
 
-        # Evaluate
+        # Use WalkForwardValidator to find the best model architecture (LGBM, XGB, or HGB)
+        wfv = WalkForwardValidator.from_settings(get_settings(), horizon_bars=15, threshold_pct=0.10)
+        
+        # Extract the best classifier for long and short from the walk-forward results
+        res_l = wfv.run(dfs_tr_l, side="long")
+        clf_l = res_l.best_classifier
+        
+        res_s = wfv.run(dfs_tr_s, side="short")
+        clf_s = res_s.best_classifier
+
+        # Evaluate AUC on the static 25% holdout for the promotion gate to ensure
+        # apples-to-apples comparison against the incumbent's saved AUC.
         def _safe_auc(clf, X_val, y_val):
             if y_val.nunique() < 2:
                 return 0.5
@@ -381,8 +413,8 @@ class _LegacyContinuousTrainer:
         import hashlib
         import joblib
 
-        X_l, y_l = build_training_set(df, horizon_bars=15, threshold_pct=0.10, side="long")
-        X_s, y_s = build_training_set(df, horizon_bars=15, threshold_pct=0.10, side="short")
+        X_l, y_l, w_l = build_training_set(df, horizon_bars=15, threshold_pct=0.10, side="long")
+        X_s, y_s, w_s = build_training_set(df, horizon_bars=15, threshold_pct=0.10, side="short")
         if len(X_l) < 300:
             applog.info("trainer", f"  Specialist [{symbol}] INSUFFICIENT_DATA n_samples={len(X_l)} < 300")
             return {"decision": "INSUFFICIENT_DATA", "n_samples": len(X_l)}
@@ -396,13 +428,13 @@ class _LegacyContinuousTrainer:
         # Long split with purge
         val_start_l = X_l.iloc[split_l:].index.min()
         mask_l = X_l.index < val_start_l - purge
-        X_tr_l, y_tr_l = X_l[mask_l], y_l[mask_l]
+        X_tr_l, y_tr_l, w_tr_l = X_l[mask_l], y_l[mask_l], w_l[mask_l]
         X_va_l, y_va_l = X_l.iloc[split_l:], y_l.iloc[split_l:]
         
         # Short split with purge
         val_start_s = X_s.iloc[split_s:].index.min()
         mask_s = X_s.index < val_start_s - purge
-        X_tr_s, y_tr_s = X_s[mask_s], y_s[mask_s]
+        X_tr_s, y_tr_s, w_tr_s = X_s[mask_s], y_s[mask_s], w_s[mask_s]
         X_va_s, y_va_s = X_s.iloc[split_s:], y_s.iloc[split_s:]
 
         # ==================================================================================================
@@ -414,14 +446,28 @@ class _LegacyContinuousTrainer:
             l2_regularization=1.0, early_stopping=True, random_state=42,
         )
         if not X_tr_l.empty:
-            clf_l.fit(X_tr_l, y_tr_l)
+            try:
+                from sklearn.calibration import CalibratedClassifierCV
+                calib_l = CalibratedClassifierCV(clf_l, method="sigmoid", cv=3)
+                calib_l.fit(X_tr_l, y_tr_l, sample_weight=w_tr_l)
+                clf_l = calib_l
+            except Exception as e:
+                applog.debug("trainer", f"Specialist long calibration failed ({e}), falling back to raw")
+                clf_l.fit(X_tr_l, y_tr_l, sample_weight=w_tr_l)
 
         clf_s = HistGradientBoostingClassifier(
             max_iter=150, learning_rate=0.08, max_depth=5,
             l2_regularization=1.0, early_stopping=True, random_state=42,
         )
         if not X_tr_s.empty:
-            clf_s.fit(X_tr_s, y_tr_s)
+            try:
+                from sklearn.calibration import CalibratedClassifierCV
+                calib_s = CalibratedClassifierCV(clf_s, method="sigmoid", cv=3)
+                calib_s.fit(X_tr_s, y_tr_s, sample_weight=w_tr_s)
+                clf_s = calib_s
+            except Exception as e:
+                applog.debug("trainer", f"Specialist short calibration failed ({e}), falling back to raw")
+                clf_s.fit(X_tr_s, y_tr_s, sample_weight=w_tr_s)
 
         def _auc(clf, X_val, y_val) -> float:
             if y_val.nunique() < 2:
@@ -430,21 +476,24 @@ class _LegacyContinuousTrainer:
 
         auc_l = _auc(clf_l, X_va_l, y_va_l) if not X_va_l.empty and not X_tr_l.empty else 0.5
         auc_s = _auc(clf_s, X_va_s, y_va_s) if not X_va_s.empty and not X_tr_s.empty else 0.5
-        candidate_auc = max(auc_l, auc_s)
+        candidate_auc = max(auc_l, auc_s)  # combined AUC for logging / artifact compat
 
         # Build feature schema fingerprint
         feature_hash = hashlib.md5(",".join(FEATURE_COLUMNS).encode()).hexdigest()[:12]
         artifact_path = self.specialist_dir / f"{symbol}.pkl"
 
-        # Read incumbent AUC from existing artifact (if any)
+        # Per-side incumbent AUC — matches the inference gate in model.py score_action_detailed().
+        # Previously used a single combined AUC which created a mismatch: a specialist could be
+        # promoted because one side improved, then immediately rejected at inference for the other
+        # side because the side-specific AUC was below min_specialist_auc.
+        incumbent_auc_long = 0.0
+        incumbent_auc_short = 0.0
         incumbent_auc = 0.0
+        incumbent_dict = None
         if artifact_path.exists():
             try:
                 incumbent = joblib.load(artifact_path)
                 if isinstance(incumbent, dict):
-                    incumbent_auc = float(incumbent.get("auc", 0.0))
-                    # Check feature version compatibility: if incompatible, treat incumbent_auc as 0.0
-                    # to force promotion of the new, compatible candidate.
                     if incumbent.get("feature_version") != feature_hash:
                         applog.warning(
                             "trainer",
@@ -452,30 +501,56 @@ class _LegacyContinuousTrainer:
                             f"artifact version {incumbent.get('feature_version')} != current version {feature_hash} "
                             f"— ignoring incumbent AUC to force promotion of the new candidate.",
                         )
-                        incumbent_auc = 0.0
-                else:
-                    incumbent_auc = 0.0
+                        # incumbent_auc_long/short stay 0.0 → forces promotion
+                    else:
+                        incumbent_dict = incumbent
+                        incumbent_auc_long = float(incumbent.get("auc_long", incumbent.get("auc", 0.0)))
+                        incumbent_auc_short = float(incumbent.get("auc_short", incumbent.get("auc", 0.0)))
+                        incumbent_auc = max(incumbent_auc_long, incumbent_auc_short)
             except Exception:
-                incumbent_auc = 0.0
+                pass  # treat as no incumbent
 
-        # Promotion gate: candidate must beat incumbent by at least PROMOTE_THRESHOLD
-        should_promote = candidate_auc >= incumbent_auc + self.PROMOTE_THRESHOLD
+        # Minimum promotable AUC floor: never promote a specialist below this threshold (protect capital)
+        from app.config import get_settings
+        min_promotable_auc = get_settings().risk_config().min_specialist_auc
+
+        # Promote if EITHER side independently beats its own incumbent by the threshold AND meets the min_promotable_auc floor.
+        promote_long = (auc_l >= incumbent_auc_long + self.PROMOTE_THRESHOLD) and (auc_l >= min_promotable_auc)
+        promote_short = (auc_s >= incumbent_auc_short + self.PROMOTE_THRESHOLD) and (auc_s >= min_promotable_auc)
+        should_promote = promote_long or promote_short
         decision = "PROMOTED" if should_promote else "RETAINED_INCUMBENT"
 
         applog.info(
             "trainer",
-            f"  Specialist [{symbol}] FITTED | candidate_auc={candidate_auc:.4f} "
-            f"incumbent_auc={incumbent_auc:.4f} threshold=+{self.PROMOTE_THRESHOLD} "
-            f"decision={decision}",
+            f"  Specialist [{symbol}] FITTED | "
+            f"candidate_auc_long={auc_l:.4f} incumbent_auc_long={incumbent_auc_long:.4f} promote_long={promote_long} | "
+            f"candidate_auc_short={auc_s:.4f} incumbent_auc_short={incumbent_auc_short:.4f} promote_short={promote_short} | "
+            f"threshold=+{self.PROMOTE_THRESHOLD} min_floor={min_promotable_auc:.2f} decision={decision}",
         )
 
+        final_clf_l = clf_l
+        final_clf_s = clf_s
+        final_auc_l = auc_l
+        final_auc_s = auc_s
+
         if should_promote:
+            # Preserve the stronger incumbent side if only one side qualified for promotion
+            if incumbent_dict is not None and incumbent_dict.get("feature_version") == feature_hash:
+                if not promote_long and "long" in incumbent_dict and incumbent_auc_long > 0:
+                    final_clf_l = incumbent_dict["long"]
+                    final_auc_l = incumbent_auc_long
+                if not promote_short and "short" in incumbent_dict and incumbent_auc_short > 0:
+                    final_clf_s = incumbent_dict["short"]
+                    final_auc_s = incumbent_auc_short
+
+            final_candidate_auc = max(final_auc_l, final_auc_s)
+
             artifact = {
-                "long": clf_l,
-                "short": clf_s,
-                "auc": candidate_auc,
-                "auc_long": round(auc_l, 6),
-                "auc_short": round(auc_s, 6),
+                "long": final_clf_l,
+                "short": final_clf_s,
+                "auc": final_candidate_auc,
+                "auc_long": round(final_auc_l, 6),
+                "auc_short": round(final_auc_s, 6),
                 "trained_at": datetime.now(UTC).isoformat(),
                 "symbol": symbol,
                 "n_samples": len(X_l),
@@ -497,12 +572,16 @@ class _LegacyContinuousTrainer:
             sym_upper = symbol.upper()
             if sym_upper in self.model._specialists:
                 del self.model._specialists[sym_upper]
-            applog.info("trainer", f"  Specialist [{symbol}] PROMOTED and cache invalidated")
+            applog.info("trainer", f"  Specialist [{symbol}] PROMOTED and cache invalidated (long_auc={final_auc_l:.4f}, short_auc={final_auc_s:.4f})")
 
         return {
             "decision": decision,
             "candidate_auc": round(candidate_auc, 4),
+            "candidate_auc_long": round(auc_l, 4),
+            "candidate_auc_short": round(auc_s, 4),
             "incumbent_auc": round(incumbent_auc, 4),
+            "incumbent_auc_long": round(incumbent_auc_long, 4),
+            "incumbent_auc_short": round(incumbent_auc_short, 4),
             "n_samples": len(X_l),
         }
 

@@ -46,20 +46,16 @@ class RiskConfig(BaseModel):
     flatten_minutes_before_close: int = Field(5, ge=0, le=60)
     min_price: float = Field(5.0, ge=0.0)
     min_avg_dollar_volume: float = Field(100_000.0, ge=0.0)
-    ml_confidence_threshold: float = Field(0.52, ge=0.0, le=1.0)    # was 0.55 — aligned to new AUC tier
+    ml_confidence_threshold: float = Field(0.52, ge=0.0, le=1.0)
     regime_ml_thresholds: dict[str, float] = Field(
         default={
-            # F-02 FIX: Previous NORMAL=0.38, CAUTION=0.42 were below random chance (0.50),
-            # producing negative EV at realistic 1.5:1 R/R (EV = 0.38*1.5 - 0.62*1.0 = -0.05R).
-            # All thresholds now require the model to show positive expected value before
-            # a signal is accepted. Thresholds tighten under stress/panic regimes.
             "NORMAL": 0.50,
             "CAUTION": 0.52,
             "STRESS": 0.55,
             "PANIC": 0.62,
         }
     )
-    min_specialist_auc: float = Field(0.50, ge=0.50, le=1.0)        # was 0.52
+    min_specialist_auc: float = Field(0.53, ge=0.50, le=1.0)
     min_stop_pct: float = Field(0.5, ge=0.0, le=5.0)
     score_threshold_trend: float = Field(50.0, ge=0.0, le=100.0)    # was 55.0
     score_threshold_range: float = Field(65.0, ge=0.0, le=100.0)    # was 70.0
@@ -90,6 +86,7 @@ class RiskConfig(BaseModel):
             {"policy_id": "exit_hybrid_breakeven_atr", "breakeven_r_trigger": 0.30, "trail_r_trigger": 0.75, "tight_trail_r_trigger": 1.50},
         ]
     )
+    adaptive_model_weight: float = Field(0.30, ge=0.0, le=1.0)
 
 
 class Settings(BaseSettings):
@@ -121,7 +118,7 @@ class Settings(BaseSettings):
     flatten_minutes_before_close: int = Field(5, validation_alias="FLATTEN_MINUTES_BEFORE_CLOSE")
     min_price: float = Field(5.0, validation_alias="MIN_PRICE")
     min_avg_dollar_volume: float = Field(100_000.0, validation_alias="MIN_AVG_DOLLAR_VOLUME")
-    min_specialist_auc: float = Field(0.50, validation_alias="MIN_SPECIALIST_AUC")           # was 0.53
+    min_specialist_auc: float = Field(0.53, validation_alias="MIN_SPECIALIST_AUC")
     min_stop_pct: float = Field(0.5, validation_alias="MIN_STOP_PCT")
     kelly_fraction_cap: float = Field(0.15, validation_alias="KELLY_FRACTION_CAP")
     max_positions_per_sector: int = Field(2, validation_alias="MAX_POSITIONS_PER_SECTOR")
