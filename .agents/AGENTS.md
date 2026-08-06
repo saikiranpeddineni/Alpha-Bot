@@ -4,9 +4,9 @@
 
 ## Core Branching Rules
 
-1. **Active Branch Naming**: All work uses branches starting from `Alphadesk_01` (incrementing only when explicitly instructed).
-2. **Persistent Branching Across Days**: Continue on the same branch (e.g. `Alphadesk_01`) across consecutive days.
-3. **NEVER create or switch to a new branch** unless I explicitly instruct you to do so.
+1. **Active Branch Naming**: All work uses branches starting from `Alphadesk_001`, incrementing sequentially (e.g. `Alphadesk_001`, `Alphadesk_002`, `Alphadesk_003`) ONLY when explicitly instructed.
+2. **Persistent Branching Across Days**: Continue on the same active branch (e.g. `Alphadesk_001`) across consecutive days.
+3. **NEVER create or switch to a new branch** unless I explicitly instruct you to do so (at which point you will increment to the next sequential number, e.g. `Alphadesk_002`).
 4. **NEVER commit directly to `master` or `main`.**
 5. **NEVER merge anything into `master`** without my explicit instruction.
 
@@ -15,7 +15,7 @@
 ## Daily & Continuous Workflow
 
 For every coding session and change:
-1. Work exclusively on the active branch (e.g. `Alphadesk_01`).
+1. Work exclusively on the active branch (e.g. `Alphadesk_001`).
 2. Add proper code documentation/comments for any modifications made.
 3. Commit the changes to the active branch with clear, descriptive commit messages.
 4. Push the commit to the git remote branch.
