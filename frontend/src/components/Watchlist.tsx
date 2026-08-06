@@ -85,8 +85,16 @@ export function Watchlist() {
               <span className="sym">
                 {sym}{" "}
                 {!isCore && (
-                  <span className="scanned-badge" title="Dynamically selected by AI Market Scanner">
-                    ML
+                  <span 
+                    className={`scanned-badge ${q && q.change_pct < 0 ? 'loser' : 'gainer'}`} 
+                    title="Dynamically selected by AI Market Scanner"
+                    style={{ 
+                      color: q && q.change_pct < 0 ? '#ff4d4f' : '#52c41a',
+                      borderColor: q && q.change_pct < 0 ? '#ff4d4f33' : '#52c41a33',
+                      backgroundColor: q && q.change_pct < 0 ? '#ff4d4f11' : '#52c41a11'
+                    }}
+                  >
+                    {q && q.change_pct < 0 ? "LOSER" : "GAINER"}
                   </span>
                 )}
                 {q?.regime && (

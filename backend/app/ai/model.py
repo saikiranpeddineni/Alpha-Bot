@@ -246,31 +246,37 @@ class _LegacySignalModel:
         has been trained, it will be used instead of the global adaptive model.
         """
         if self.is_trained:
+            from app.config import get_settings
+            w_adaptive = get_settings().risk_config().adaptive_model_weight
+            w_global = 1.0 - w_adaptive
             x = pd.DataFrame([features[FEATURE_COLUMNS].to_numpy(dtype=float)], columns=FEATURE_COLUMNS)
             p_global = float(predict_proba_safe(self._model_long, x)[0, 1])
             # Prefer regime-specific adaptive > global adaptive
             reg_model = self._regime_adaptive_long.get(regime_key or "")
             if reg_model is not None:
                 p_adaptive = float(predict_proba_safe(reg_model, x)[0, 1])
-                return 0.70 * p_global + 0.30 * p_adaptive
+                return w_global * p_global + w_adaptive * p_adaptive
             if self._adaptive_long is not None:
                 p_adaptive = float(predict_proba_safe(self._adaptive_long, x)[0, 1])
-                return 0.70 * p_global + 0.30 * p_adaptive
+                return w_global * p_global + w_adaptive * p_adaptive
             return p_global
         return self._heuristic_p_up(features)
 
     def p_down(self, features: pd.Series, regime_key: str | None = None) -> float:
         """Probability of a favorable downward move for the latest bar."""
         if self._model_short is not None:
+            from app.config import get_settings
+            w_adaptive = get_settings().risk_config().adaptive_model_weight
+            w_global = 1.0 - w_adaptive
             x = pd.DataFrame([features[FEATURE_COLUMNS].to_numpy(dtype=float)], columns=FEATURE_COLUMNS)
             p_global = float(predict_proba_safe(self._model_short, x)[0, 1])
             reg_model = self._regime_adaptive_short.get(regime_key or "")
             if reg_model is not None:
                 p_adaptive = float(predict_proba_safe(reg_model, x)[0, 1])
-                return 0.70 * p_global + 0.30 * p_adaptive
+                return w_global * p_global + w_adaptive * p_adaptive
             if self._adaptive_short is not None:
                 p_adaptive = float(predict_proba_safe(self._adaptive_short, x)[0, 1])
-                return 0.70 * p_global + 0.30 * p_adaptive
+                return w_global * p_global + w_adaptive * p_adaptive
             return p_global
         # Fallback to complement of p_up for legacy models
         return 1.0 - self.p_up(features)
@@ -539,18 +545,20 @@ class _LegacySignalModel:
             else:
                 new_short = HistGradientBoostingClassifier(max_iter=100, learning_rate=0.06, max_depth=4, early_stopping=True, random_state=42)
 
-        xs_long, ys_long = [], []
-        xs_short, ys_short = [], []
+        xs_long, ys_long, ws_long = [], [], []
+        xs_short, ys_short, ws_short = [], [], []
 
         for symbol, df in frames.items():
-            X_l, y_l = build_training_set(df, horizon_bars, threshold_pct, side="long")
-            X_s, y_s = build_training_set(df, horizon_bars, threshold_pct, side="short")
+            X_l, y_l, w_l = build_training_set(df, horizon_bars, threshold_pct, side="long")
+            X_s, y_s, w_s = build_training_set(df, horizon_bars, threshold_pct, side="short")
             if len(X_l) > 10:
                 xs_long.append(X_l)
                 ys_long.append(y_l)
+                ws_long.append(w_l)
             if len(X_s) > 10:
                 xs_short.append(X_s)
                 ys_short.append(y_s)
+                ws_short.append(w_s)
 
         if not xs_long or not xs_short:
             applog.warning("ai.model", "Insufficient daily data for adaptive training. Skipping.")
@@ -558,11 +566,13 @@ class _LegacySignalModel:
 
         X_l = pd.concat(xs_long)
         y_l = pd.concat(ys_long)
+        w_l = pd.concat(ws_long)
         X_s = pd.concat(xs_short)
         y_s = pd.concat(ys_short)
+        w_s = pd.concat(ws_short)
 
-        new_long.fit(X_l, y_l)
-        new_short.fit(X_s, y_s)
+        new_long.fit(X_l, y_l, sample_weight=w_l)
+        new_short.fit(X_s, y_s, sample_weight=w_s)
 
         if save_to_disk:
             try:
@@ -650,7 +660,7 @@ class _LegacySignalModel:
         def _holdout_auc(clf, all_frames, side):
             xs, ys = [], []
             for df in all_frames.values():
-                X, y = build_training_set(df, horizon_bars, threshold_pct, side)
+                X, y, _w = build_training_set(df, horizon_bars, threshold_pct, side)
                 if len(X) > 50:
                     xs.append(X)
                     ys.append(y)

@@ -42,39 +42,42 @@ async def run_pipeline_iteration(dataset: list[dict]) -> list[dict]:
     """Execute single pass of position evaluation over dataset."""
     config = PISConfig(history_max_len=100)
     service = PISService(config=config)
-    adapter = PISEngineAdapter(service=service, config=config)
+    from unittest.mock import patch
+    
+    with patch("app.db.database.Database.active", return_value=None):
+        adapter = PISEngineAdapter(service=service, config=config)
 
-    results = []
-    entry_price = dataset[0]["close"]
-    initial_stop = entry_price - 4.0
+        results = []
+        entry_price = dataset[0]["close"]
+        initial_stop = entry_price - 4.0
 
-    pos = Position(
-        symbol="REGRESS_TEST",
-        qty=100,
-        avg_entry_price=entry_price,
-        market_price=dataset[0]["close"],
-    )
-
-    for i in range(1, len(dataset)):
-        df = pd.DataFrame(dataset[: i + 1])
-        _, decision = await adapter.evaluate_position_exit(
-            position=pos,
-            bar_df=df,
-            initial_stop=initial_stop,
+        pos = Position(
+            symbol="REGRESS_TEST",
+            qty=100,
+            avg_entry_price=entry_price,
+            market_price=dataset[0]["close"],
         )
 
-        results.append({
-            "step": i,
-            "action": decision.action.value,
-            "target_stop": decision.target_stop_loss,
-            "health_overall": round(decision.health.overall, 6),
-            "thesis_drift": round(decision.thesis.drift_score, 6),
-            "runner_score": round(decision.runner_score, 6),
-            "lifecycle": decision.lifecycle_state.value,
-            "reasons": [r.value for r in decision.reason_codes],
-        })
+        for i in range(1, len(dataset)):
+            df = pd.DataFrame(dataset[: i + 1])
+            _, decision = await adapter.evaluate_position_exit(
+                position=pos,
+                bar_df=df,
+                initial_stop=initial_stop,
+            )
 
-    return results
+            results.append({
+                "step": i,
+                "action": decision.action.value,
+                "target_stop": decision.target_stop_loss,
+                "health_overall": round(decision.health.overall, 6),
+                "thesis_drift": round(decision.thesis.drift_score, 6),
+                "runner_score": round(decision.runner_score, 6),
+                "lifecycle": decision.lifecycle_state.value,
+                "reasons": [r.value for r in decision.reason_codes],
+            })
+
+        return results
 
 
 @pytest.mark.asyncio

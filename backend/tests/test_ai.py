@@ -30,7 +30,7 @@ def test_latest_feature_row_none_during_warmup():
 
 def test_training_set_labels_are_forward_looking():
     df = make_bars(300, drift=0.001, vol=0.0005, seed=5)  # strong steady uptrend
-    X, y = build_training_set(df, horizon_bars=15, threshold_pct=0.10)
+    X, y, _w = build_training_set(df, horizon_bars=15, threshold_pct=0.10)
     assert len(X) == len(y)
     assert len(X) > 200
     assert y.mean() > 0.5  # uptrend -> mostly positive labels

@@ -63,10 +63,10 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     er20 = out.get("er20", pd.Series(0, index=out.index)).fillna(0)
     ema20 = out.get("ema20", pd.Series(np.nan, index=out.index))
     slope = (ema20 / ema20.shift(10) - 1.0) * 100.0
-    vol_pct = out["atr_pct"].rolling(390, min_periods=1).rank(pct=True)
+    vol_p85 = out["atr_pct"].rolling(390, min_periods=1).quantile(0.85)
 
     regime_val = pd.Series(0.0, index=out.index)
-    mask_volatile = vol_pct >= 0.85
+    mask_volatile = out["atr_pct"] >= vol_p85
     mask_trend_up = (~mask_volatile) & (er20 >= 0.30) & (slope > 0)
     mask_trend_down = (~mask_volatile) & (er20 >= 0.30) & (slope <= 0)
 
@@ -95,19 +95,26 @@ def build_training_set(
     horizon_bars: int = 15,
     threshold_pct: float = 0.10,
     side: str = "long",
-) -> tuple[pd.DataFrame, pd.Series]:
+) -> tuple[pd.DataFrame, pd.Series, pd.Series]:
     """Supervised dataset: features at bar t, label = forward return over the
-    next `horizon_bars` exceeding `threshold_pct` (cost-adjusted edge) for long,
-    or falling below `-threshold_pct` for short."""
+    next `horizon_bars` exceeding dynamic ATR-scaled threshold.
+    
+    Returns:
+        X (DataFrame): Features
+        y (Series): Binary label
+        w (Series): Sample weights scaled by profit magnitude to maximize recall
+    """
     feats = compute_features(df)
     if feats.empty:
-        return pd.DataFrame(columns=FEATURE_COLUMNS), pd.Series(dtype=int)
+        return pd.DataFrame(columns=FEATURE_COLUMNS), pd.Series(dtype=int), pd.Series(dtype=float)
     fwd_ret = feats["close"].shift(-horizon_bars) / feats["close"] - 1.0
 
+    # Dynamic Volatility Threshold: 50% of the daily ATR (approx)
+    # Using the precomputed `atr_pct` which is ATR14 / Close * 100.
+    # We clip it so it never drops below 0.05% (to avoid micro-noise) and never exceeds 0.50% (to avoid missing valid trades in extreme chop).
+    dyn_threshold = (feats["atr_pct"] * 0.5).clip(lower=0.05, upper=0.50)
+
     # Purge forward returns that cross a calendar day.
-    # F-05 FIX: Both sides explicitly cast to numpy arrays to avoid silent
-    # pandas/numpy broadcast misalignment when comparing DatetimeIndex.date
-    # (numpy array) against a shifted dt.date Series (pandas Series).
     et_dates = np.array(feats.index.tz_convert(ET).date)
     et_series = pd.Series(feats.index.tz_convert(ET), index=feats.index)
     shifted_et_dates = np.array(et_series.shift(-horizon_bars).dt.date)
@@ -115,13 +122,25 @@ def build_training_set(
     fwd_ret.loc[~mask_same_day] = np.nan
 
     if side == "short":
-        label = (fwd_ret * 100.0 < -threshold_pct).astype(int)
+        label = (fwd_ret * 100.0 < -dyn_threshold).astype(int)
     else:
-        label = (fwd_ret * 100.0 > threshold_pct).astype(int)
+        label = (fwd_ret * 100.0 > dyn_threshold).astype(int)
+
+    # Asymmetric Profit Weights: heavily penalize false negatives for highly profitable trades
+    # Base weight is 1.0. For every 0.10% of profit, we add weight.
+    # e.g., a 1.0% profit trade gets a weight of ~11.0, forcing the tree to capture it.
+    fwd_ret_pct = fwd_ret * 100.0
+    if side == "short":
+        profit_magnitude = np.clip(-fwd_ret_pct, 0.0, 5.0)
+    else:
+        profit_magnitude = np.clip(fwd_ret_pct, 0.0, 5.0)
+    
+    # Give winning trades exponential weight so big winners are NEVER missed
+    weight = 1.0 + (profit_magnitude * 10.0)
 
     X = feats[FEATURE_COLUMNS]
-    mask = ~(X.isna().any(axis=1) | fwd_ret.isna())
-    return X[mask], label[mask]
+    mask = ~(X.isna().any(axis=1) | fwd_ret.isna() | dyn_threshold.isna())
+    return X[mask], label[mask], weight[mask]
 
 
 def build_mae_mfe_dataset(
@@ -149,22 +168,27 @@ def build_mae_mfe_dataset(
         empty = pd.DataFrame(columns=FEATURE_COLUMNS)
         return empty, pd.Series(dtype=float), pd.Series(dtype=float)
 
-    close = feats["close"].to_numpy()
-    n = len(close)
-    mae = np.full(n, np.nan)
-    mfe = np.full(n, np.nan)
-    et_dates = feats.index.tz_convert(ET).date
+    close_s = feats["close"]
+    
+    # Vectorized forward window
+    indexer = pd.api.indexers.FixedForwardWindowIndexer(window_size=horizon_bars)
+    shifted_close = close_s.shift(-1)
+    window_min = shifted_close.rolling(indexer).min()
+    window_max = shifted_close.rolling(indexer).max()
 
-    for i in range(n - horizon_bars):
-        entry = close[i]
-        if entry <= 0 or et_dates[i] != et_dates[i + horizon_bars]:
-            continue
-        window = close[i + 1 : i + 1 + horizon_bars]
-        mae[i] = float(max(0.0, (entry - window.min()) / entry * 100.0))
-        mfe[i] = float(max(0.0, (window.max() - entry) / entry * 100.0))
+    # Temporal purity check
+    et_series = pd.Series(feats.index.tz_convert(ET), index=feats.index)
+    et_dates = et_series.dt.date
+    shifted_et_dates = et_series.shift(-horizon_bars).dt.date
+
+    mask_valid = (close_s > 0) & (et_dates == shifted_et_dates)
+    
+    mae_pct = ((close_s - window_min) / close_s * 100.0).clip(lower=0.0)
+    mfe_pct = ((window_max - close_s) / close_s * 100.0).clip(lower=0.0)
+
+    mae_pct.loc[~mask_valid] = np.nan
+    mfe_pct.loc[~mask_valid] = np.nan
 
     X = feats[FEATURE_COLUMNS]
-    mae_s = pd.Series(mae, index=feats.index)
-    mfe_s = pd.Series(mfe, index=feats.index)
-    mask = ~(X.isna().any(axis=1) | mae_s.isna() | mfe_s.isna())
-    return X[mask], mae_s[mask], mfe_s[mask]
+    mask = ~(X.isna().any(axis=1) | mae_pct.isna() | mfe_pct.isna())
+    return X[mask], mae_pct[mask], mfe_pct[mask]

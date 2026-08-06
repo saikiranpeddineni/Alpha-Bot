@@ -196,13 +196,26 @@ class TopMoversScanner:
 
         now = datetime.now(UTC)
         start = now - timedelta(days=5)
+        
+        res_1d = {}
+        if hasattr(self.data, "multi_history"):
+            try:
+                batched = await self.data.multi_history(CANDIDATE_POOL, "1Day", start, now, prefer_cache=False)
+                if isinstance(batched, dict):
+                    res_1d = batched
+            except Exception as exc:
+                log.warning(f"[TopMovers] multi_history batch failed ({exc})")
+
         semaphore = asyncio.Semaphore(_FALLBACK_CONCURRENCY)
         mover_entries: list[MoverEntry] = []
 
         async def _check(symbol: str) -> MoverEntry | None:
             async with semaphore:
                 try:
-                    df = await self.data.history(symbol, "1Day", start, now, prefer_cache=False)
+                    if symbol in res_1d:
+                        df = res_1d[symbol]
+                    else:
+                        df = await self.data.history(symbol, "1Day", start, now, prefer_cache=False)
                     if df is None or len(df) < 2:
                         return None
                     prior_close = float(df["close"].iloc[-2])

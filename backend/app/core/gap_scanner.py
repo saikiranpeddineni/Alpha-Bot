@@ -40,7 +40,7 @@ log = logging.getLogger(__name__)
 _GAP_MIN_DOLLAR_VOLUME = 5_000_000.0   # $5M pre-market DV
 _GAP_MIN_PCT = 2.0                     # 2% gap from prior close
 _GAP_MAX_RESULTS = 30                  # top 30 movers returned
-_PREMARKET_FETCH_CONCURRENCY = 10      # was 15 — reduced to share Alpaca rate limit budget
+_PREMARKET_FETCH_CONCURRENCY = 5      # was 10 — reduced to share Alpaca rate limit budget
 
 
 class PreMarketGapScanner:
@@ -147,50 +147,48 @@ class PreMarketGapScanner:
         """Use Alpaca's snapshot API to get pre-market prices and yesterday's close."""
         from app.core.scanner import CANDIDATE_POOL
 
-        semaphore = asyncio.Semaphore(_PREMARKET_FETCH_CONCURRENCY)
-        movers: list[tuple[str, float]] = []
-
-        async def _check(symbol: str) -> tuple[str, float] | None:
-            async with semaphore:
-                try:
-                    snaps = await provider.get_snapshots([symbol])
-                    snap = snaps.get(symbol)
-                    if snap is None:
-                        return None
-                    # Alpaca snapshot keys: prevDailyBar.c, minuteBar.c
-                    prev_close = getattr(snap, "prev_daily_bar", None)
-                    daily_bar = getattr(snap, "daily_bar", None)
-                    minute_bar = getattr(snap, "minute_bar", None)
-                    if prev_close is None or daily_bar is None:
-                        return None
-                    prior_close = float(getattr(prev_close, "c", 0.0) or 0.0)
-                    today_open = float(getattr(daily_bar, "o", 0.0) or 0.0)
-                    current_price = float(
-                        getattr(minute_bar, "c", today_open) if minute_bar else today_open
-                    )
-                    if prior_close <= 0 or today_open <= 0:
-                        return None
-                    if current_price < self.min_price:
-                        return None
-                    gap_pct = abs(today_open / prior_close - 1.0) * 100.0
-                    if gap_pct < _GAP_MIN_PCT:
-                        return None
-                    # Rough dollar volume estimate
-                    vol = float(getattr(daily_bar, "v", 0.0) or 0.0)
-                    dollar_vol = vol * current_price
-                    if dollar_vol < _GAP_MIN_DOLLAR_VOLUME:
-                        return None
-                    return symbol, gap_pct
-                except Exception:
-                    return None
-
         # Include already-known names plus a broad list of frequent movers
         targets = set(CANDIDATE_POOL)
-        # Add common gap/mover tickers not in the static pool
         targets.update(_FREQUENT_MOVERS)
+        target_list = sorted(targets)
+        
+        try:
+            snaps = await provider.get_snapshots(target_list)
+        except Exception as exc:
+            log.warning(f"[GapScanner] get_snapshots batch failed ({exc})")
+            return []
+            
+        for symbol, snap in snaps.items():
+            try:
+                if snap is None:
+                    continue
+                # Alpaca snapshot keys: prevDailyBar.c, minuteBar.c
+                prev_close = getattr(snap, "prev_daily_bar", None)
+                daily_bar = getattr(snap, "daily_bar", None)
+                minute_bar = getattr(snap, "minute_bar", None)
+                if prev_close is None or daily_bar is None:
+                    continue
+                prior_close = float(getattr(prev_close, "c", 0.0) or 0.0)
+                today_open = float(getattr(daily_bar, "o", 0.0) or 0.0)
+                current_price = float(
+                    getattr(minute_bar, "c", today_open) if minute_bar else today_open
+                )
+                if prior_close <= 0 or today_open <= 0:
+                    continue
+                if current_price < self.min_price:
+                    continue
+                gap_pct = abs(today_open / prior_close - 1.0) * 100.0
+                if gap_pct < _GAP_MIN_PCT:
+                    continue
+                # Rough dollar volume estimate
+                vol = float(getattr(daily_bar, "v", 0.0) or 0.0)
+                dollar_vol = vol * current_price
+                if dollar_vol < _GAP_MIN_DOLLAR_VOLUME:
+                    continue
+                movers.append((symbol, gap_pct))
+            except Exception:
+                continue
 
-        results = await asyncio.gather(*[_check(sym) for sym in sorted(targets)])
-        movers = [r for r in results if r is not None]
         movers.sort(key=lambda x: x[1], reverse=True)
         return [sym for sym, _ in movers[:_GAP_MAX_RESULTS]]
 
@@ -200,13 +198,26 @@ class PreMarketGapScanner:
 
         now = datetime.now(UTC)
         start = now - timedelta(days=5)
+        
+        res_1d = {}
+        if hasattr(self.data, "multi_history"):
+            try:
+                batched = await self.data.multi_history(CANDIDATE_POOL, "1Day", start, now, prefer_cache=False)
+                if isinstance(batched, dict):
+                    res_1d = batched
+            except Exception as exc:
+                log.warning(f"[GapScanner] multi_history batch failed ({exc})")
+
         semaphore = asyncio.Semaphore(_PREMARKET_FETCH_CONCURRENCY)
         movers: list[tuple[str, float]] = []
 
         async def _check(symbol: str) -> tuple[str, float] | None:
             async with semaphore:
                 try:
-                    df = await self.data.history(symbol, "1Day", start, now, prefer_cache=False)
+                    if symbol in res_1d:
+                        df = res_1d[symbol]
+                    else:
+                        df = await self.data.history(symbol, "1Day", start, now, prefer_cache=False)
                     if df is None or len(df) < 2:
                         return None
                     prior_close = float(df["close"].iloc[-2])

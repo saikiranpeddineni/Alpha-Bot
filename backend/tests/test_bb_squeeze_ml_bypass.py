@@ -52,8 +52,8 @@ def dummy_features() -> pd.Series:
     return pd.Series({col: 1.0 for col in FEATURE_COLUMNS})
 
 
-def test_bb_squeeze_short_base_fallback_bypass_1430():
-    """Test 1: BB Squeeze SHORT at 14:30 ET with BASE_FALLBACK ML < 0.52 -> Advisory bypass, NOT rejected by ml_gate."""
+def test_bb_squeeze_short_base_fallback_no_bypass_1430():
+    """Test 1: BB Squeeze SHORT at 14:30 ET with BASE_FALLBACK ML < 0.52 -> REJECTED by ml_gate (Bypass removed)."""
     mock_model = DummySignalModel(prob=0.35, model_source="BASE", specialist_status="NO_ARTIFACT")
     pipeline = SignalPipeline(model=mock_model, ml_threshold=0.52)
     
@@ -82,7 +82,7 @@ def test_bb_squeeze_short_base_fallback_bypass_1430():
     
     assert getattr(sig, "ml_gate_decision", None) == "REJECT"
     ml_rejections = [r for s, r in rejected if "ML confidence" in r]
-    assert len(ml_rejections) == 0
+    assert len(ml_rejections) == 1
 
 
 def test_bb_squeeze_long_not_bypassed_1430():

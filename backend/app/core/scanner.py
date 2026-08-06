@@ -29,6 +29,7 @@ import pandas as pd
 from app.core.applog import applog
 from app.core.scanner_discovery_input import resolve_stage1_symbols
 from app.core.universe_discovery import DiscoveryCoordinator
+from app.core.gap_scanner import PreMarketGapScanner
 from app.ai.features import FEATURE_COLUMNS, build_training_set
 from app.data.manager import DataManager
 from app.risk.market_regime import (
@@ -114,8 +115,8 @@ DEFENSIVE_WATCHLIST: list[str] = ["SPY", "QQQ", "DIA", "IWM", "GLD"]
 LARGE_CAP_ANCHORS: list[str] = ["NVDA", "TSLA", "AMD", "META", "AMZN", "AAPL", "MSFT", "PLTR", "SMCI", "COIN"]
 
 # Concurrency limits
-_PREFILTER_CONCURRENCY = 20
-_ML_CONCURRENCY = 8
+_PREFILTER_CONCURRENCY = 5
+_ML_CONCURRENCY = 4
 
 # Selection parameters
 _TECH_SCORE_TOP_N = 25
@@ -139,6 +140,9 @@ class MarketScanner:
             data_manager=data_manager,
             universe_symbols=list(CANDIDATE_POOL),
         )
+        from app.config import get_settings
+        cfg = self.risk_config or get_settings().risk_config()
+        self._gap_scanner = PreMarketGapScanner(data_manager=data_manager, min_price=cfg.min_price)
 
     async def _stage1_symbols(self, as_of: datetime | None = None) -> list[str]:
         """Resolve bounded Stage-1 input without current-data replay leakage."""
@@ -161,7 +165,19 @@ class MarketScanner:
             as_of=as_of, static_symbols=CANDIDATE_POOL, fallback_limit=50,
             discovery_supported=discovery_supported, acquire_discovery=acquire_discovery,
         )
-        return list(symbols)
+        symbols_list = list(symbols)
+
+        # Inject gap movers and intraday top gainers/losers only in live/production mode
+        if as_of is None:
+            try:
+                dynamic_movers = await self._gap_scanner.get_gap_movers()
+                if dynamic_movers:
+                    applog.info("scanner", f"[Discovery] Injected {len(dynamic_movers)} dynamic movers into Stage 1 pool.")
+                    symbols_list.extend(dynamic_movers)
+            except Exception as exc:
+                applog.error("scanner", f"[Discovery] Failed to fetch dynamic movers: {exc}")
+
+        return sorted(list(set(symbols_list)))
 
     # ------------------------------------------------------------------
     # Global safety gate — multi-signal, fail-closed on UNKNOWN
@@ -210,8 +226,20 @@ class MarketScanner:
         applog.info("scanner", f"[Stage 1] Pre-filtering {len(all_symbols)} symbols (parallel)... end={end.isoformat()} tzinfo={end.tzinfo}")
 
         diag_records = {}
-
         history_fn = self.data.history
+        
+        multi_1d: dict[str, pd.DataFrame] = {}
+        multi_1m: dict[str, pd.DataFrame] = {}
+        if hasattr(self.data, "multi_history"):
+            try:
+                res_1d = await self.data.multi_history(all_symbols, "1Day", start, end, prefer_cache=True)
+                if isinstance(res_1d, dict):
+                    multi_1d = res_1d
+                res_1m = await self.data.multi_history(all_symbols, "1Min", end - timedelta(minutes=15), end, prefer_cache=True)
+                if isinstance(res_1m, dict):
+                    multi_1m = res_1m
+            except Exception as exc:
+                applog.error("scanner", f"Failed multi_history batch fetch: {exc}")
 
         async def _check(symbol: str) -> dict | None:
             symbol = symbol.upper()
@@ -238,9 +266,13 @@ class MarketScanner:
 
             async with semaphore:
                 try:
-                    df = await history_fn(symbol, "1Day", start, end, prefer_cache=True)
-                    record["bars_raw"] = len(df)
-                    record["bars_asof"] = len(df)
+                    if symbol in multi_1d:
+                        df = multi_1d[symbol]
+                    else:
+                        df = await history_fn(symbol, "1Day", start, end, prefer_cache=True)
+                    
+                    record["bars_raw"] = len(df) if df is not None else 0
+                    record["bars_asof"] = len(df) if df is not None else 0
 
                     record["filter_history"] = {
                         "actual": len(df),
@@ -286,7 +318,10 @@ class MarketScanner:
                     price = float(df["close"].iloc[-1])
                     intraday_df = None
                     try:
-                        intraday_df = await history_fn(symbol, "1Min", end - timedelta(minutes=15), end, prefer_cache=True)
+                        if symbol in multi_1m:
+                            intraday_df = multi_1m[symbol]
+                        else:
+                            intraday_df = await history_fn(symbol, "1Min", end - timedelta(minutes=15), end, prefer_cache=True)
                         if intraday_df is not None and not intraday_df.empty:
                             price = float(intraday_df["close"].iloc[-1])
                     except Exception:
@@ -436,7 +471,7 @@ class MarketScanner:
                         candidate["auc"] = 0.0
                         return candidate
 
-                    X, y = build_training_set(df)
+                    X, y, _ = build_training_set(df)
                     if len(X) < 100 or y.nunique() < 2:
                         candidate["auc"] = 0.0
                         return candidate

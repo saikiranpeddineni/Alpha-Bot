@@ -1353,12 +1353,19 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                 continue
             session = df.index.tz_convert(ET).date
             today = session == session[-1]
-            day_open = float(df.loc[today, "open"].iloc[0])
+            
             price = float(df["close"].iloc[-1])
+            past_sessions = df.loc[~today]
+            
+            if not past_sessions.empty:
+                prev_close = float(past_sessions["close"].iloc[-1])
+            else:
+                prev_close = float(df.loc[today, "open"].iloc[0])
+                
             out.append({
                 "symbol": symbol,
                 "price": round(price, 2),
-                "change_pct": round((price / day_open - 1.0) * 100.0, 2) if day_open else 0.0,
+                "change_pct": round((price / prev_close - 1.0) * 100.0, 2) if prev_close else 0.0,
                 "volume": float(df.loc[today, "volume"].sum()),
                 "regime": self._regimes.get(symbol),
             })

@@ -254,6 +254,7 @@ def _make_classifier(name: str, n_estimators: int = 300):
                 subsample=0.8,
                 colsample_bytree=0.8,
                 reg_lambda=1.0,
+                class_weight="balanced",
                 random_state=42,
                 verbose=-1,
             )
@@ -271,6 +272,7 @@ def _make_classifier(name: str, n_estimators: int = 300):
                 reg_lambda=1.0,
                 use_label_encoder=False,
                 eval_metric="logloss",
+                scale_pos_weight=1.5,
                 random_state=42,
                 verbosity=0,
             )
@@ -404,12 +406,13 @@ class WalkForwardValidator:
         metrics per model.
         """
         # Pool all frames into a single sorted dataset
-        xs, ys = [], []
+        xs, ys, ws = [], [], []
         for df in frames.values():
-            X, y = build_training_set(df, self.horizon_bars, self.threshold_pct, side)
+            X, y, w = build_training_set(df, self.horizon_bars, self.threshold_pct, side)
             if len(X) > 20:
                 xs.append(X)
                 ys.append(y)
+                ws.append(w)
 
         if not xs:
             applog.warning("wfv", "Not enough data for walk-forward validation")
@@ -423,10 +426,12 @@ class WalkForwardValidator:
 
         X_all = pd.concat(xs).sort_index()
         y_all = pd.concat(ys).sort_index()
+        w_all = pd.concat(ws).sort_index()
 
         # Build a combined frame for day-splitting
         combined = X_all.copy()
         combined["__label__"] = y_all
+        combined["__weight__"] = w_all
 
         windows = self._split_by_days(combined)
         n_windows = len(windows)
@@ -440,7 +445,7 @@ class WalkForwardValidator:
             clf = _make_classifier("lgbm")
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                clf.fit(X_all, y_all)
+                clf.fit(X_all, y_all, sample_weight=w_all)
             return WalkForwardResult(
                 best_classifier=clf,
                 best_name="lgbm",
@@ -453,9 +458,10 @@ class WalkForwardValidator:
         model_window_metrics: dict[str, list[dict]] = {n: [] for n in _CLASSIFIERS}
 
         for train_df, val_df in windows:
-            X_tr = train_df.drop(columns=["__label__"])
+            X_tr = train_df.drop(columns=["__label__", "__weight__"])
             y_tr = train_df["__label__"]
-            X_va = val_df.drop(columns=["__label__"])
+            w_tr = train_df["__weight__"]
+            X_va = val_df.drop(columns=["__label__", "__weight__"])
             y_va = val_df["__label__"]
 
             if y_tr.nunique() < 2 or y_va.nunique() < 2:
@@ -466,7 +472,7 @@ class WalkForwardValidator:
                     clf = _make_classifier(name)
                     with warnings.catch_warnings():
                         warnings.simplefilter("ignore")
-                        clf.fit(X_tr, y_tr)
+                        clf.fit(X_tr, y_tr, sample_weight=w_tr)
                     proba = clf.predict_proba(X_va)[:, 1]
                     m = _trading_metrics(y_va.to_numpy(), proba)
                     model_window_metrics[name].append(m)
@@ -505,11 +511,28 @@ class WalkForwardValidator:
             f"windows={n_windows}",
         )
 
-        # Retrain best model on the FULL dataset
-        best_clf = _make_classifier(best_name)
+        # Retrain best model on all data up to the last training window boundary.
+        # This prevents look-ahead bias where the final model is trained on the
+        # exact validation data that was just used to select it.
+        if windows:
+            last_train_df = windows[-1][0]
+            last_train_end = last_train_df.index.max()
+            train_mask = X_all.index <= last_train_end
+            X_final = X_all[train_mask]
+            y_final = y_all[train_mask]
+            w_final = w_all[train_mask]
+        else:
+            X_final = X_all
+            y_final = y_all
+            w_final = w_all
+
+        from sklearn.calibration import CalibratedClassifierCV
+        base_clf = _make_classifier(best_name)
+        # Use cv=3 isotonic regression to calibrate probabilities to true win-rates
+        best_clf = CalibratedClassifierCV(estimator=base_clf, method="isotonic", cv=3)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            best_clf.fit(X_all, y_all)
+            best_clf.fit(X_final, y_final, sample_weight=w_final)
 
         return WalkForwardResult(
             best_classifier=best_clf,
@@ -895,7 +918,7 @@ class MetaLabelEngine:
                             f"[meta_label] Bypass {strategy} ({side}) due to temporal leakage: "
                             f"model trained_at {trained_at_str} is after backtest start {self.backtest_start_time}"
                         )
-                        pass # TEMPORARY BYPASS FOR THE USER DEMONSTRATION
+                        clf = None  # fix: actually bypass the leaky model (was: pass — bug!)
         threshold = self.DEFAULT_THRESHOLDS.get(strategy, self.FALLBACK_THRESHOLD)
         cache_key = f"{strategy}_{side}"
         n_samples = self._sample_counts.get(cache_key, 0)
@@ -1046,7 +1069,7 @@ class MetaLabelEngine:
         import hashlib
         from sklearn.metrics import roc_auc_score
 
-        xs, ys = [], []
+        xs, ys, ws = [], [], []
         strategy_candidate_count = 0
         for symbol, df in frames.items():
             candidate_timestamps = get_strategy_candidates(
@@ -1055,11 +1078,12 @@ class MetaLabelEngine:
             if not candidate_timestamps:
                 continue
 
-            X, y = build_training_set(df, horizon_bars, threshold_pct, side=side)
+            X, y, w = build_training_set(df, horizon_bars, threshold_pct, side=side)
             common_idx = X.index.intersection(candidate_timestamps)
             if len(common_idx) > 0:
                 xs.append(X.loc[common_idx])
                 ys.append(y.loc[common_idx])
+                ws.append(w.loc[common_idx])
                 strategy_candidate_count += len(common_idx)
 
         if not xs:
@@ -1068,6 +1092,7 @@ class MetaLabelEngine:
 
         X_all = pd.concat(xs).sort_index()
         y_all = pd.concat(ys).sort_index()
+        w_all = pd.concat(ws).sort_index()
         n_total = len(X_all)
         n_pos = int(y_all.sum())
         n_neg = int((y_all == 0).sum())
@@ -1117,15 +1142,19 @@ class MetaLabelEngine:
         purge = timedelta(minutes=15)
         train_mask = X_all.index < val_start_dt - purge
 
-        X_tr, y_tr = X_all[train_mask], y_all[train_mask]
+        X_tr, y_tr, w_tr = X_all[train_mask], y_all[train_mask], w_all[train_mask]
         X_va, y_va = X_all.iloc[split:], y_all.iloc[split:]
 
         clf = _make_classifier("lgbm", n_estimators=200)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            # Fit using DataFrame with column names
             if not X_tr.empty:
-                clf.fit(X_tr, y_tr)
+                try:
+                    clf.fit(X_tr, y_tr, sample_weight=w_tr)
+                except Exception as exc:
+                    applog.warning("meta", f"[meta_train] {strategy} ({side}) LGBM failed ({exc}), falling back to HGB")
+                    clf = _make_classifier("hgb")
+                    clf.fit(X_tr, y_tr, sample_weight=w_tr)
 
         # OOS validation AUC
         val_auc = 0.5
@@ -1194,8 +1223,12 @@ class MetaLabelEngine:
         clf_full = _make_classifier("lgbm", n_estimators=200)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            # Fit using full DataFrame with column names
-            clf_full.fit(X_all, y_all)
+            try:
+                clf_full.fit(X_all, y_all)
+            except Exception as exc:
+                applog.warning("meta", f"[meta_train] {strategy} ({side}) full LGBM failed ({exc}), falling back to HGB")
+                clf_full = _make_classifier("hgb")
+                clf_full.fit(X_all, y_all)
 
         provenance = {
             "model": clf_full,

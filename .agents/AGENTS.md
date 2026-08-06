@@ -406,3 +406,128 @@ Every substantial review or implementation should conclude with:
 * Optimize for long-term maintainability, reliability, and trading performance.
 * Never sacrifice system stability for a speculative optimization.
 * If evidence is insufficient to support a conclusion, clearly state the uncertainty instead of guessing.
+
+---
+
+# Preserve Edge, Never Chase Trade Count (Mandatory)
+
+Never solve missed opportunities by lowering, widening, relaxing, or bypassing any trading thresholds, confidence gates, probability cutoffs, risk filters, portfolio constraints, or execution safeguards. Increasing the number of trades is never a success metric if it comes at the expense of expected value (EV), risk-adjusted returns, drawdown, or long-term profitability.
+
+If analysis shows that quality trades are being rejected, **do not compensate by weakening the filters.** Instead, make the AI fundamentally better at identifying genuinely high-quality opportunities so they naturally exceed the existing strict thresholds.
+
+Prioritize improving:
+
+* Feature engineering and signal quality.
+* Model architecture and calibration.
+* Training data quality and labeling.
+* Regime awareness and market context.
+* Pattern recognition and contextual understanding.
+* Specialist models for specific symbols, sectors, and market conditions.
+* Probability calibration so true high-edge trades receive appropriately high confidence.
+* Explainability and root-cause analysis for every false negative.
+
+Every rejected high-performing trade must undergo forensic analysis to determine **why the model underestimated it**, then improve the model—not the thresholds.
+
+Every proposed change must satisfy:
+
+* Equal or lower drawdown.
+* Equal or higher win rate.
+* Equal or higher Profit Factor.
+* Equal or higher Sharpe/Sortino.
+* Equal or higher expectancy (R/trade).
+* No statistically significant increase in losing trades.
+* No degradation of existing high-quality signals.
+
+Never accept solutions that simply "allow more trades." Every additional trade must earn its place through demonstrably higher predictive intelligence.
+
+Treat every threshold as a **capital preservation mechanism**, not an obstacle to overcome. Any proposal to reduce thresholds, widen limits, bypass filters, or increase tolerance must first provide overwhelming statistical evidence through out-of-sample testing, walk-forward validation, Monte Carlo analysis, and live shadow validation that the change improves long-term risk-adjusted performance without increasing losses.
+
+**Core Philosophy:** Make the AI smarter—not the filters weaker. The objective is **maximum quality, not maximum quantity**. Protect capital first, maximize edge second, and only increase trade frequency when it is a natural consequence of superior prediction accuracy rather than relaxed standards.
+
+---
+
+## Intelligent AI Improvement Policy (Mandatory)
+
+When a profitable trade is rejected, **never assume the threshold is wrong.** Assume the model lacks sufficient understanding until proven otherwise.
+
+The investigation order must always be:
+
+1. Was the feature set insufficient?
+2. Was important market context missing?
+3. Was the specialist model under-trained?
+4. Was probability calibration inaccurate?
+5. Was the training data mislabeled or incomplete?
+6. Was the market regime incorrectly identified?
+7. Was the trade outside the model's experience?
+8. Was there conflicting evidence that legitimately reduced confidence?
+
+Only after exhausting all intelligence improvements—and demonstrating with rigorous statistical evidence that the threshold itself is limiting performance—may a threshold adjustment even be considered.
+
+---
+
+## Thresholds Are Capital Protection
+
+Every threshold represents accumulated trading knowledge and exists to protect capital.
+
+Treat every proposal to reduce a threshold as a **high-risk architectural change**, not a tuning exercise.
+
+Any proposal to relax thresholds must prove, using out-of-sample validation, walk-forward analysis, Monte Carlo simulations, and shadow/live-forward testing, that it:
+
+* Improves expectancy.
+* Improves or maintains Profit Factor.
+* Does not materially increase drawdown.
+* Does not materially increase false positives.
+* Maintains or improves long-term risk-adjusted returns.
+
+Without this evidence, the proposal must be rejected.
+
+---
+
+## Continuous Learning
+
+The AI should become progressively better over time by learning **why** it rejected profitable trades.
+
+Every false negative should be converted into knowledge by:
+
+* Discovering missing predictive signals.
+* Improving feature engineering.
+* Enhancing regime detection.
+* Improving specialist models.
+* Improving calibration.
+* Learning previously unseen market structures.
+
+The preferred outcome is **the same strict threshold accepting more true winners because the model became smarter—not because the gate became easier to pass.**
+
+---
+
+## Long-Term Optimization Objective
+
+Optimize for **compound returns over years**, not short-term trade count.
+
+The primary optimization objective, in order of priority, is:
+
+1. Preserve capital.
+2. Maximize expectancy.
+3. Minimize drawdown.
+4. Maximize risk-adjusted return.
+5. Improve prediction accuracy.
+6. Increase confidence calibration.
+7. Reduce false positives.
+8. Reduce false negatives.
+9. Increase trade frequency **only if it naturally results from improved predictive intelligence**.
+
+Trade frequency is an outcome—not a target.
+
+---
+
+## Architectural Rule
+
+If an engineer, AI agent, or optimization routine proposes lowering a threshold, widening a gate, disabling a safeguard, or bypassing a risk control, it must first answer:
+
+> **"Why can't the model be made smarter instead?"**
+
+If improving the model is feasible, that path must always be preferred over weakening the system's protective mechanisms.
+
+**Core Engineering Principle:**
+
+> **A world-class trading system wins because its intelligence continuously improves—not because its standards continuously decline.**

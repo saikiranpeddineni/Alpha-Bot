@@ -309,6 +309,81 @@ class DataManager:
         self._record_provenance(symbol, source, provider_name, df)
         return df
 
+    async def multi_history(
+        self,
+        symbols: list[str],
+        timeframe: str,
+        start: datetime,
+        end: datetime,
+        prefer_cache: bool = True,
+        cache_policy: str | None = None,
+    ) -> dict[str, pd.DataFrame]:
+        """Batched range fetch with cache-first reads and automatic cache writes."""
+        out: dict[str, pd.DataFrame] = {}
+        policy = cache_policy or self.cache_policy
+        
+        yahoo_symbols = []
+        default_symbols = []
+        
+        for sym in symbols:
+            s = sym.upper()
+            if s in ("VIX", "^VIX") and not self.is_synthetic:
+                yahoo_symbols.append(s)
+            else:
+                default_symbols.append(s)
+
+        missing_symbols = []
+        
+        if self.is_synthetic or policy == CachePolicy.IMMUTABLE_CACHE_ONLY:
+            for s in default_symbols:
+                out[s] = await self.history(s, timeframe, start, end, prefer_cache, policy)
+        else:
+            for s in default_symbols:
+                if prefer_cache:
+                    cached = self.cache.query(s, timeframe, start, end)
+                    if not cached.empty:
+                        try:
+                            self.validate_cache_coverage(s, timeframe, start, end, cached)
+                            out[s] = cached
+                            self._record_provenance(s, "cache", None, cached)
+                        except HistoricalDataCoverageError:
+                            missing_symbols.append(s)
+                    else:
+                        missing_symbols.append(s)
+                else:
+                    missing_symbols.append(s)
+
+            if missing_symbols:
+                if hasattr(self.provider, "get_multi_bars"):
+                    try:
+                        network_data = await self.provider.get_multi_bars(missing_symbols, timeframe, start=start, end=end)
+                        for s in missing_symbols:
+                            df = network_data.get(s, empty_bars())
+                            if df.empty:
+                                cached = self.cache.query(s, timeframe, start, end)
+                                if not cached.empty:
+                                    out[s] = cached
+                                    self._record_provenance(s, "cache", None, cached)
+                                else:
+                                    out[s] = empty_bars()
+                                    self._record_provenance(s, "network", self.provider.name, empty_bars())
+                            else:
+                                self.cache.upsert(s, timeframe, df)
+                                out[s] = df
+                                self._record_provenance(s, "network", self.provider.name, df)
+                    except Exception as exc:
+                        applog.error("data", f"Batched history fetch failed: {exc}. Falling back to sequential.")
+                        for s in missing_symbols:
+                            out[s] = await self.history(s, timeframe, start, end, prefer_cache, policy)
+                else:
+                    for s in missing_symbols:
+                        out[s] = await self.history(s, timeframe, start, end, prefer_cache, policy)
+
+        for s in yahoo_symbols:
+            out[s] = await self.history(s, timeframe, start, end, prefer_cache, policy)
+
+        return out
+
     async def close(self) -> None:
         await self.provider.close()
         self.cache.close()
