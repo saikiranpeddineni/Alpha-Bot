@@ -24,6 +24,16 @@ For every coding session and change:
 
 ---
 
+## Post-Merge Workflow
+
+Once an active branch is successfully merged into `master`:
+1. Delete the old merged branch both locally and remotely.
+2. Create and switch to a new active branch by incrementing the sequential number (e.g., from `Alphadesk_001` to `Alphadesk_002`).
+3. Push the new branch to the remote repository.
+4. Continue all new work on this newly created branch.
+
+---
+
 ## Previous Branch Check
 
 At the start of every new workday:
