@@ -259,7 +259,7 @@ def _momentum_ctx(debug: bool = False) -> StrategyContext:
 def test_macd_event_created_on_inflection():
     """MACD inflection on bar N must arm a pending event for the symbol."""
     # rsi_max=99 bypasses RSI filter so we isolate event-creation behaviour.
-    strat = MomentumCross(params={"rsi_max": 99.0})
+    strat = MomentumCross(params={"rsi_max": 99.0, "atr_ext_min": 0.0, "atr_ext_max": 99.0})
     df = _make_momentum_df(trend="up", above_vwap=True)
     # Walk bar by bar; after the inflection the event must exist (pending or consumed)
     for end in range(30, len(df) + 1):
@@ -276,7 +276,7 @@ def test_macd_event_created_on_inflection():
 def test_macd_event_confirms_within_window():
     """A candidate must be emitted when conditions align within EVENT_WINDOW_BARS."""
     # rsi_max=99 bypasses RSI filter; vol_z_min=-5 bypasses volume filter.
-    strat = MomentumCross(params={"rsi_max": 99.0, "vol_z_min": -5.0})
+    strat = MomentumCross(params={"rsi_max": 99.0, "vol_z_min": -5.0, "atr_ext_min": 0.0, "atr_ext_max": 99.0})
     df = _make_momentum_df(trend="up", above_vwap=True, vol_z=1.0)
 
     sig = None
@@ -294,7 +294,7 @@ def test_macd_event_expired_after_window():
     NOT produce a candidate even if conditions later align."""
     from app.strategies.momentum import EVENT_WINDOW_BARS
 
-    strat = MomentumCross(params={"rsi_min": 50.0, "rsi_max": 78.0, "vol_z_min": 0.0})
+    strat = MomentumCross(params={"rsi_min": 50.0, "rsi_max": 78.0, "vol_z_min": 0.0, "atr_ext_min": 0.0, "atr_ext_max": 99.0})
 
     # Build a frame: first n-15 bars drive a MACD inflection but with rsi/vwap
     # conditions failing, so the event is NOT consumed.  Then on bar n-14 .. n-1
@@ -344,7 +344,7 @@ def test_macd_event_expired_after_window():
 
 def test_one_event_emits_at_most_one_candidate():
     """The same MACD event must not produce more than one candidate signal."""
-    strat = MomentumCross(params={"rsi_max": 99.0, "vol_z_min": -5.0})
+    strat = MomentumCross(params={"rsi_max": 99.0, "vol_z_min": -5.0, "atr_ext_min": 0.0, "atr_ext_max": 99.0})
     df = _make_momentum_df(trend="up", above_vwap=True, vol_z=1.0)
 
     signals = []
@@ -359,7 +359,7 @@ def test_one_event_emits_at_most_one_candidate():
 def test_new_inflection_arms_new_event_after_consume():
     """After the first event is consumed, a subsequent MACD inflection must
     create a new, independent event."""
-    strat = MomentumCross(params={"rsi_max": 99.0, "vol_z_min": -5.0})
+    strat = MomentumCross(params={"rsi_max": 99.0, "vol_z_min": -5.0, "atr_ext_min": 0.0, "atr_ext_max": 99.0})
 
     # First frame: get a signal (consumes event)
     df1 = _make_momentum_df(n=80, trend="up", above_vwap=True, vol_z=1.0, seed=1)

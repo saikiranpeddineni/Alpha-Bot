@@ -57,6 +57,8 @@ class MomentumCross(Strategy):
         "trailing_stop_atr_mult": 1.5,
         "htf_trend_filter": False,
         "min_minutes_since_open": 5,
+        "atr_ext_min": 0.5,
+        "atr_ext_max": 1.0,
     }
 
     # ------------------------------------------------------------------
@@ -233,12 +235,18 @@ class MomentumCross(Strategy):
         if macd_inflected_down:
             self._set_event(ctx, symbol, "short", current_time)
 
+        # ---- Structural Extension Guard (Data-driven Goldilocks zone) ----
+        # See phase_4_winners_expectancy analysis: Expectancy peaks at 0.5 < atr_ext < 1.0.
+        atr_ext = abs(close - float(last["ema9"])) / atr
+        valid_atr_ext = p.get("atr_ext_min", 0.5) <= atr_ext < p.get("atr_ext_max", 1.0)
+
         # ---- Long candidate ----
         if (
             allow_long
             and last["ema9"] > last["ema20"]
             and close > float(last["vwap"])
             and p["rsi_min"] <= rsi <= p["rsi_max"]
+            and valid_atr_ext
             and self._valid_event(ctx, symbol, "long", current_bar_idx, df)
         ):
             # Dynamic Stop Tightening: 1.0 * ATR if explosive volume and expanding MACD
@@ -263,6 +271,7 @@ class MomentumCross(Strategy):
             and last["ema9"] < last["ema20"]
             and close < float(last["vwap"])
             and (100.0 - p["rsi_max"]) <= rsi <= (100.0 - p["rsi_min"])
+            and valid_atr_ext
             and self._valid_event(ctx, symbol, "short", current_bar_idx, df)
         ):
             # Dynamic Stop Tightening: 1.0 * ATR if explosive volume and expanding MACD
