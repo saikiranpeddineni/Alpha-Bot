@@ -19,7 +19,7 @@ import logging
 
 import pandas as pd
 
-from app.core.domain import Signal, SignalAction
+from app.core.domain import Regime, Signal, SignalAction
 from app.strategies.base import Strategy, StrategyContext, register
 
 logger = logging.getLogger("alphadesk")
@@ -30,7 +30,14 @@ EVENT_WINDOW_BARS = 10  # max bars a pending MACD event stays valid
 @register
 class MomentumCross(Strategy):
     name = "momentum"
-    description = "EMA9/EMA20 trend with MACD-inflection pending event confirmation"
+    description = "EMA crossover momentum with MACD inflection pending event"
+
+    is_breakout = True
+    ml_threshold = 0.55
+    evaluation_horizons = ["60m", "close"]
+    regime_weights = {
+        Regime.TREND_UP: 1.20, Regime.TREND_DOWN: 1.05, Regime.RANGE: 0.60, Regime.VOLATILE: 0.80
+    }
 
     def __init__(self, params: dict | None = None, enabled: bool = True) -> None:
         super().__init__(params, enabled)
@@ -49,7 +56,6 @@ class MomentumCross(Strategy):
         "reward_risk": 1.8,
         "trailing_stop_atr_mult": 1.5,
         "htf_trend_filter": False,
-        "midday_block": False,
         "min_minutes_since_open": 5,
     }
 
@@ -177,10 +183,6 @@ class MomentumCross(Strategy):
         from zoneinfo import ZoneInfo
         now_et = ctx.now.astimezone(ZoneInfo("America/New_York"))
         mins_et = now_et.hour * 60 + now_et.minute
-
-        # Optional midday block
-        if p.get("midday_block", False) and (11 * 60 + 30 <= mins_et <= 13 * 60 + 30):
-            return None
 
         # ---- HTF trend filter ----
         if p.get("htf_trend_filter", False) and (crossed_up or crossed_down):

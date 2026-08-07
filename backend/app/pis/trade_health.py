@@ -54,17 +54,23 @@ class TradeHealthEvaluator:
             trend_score = max(0.0, min(1.0, 0.60 + (current_r * 0.40)))
 
         # 2. Momentum Score: Noise-dampened intra-bar & directional evaluation
+        # Calculate structural position within the bar for momentum and adverse analysis
         bar_range = obs.high - obs.low
+        if bar_range <= 1e-8 or math.isnan(bar_range) or math.isinf(bar_range):
+            pos_in_bar = 0.5
+        else:
+            if obs.side > 0:  # Long
+                pos_in_bar = (obs.close - obs.low) / bar_range
+            else:  # Short
+                pos_in_bar = (obs.high - obs.close) / bar_range
+
+        # 2. Momentum Score: Noise-dampened intra-bar & directional evaluation
         if bar_range <= 1e-8 or math.isnan(bar_range) or math.isinf(bar_range):
             momentum_score = 0.55
         elif bar_range < 0.35 * atr:
             # Micro-consolidation bar (tight range noise): Treat as healthy consolidation
             momentum_score = 0.65
         else:
-            if obs.side > 0:  # Long
-                pos_in_bar = (obs.close - obs.low) / bar_range
-            else:  # Short
-                pos_in_bar = (obs.high - obs.close) / bar_range
             # Dampen extreme 0.0/1.0 intra-bar spikes to preserve multi-bar trend context
             momentum_score = max(0.15, min(0.95, (pos_in_bar * 0.70) + 0.15))
 
@@ -81,7 +87,7 @@ class TradeHealthEvaluator:
 
         # 4. Volume Score: Price-Volume Distribution & Absorption Intelligence
         # Distinguish high-volume institutional selling (distribution) from low-volume absorption (consolidation)
-        is_adverse_bar = (obs.side > 0 and obs.close < obs.high) or (obs.side < 0 and obs.close > obs.low)
+        is_adverse_bar = pos_in_bar < 0.40
         if obs.volume <= 0:
             volume_score = 0.60
         elif is_adverse_bar and vol_ratio > 2.5:

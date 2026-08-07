@@ -6,17 +6,14 @@ import math
 from datetime import UTC, datetime
 from app.db.database import Database
 from app.core.applog import applog
+from app.strategies.base import REGISTRY
 
 
 # Strategy-specific evaluation horizons for canonical realized_r attribution.
 # Horizons are tried in priority order; first match in the outcomes dict wins.
 # Fallback: "close" if none of the listed horizons are present.
 STRATEGY_HORIZON: dict[str, list[str]] = {
-    "rsi2_reversion": ["15m", "30m", "close"],
-    "vwap_reversion": ["15m", "30m", "close"],
-    "orb":            ["60m", "close"],
-    "momentum":       ["60m", "close"],
-    "bb_squeeze":     ["60m", "close"],
+    name: cls.evaluation_horizons for name, cls in REGISTRY.items()
 }
 _DEFAULT_HORIZON = ["15m", "close"]  # fallback for unknown strategies
 
@@ -319,6 +316,17 @@ def get_episodic_nearest_neighbors(
 def get_adaptive_ml_threshold(base_threshold: float, exp_info: dict, sctx=None) -> float:
     threshold = base_threshold
     
+    # Audit Phase 3: Volatility & Expectancy Adaptation
+    # Link the ML threshold directly to historical contextual EV.
+    if exp_info:
+        exp = exp_info.get("shrunk_expectancy", 0.0)
+        if exp > 0.8:
+            # Massive historical edge. Relax threshold to capture explosive runners.
+            threshold = 0.48
+        elif exp < 0.0:
+            # Negative edge in this regime. Choke threshold to protect capital.
+            threshold = 0.65
+    
     # Apply dynamic opening slippage handicap
     if sctx is not None:
         try:
@@ -333,7 +341,7 @@ def get_adaptive_ml_threshold(base_threshold: float, exp_info: dict, sctx=None) 
         except Exception:
             pass
             
-    return threshold
+    return min(max(threshold, 0.45), 0.95)
 
 def get_adaptive_signal_score(base_score: float, exp_info: dict) -> float:
     return base_score

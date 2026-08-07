@@ -43,14 +43,16 @@ SESSION_MINUTES = 390
 def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     """Append feature columns to an (enriched) bar frame."""
     if df.empty:
-        return df.copy()
+        return df
+    if "regime_val" in df.columns:
+        return df
+        
     out = df if is_enriched(df) else enrich(df)
-    out = out.copy()
+    # We deliberately mutate the dataframe directly to cache features across training loops
+    out["macd_hist_norm"] = out["macd_hist"] / out["close"] * 1000.0
 
-    close = out["close"]
-    out["macd_hist_norm"] = out["macd_hist"] / close * 1000.0
-    out["atr_pct"] = out["atr14"] / close * 100.0
-    out["price_velocity"] = (close - close.shift(3)) / out["atr14"].replace(0.0, np.nan)
+    out["atr_pct"] = out["atr14"] / out["close"] * 100.0
+    out["price_velocity"] = (out["close"] - out["close"].shift(3)) / out["atr14"].replace(0.0, np.nan)
 
     et_index = out.index.tz_convert(ET)
     minute = (et_index.hour * 60 + et_index.minute) - (9 * 60 + 30)
@@ -75,7 +77,8 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     regime_val.loc[mask_volatile] = 2.0
     out["regime_val"] = regime_val
 
-    return out
+    df[out.columns] = out
+    return df
 
 
 def latest_feature_row(df: pd.DataFrame) -> pd.Series | None:

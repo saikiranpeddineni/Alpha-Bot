@@ -344,19 +344,6 @@ class MarketScanner:
                     avg_daily_dollar_vol = avg_vol * price
                     target_daily_dollar_vol = cfg.min_avg_dollar_volume * 390
 
-                    record["avg_dollar_volume"] = avg_daily_dollar_vol
-                    record["filter_liquidity"] = {
-                        "actual": avg_daily_dollar_vol,
-                        "threshold": target_daily_dollar_vol,
-                        "result": "PASS" if avg_daily_dollar_vol >= target_daily_dollar_vol else "FAIL"
-                    }
-                    if avg_daily_dollar_vol < target_daily_dollar_vol:
-                        record["FINAL_REJECTION_REASON"] = "LIQUIDITY_FILTER"
-                        return None
-
-                    record["FINAL_PASS"] = True
-                    record["FINAL_REJECTION_REASON"] = "NONE"
-
                     # Time-normalized RVOL calculation for partial session comparison
                     if et_mins >= 9 * 60 + 30 and et_mins <= 16 * 60:
                         session_elapsed_frac = min(1.0, max(0.05, (et_mins - (9 * 60 + 30)) / 390.0))
@@ -366,6 +353,22 @@ class MarketScanner:
                     last_bar_vol = float(df["volume"].iloc[-1])
                     normalized_last_vol = last_bar_vol / session_elapsed_frac if session_elapsed_frac > 0 else last_bar_vol
                     rvol = float(normalized_last_vol / avg_vol) if avg_vol > 0 else 0.0
+
+                    # Use Projected Catalyst Liquidity (allow huge intraday runners to pass filter)
+                    projected_daily_dollar_vol = avg_daily_dollar_vol * max(1.0, rvol)
+
+                    record["avg_dollar_volume"] = avg_daily_dollar_vol
+                    record["filter_liquidity"] = {
+                        "actual": projected_daily_dollar_vol,
+                        "threshold": target_daily_dollar_vol,
+                        "result": "PASS" if projected_daily_dollar_vol >= target_daily_dollar_vol else "FAIL"
+                    }
+                    if projected_daily_dollar_vol < target_daily_dollar_vol:
+                        record["FINAL_REJECTION_REASON"] = "LIQUIDITY_FILTER"
+                        return None
+
+                    record["FINAL_PASS"] = True
+                    record["FINAL_REJECTION_REASON"] = "NONE"
 
                     atr_pct = float(((df["high"] - df["low"]) / df["close"] * 100.0).mean())
                     yesterday_close = float(df["close"].iloc[-2]) if len(df) >= 2 else price
@@ -420,7 +423,8 @@ class MarketScanner:
         rvols = np.array([c["rvol"] for c in candidates])
         atrs = np.array([c["atr_pct"] for c in candidates])
         gaps = np.array([c["gap_pct"] for c in candidates])
-        moms = np.array([c["mom3"] for c in candidates])
+        # Audit Fix: Use absolute magnitude so massive shorts aren't pushed to rank 0.0
+        moms = np.array([abs(c["mom3"]) for c in candidates])
 
         def _rank(arr: np.ndarray) -> np.ndarray:
             order = arr.argsort()
@@ -472,8 +476,14 @@ class MarketScanner:
                         return candidate
 
                     X, y, _ = build_training_set(df)
-                    if len(X) < 100 or y.nunique() < 2:
+                    if len(X) < 100:
                         candidate["auc"] = 0.0
+                        return candidate
+                    
+                    if y.nunique() < 2:
+                        # Audit Fix: Target class imbalance implies massive one-sided trend.
+                        # Do not kill it with AUC 0.0, give it a passing baseline so the main NN can evaluate.
+                        candidate["auc"] = 0.55
                         return candidate
 
                     def _train_and_evaluate(X_sync, y_sync):

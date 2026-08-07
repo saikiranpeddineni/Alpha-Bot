@@ -104,7 +104,22 @@ class _LegacyContinuousTrainer:
             applog.info(
                 "trainer",
                 f"Data ready for {len(dfs)}/{len(watchlist)} symbols. "
-                "Running global + specialist + MetaLabel training...",
+                "Pre-computing TA-lib features incrementally...",
+            )
+            
+            # Pre-compute features sequentially to avoid race conditions and guarantee memoization
+            # across the parallel Global, Specialist, and MetaLabel training stages.
+            from app.ai.features import compute_features
+            for sym in list(dfs.keys()):
+                try:
+                    dfs[sym] = compute_features(dfs[sym])
+                except Exception as exc:
+                    applog.warning("trainer", f"Feature pre-computation failed for {sym}: {exc}")
+                    del dfs[sym]
+
+            applog.info(
+                "trainer",
+                f"Features cached. Running global + specialist + MetaLabel training...",
             )
 
             # ---- Stage 2: global + specialists in parallel ----
@@ -442,8 +457,8 @@ class _LegacyContinuousTrainer:
         # See explanation above. Models must be fitted with pure Pandas DataFrames.
         # ==================================================================================================
         clf_l = HistGradientBoostingClassifier(
-            max_iter=150, learning_rate=0.08, max_depth=5,
-            l2_regularization=1.0, early_stopping=True, random_state=42,
+            max_iter=150, learning_rate=0.05, max_depth=3, min_samples_leaf=100,
+            l2_regularization=5.0, early_stopping=True, random_state=42,
         )
         if not X_tr_l.empty:
             try:
@@ -456,8 +471,8 @@ class _LegacyContinuousTrainer:
                 clf_l.fit(X_tr_l, y_tr_l, sample_weight=w_tr_l)
 
         clf_s = HistGradientBoostingClassifier(
-            max_iter=150, learning_rate=0.08, max_depth=5,
-            l2_regularization=1.0, early_stopping=True, random_state=42,
+            max_iter=150, learning_rate=0.05, max_depth=3, min_samples_leaf=100,
+            l2_regularization=5.0, early_stopping=True, random_state=42,
         )
         if not X_tr_s.empty:
             try:
@@ -601,7 +616,8 @@ class _LegacyContinuousTrainer:
         from app.ai.prediction import MetaLabelEngine
         from app.config import get_models_dir
 
-        strategies = ["orb", "momentum", "vwap_reversion", "rsi2_reversion", "bb_squeeze"]
+        from app.strategies.base import REGISTRY
+        strategies = list(REGISTRY.keys())
         sides = ["long", "short"]
         meta_engine: MetaLabelEngine = getattr(self.model, "_meta_label_engine", None)  # type: ignore[assignment]
         if meta_engine is None:
@@ -703,7 +719,8 @@ class _LegacyContinuousTrainer:
                 applog.info("trainer", f"[readiness] SPECIALIST {sym_upper} | NO_ARTIFACT")
 
         # ---- MetaLabel ----
-        strategies = ["orb", "momentum", "vwap_reversion", "rsi2_reversion", "bb_squeeze"]
+        from app.strategies.base import REGISTRY
+        strategies = list(REGISTRY.keys())
         sides = ["long", "short"]
         meta_dir = get_models_dir() / "meta"
         for strategy in strategies:

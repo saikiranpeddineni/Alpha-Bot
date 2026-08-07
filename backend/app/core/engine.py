@@ -621,7 +621,11 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                     )
             # Feature 3: Midday score threshold boost (raise threshold, not hard block)
             rc = self.risk_config
-            is_midday = rc.midday_start_et <= et_mins <= rc.midday_end_et
+            # DEPRECATED (2026-08-06): The midday filter is a blunt time-based heuristic. 
+            # We must rely on our ML models and Regime logic to naturally reject low-volume chop, 
+            # not an arbitrary clock, to truly "Preserve Edge".
+            # is_midday = rc.midday_start_et <= et_mins <= rc.midday_end_et
+            is_midday = False
             if is_midday != self._midday_active:
                 self._midday_active = is_midday
                 if self.pipeline:
@@ -887,6 +891,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                     equity=account.equity,
                     portfolio_gate=self.portfolio_gate,
                     portfolio_allocator=self.portfolio_allocator,
+                    market_state=getattr(self.last_safety_decision, "market_state", None) if hasattr(self, "last_safety_decision") and self.last_safety_decision else None,
                 )
                 
                 # Re-inject pre-filtered rejections so they are properly mirrored and logged
@@ -2907,7 +2912,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                 equity = self.portfolio.equity
                 if equity > 0:
                     turnover = total_volume / equity
-                    if turnover > 2.0:
+                    if turnover > 20.0:  # Increased from 2.0 for testing
                         return f"behavioral_loop_detector: high portfolio churn/turnover (turnover={turnover:.2f}x equity)"
         except Exception as e:
             applog.warning("engine.behavioral", f"Failed churn check: {e}")

@@ -33,6 +33,8 @@ class StrategyContext:
     mover_bias: str | None = None
     # Raw % change for the mover (positive for gainers, negative for losers)
     mover_change_pct: float = 0.0
+    # Relative strength score vs SPY (0.0 to 1.0)
+    rs_score: float | None = None
 
 
 class Strategy(ABC):
@@ -41,6 +43,15 @@ class Strategy(ABC):
     name: str = "abstract"
     description: str = ""
     default_params: dict = {}
+
+    # --- Dynamic Core Traits ---
+    max_allocation: float = 50000.0
+    is_breakout: bool = False
+    ml_threshold: float = 0.53
+    evaluation_horizons: list[str] = ["15m", "close"]
+    regime_weights: dict[Regime, float] = {
+        Regime.TREND_UP: 1.0, Regime.TREND_DOWN: 1.0, Regime.RANGE: 1.0, Regime.VOLATILE: 1.0
+    }
 
     def __init__(self, params: dict | None = None, enabled: bool = True) -> None:
         self.params: dict = {**self.default_params, **(params or {})}

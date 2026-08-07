@@ -132,7 +132,7 @@ class _FakeStrategy(Strategy):
 
 def _patch_pipeline_accept_all(pipeline):
     """Bypass all pipeline ML/meta-label/trade-score gates: accept every signal."""
-    def permissive_process(symbol, df, signals, regime, features=None, sector_strength=None):
+    def permissive_process(symbol, df, signals, regime, *args, **kwargs):
         accepted, rejected = [], []
         for sig in signals:
             sig.ml_probability = sig.ml_probability or 0.99
@@ -144,7 +144,7 @@ def _patch_pipeline_accept_all(pipeline):
 
 def _patch_portfolio_gate_accept_all(engine):
     """Bypass portfolio correlation/sector gate: always approve."""
-    engine.portfolio_gate.gate = lambda symbol, positions, sector_override=None: (True, "ok")
+    engine.portfolio_gate.gate = lambda *args, **kwargs: (True, "ok")
 
 
 def _patch_risk_accept_all(engine):
@@ -225,7 +225,7 @@ async def test_reconciliation_failure_blocks_entries_but_allows_exits(tmp_path, 
 
     real_reconcile = engine._reconcile_positions
 
-    async def fake_reconcile(positions):
+    def fake_reconcile(positions):
         pass
 
     engine._reconcile_positions = fake_reconcile  # keep flag True

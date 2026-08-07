@@ -95,7 +95,7 @@ def test_strategies_endpoints(client):
     r = client.get("/api/strategies")
     assert r.status_code == 200
     names = {s["name"] for s in r.json()}
-    assert {"orb", "momentum", "vwap_reversion", "rsi2_reversion"} <= names
+    assert {"orb", "momentum", "vwap_reversion", "rsi2_reversion", "gap_and_go", "trend_pullback", "liquidity_sweep", "relative_strength"} <= names
     r = client.put("/api/strategies/orb", json={"enabled": False})
     assert r.status_code == 200 and r.json()["enabled"] is False
     assert client.put("/api/strategies/nope", json={"enabled": True}).status_code == 404

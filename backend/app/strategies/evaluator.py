@@ -10,6 +10,7 @@ import pandas as pd
 
 from app.core.domain import Regime, Signal, SignalAction
 from app.core.applog import applog
+from app.strategies.base import REGISTRY
 from app.ai.features import latest_feature_row
 from app.ai.prediction import ExcursionEstimate
 
@@ -126,7 +127,7 @@ class ParallelEvidenceEvaluator:
             )
             trade_score = min(100.0, max(0.0, raw_score))
 
-            is_breakout = sig.strategy in ["bb_squeeze", "orb", "momentum"]
+            is_breakout = REGISTRY[sig.strategy].is_breakout if sig.strategy in REGISTRY else False
             score_passed, score_threshold = self.trade_score_engine.approve(
                 trade_score, regime,
                 is_event_day=is_event_day,

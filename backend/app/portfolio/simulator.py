@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 
 from app.core.applog import applog
+from app.strategies.base import REGISTRY
 
 # Sectors map matching allocator.py
 _SECTOR_MAP: dict[str, str] = {
@@ -69,11 +70,7 @@ class SimulationConfig:
     
     # Strategy-level allocation limits
     max_allocation_per_strategy: dict[str, float] = field(default_factory=lambda: {
-        "orb": 50000.0,
-        "momentum": 50000.0,
-        "vwap_reversion": 50000.0,
-        "rsi2_reversion": 50000.0,
-        "bb_squeeze": 50000.0,
+        name: getattr(cls, "max_allocation", 50000.0) for name, cls in REGISTRY.items()
     })
     
     # Short sale configuration (configurable, not hardcoded)

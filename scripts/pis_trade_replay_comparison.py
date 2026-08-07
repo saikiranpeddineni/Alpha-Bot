@@ -26,6 +26,8 @@ from typing import Optional
 
 import pandas as pd
 
+from app.strategies.base import REGISTRY
+
 # ---------------------------------------------------------------------------
 # Path setup – make backend/app importable
 # ---------------------------------------------------------------------------
@@ -306,8 +308,7 @@ def main():
 
     # Step 3: exclude raw broker fill records and manual closes
     #         (strategy='alpaca' or 'manual' are not bot-generated positions)
-    BOT_STRATEGIES = {"orb", "momentum", "rsi2_reversion", "bb_squeeze",
-                      "vwap_reversion", "rsi_reversion", "mean_reversion"}
+    BOT_STRATEGIES = set(REGISTRY.keys())
     records_strategy = [r for r in records_paper
                         if str(r.get("strategy", "")).lower() in BOT_STRATEGIES]
 

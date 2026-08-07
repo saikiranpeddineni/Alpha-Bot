@@ -533,15 +533,26 @@ class _LegacySignalModel:
                 new_long.set_params(warm_start=True, max_iter=self._model_long.max_iter + 50)
             except AttributeError:
                 # LGBMClassifier uses n_estimators
-                cur = getattr(self._model_long, "n_estimators", 100)
-                new_long.set_params(warm_start=True, n_estimators=cur + 50)
+                try:
+                    cur = getattr(self._model_long, "n_estimators", 100)
+                    new_long.set_params(warm_start=True, n_estimators=cur + 50)
+                except ValueError:
+                    pass # CalibratedClassifierCV doesn't support warm_start directly
+            except ValueError:
+                pass
+            
             if self._model_short is not None:
                 new_short = copy.deepcopy(self._model_short)
                 try:
                     new_short.set_params(warm_start=True, max_iter=self._model_short.max_iter + 50)
                 except AttributeError:
-                    cur = getattr(self._model_short, "n_estimators", 100)
-                    new_short.set_params(warm_start=True, n_estimators=cur + 50)
+                    try:
+                        cur = getattr(self._model_short, "n_estimators", 100)
+                        new_short.set_params(warm_start=True, n_estimators=cur + 50)
+                    except ValueError:
+                        pass
+                except ValueError:
+                    pass
             else:
                 new_short = HistGradientBoostingClassifier(max_iter=100, learning_rate=0.06, max_depth=4, early_stopping=True, random_state=42)
 

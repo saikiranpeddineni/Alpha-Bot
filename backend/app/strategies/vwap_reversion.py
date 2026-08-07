@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from app.core.domain import Signal, SignalAction
+from app.core.domain import Regime, Signal, SignalAction
 from app.indicators.ta import rolling_zscore
 from app.strategies.base import Strategy, StrategyContext, register
 
@@ -18,6 +18,13 @@ from app.strategies.base import Strategy, StrategyContext, register
 class VwapReversion(Strategy):
     name = "vwap_reversion"
     description = "Fade extreme stretches from session VWAP in range-bound tape"
+    
+    is_breakout = False
+    ml_threshold = 0.52
+    evaluation_horizons = ["15m", "30m", "close"]
+    regime_weights = {
+        Regime.TREND_UP: 0.70, Regime.TREND_DOWN: 0.70, Regime.RANGE: 1.20, Regime.VOLATILE: 0.90
+    }
     default_params = {
         "z_entry": 2.0,          # |z| of vwap distance to trigger
         "z_window": 60,

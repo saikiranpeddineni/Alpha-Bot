@@ -13,7 +13,7 @@ from datetime import timedelta
 import pandas as pd
 from zoneinfo import ZoneInfo
 
-from app.core.domain import Signal, SignalAction
+from app.core.domain import Regime, Signal, SignalAction
 from app.data.base import resample_bars
 from app.strategies.base import Strategy, StrategyContext, register
 
@@ -23,13 +23,16 @@ ET = ZoneInfo("America/New_York")
 @register
 class OpeningRangeBreakout(Strategy):
     name = "orb"
-    description = "Opening range breakout with volume confirmation and 5m trend alignment"
+    description = "Trades breakouts of the opening N-minute range"
+    
+    is_breakout = True
+    ml_threshold = 0.55
+    evaluation_horizons = ["60m", "close"]
+    regime_weights = {
+        Regime.TREND_UP: 1.15, Regime.TREND_DOWN: 1.15, Regime.RANGE: 0.70, Regime.VOLATILE: 1.00
+    }
     default_params = {
         "range_minutes": 15,
-        # ARCHITECTURAL NOTE: We intentionally leave ORB active for the full session (390 mins).
-        # We rely on the ML TradeScore pipeline to intelligently reject low-volume afternoon chop 
-        # instead of hardcoding a structural time block here. 
-        "entry_cutoff_minute": 390,
         "breakout_buffer_bps": 5,     # close must clear the range by 0.05%
         "atr_buffer_mult": 0.0,       # if > 0, overrides breakout_buffer_bps with (mult * ATR)
         "volume_z_min": 1.5,
@@ -103,7 +106,7 @@ class OpeningRangeBreakout(Strategy):
         today_df = df[et_dates == today]
         n_today = len(today_df)
         rng_n = int(p["range_minutes"])
-        if n_today <= rng_n or n_today > int(p["entry_cutoff_minute"]):
+        if n_today <= rng_n:
             return None
 
         or_high = float(today_df["high"].iloc[:rng_n].max())

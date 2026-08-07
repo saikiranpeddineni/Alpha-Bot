@@ -24,13 +24,10 @@ from app.ai.prediction import TradeScoreEngine
 from app.config import RiskConfig, Settings, get_settings
 from app.core.domain import Regime, Signal, SignalAction
 from app.core.applog import applog
+from app.strategies.base import REGISTRY
 
 REGIME_WEIGHTS: dict[str, dict[Regime, float]] = {
-    "orb": {Regime.TREND_UP: 1.15, Regime.TREND_DOWN: 1.15, Regime.RANGE: 0.70, Regime.VOLATILE: 1.00},
-    "momentum": {Regime.TREND_UP: 1.20, Regime.TREND_DOWN: 1.05, Regime.RANGE: 0.60, Regime.VOLATILE: 0.80},
-    "vwap_reversion": {Regime.TREND_UP: 0.70, Regime.TREND_DOWN: 0.70, Regime.RANGE: 1.20, Regime.VOLATILE: 0.90},
-    "rsi2_reversion": {Regime.TREND_UP: 1.15, Regime.TREND_DOWN: 0.50, Regime.RANGE: 1.00, Regime.VOLATILE: 0.80},
-    "bb_squeeze": {Regime.TREND_UP: 1.10, Regime.TREND_DOWN: 1.10, Regime.RANGE: 0.80, Regime.VOLATILE: 0.90},
+    name: cls.regime_weights for name, cls in REGISTRY.items()
 }
 
 _REGIME_KEY: dict[Regime, str] = {
@@ -86,7 +83,8 @@ class SignalPipeline:
         return True
 
     def process(self, symbol: str, df: pd.DataFrame, signals: list[Signal], regime: Regime,
-                features: pd.Series | None = None, sector_strength: float | None = None) -> tuple[list[Signal], list[tuple[Signal, str]]]:
+                features: pd.Series | None = None, sector_strength: float | None = None,
+                adaptive_ml_thresholds: dict[str, float] | None = None) -> tuple[list[Signal], list[tuple[Signal, str]]]:
         """Return accepted and rejected signals. Shadow challengers never execute in this path."""
         if not signals:
             return [], []
@@ -166,18 +164,29 @@ class SignalPipeline:
                 mins_et = now_et.hour * 60 + now_et.minute
                 enforce_veto = self.should_enforce_ml_veto(sig.strategy, sig.action, score_res.model_source,
                                                            score_res.specialist_status, mins_et)
+                
+                # Audit Phase 3: Use adaptive threshold if available
+                current_threshold = self.ml_threshold
+                if adaptive_ml_thresholds and getattr(sig, "candidate_id", None) in adaptive_ml_thresholds:
+                    current_threshold = adaptive_ml_thresholds[sig.candidate_id]
+                
                 hard_reject_cutoff = getattr(self.trade_score_engine.risk_config, "ml_hard_reject_threshold", 0.48)
-                if ml < self.ml_threshold:
-                    if self.soft_composite_gating and ml >= hard_reject_cutoff:
+                if ml < current_threshold:
+                    if self.soft_composite_gating and ml >= (current_threshold - 0.04):
                         sig.ml_gate_decision = "GRAY_ZONE_EVALUATION"
-                        applog.info("pipeline", f"{symbol}: ML gray zone active ({ml:.4f} in [{hard_reject_cutoff:.2f}, {self.ml_threshold:.2f}]). Evaluating Meta & TradeScore.")
+                        applog.info("pipeline", f"{symbol}: ML gray zone active ({ml:.4f} in [{(current_threshold - 0.04):.2f}, {current_threshold:.2f}]). Evaluating Meta & TradeScore.")
+                    elif ml < hard_reject_cutoff:
+                        applog.info("pipeline", f"{symbol}: ML confidence {ml:.4f} < hard cutoff {hard_reject_cutoff:.2f}. Rejected.")
+                        sig.ml_gate_decision = "REJECT"
+                        rejected.append((sig, f"ML confidence {ml:.4f} < threshold {current_threshold:.4f}"))
+                        continue
                     elif enforce_veto:
                         sig.ml_gate_decision = "REJECT"
-                        rejected.append((sig, f"ML confidence {ml:.4f} < threshold {self.ml_threshold:.4f}"))
+                        rejected.append((sig, f"ML confidence {ml:.4f} < threshold {current_threshold:.4f}"))
                         continue
                     else:
                         sig.ml_gate_decision = "BASE_FALLBACK_BYPASS"
-                        applog.info("pipeline", f"{symbol}: {sig.strategy.upper()} BASE_FALLBACK ML advisory bypass active: prob={ml:.4f} < threshold={self.ml_threshold:.4f} (mins_et={mins_et})")
+                        applog.info("pipeline", f"{symbol}: {sig.strategy.upper()} BASE_FALLBACK ML advisory bypass active: prob={ml:.4f} < threshold={current_threshold:.4f} (mins_et={mins_et})")
                 else:
                     sig.ml_gate_decision = "PASS"
 
@@ -238,7 +247,13 @@ class SignalPipeline:
                             sig.take_profit = min(sig.take_profit, round(minimum_target, 4))
 
             side_str = "long" if sig.action == SignalAction.ENTER_LONG else "short"
-            meta_pred = self.meta_label_engine.predict(sig.strategy, features, side=side_str)
+            
+            # Fetch dynamic threshold again for the Meta Label Supervisor
+            meta_threshold = self.ml_threshold
+            if adaptive_ml_thresholds and getattr(sig, "candidate_id", None) in adaptive_ml_thresholds:
+                meta_threshold = adaptive_ml_thresholds[sig.candidate_id]
+                
+            meta_pred = self.meta_label_engine.predict(sig.strategy, features, side=side_str, adaptive_threshold=meta_threshold)
             if not meta_pred.approved:
                 rejected.append((sig, f"Meta-label {meta_pred.decision} [{meta_pred.source}]: {meta_pred.reason}"))
                 continue
@@ -257,7 +272,7 @@ class SignalPipeline:
                                                         avg_daily_volume=avg_volume, sector_strength=sector_strength)
             trade_score = min(100.0, max(0.0, raw_score))
             sig.score = round(trade_score / 100.0, 4)
-            is_breakout = sig.strategy in ["bb_squeeze", "orb", "momentum"]
+            is_breakout = REGISTRY[sig.strategy].is_breakout if sig.strategy in REGISTRY else False
             approved, threshold = self.trade_score_engine.approve(
                 trade_score, regime, is_event_day=self._is_event_day,
                 threshold_boost=self.trade_score_engine.risk_config.midday_score_boost if (self._midday_active and is_breakout) else 0.0)

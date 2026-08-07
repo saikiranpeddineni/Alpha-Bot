@@ -25,6 +25,8 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pandas as pd
 
+
+
 from app.ai.features import FEATURE_COLUMNS, build_mae_mfe_dataset, build_training_set
 from app.core.domain import Regime
 from app.core.applog import applog
@@ -248,12 +250,13 @@ def _make_classifier(name: str, n_estimators: int = 300):
             from lightgbm import LGBMClassifier  # type: ignore[import-untyped]
             return LGBMClassifier(
                 n_estimators=n_estimators,
-                learning_rate=0.06,
-                max_depth=6,
-                num_leaves=63,
-                subsample=0.8,
-                colsample_bytree=0.8,
-                reg_lambda=1.0,
+                learning_rate=0.05,
+                max_depth=4,
+                num_leaves=15,
+                min_child_samples=100,
+                subsample=0.6,
+                colsample_bytree=0.6,
+                reg_lambda=5.0,
                 class_weight="balanced",
                 random_state=42,
                 verbose=-1,
@@ -739,37 +742,14 @@ def get_strategy_candidates(
     if n < 60:
         return []
 
-    # Precompute regimes for all bars to avoid slow sliding-window regime detection
-    regimes = [Regime.RANGE] * n
-    if "er20" in df.columns:
-        er_vals = df["er20"].to_numpy()
-        atr_pct_all = (df["atr14"] / df["close"] * 100.0).to_numpy()
-        ema = df["ema20"].to_numpy()
-
-        slope_pct_all = np.zeros(n)
-        for i in range(11, n):
-            if not np.isnan(ema[i]) and not np.isnan(ema[i - 10]):
-                slope_pct_all[i] = (ema[i] / ema[i - 10] - 1.0) * 100.0
-
-        vol_percentile_all = np.full(n, 0.5)
-        for i in range(59, n):
-            start_idx = max(0, i - 389)
-            window_vol = atr_pct_all[start_idx : i + 1]
-            curr = atr_pct_all[i]
-            if not np.isnan(curr):
-                vol_percentile_all[i] = np.mean(window_vol <= curr)
-
-        for i in range(59, n):
-            vol_pct = vol_percentile_all[i]
-            er_val = er_vals[i]
-            slope = slope_pct_all[i]
-
-            if vol_pct >= 0.85:
-                regimes[i] = Regime.VOLATILE
-            elif not np.isnan(er_val) and er_val >= 0.30:
-                regimes[i] = Regime.TREND_UP if slope > 0 else Regime.TREND_DOWN
-            else:
-                regimes[i] = Regime.RANGE
+    # Use the memoized regime_val feature rather than manually re-calculating slope/ATR/ER20
+    # for 142k bars iteratively.
+    if "regime_val" in df.columns:
+        regime_map = {0.0: Regime.RANGE, 1.0: Regime.TREND_UP, -1.0: Regime.TREND_DOWN, 2.0: Regime.VOLATILE}
+        regimes = df["regime_val"].map(regime_map).fillna(Regime.RANGE).tolist()
+    else:
+        # Fallback if somehow not enriched
+        regimes = [Regime.RANGE] * n
 
     # Slice window size matches backtest: SLICE_WINDOW = 450
     for i in range(1, n):
@@ -812,13 +792,10 @@ class MetaLabelEngine:
 
     # Default per-strategy approval thresholds.
     # These are deliberately conservative; lower only with evidence.
-    DEFAULT_THRESHOLDS: dict[str, float] = {
-        "orb":           0.55,
-        "momentum":      0.55,
-        "vwap_reversion": 0.52,
-        "rsi2_reversion": 0.52,
-        "bb_squeeze":    0.53,
-    }
+    @property
+    def default_thresholds(self) -> dict[str, float]:
+        from app.strategies.base import REGISTRY
+        return {name: cls.ml_threshold for name, cls in REGISTRY.items()}
     FALLBACK_THRESHOLD = 0.53
 
     # Strategies that REQUIRE a trained MetaLabel model to pass.
@@ -884,7 +861,7 @@ class MetaLabelEngine:
 
         return None
 
-    def predict(self, strategy: str, features: "pd.Series", side: str = "long") -> MetaPrediction:  # type: ignore[name-defined]
+    def predict(self, strategy: str, features: "pd.Series", side: str = "long", adaptive_threshold: float | None = None) -> MetaPrediction:  # type: ignore[name-defined]
         """Return a MetaPrediction using the explicit three-state contract.
 
         PASS   = real trained model evaluated and approved.
@@ -919,7 +896,7 @@ class MetaLabelEngine:
                             f"model trained_at {trained_at_str} is after backtest start {self.backtest_start_time}"
                         )
                         clf = None  # fix: actually bypass the leaky model (was: pass — bug!)
-        threshold = self.DEFAULT_THRESHOLDS.get(strategy, self.FALLBACK_THRESHOLD)
+        threshold = adaptive_threshold if adaptive_threshold is not None else self.default_thresholds.get(strategy, self.FALLBACK_THRESHOLD)
         cache_key = f"{strategy}_{side}"
         n_samples = self._sample_counts.get(cache_key, 0)
         is_mandatory = strategy in self.MANDATORY_STRATEGIES
@@ -1169,7 +1146,7 @@ class MetaLabelEngine:
         # The probability threshold is deliberately not tuned here.  This
         # validation report shows whether the *existing* gate improves the
         # candidate population it will be asked to filter.
-        threshold = self.DEFAULT_THRESHOLDS.get(strategy, self.FALLBACK_THRESHOLD)
+        threshold = self.default_thresholds.get(strategy, self.FALLBACK_THRESHOLD)
         validation_gate_report: dict[str, dict | int | float] = {}
         if len(y_va):
             proba_va = predict_proba_safe(clf, X_va)[:, 1]

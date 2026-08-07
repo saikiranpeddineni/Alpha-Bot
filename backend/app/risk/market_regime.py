@@ -320,14 +320,30 @@ class MarketRiskAggregator:
                     health=SignalHealth(healthy=False, reason=reason, source_ts=T, confidence=0.0),
                     reason=reason,
                 )
+            # Audit Phase 2: Make Volatility Trend-Aware
+            is_uptrend = False
+            try:
+                if len(df) > 0 and "close" in df.columns:
+                    # Determine if it's a massive uptrend by checking 20-hour SMA
+                    df_h = df.resample("1h").agg({"close": "last"}).dropna()
+                    if len(df_h) >= 20:
+                        close = float(df_h["close"].iloc[-1])
+                        sma20 = float(df_h["close"].rolling(20).mean().iloc[-1])
+                        is_uptrend = close > sma20
+            except Exception:
+                is_uptrend = False
+
             if pct >= _PANIC_THRESHOLD:
-                state = MarketRiskState.PANIC
+                state = MarketRiskState.CAUTION if is_uptrend else MarketRiskState.PANIC
             elif pct >= _STRESS_THRESHOLD:
-                state = MarketRiskState.STRESS
+                state = MarketRiskState.CAUTION if is_uptrend else MarketRiskState.STRESS
             elif pct >= _CAUTION_THRESHOLD:
                 state = MarketRiskState.CAUTION
             else:
                 state = MarketRiskState.NORMAL
+                
+            if is_uptrend and pct >= _STRESS_THRESHOLD:
+                reason += " (downgraded due to uptrend)"
             source_ts = df.index[-1].to_pydatetime() if hasattr(df.index[-1], "to_pydatetime") else T
             return SignalVote(
                 family=family,

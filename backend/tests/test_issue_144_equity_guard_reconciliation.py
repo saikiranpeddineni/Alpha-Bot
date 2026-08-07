@@ -131,7 +131,7 @@ class _FakeStrategy(Strategy):
 
 
 def _patch_pipeline_accept_all(pipeline):
-    def permissive_process(symbol, df, signals, regime, features=None, sector_strength=None):
+    def permissive_process(symbol, df, signals, regime, *args, **kwargs):
         accepted, rejected = [], []
         for sig in signals:
             sig.ml_probability = sig.ml_probability or 0.99
@@ -143,7 +143,7 @@ def _patch_pipeline_accept_all(pipeline):
 
 
 def _patch_portfolio_gate_accept_all(engine):
-    engine.portfolio_gate.gate = lambda symbol, positions, sector_override=None: (True, "ok")
+    engine.portfolio_gate.gate = lambda *args, **kwargs: (True, "ok")
 
 
 def _patch_risk_accept_all(engine):

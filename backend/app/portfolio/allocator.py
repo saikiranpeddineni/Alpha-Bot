@@ -48,7 +48,7 @@ class AllocationResult:
 class PortfolioAIGate:
     """Correlation and sector-concentration guard."""
 
-    def __init__(self, max_correlation: float = 0.75, max_positions_per_sector: int = 2) -> None:
+    def __init__(self, max_correlation: float = 0.75, max_positions_per_sector: int = 5) -> None:
         self.max_correlation = max_correlation
         self.max_positions_per_sector = max_positions_per_sector
         self._corr: pd.DataFrame | None = None
@@ -85,7 +85,7 @@ class PortfolioAIGate:
                     max_c = max(max_c, abs(float(c)))
         return max_c
 
-    def gate(self, symbol: str, open_positions: list[Position], sector_override: str | None = None) -> tuple[bool, str]:
+    def gate(self, symbol: str, open_positions: list[Position], sector_override: str | None = None, market_state: Any = None) -> tuple[bool, str]:
         sym = symbol.upper()
         max_c = self._max_corr_with_positions(sym, open_positions)
         if max_c > self.max_correlation:
@@ -99,12 +99,22 @@ class PortfolioAIGate:
             ]
             return False, f"{sym} correlation {max_c:.2f} > {self.max_correlation:.2f} with {correlated_with}"
 
+        limit = self.max_positions_per_sector
+        if market_state is not None:
+            state_str = getattr(market_state, "value", str(market_state)).upper()
+            if state_str == "NORMAL":
+                limit = 5
+            elif state_str == "CAUTION":
+                limit = 3
+            elif state_str in ("STRESS", "PANIC"):
+                limit = 1
+
         sector = sector_override or _sector(sym)
         sector_count = sum(1 for p in open_positions if _sector(p.symbol) == sector)
-        if sector_count >= self.max_positions_per_sector:
+        if sector_count >= limit:
             return False, (
-                f"{sym} would exceed sector limit {self.max_positions_per_sector} "
-                f"in {sector} (currently {sector_count})"
+                f"{sym} would exceed dynamic sector limit {limit} "
+                f"in {sector} (currently {sector_count}, state={market_state})"
             )
         return True, "ok"
 
@@ -202,6 +212,7 @@ def process_portfolio_allocations(
     equity: float,
     portfolio_gate: PortfolioAIGate | None = None,
     portfolio_allocator: CapitalAllocationOptimizer | None = None,
+    market_state: Any = None,
 ) -> PortfolioDecision:
     approved_candidates: list[Signal] = []
     gated_entries: list[tuple[Signal, str]] = []
@@ -215,7 +226,7 @@ def process_portfolio_allocations(
     # RiskManager remains the sole sizing authority.
     effective_positions = list(positions)
     for sig in signals:
-        approved, reason = portfolio_gate.gate(sig.symbol, effective_positions) if portfolio_gate is not None else (True, "ok")
+        approved, reason = portfolio_gate.gate(sig.symbol, effective_positions, market_state=market_state) if portfolio_gate is not None else (True, "ok")
         if approved:
             approved_candidates.append(sig)
             if portfolio_gate is not None:

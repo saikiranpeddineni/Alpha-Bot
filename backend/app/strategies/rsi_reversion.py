@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from app.core.domain import Signal, SignalAction
+from app.core.domain import Regime, Signal, SignalAction
 from app.strategies.base import Strategy, StrategyContext, register
 
 
@@ -18,6 +18,13 @@ from app.strategies.base import Strategy, StrategyContext, register
 class Rsi2Reversion(Strategy):
     name = "rsi2_reversion"
     description = "Buy RSI(2) panic dips inside an intact intraday uptrend"
+    
+    is_breakout = False
+    ml_threshold = 0.52
+    evaluation_horizons = ["15m", "30m", "close"]
+    regime_weights = {
+        Regime.TREND_UP: 1.15, Regime.TREND_DOWN: 0.50, Regime.RANGE: 1.00, Regime.VOLATILE: 0.80
+    }
     default_params = {
         "rsi2_entry": 5.0,
         "rsi2_exit": 70.0,

@@ -128,9 +128,13 @@ class AdaptiveProtectionPlanner:
                 # 3. Exhaustion Top / Rejection (Choke)
                 elif health.overall <= 0.4:
                     giveback_pct = min(base, 0.15)
-                # 4. Smooth Interpolation
+                # 4. Smooth Interpolation with Volume-Weighted Elasticity
                 else:
-                    giveback_pct = max(0.12, base)
+                    # Elastic Trailing Stop: 
+                    # High volume_score (healthy absorption) relaxes the stop.
+                    # Low volume_score (distribution) chokes the stop.
+                    elasticity = max(0.5, min(1.5, health.volume_score / 0.80))
+                    giveback_pct = max(0.12, base * elasticity)
 
             runner_threshold = getattr(self.config, "hyper_runner_threshold_r", 1.50)
             if peak_r >= runner_threshold and health.overall >= 0.70 and proximity < 0.80:

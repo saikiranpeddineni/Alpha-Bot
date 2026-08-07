@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from app.core.domain import Signal, SignalAction
+from app.core.domain import Regime, Signal, SignalAction
 from app.strategies.base import Strategy, StrategyContext, register
 
 
@@ -15,6 +15,13 @@ from app.strategies.base import Strategy, StrategyContext, register
 class BollingerBandSqueeze(Strategy):
     name = "bb_squeeze"
     description = "Volume-confirmed breakout from a Bollinger Band squeeze"
+    
+    is_breakout = True
+    ml_threshold = 0.53
+    evaluation_horizons = ["60m", "close"]
+    regime_weights = {
+        Regime.TREND_UP: 1.10, Regime.TREND_DOWN: 1.10, Regime.RANGE: 0.80, Regime.VOLATILE: 0.90
+    }
     default_params = {
         "width_percentile_lookback": 100,
         "width_percentile_threshold": 0.15,

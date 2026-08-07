@@ -174,8 +174,8 @@ class TestMetaLabelEngine:
 
     def test_known_strategy_has_threshold(self):
         engine = self._make_engine()
-        assert engine.DEFAULT_THRESHOLDS["orb"] == pytest.approx(0.55)
-        assert engine.DEFAULT_THRESHOLDS["vwap_reversion"] == pytest.approx(0.52)
+        assert engine.default_thresholds["orb"] == pytest.approx(0.55)
+        assert engine.default_thresholds["vwap_reversion"] == pytest.approx(0.52)
 
     def test_train_and_predict_known_class(self, monkeypatch):
         engine = self._make_engine()

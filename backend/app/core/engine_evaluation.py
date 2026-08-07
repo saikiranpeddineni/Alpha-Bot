@@ -135,38 +135,6 @@ class TradingEngineEvaluationMixin:
         _mover_bias = _mover_entry.get("direction")   # "gainer" | "loser" | None
         _mover_chg  = float(_mover_entry.get("change_pct", 0.0))
 
-        sctx = StrategyContext(
-            position=position, equity=equity, regime=regime, now=now,
-            mover_bias=_mover_bias, mover_change_pct=_mover_chg,
-        )
-        signals = []
-        for strat in self.strategies:
-
-            if not strat.enabled:
-                continue
-            decision = getattr(self, "last_safety_decision", None)
-            if decision is not None and strat.name not in decision.allowed_strategies:
-                continue
-            try:
-                sig = strat.on_bar(sctx, symbol, df)
-            except Exception as exc:  # noqa: BLE001
-                applog.error("engine", f"strategy {strat.name} failed on {symbol}: {exc}")
-                continue
-            if sig is not None:
-                sig.strategy_params = getattr(strat, "params", {})
-                signals.append(sig)
-        if not signals:
-            return []
-
-        # CR-146 CEO Audit: Pre-Gate the symbol against portfolio sector/correlation limits
-        # BEFORE we spend hundreds of milliseconds running ML feature extraction & inference.
-        has_exits = any(sig.action == SignalAction.EXIT for sig in signals)
-        if not has_exits and effective_positions is not None and getattr(self, "portfolio_gate", None) is not None:
-            approved, reason = self.portfolio_gate.gate(symbol, effective_positions)
-            if not approved:
-                applog.info("portfolio.gate", f"{symbol} rejected pre-ML: {reason}")
-                return []
-
         # Feature 2: Relative Strength vs SPY — multi-timeframe (40% ret_5 + 60% ret_15)
         # Audit Fix: SPY df is now cached per-tick on the engine to eliminate redundant computation.
         spy_df = None
@@ -190,6 +158,68 @@ class TradingEngineEvaluationMixin:
                 applog.debug("engine", f"{symbol} RS vs SPY: rs_score={rs_score:.3f}")
         except Exception:
             rs_score = None  # graceful fallback — pipeline treats None as neutral 50
+
+        sctx = StrategyContext(
+            position=position, equity=equity, regime=regime, now=now,
+            mover_bias=_mover_bias, mover_change_pct=_mover_chg, rs_score=rs_score
+        )
+        signals = []
+        for strat in self.strategies:
+
+            if not strat.enabled:
+                continue
+            decision = getattr(self, "last_safety_decision", None)
+            if decision is not None and strat.name not in decision.allowed_strategies:
+                continue
+            try:
+                sig = strat.on_bar(sctx, symbol, df)
+            except Exception as exc:  # noqa: BLE001
+                applog.error("engine", f"strategy {strat.name} failed on {symbol}: {exc}")
+                continue
+            if sig is not None:
+                sig.strategy_params = getattr(strat, "params", {})
+                signals.append(sig)
+        if not signals:
+            return []
+
+        # Resolve strategy overlap: If multiple entry signals trigger on the same bar,
+        # pick the one with the highest priority to prevent signal correlation and AI confusion.
+        entry_signals = [sig for sig in signals if sig.action != SignalAction.EXIT]
+        exit_signals = [sig for sig in signals if sig.action == SignalAction.EXIT]
+        
+        if len(entry_signals) > 1:
+            STRATEGY_PRIORITY = {
+                "gap_and_go": 1,
+                "liquidity_sweep": 2,
+                "bb_squeeze": 3,
+                "relative_strength": 4,
+                "trend_pullback": 5,
+                "orb": 6,
+                "rsi_reversion": 7,
+                "vwap_reversion": 8,
+                "momentum": 9,
+            }
+            # Sort ascending by priority (1 is best). Unknown strategies default to 99.
+            entry_signals.sort(key=lambda s: STRATEGY_PRIORITY.get(s.strategy, 99))
+            entry_signals = [entry_signals[0]] # Keep only the absolute best one
+            
+        signals = exit_signals + entry_signals
+
+        if not signals:
+            return []
+
+        # CR-146 CEO Audit: Pre-Gate the symbol against portfolio sector/correlation limits
+        # BEFORE we spend hundreds of milliseconds running ML feature extraction & inference.
+        has_exits = any(sig.action == SignalAction.EXIT for sig in signals)
+        decision = getattr(self, "last_safety_decision", None)
+        market_state = getattr(decision, "market_state", None) if decision else None
+        
+        if not has_exits and effective_positions is not None and getattr(self, "portfolio_gate", None) is not None:
+            approved, reason = self.portfolio_gate.gate(symbol, effective_positions, market_state=market_state)
+            if not approved:
+                applog.info("portfolio.gate", f"{symbol} rejected pre-ML: {reason}")
+                return []
+
 
         # Assign a unique candidate ID to all candidate entry signals first (shared UUID)
         for sig in signals:
@@ -274,7 +304,7 @@ class TradingEngineEvaluationMixin:
                     applog.error("engine.evaluator", f"ParallelEvidenceEvaluator failed for {symbol} {sig.strategy}: {exc}")
 
         accepted, rejected = await asyncio.to_thread(
-            partial(self.pipeline.process, symbol, df, signals, regime, sector_strength=rs_score)
+            partial(self.pipeline.process, symbol, df, signals, regime, sector_strength=rs_score, adaptive_ml_thresholds=adaptive_ml_thresholds)
         )
         
         # Save signals to shadow ledger
