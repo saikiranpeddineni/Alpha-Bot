@@ -135,7 +135,7 @@ class OpeningRangeBreakout(Strategy):
         mft_enabled = bool(p.get("mft_alignment", True))
         is_bullish_5m, is_bearish_5m = self._check_5m_trend(df) if mft_enabled else (True, True)
 
-        if close > or_high * buffer and volume_ok and is_bullish_5m and ctx.regime == Regime.TREND_UP and rsi14 < 70.0:
+        if close > or_high * buffer and volume_ok and is_bullish_5m and ctx.regime == Regime.TREND_UP:
             stop = max(or_low, close - p["atr_stop_mult"] * atr)
             risk = close - stop
             if risk <= 0:
@@ -146,12 +146,12 @@ class OpeningRangeBreakout(Strategy):
                 action=SignalAction.ENTER_LONG,
                 confidence=confidence,
                 strategy=self.name,
-                reason=f"Broke above {rng_n}m range {or_high:.2f} (vol z {vol_z:.1f}, 5m trend aligned, RSI {rsi14:.1f})",
+                reason=f"Broke above {rng_n}m range {or_high:.2f} (vol z {vol_z:.1f}, 5m trend aligned)",
                 price=close,
                 stop_loss=stop,
                 take_profit=close + p["reward_risk"] * risk,
             )
-        if close < or_low / buffer and volume_ok and is_bearish_5m and ctx.regime == Regime.TREND_DOWN and rsi14 > 30.0:
+        if close < or_low / buffer and volume_ok and is_bearish_5m and ctx.regime == Regime.TREND_DOWN:
             stop = min(or_high, close + p["atr_stop_mult"] * atr)
             risk = stop - close
             if risk <= 0:
@@ -162,7 +162,7 @@ class OpeningRangeBreakout(Strategy):
                 action=SignalAction.ENTER_SHORT,
                 confidence=confidence,
                 strategy=self.name,
-                reason=f"Broke below {rng_n}m range {or_low:.2f} (vol z {vol_z:.1f}, 5m trend aligned, RSI {rsi14:.1f})",
+                reason=f"Broke below {rng_n}m range {or_low:.2f} (vol z {vol_z:.1f}, 5m trend aligned)",
                 price=close,
                 stop_loss=stop,
                 take_profit=close - p["reward_risk"] * risk,

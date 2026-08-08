@@ -12,6 +12,7 @@ from pathlib import Path
 
 from pydantic import AliasChoices, BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from typing import Any
 
 import contextvars
 
@@ -93,6 +94,21 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=str(REPO_ROOT / ".env"), env_file_encoding="utf-8",
         extra="ignore", case_sensitive=False,
+    )
+
+    strategy_config: dict[str, dict[str, Any]] = Field(
+        default={
+            "momentum": {"enabled": True, "params": {}},
+            "mean_reversion": {"enabled": True, "params": {}},
+            "breakout": {"enabled": True, "params": {}},
+            "vwap_cross": {"enabled": True, "params": {}},
+            "orb": {"enabled": True, "params": {}},
+            "bb_squeeze": {"enabled": True, "params": {}},
+            "gap_and_go": {"enabled": True, "params": {}},
+            "trend_pullback": {"enabled": True, "params": {}},
+            "liquidity_sweep": {"enabled": True, "params": {}},
+            "relative_strength": {"enabled": True, "params": {}},
+        }
     )
 
     host: str = Field("0.0.0.0", validation_alias=AliasChoices("ALPHADESK_HOST", "HOST"))

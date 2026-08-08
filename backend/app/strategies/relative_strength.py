@@ -85,20 +85,26 @@ class RelativeStrength(Strategy):
         # Long Setup (High Relative Strength)
         if ctx.rs_score >= p["rs_long_threshold"]:
             if close_px > local_high:
+                confidence = min(0.90, 0.60 + 0.1 * (ctx.rs_score - p["rs_long_threshold"]))
                 return Signal(
                     symbol=symbol,
                     action=SignalAction.ENTER_LONG,
+                    confidence=round(confidence, 4),
                     strategy=self.name,
+                    reason=f"RS score {ctx.rs_score:.2f} > {p['rs_long_threshold']} and broke local high",
                     score=0.75,
                 )
 
         # Short Setup (High Relative Weakness)
         if ctx.rs_score <= p["rs_short_threshold"]:
             if close_px < local_low:
+                confidence = min(0.90, 0.60 + 0.1 * (p["rs_short_threshold"] - ctx.rs_score))
                 return Signal(
                     symbol=symbol,
                     action=SignalAction.ENTER_SHORT,
+                    confidence=round(confidence, 4),
                     strategy=self.name,
+                    reason=f"RS score {ctx.rs_score:.2f} < {p['rs_short_threshold']} and broke local low",
                     score=0.75,
                 )
 

@@ -431,6 +431,15 @@ class WalkForwardValidator:
         y_all = pd.concat(ys).sort_index()
         w_all = pd.concat(ws).sort_index()
 
+        MAX_WFV_SAMPLES = 1_000_000
+        if len(X_all) > MAX_WFV_SAMPLES:
+            applog.info("wfv", f"Subsampling from {len(X_all)} down to {MAX_WFV_SAMPLES} to accelerate Walk-Forward Validation.")
+            idx = np.random.choice(len(X_all), MAX_WFV_SAMPLES, replace=False)
+            idx.sort()
+            X_all = X_all.iloc[idx]
+            y_all = y_all.iloc[idx]
+            w_all = w_all.iloc[idx]
+
         # Build a combined frame for day-splitting
         combined = X_all.copy()
         combined["__label__"] = y_all
@@ -446,9 +455,11 @@ class WalkForwardValidator:
                 "Using full-dataset training.",
             )
             clf = _make_classifier("lgbm")
+            from threadpoolctl import threadpool_limits
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                clf.fit(X_all, y_all, sample_weight=w_all)
+                with threadpool_limits(limits=1, user_api="openmp"):
+                    clf.fit(X_all, y_all, sample_weight=w_all)
             return WalkForwardResult(
                 best_classifier=clf,
                 best_name="lgbm",
@@ -459,6 +470,8 @@ class WalkForwardValidator:
 
         # Accumulate per-model metrics across windows
         model_window_metrics: dict[str, list[dict]] = {n: [] for n in _CLASSIFIERS}
+
+        from threadpoolctl import threadpool_limits
 
         for train_df, val_df in windows:
             X_tr = train_df.drop(columns=["__label__", "__weight__"])
@@ -475,7 +488,8 @@ class WalkForwardValidator:
                     clf = _make_classifier(name)
                     with warnings.catch_warnings():
                         warnings.simplefilter("ignore")
-                        clf.fit(X_tr, y_tr, sample_weight=w_tr)
+                        with threadpool_limits(limits=1, user_api="openmp"):
+                            clf.fit(X_tr, y_tr, sample_weight=w_tr)
                     proba = clf.predict_proba(X_va)[:, 1]
                     m = _trading_metrics(y_va.to_numpy(), proba)
                     model_window_metrics[name].append(m)
@@ -708,6 +722,108 @@ class MetaPrediction:
     reason: str = ""               # human-readable explanation when REJECT or BYPASS
 
 
+_CANDIDATE_CACHE: dict = {}
+
+def clear_candidate_cache():
+    """Clear the strategy candidate cache to prevent memory leaks across daily cycles."""
+    _CANDIDATE_CACHE.clear()
+
+def _compute_candidates_for_symbol(symbol: str, df_or_path, strategy_overrides: dict | None = None) -> dict:
+    from app.strategies.base import create_strategies, StrategyContext
+    from app.core.domain import SignalAction, Regime
+    from app.indicators.ta import is_enriched, enrich
+    from datetime import timedelta
+    import pandas as pd
+    
+    if isinstance(df_or_path, str):
+        df = pd.read_parquet(df_or_path)
+    else:
+        df = df_or_path
+        
+    strats = create_strategies(strategy_overrides)
+    results = {}
+    for s in strats:
+        results[s.name] = {"long": [], "short": []}
+        s.reset()
+        
+    if not is_enriched(df):
+        df = enrich(df)
+        
+    # WARNING: To prevent extreme memory/CPU overhead, we MUST defragment the dataframe.
+    # Otherwise, iloc slices on 150 mixed-type columns take 100x longer per loop iteration!
+    df = df.copy()
+
+    n = len(df)
+    if n < 60:
+        return results
+        
+    if "regime_val" in df.columns:
+        regime_map = {0.0: Regime.RANGE, 1.0: Regime.TREND_UP, -1.0: Regime.TREND_DOWN, 2.0: Regime.VOLATILE}
+        regimes = df["regime_val"].map(regime_map).fillna(Regime.RANGE).tolist()
+    else:
+        regimes = [Regime.RANGE] * n
+        
+    for i in range(1, n):
+        window = df.iloc[max(0, i - 450 + 1) : i + 1]
+        regime = regimes[i]
+        now_ts = (window.index[-1] + timedelta(minutes=1)).to_pydatetime()
+        sctx = StrategyContext(position=None, equity=100_000.0, regime=regime, now=now_ts)
+        
+        for strat in strats:
+            try:
+                sig = strat.on_bar(sctx, symbol, window)
+                if sig is not None:
+                    sig_side = "long" if sig.action == SignalAction.ENTER_LONG else "short"
+                    results[strat.name][sig_side].append(df.index[i])
+            except Exception:
+                pass
+                
+    return results
+
+def precompute_all_strategy_candidates(frames: dict[str, pd.DataFrame], strategy_overrides: dict | None = None):
+    """Precompute and cache candidates for all symbols concurrently using ProcessPoolExecutor."""
+    symbols_to_compute = []
+    for sym, df in frames.items():
+        cache_key = (sym, id(df))
+        if cache_key not in _CANDIDATE_CACHE:
+            symbols_to_compute.append((sym, df))
+            
+    if not symbols_to_compute:
+        return
+        
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+    from app.core.applog import applog
+    import os
+    import tempfile
+    
+    # Dump DataFrames to parquet to completely bypass Windows IPC pickling limits
+    temp_dir = tempfile.mkdtemp()
+    symbol_paths = {}
+    for sym, df in symbols_to_compute:
+        path = os.path.join(temp_dir, f"{sym}.parquet")
+        df.to_parquet(path, engine="pyarrow")
+        symbol_paths[sym] = path
+    
+    applog.info("meta", f"Precomputing candidates for {len(symbols_to_compute)} symbols across all strategies concurrently...")
+    with ProcessPoolExecutor() as executor:
+        futures = {
+            executor.submit(_compute_candidates_for_symbol, sym, symbol_paths[sym], strategy_overrides): (sym, id(df))
+            for sym, df in symbols_to_compute
+        }
+        for future in as_completed(futures):
+            cache_key = futures[future]
+            try:
+                _CANDIDATE_CACHE[cache_key] = future.result()
+            except Exception as exc:
+                applog.warning("meta", f"Failed to precompute candidates for {cache_key[0]}: {exc}")
+                _CANDIDATE_CACHE[cache_key] = {}
+                
+    import shutil
+    try:
+        shutil.rmtree(temp_dir)
+    except:
+        pass
+
 def get_strategy_candidates(
     strategy_name: str,
     df: pd.DataFrame,
@@ -715,62 +831,14 @@ def get_strategy_candidates(
     side: str,
     strategy_overrides: dict[str, dict] | None = None,
 ) -> list[pd.Timestamp]:
-    """Replay the strategy on the historical dataframe to find candidate timestamps.
-    
-    Uses closed-bar semantics and the actual strategy on_bar method.
-    """
-    from app.strategies.base import create_strategies, StrategyContext
-    from app.core.domain import SignalAction, Regime
-    import numpy as np
-
-    # Use the same persisted strategy parameters as the live engine and
-    # backtester.  A MetaLabel trained on defaults must never gate a strategy
-    # running with user-modified parameters.
-    strats = create_strategies(strategy_overrides)
-    strat = next((s for s in strats if s.name == strategy_name), None)
-    if strat is None:
-        return []
-
-    strat.reset()
-    candidate_timestamps = []
-    
-    from app.indicators.ta import is_enriched, enrich
-    if not is_enriched(df):
-        df = enrich(df)
-
-    n = len(df)
-    if n < 60:
-        return []
-
-    # Use the memoized regime_val feature rather than manually re-calculating slope/ATR/ER20
-    # for 142k bars iteratively.
-    if "regime_val" in df.columns:
-        regime_map = {0.0: Regime.RANGE, 1.0: Regime.TREND_UP, -1.0: Regime.TREND_DOWN, 2.0: Regime.VOLATILE}
-        regimes = df["regime_val"].map(regime_map).fillna(Regime.RANGE).tolist()
-    else:
-        # Fallback if somehow not enriched
-        regimes = [Regime.RANGE] * n
-
-    # Slice window size matches backtest: SLICE_WINDOW = 450
-    for i in range(1, n):
-        window = df.iloc[max(0, i - 450 + 1) : i + 1]
-        regime = regimes[i]
-        from datetime import timedelta
-        now_ts = (window.index[-1] + timedelta(minutes=1)).to_pydatetime()
-        sctx = StrategyContext(position=None, equity=100_000.0, regime=regime, now=now_ts)
+    """Replay the strategy on the historical dataframe to find candidate timestamps."""
+    cache_key = (symbol, id(df))
+    if cache_key not in _CANDIDATE_CACHE:
+        _CANDIDATE_CACHE[cache_key] = _compute_candidates_for_symbol(symbol, df, strategy_overrides)
         
-        try:
-            sig = strat.on_bar(sctx, symbol, window)
-        except Exception:
-            sig = None
-            
-        if sig is not None:
-            # Check direction match
-            sig_side = "long" if sig.action == SignalAction.ENTER_LONG else "short"
-            if sig_side == side:
-                candidate_timestamps.append(df.index[i])
-                
-    return candidate_timestamps
+    if strategy_name not in _CANDIDATE_CACHE.get(cache_key, {}):
+        return []
+    return _CANDIDATE_CACHE[cache_key][strategy_name].get(side, [])
 
 
 class MetaLabelEngine:
@@ -1070,6 +1138,15 @@ class MetaLabelEngine:
         X_all = pd.concat(xs).sort_index()
         y_all = pd.concat(ys).sort_index()
         w_all = pd.concat(ws).sort_index()
+        
+        MAX_META_SAMPLES = 1_000_000
+        if len(X_all) > MAX_META_SAMPLES:
+            applog.info("meta", f"[meta_train] Subsampling from {len(X_all)} down to {MAX_META_SAMPLES} to accelerate MetaLabel training.")
+            idx = np.random.choice(len(X_all), MAX_META_SAMPLES, replace=False)
+            idx.sort()
+            X_all = X_all.iloc[idx]
+            y_all = y_all.iloc[idx]
+            w_all = w_all.iloc[idx]
         n_total = len(X_all)
         n_pos = int(y_all.sum())
         n_neg = int((y_all == 0).sum())
@@ -1123,15 +1200,18 @@ class MetaLabelEngine:
         X_va, y_va = X_all.iloc[split:], y_all.iloc[split:]
 
         clf = _make_classifier("lgbm", n_estimators=200)
+        from threadpoolctl import threadpool_limits
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             if not X_tr.empty:
                 try:
-                    clf.fit(X_tr, y_tr, sample_weight=w_tr)
+                    with threadpool_limits(limits=1, user_api="openmp"):
+                        clf.fit(X_tr, y_tr, sample_weight=w_tr)
                 except Exception as exc:
                     applog.warning("meta", f"[meta_train] {strategy} ({side}) LGBM failed ({exc}), falling back to HGB")
                     clf = _make_classifier("hgb")
-                    clf.fit(X_tr, y_tr, sample_weight=w_tr)
+                    with threadpool_limits(limits=1, user_api="openmp"):
+                        clf.fit(X_tr, y_tr, sample_weight=w_tr)
 
         # OOS validation AUC
         val_auc = 0.5

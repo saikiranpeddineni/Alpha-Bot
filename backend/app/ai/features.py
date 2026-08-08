@@ -35,6 +35,8 @@ FEATURE_COLUMNS = [
     "minute_cos",
     "day_progress",
     "regime_val",
+    "atr_ext",
+    "or_dist_pct",
 ]
 
 SESSION_MINUTES = 390

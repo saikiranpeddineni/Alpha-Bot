@@ -103,11 +103,17 @@ class TrendPullback(Strategy):
                     wick_ratio = lower_wick / candle_range
                     
                     if close_px > open_px and close_px > ema20 and wick_ratio >= p["min_wick_ratio"]:
+                        confidence = min(0.90, 0.55 + (0.15 * min(2.0, er20)) + (0.10 * min(1.0, wick_ratio)))
                         return Signal(
                             symbol=symbol,
                             action=SignalAction.ENTER_LONG,
+                            confidence=round(confidence, 4),
                             strategy=self.name,
+                            reason=f"Trend pullback (er20 {er20:.2f}, wick {wick_ratio:.2f})",
+                            price=close_px,
                             score=0.80, # Very high probability setup
+                            stop_loss=ema50 - 0.5 * atr14,
+                            take_profit=close_px + (close_px - (ema50 - 0.5 * atr14)) * reward_risk,
                         )
 
         # Short Setup (Downtrend Pullback)

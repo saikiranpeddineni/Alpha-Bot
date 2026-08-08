@@ -121,16 +121,52 @@ def tail_whipsaw(df: pd.DataFrame) -> pd.Series:
     return whipsaw_size / total_size.replace(0.0, np.nan)
 
 
+def opening_range_distance(df: pd.DataFrame, range_minutes: int = 15) -> pd.Series:
+    """Distance from the first N-minute opening range high/low. Positive means breakout, negative means inside range."""
+    if df.empty:
+        return pd.Series(dtype=float)
+        
+    out = pd.Series(index=df.index, dtype=float)
+    et_index = df.index.tz_convert(ET) if getattr(df.index, "tz", None) is not None else df.index
+    
+    # Extract time as minutes since midnight ET
+    mins_et = et_index.hour * 60 + et_index.minute
+    
+    # 9:30 AM is 570 minutes
+    is_or_bar = (mins_et >= 570) & (mins_et < 570 + range_minutes)
+    
+    sessions = et_index.date
+    for session in pd.unique(sessions):
+        session_mask = (sessions == session)
+        or_mask = session_mask & is_or_bar
+        
+        if not or_mask.any():
+            continue
+            
+        or_high = float(df.loc[or_mask, "high"].max())
+        or_low = float(df.loc[or_mask, "low"].min())
+        
+        # We only calculate distance for bars AFTER the opening range is established
+        post_or_mask = session_mask & (mins_et >= 570 + range_minutes)
+        if post_or_mask.any():
+            close = df.loc[post_or_mask, "close"].astype(float)
+            dist_up = (close - or_high) / or_high
+            dist_down = (or_low - close) / or_low
+            out.loc[post_or_mask] = pd.concat([dist_up, dist_down], axis=1).max(axis=1) * 100.0
+            
+    # For bars before OR is established, fill with 0
+    return out.fillna(0.0)
+
+
 def enrich(df: pd.DataFrame) -> pd.DataFrame:
     """Append the standard indicator column set. Returns a new DataFrame."""
-    if df.empty:
-        return df.copy()
+    if df is None or len(df) == 0:
+        return df.copy() if hasattr(df, 'copy') else df
     out = df.copy()
     for col in ("open", "high", "low", "close", "volume"):
         if col in out.columns:
             out[col] = out[col].astype(float)
     close = out["close"]
-
     out["ema9"] = ema(close, 9)
     out["ema20"] = ema(close, 20)
     out["ema50"] = ema(close, 50)
@@ -138,6 +174,7 @@ def enrich(df: pd.DataFrame) -> pd.DataFrame:
     out["rsi2"] = rsi(close, 2)
     out = out.join(macd(close))
     out["atr14"] = atr(out, 14)
+    out["atr_ext"] = (close - out["ema9"]).abs() / out["atr14"].replace(0.0, 0.001)
     out = out.join(bollinger(close, 20, 2.0))
     out["vwap"] = session_vwap(out)
     out["vwap_dist_pct"] = (close / out["vwap"] - 1.0) * 100.0
@@ -146,6 +183,7 @@ def enrich(df: pd.DataFrame) -> pd.DataFrame:
     out["er20"] = efficiency_ratio(close, 20)
     out["vol_expansion"] = volatility_expansion(out, 5, 20)
     out["whipsaw_ratio"] = tail_whipsaw(out)
+    out["or_dist_pct"] = opening_range_distance(out, 15)
     out["ret_1"] = close.pct_change(1)
     out["ret_5"] = close.pct_change(5)
     out["ret_15"] = close.pct_change(15)
@@ -153,9 +191,9 @@ def enrich(df: pd.DataFrame) -> pd.DataFrame:
 
 
 REQUIRED_ENRICHED_COLUMNS = (
-    "ema9", "ema20", "ema50", "rsi14", "rsi2", "macd_hist", "atr14",
+    "ema9", "ema20", "ema50", "rsi14", "rsi2", "macd_hist", "atr14", "atr_ext",
     "bb_pos", "bb_width", "vwap", "vwap_dist_pct", "vol_z", "er20",
-    "vol_expansion", "whipsaw_ratio",
+    "vol_expansion", "whipsaw_ratio", "or_dist_pct",
 )
 
 

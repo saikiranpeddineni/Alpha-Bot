@@ -351,7 +351,7 @@ async def get_trainer_status(request: Request) -> dict:
     engine = _engine(request)
     if engine.trainer is None:
         return {"training_in_progress": False, "last_trained": None, "last_result": {}}
-    return engine.trainer.status
+    return engine.trainer.status()
 
 
 @router.post("/ai/trainer/run")

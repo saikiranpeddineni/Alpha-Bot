@@ -140,9 +140,10 @@ class SignalPipeline:
                         f"fallback={score_res.fallback_reason or 'None'}")
             if ml is None:
                 if score_res.specialist_status == "TEMPORAL_BYPASS":
-                    applog.info("pipeline", f"{symbol}: ML_GATE_BYPASSED_TEMPORAL")
-                    sig.ml_probability = None
-                    sig.ml_gate_decision = "PASS"
+                    applog.error("pipeline", f"{symbol}: ML_GATE_REJECTED_TEMPORAL - Model trained after backtest start.")
+                    sig.ml_gate_decision = "REJECT"
+                    rejected.append((sig, "ML model temporal bypass (look-ahead bias protection)"))
+                    continue
                 else:
                     sig.ml_gate_decision = "REJECT"
                     rejected.append((sig, f"ML probability unavailable ({score_res.fallback_reason or 'unknown reason'})"))

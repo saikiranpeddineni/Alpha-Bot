@@ -91,6 +91,10 @@ class GapAndGo(Strategy):
         if vol_z < p["vol_z_min"]:
             return None
 
+        # Calculate confidence based on volume and trend alignment
+        ema_spread_pct = abs(ema9 - ema20) / ema20 * 100.0
+        confidence = min(0.90, 0.55 + (0.05 * max(0.0, vol_z)) + (0.05 * min(2.0, ema_spread_pct)))
+
         # Long Setup (Gap Up)
         if is_gap_up:
             if close_px > vwap and ema9 > ema20 and close_px > open_px:
@@ -98,8 +102,13 @@ class GapAndGo(Strategy):
                 return Signal(
                     symbol=symbol,
                     action=SignalAction.ENTER_LONG,
+                    confidence=round(confidence, 4),
                     strategy=self.name,
-                    score=0.70, # Base score, ML pipeline will adjust
+                    reason=f"Gap up continuation breakout (vol z {vol_z:.1f})",
+                    price=close_px,
+                    score=0.75,
+                    stop_loss=ema20 - 0.05,
+                    take_profit=close_px + (close_px - ema20) * reward_risk,
                 )
 
         # Short Setup (Gap Down)
@@ -109,8 +118,11 @@ class GapAndGo(Strategy):
                 return Signal(
                     symbol=symbol,
                     action=SignalAction.ENTER_SHORT,
+                    confidence=round(confidence, 4),
                     strategy=self.name,
-                    score=0.70,
+                    reason=f"Gap down continuation breakdown (vol z {vol_z:.1f})",
+                    price=close_px,
+                    score=0.75,
+                    stop_loss=ema20 + 0.05,
+                    take_profit=close_px - (ema20 - close_px) * reward_risk,
                 )
-
-        return None

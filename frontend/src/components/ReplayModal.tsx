@@ -44,8 +44,9 @@ export function ReplayModal({
   const storeWatchlist = useStore((s) => s.status?.watchlist);
   const activeWatchlist = storeWatchlist && storeWatchlist.length > 0 ? storeWatchlist : watchlist;
 
-  const [startDate, setStartDate] = useState("2026-07-29");
-  const [endDate, setEndDate] = useState("2026-07-30");
+  const today = new Date().toISOString().split("T")[0];
+  const [startDate, setStartDate] = useState(today);
+  const [endDate, setEndDate] = useState(today);
   const [selectedSymbols, setSelectedSymbols] = useState<string[]>([]);
   const [fillModel, setFillModel] = useState("ohlc_touch");
   const [slippageBps, setSlippageBps] = useState("0");

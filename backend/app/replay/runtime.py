@@ -47,11 +47,31 @@ class ReplayRuntime:
         parity: dict[str, Any] | None = None
         run_snapshot = Path(tempfile.mkdtemp(prefix="alpha_replay_run_snapshot_"))
         try:
-            # Fallback to DB watchlist or core watchlist if symbols is None
-            target_symbols = symbols if symbols is not None else (self.source_db.get_setting("watchlist") or self.settings.watchlist_symbols())
+            # Scanner Parity: Include dynamically traded symbols from live db
+            if symbols is not None:
+                target_symbols = symbols
+            else:
+                base_watchlist = self.source_db.get_setting("watchlist") or self.settings.watchlist_symbols()
+                live_symbols = set()
+                try:
+                    c = self.source_db.conn.cursor()
+                    c.execute("SELECT symbol, payload FROM trades")
+                    for r in c.fetchall():
+                        sym = r[0]
+                        payload = r[1]
+                        if payload:
+                            import json
+                            p = json.loads(payload)
+                            entry_at = p.get('entry_at', '')
+                            if start_date <= entry_at <= end_date + "T23:59:59":
+                                live_symbols.add(sym)
+                except Exception:
+                    pass
+                target_symbols = list(set(base_watchlist) | live_symbols)
+
             await self.feed.ensure_data(start_date, end_date, target_symbols)
             
-            bars = self.feed.load_bars(start_date, end_date, symbols)
+            bars = self.feed.load_bars(start_date, end_date, target_symbols)
             
             # Filter bars to include only requested warmup + replay window
             filtered_bars = []
@@ -75,10 +95,25 @@ class ReplayRuntime:
             snapshot_db = run_snapshot / "source.db"
             self._snapshot_source_database(snapshot_db)
             snapshot_models = run_snapshot / "models"
-            if MODELS_DIR.exists():
+            
+            # Model Versioning: Attempt to load from archive if model_asof is provided
+            archived_loaded = False
+            if model_asof:
+                asof_dt = model_asof
+                if asof_dt.tzinfo is None:
+                    asof_dt = asof_dt.replace(tzinfo=timezone.utc)
+                from zoneinfo import ZoneInfo
+                ET = ZoneInfo("America/New_York")
+                asof_date_str = asof_dt.astimezone(ET).strftime("%Y-%m-%d")
+                archive_dir = MODELS_DIR / "archive" / asof_date_str
+                if archive_dir.exists():
+                    shutil.copytree(archive_dir, snapshot_models, dirs_exist_ok=True)
+                    archived_loaded = True
+            
+            if not archived_loaded:
                 shutil.copytree(MODELS_DIR, snapshot_models, dirs_exist_ok=True)
-            else:
-                snapshot_models.mkdir(parents=True, exist_ok=True)
+                
+            snapshot_models.mkdir(parents=True, exist_ok=True)
             model_asof_report = self._enforce_model_asof(snapshot_models, model_asof)
             snapshot_fingerprint = self._snapshot_fingerprint(snapshot_db, snapshot_models)
             manifest = self._build_manifest(config, bars)

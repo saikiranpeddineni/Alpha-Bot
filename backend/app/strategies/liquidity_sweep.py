@@ -101,10 +101,14 @@ class LiquiditySweep(Strategy):
             sweep_extension = ((high_px - session_high) / session_high) * 100.0
             if sweep_extension <= p["sweep_tolerance_pct"]:
                 if close_px < open_px: # Bearish rejection
+                    sweep_score = max(0, (p["sweep_tolerance_pct"] - sweep_extension) / p["sweep_tolerance_pct"])
+                    confidence = min(0.90, 0.55 + (0.1 * vol_z) + (0.1 * sweep_score))
                     return Signal(
                         symbol=symbol,
                         action=SignalAction.ENTER_SHORT,
+                        confidence=round(confidence, 4),
                         strategy=self.name,
+                        reason=f"Sweep high breakdown (ext {sweep_extension:.2f}%, vol {vol_z:.1f})",
                         score=0.75,
                     )
 
@@ -114,10 +118,14 @@ class LiquiditySweep(Strategy):
             sweep_extension = ((session_low - low_px) / session_low) * 100.0
             if sweep_extension <= p["sweep_tolerance_pct"]:
                 if close_px > open_px: # Bullish rejection
+                    sweep_score = max(0, (p["sweep_tolerance_pct"] - sweep_extension) / p["sweep_tolerance_pct"])
+                    confidence = min(0.90, 0.55 + (0.1 * vol_z) + (0.1 * sweep_score))
                     return Signal(
                         symbol=symbol,
                         action=SignalAction.ENTER_LONG,
+                        confidence=round(confidence, 4),
                         strategy=self.name,
+                        reason=f"Sweep low breakout (ext {sweep_extension:.2f}%, vol {vol_z:.1f})",
                         score=0.75,
                     )
 

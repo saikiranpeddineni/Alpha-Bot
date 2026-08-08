@@ -15,12 +15,7 @@ from app.backtest.engine import BacktestParams, run_backtest
 from app.brokers.alpaca import AlpacaBroker
 from app.data.manager import make_provider
 
-# Force bypass of the temporal leakage check so we can use today's models in the backtest
-original_predict = MetaLabelEngine.predict
-def mock_predict(self, strategy, features, side="long"):
-    self.backtest_start_time = None
-    return original_predict(self, strategy, features, side)
-MetaLabelEngine.predict = mock_predict
+
 
 async def run():
     print("==================================================")
@@ -43,11 +38,11 @@ async def run():
     from app.strategies.base import REGISTRY
     strategies = {name: {"enabled": True, "params": {}} for name in REGISTRY.keys()}
     
-    # Define backtest parameters for today (July 17, 2026)
+    # Define backtest parameters for today (August 7, 2026)
     params = BacktestParams(
         symbols=symbols,
-        start=datetime(2026, 7, 17, 9, 30, tzinfo=timezone.utc),
-        end=datetime(2026, 7, 17, 16, 0, tzinfo=timezone.utc),
+        start=datetime(2026, 8, 7, 9, 30, tzinfo=timezone.utc),
+        end=datetime(2026, 8, 7, 16, 0, tzinfo=timezone.utc),
         starting_cash=100_000.0,
         slippage_bps=2.0,
         use_ml_gate=True,
@@ -56,13 +51,12 @@ async def run():
         strategies=strategies,
         risk=risk_cfg,
         cache_policy=CachePolicy.DEFAULT,
+        ignore_temporal_leakage=True,
     )
     
     # Setup data provider
     provider = make_provider(settings.resolve_data_provider(), settings)
     dm = DataManager(provider, cache_path)
-    # Bypass coverage check for single day test
-    dm.validate_cache_coverage = lambda *args, **kwargs: None
 
     # ----------------------------------------------------
     # RUN 1: Meta-Labeling ON (Thresholds = 0.55/0.53)

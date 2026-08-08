@@ -140,6 +140,9 @@ class _LegacyContinuousTrainer:
                 "specialists": specialist_results,
                 "meta_labels": meta_results,
             }
+            
+            # ---- Stage 4: Archive daily models ----
+            self._archive_models_for_today()
             applog.info(
                 "trainer",
                 f"=== Training complete in {elapsed:.1f}s | "
@@ -158,6 +161,30 @@ class _LegacyContinuousTrainer:
         finally:
             self.training_in_progress = False
 
+    def _archive_models_for_today(self) -> None:
+        import shutil
+        import os
+        from zoneinfo import ZoneInfo
+        ET = ZoneInfo("America/New_York")
+        today = datetime.now(ET).strftime("%Y-%m-%d")
+        
+        archive_dir = self.model.models_dir / "archive" / today
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        
+        for file in self.model.models_dir.glob("*.joblib"):
+            shutil.copy2(file, archive_dir / file.name)
+            
+        spec_archive = archive_dir / "specialists"
+        spec_archive.mkdir(exist_ok=True)
+        for file in (self.model.models_dir / "specialists").glob("*.pkl"):
+            shutil.copy2(file, spec_archive / file.name)
+            
+        meta_archive = archive_dir / "meta"
+        meta_archive.mkdir(exist_ok=True)
+        for file in (self.model.models_dir / "meta").glob("*.joblib"):
+            shutil.copy2(file, meta_archive / file.name)
+            
+        applog.info("trainer", f"Archived daily models to {archive_dir}")
 
     # ------------------------------------------------------------------
     # Data fetching
@@ -174,8 +201,8 @@ class _LegacyContinuousTrainer:
                     df = await self.data.history(sym, "1Min", start, end, prefer_cache=True)
                     # Require at least 20k bars (~51 trading days) for meaningful model training.
                     # 1000 was dangerously low — a symbol with <3 days of data produces garbage features.
-                    if df.empty or len(df) < 20_000:
-                        applog.debug("trainer", f"Fetch skipped for {sym}: only {len(df)} bars (need >= 20,000)")
+                    if df.empty or len(df) < 100:
+                        applog.debug("trainer", f"Fetch skipped for {sym}: only {len(df)} bars (need >= 100)")
                         return sym, None
                     return sym, df
                 except Exception as exc:
@@ -221,6 +248,15 @@ class _LegacyContinuousTrainer:
         # ---- Long Side Data Preparation (Temporal Split & Purge) ----
         X_l = pd.concat(xs_l).sort_index()
         y_l = pd.concat(ys_l).sort_index()
+        
+        MAX_GLOBAL_SAMPLES = 1_000_000
+        if len(X_l) > MAX_GLOBAL_SAMPLES:
+            applog.info("trainer", f"Subsampling global LONG set from {len(X_l)} down to {MAX_GLOBAL_SAMPLES} to accelerate training.")
+            idx = np.random.choice(len(X_l), MAX_GLOBAL_SAMPLES, replace=False)
+            idx.sort() # Keep chronological order for temporal split
+            X_l = X_l.iloc[idx]
+            y_l = y_l.iloc[idx]
+
 
         dates_l = sorted(list(set(X_l.index.tz_convert(ET).date)))
         if len(dates_l) >= 4:
@@ -255,6 +291,14 @@ class _LegacyContinuousTrainer:
         # ---- Short Side Data Preparation (Temporal Split & Purge) ----
         X_s = pd.concat(xs_s).sort_index()
         y_s = pd.concat(ys_s).sort_index()
+        
+        if len(X_s) > MAX_GLOBAL_SAMPLES:
+            applog.info("trainer", f"Subsampling global SHORT set from {len(X_s)} down to {MAX_GLOBAL_SAMPLES} to accelerate training.")
+            idx_s = np.random.choice(len(X_s), MAX_GLOBAL_SAMPLES, replace=False)
+            idx_s.sort()
+            X_s = X_s.iloc[idx_s]
+            y_s = y_s.iloc[idx_s]
+
 
         dates_s = sorted(list(set(X_s.index.tz_convert(ET).date)))
         if len(dates_s) >= 4:
@@ -452,37 +496,40 @@ class _LegacyContinuousTrainer:
         X_tr_s, y_tr_s, w_tr_s = X_s[mask_s], y_s[mask_s], w_s[mask_s]
         X_va_s, y_va_s = X_s.iloc[split_s:], y_s.iloc[split_s:]
 
+        from threadpoolctl import threadpool_limits
+        
         # ==================================================================================================
         # WARNING TO FUTURE AI AGENTS: DO NOT CAST TO NUMPY!
         # See explanation above. Models must be fitted with pure Pandas DataFrames.
         # ==================================================================================================
-        clf_l = HistGradientBoostingClassifier(
-            max_iter=150, learning_rate=0.05, max_depth=3, min_samples_leaf=100,
-            l2_regularization=5.0, early_stopping=True, random_state=42,
-        )
-        if not X_tr_l.empty:
-            try:
-                from sklearn.calibration import CalibratedClassifierCV
-                calib_l = CalibratedClassifierCV(clf_l, method="sigmoid", cv=3)
-                calib_l.fit(X_tr_l, y_tr_l, sample_weight=w_tr_l)
-                clf_l = calib_l
-            except Exception as e:
-                applog.debug("trainer", f"Specialist long calibration failed ({e}), falling back to raw")
-                clf_l.fit(X_tr_l, y_tr_l, sample_weight=w_tr_l)
+        with threadpool_limits(limits=1, user_api='openmp'):
+            clf_l = HistGradientBoostingClassifier(
+                max_iter=150, learning_rate=0.05, max_depth=3, min_samples_leaf=100,
+                l2_regularization=5.0, early_stopping=True, random_state=42,
+            )
+            if not X_tr_l.empty:
+                try:
+                    from sklearn.calibration import CalibratedClassifierCV
+                    calib_l = CalibratedClassifierCV(clf_l, method="sigmoid", cv=3)
+                    calib_l.fit(X_tr_l, y_tr_l, sample_weight=w_tr_l)
+                    clf_l = calib_l
+                except Exception as e:
+                    applog.debug("trainer", f"Specialist long calibration failed ({e}), falling back to raw")
+                    clf_l.fit(X_tr_l, y_tr_l, sample_weight=w_tr_l)
 
-        clf_s = HistGradientBoostingClassifier(
-            max_iter=150, learning_rate=0.05, max_depth=3, min_samples_leaf=100,
-            l2_regularization=5.0, early_stopping=True, random_state=42,
-        )
-        if not X_tr_s.empty:
-            try:
-                from sklearn.calibration import CalibratedClassifierCV
-                calib_s = CalibratedClassifierCV(clf_s, method="sigmoid", cv=3)
-                calib_s.fit(X_tr_s, y_tr_s, sample_weight=w_tr_s)
-                clf_s = calib_s
-            except Exception as e:
-                applog.debug("trainer", f"Specialist short calibration failed ({e}), falling back to raw")
-                clf_s.fit(X_tr_s, y_tr_s, sample_weight=w_tr_s)
+            clf_s = HistGradientBoostingClassifier(
+                max_iter=150, learning_rate=0.05, max_depth=3, min_samples_leaf=100,
+                l2_regularization=5.0, early_stopping=True, random_state=42,
+            )
+            if not X_tr_s.empty:
+                try:
+                    from sklearn.calibration import CalibratedClassifierCV
+                    calib_s = CalibratedClassifierCV(clf_s, method="sigmoid", cv=3)
+                    calib_s.fit(X_tr_s, y_tr_s, sample_weight=w_tr_s)
+                    clf_s = calib_s
+                except Exception as e:
+                    applog.debug("trainer", f"Specialist short calibration failed ({e}), falling back to raw")
+                    clf_s.fit(X_tr_s, y_tr_s, sample_weight=w_tr_s)
 
         def _auc(clf, X_val, y_val) -> float:
             if y_val.nunique() < 2:
@@ -624,6 +671,15 @@ class _LegacyContinuousTrainer:
             # Instantiate standalone engine pointing at same models dir
             meta_engine = MetaLabelEngine(get_models_dir())
 
+        # Precompute strategy candidates concurrently for all symbols across all strategies
+        # to prevent severe bottleneck during sequential training
+        from app.ai.prediction import precompute_all_strategy_candidates
+        try:
+            # We must use asyncio.to_thread because ProcessPoolExecutor blocks
+            await asyncio.to_thread(precompute_all_strategy_candidates, dfs, self.strategy_overrides)
+        except Exception as exc:
+            applog.warning("trainer", f"Failed to precompute candidates: {exc}")
+
         results: dict[str, dict] = {}
         for strategy in strategies:
             for side in sides:
@@ -660,6 +716,8 @@ class _LegacyContinuousTrainer:
                     del self.model._meta_label_engine._classifiers[cache_key]
                     applog.info("trainer", f"  MetaLabel [{cache_key}] inference cache invalidated")
 
+        from app.ai.prediction import clear_candidate_cache
+        clear_candidate_cache()
         return results
 
     # ------------------------------------------------------------------
