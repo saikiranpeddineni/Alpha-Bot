@@ -52,7 +52,7 @@ export function ReplayModal({
   const [slippageBps, setSlippageBps] = useState("0");
   const [volumeConstrained, setVolumeConstrained] = useState(true);
   const [maxVolumePct, setMaxVolumePct] = useState("5");
-  const [warmupBars, setWarmupBars] = useState("50");
+  const [warmupBars, setWarmupBars] = useState("1500");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [replayData, setReplayData] = useState<any>(null);
