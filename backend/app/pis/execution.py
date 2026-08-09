@@ -29,13 +29,26 @@ class PISExecutionAdapter:
         Returns:
             OrderRequest or None if action is HOLD or UPDATE_PROTECTION.
         """
-        if decision.action not in (ExitAction.PARTIAL_EXIT, ExitAction.FULL_EXIT):
-            return None
-
         # Determine side (opposite of position side)
         order_side = OrderSide.SELL if obs.side > 0 else OrderSide.BUY
-
+        reason_str = ",".join([r.value for r in decision.reason_codes])
         import math
+
+        if decision.action == ExitAction.UPDATE_PROTECTION:
+            if not decision.target_stop:
+                return None
+            return OrderRequest(
+                symbol=obs.symbol,
+                side=order_side,
+                order_type=OrderType.STOP,
+                qty=abs(obs.qty),
+                stop_price=decision.target_stop,
+                strategy=f"PISProtection[{decision.lifecycle_state.value}]",
+                reason=f"PIS Protection Update: {reason_str}",
+            )
+
+        if decision.action not in (ExitAction.PARTIAL_EXIT, ExitAction.FULL_EXIT):
+            return None
 
         # Quantity to close
         if decision.action == ExitAction.FULL_EXIT or decision.exit_ratio >= 1.0:
@@ -50,8 +63,6 @@ class PISExecutionAdapter:
                 qty_to_close = round(raw_qty, 4)
         if qty_to_close <= 0:
             return None
-
-        reason_str = ",".join([r.value for r in decision.reason_codes])
 
         return OrderRequest(
             symbol=obs.symbol,
