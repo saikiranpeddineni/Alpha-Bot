@@ -315,7 +315,14 @@ class ShadowLedger:
                 if i + 1 >= len(df) and len(df) > 1:
                     i = max(0, len(df) - 30)
                 if i >= 0 and i + 1 < len(df):
-                    entry_price = float(df["open"].iloc[i + 1])
+                    raw_entry = float(df["open"].iloc[i + 1])
+                    # Fix A7 (#191): Model live execution delay (5-15s) via 2.5bps slippage
+                    # to match backtest replay realism and avoid overly optimistic R-multiples.
+                    slip_pct = 2.5 / 10000.0
+                    if direction == "long":
+                        entry_price = raw_entry * (1.0 + slip_pct)
+                    else:
+                        entry_price = raw_entry * (1.0 - slip_pct)
             except Exception:
                 pass
 

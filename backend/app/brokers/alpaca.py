@@ -760,15 +760,23 @@ class AlpacaBroker(Broker):
         return fills
 
     async def cancel(self, order_id: str) -> bool:
-        try:
-            await _call(self._client.cancel_order_by_id, order_id, label=f"cancel/{order_id}")
-            return True
-        except BrokerTimeoutError:
-            applog.warning("broker.alpaca", f"cancel {order_id} timed out; state is ambiguous")
-            return False
-        except Exception as exc:  # noqa: BLE001
-            applog.warning("broker.alpaca", f"cancel {order_id} failed: {exc}")
-            return False
+        import asyncio
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                await _call(self._client.cancel_order_by_id, order_id, label=f"cancel/{order_id}")
+                return True
+            except BrokerTimeoutError:
+                if attempt < max_retries - 1:
+                    applog.warning("broker.alpaca", f"cancel {order_id} timed out; retrying ({attempt+1}/{max_retries})")
+                    await asyncio.sleep(1.0)
+                    continue
+                applog.warning("broker.alpaca", f"cancel {order_id} timed out after {max_retries} attempts; state is ambiguous")
+                return False
+            except Exception as exc:  # noqa: BLE001
+                applog.warning("broker.alpaca", f"cancel {order_id} failed: {exc}")
+                return False
+        return False
 
     async def cancel_all(self) -> None:
         """Cancel all open orders. Used by emergency flatten and EOD liquidation."""

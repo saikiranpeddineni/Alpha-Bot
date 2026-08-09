@@ -328,7 +328,11 @@ class RiskManager:
 
         risk_mult = getattr(signal, "risk_multiplier", 1.0)
         if kelly_override is not None:
-            kelly_cap = getattr(cfg, "kelly_fraction_cap", 0.15)
+            # Fix #192 (Phase 2): Align Kelly limits with Fixed-Risk limits to prevent blowout on slippage.
+            # Kelly bet fraction should never exceed an absolute hard cap of 2.0x the configured max fixed risk.
+            base_risk_pct_cap = (getattr(cfg, "risk_per_trade_pct", 1.0) * 2.0) / 100.0
+            kelly_cap = min(getattr(cfg, "kelly_fraction_cap", 0.15), base_risk_pct_cap)
+            
             effective_kelly = min(kelly_override, kelly_cap) * risk_mult
             risk_amount = ctx.equity * effective_kelly
             qty = int(risk_amount / stop_distance) if stop_distance > 0 else 0

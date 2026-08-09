@@ -125,7 +125,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         self._position_current_stops: dict[str, float | None] = {}
         # Original strategy target survives broker protection repair/reconciliation.
         self._position_take_profits: dict[str, float] = {}
-        self.pis_adapter: PISEngineAdapter = PISEngineAdapter()
+        self.pis_adapter: PISEngineAdapter = PISEngineAdapter(mode=self.mode)
         self._last_scan_date = None
         self._last_train_date = None
         self._last_event_monitor_min = None
@@ -1591,6 +1591,16 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                 stop_loss=stop_loss,
                 initial_risk_per_share=initial_risk,
             )
+            # Restore engine tracker state across restarts
+            if p.symbol not in self._position_initial_stops:
+                self._position_initial_stops[p.symbol] = stop_loss
+            if getattr(self, "_position_current_stops", None) is not None and p.symbol not in self._position_current_stops:
+                self._position_current_stops[p.symbol] = stop_loss
+            if p.symbol not in self._position_peaks:
+                self._position_peaks[p.symbol] = p.avg_entry_price
+            if p.symbol not in self._position_troughs:
+                self._position_troughs[p.symbol] = p.avg_entry_price
+
             applog.info(
                 "engine",
                 f"Reconstructed portfolio lot for {p.symbol}: qty={p.qty}, "
