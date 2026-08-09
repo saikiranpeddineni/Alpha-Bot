@@ -24,11 +24,7 @@ def _runtime_risk_config() -> Any:
             base.update(stored)
         return RiskConfig(**base)
     except Exception:
-        try:
-            from app.config import get_settings
-            return get_settings().risk_config()
-        except Exception:
-            return None
+        return None
 
 
 def adaptive_ml_threshold(base_threshold: float, exp_info: dict | None, sctx: Any = None) -> float:
@@ -42,16 +38,14 @@ def adaptive_ml_threshold(base_threshold: float, exp_info: dict | None, sctx: An
     cfg = _runtime_risk_config()
     base = float(base_threshold)
     if not math.isfinite(base):
-        base = float(getattr(cfg, "ml_confidence_threshold", 0.5) if cfg else 0.5)
+        return base_threshold
     base = min(max(base, 0.0), 1.0)
 
-    if not exp_info:
+    if cfg is None or not exp_info:
         return base
 
     sample_count = int(exp_info.get("trades_count") or 0)
-    min_samples = int(
-        getattr(cfg, "promotion_min_valid_observations", 30) if cfg else 30
-    )
+    min_samples = int(getattr(cfg, "promotion_min_valid_observations"))
     if sample_count < min_samples:
         return base
 
@@ -59,20 +53,13 @@ def adaptive_ml_threshold(base_threshold: float, exp_info: dict | None, sctx: An
     if not math.isfinite(expectancy):
         return base
 
-    # Evidence confidence rises smoothly from zero at the minimum sample count
-    # toward one as the context accumulates more observations.
     evidence_confidence = sample_count / max(sample_count + min_samples, 1)
-
-    # Normalize the observed edge continuously. tanh prevents a single unusually
-    # large historical R outcome from dominating the live gate.
     edge_scale = max(abs(expectancy), 1.0)
     edge_signal = math.tanh(expectancy / edge_scale)
-
-    adaptive_weight = float(getattr(cfg, "adaptive_model_weight", 0.30) if cfg else 0.30)
+    adaptive_weight = float(getattr(cfg, "adaptive_model_weight"))
     neutral = 0.5
-    available_room = min(base, 1.0 - base)
+    available_room = min(abs(base - neutral), abs(1.0 - base))
     adjustment = available_room * adaptive_weight * evidence_confidence * edge_signal
-
     threshold = base - adjustment
 
     # Opening behaviour is intentionally left to the existing market-regime and
