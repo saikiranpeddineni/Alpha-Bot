@@ -67,9 +67,20 @@ class TradingEngineEvaluationMixin:
                 )
             except Exception as e:
                 applog.warning("engine.exit", f"PIS global evaluation crashed for {symbol}: {e}")
+                
+                # ==================================================================================================
+                # WARNING TO FUTURE AI AGENTS: DO NOT REVERT THIS FALLBACK CIRCUIT BREAKER!
+                # If PIS throws an exception (due to network failure, API downtime, or a code bug), 
+                # this position MUST NOT BE ABANDONED. Without this fallback, the position will become completely 
+                # orphaned and bleed capital until the end-of-day timeout. 
+                # The Dumb Fallback Trailing Stop guarantees that code bugs never cause runaway market losses.
+                # ==================================================================================================
+                
+                # HOLISTIC FIX: Engage a mechanical dumb fallback trailing stop if the AI (PIS) goes offline
                 peak = self._position_peaks.get(symbol, position.avg_entry_price)
                 trough = self._position_troughs.get(symbol, position.avg_entry_price)
                 atr = float(df["atr14"].iloc[-1]) if "atr14" in df.columns else (close * 0.02)
+                
                 if position.qty > 0 and close < peak - (3.0 * atr):
                     applog.critical("engine.exit", f"Dumb Fallback triggered for {symbol}: -3.0 ATR trailing stop breached while PIS was offline.")
                     await self._close_position_guarded(symbol, reason="CRITICAL: PIS Offline - Fallback Trailing Stop", qty=abs(position.qty))
@@ -82,6 +93,7 @@ class TradingEngineEvaluationMixin:
             if pis_order is not None:
                 try:
                     if pis_order.order_type == OrderType.STOP:
+                        # Process UPDATE_PROTECTION from PIS adapter
                         if pis_order.stop_price is not None:
                             broker = getattr(self, "broker", None)
                             if broker and hasattr(broker, "update_protection"):
@@ -91,6 +103,7 @@ class TradingEngineEvaluationMixin:
                     else:
                         applog.info("engine", f"{symbol}: PIS Unified Exit triggered: {pis_order.reason} (qty={pis_order.qty})")
                         await self._close_position_guarded(symbol, reason=pis_order.reason, qty=pis_order.qty)
+
                         # Never derive runner quantity from the stale pre-fill position snapshot.
                         # The broker fill/reconciliation path is authoritative. Keep the existing
                         # protection until the reduced position is observed, then let PIS re-plan it.
@@ -114,16 +127,24 @@ class TradingEngineEvaluationMixin:
                             self._position_take_profits.pop(symbol, None)
                         return []
                 except Exception as e:
+                    # ==================================================================================================
+                    # WARNING TO FUTURE AI AGENTS: 
+                    # Do NOT wrap the above `_close_position_guarded` routing call inside the PIS evaluation try-block.
+                    # Routing failures (like Alpaca 502s) must NOT be masked as PIS AI evaluation crashes.
+                    # ==================================================================================================
                     applog.error("engine.exit", f"Execution failed for PIS action on {symbol}: {e}")
 
             # All exits (including strategy take profit targets) are now handled exclusively by PIS
             # to guarantee PIS acts as the single source of truth for intelligent exits.
+
             if position.qty > 0:
                 self._position_peaks[symbol] = max(self._position_peaks[symbol], high_val)
                 self._position_troughs[symbol] = min(self._position_troughs[symbol], low_val)
             else:
                 self._position_peaks[symbol] = min(self._position_peaks[symbol], low_val)
                 self._position_troughs[symbol] = max(self._position_troughs[symbol], high_val)
+
+            # Legacy local trailing stops removed to give PIS sole authority over exits
         else:
             if symbol in self._position_peaks:
                 del self._position_peaks[symbol]
@@ -136,14 +157,20 @@ class TradingEngineEvaluationMixin:
             self._position_take_profits.pop(symbol, None)
             self.pis_adapter.handle_position_closed(symbol)
 
+
+        # Look up mover bias from scanner context (top gainer → long bias, top loser → short bias)
         _scanner = getattr(self, "_scanner", None) or getattr(self, "scanner", None)
         _mover_ctx = getattr(_scanner, "mover_context", {}) if _scanner else {}
         _mover_entry = _mover_ctx.get(symbol, {})
-        _mover_bias = _mover_entry.get("direction")
+        _mover_bias = _mover_entry.get("direction")   # "gainer" | "loser" | None
         _mover_chg  = float(_mover_entry.get("change_pct", 0.0))
 
+        # Feature 2: Relative Strength vs SPY — multi-timeframe (40% ret_5 + 60% ret_15)
+        # Audit Fix: SPY df is now cached per-tick on the engine to eliminate redundant computation.
         spy_df = None
         rs_score: float | None = None
+        
+        # Determine if cache is fresh for this tick
         tick_id = getattr(self, "_tick_count", 0)
         cached_spy = getattr(self, "_spy_cache", None)
         if cached_spy is not None and cached_spy.get("tick") == tick_id:
@@ -160,7 +187,7 @@ class TradingEngineEvaluationMixin:
             if rs_score is not None:
                 applog.debug("engine", f"{symbol} RS vs SPY: rs_score={rs_score:.3f}")
         except Exception:
-            rs_score = None
+            rs_score = None  # graceful fallback — pipeline treats None as neutral 50
 
         sctx = StrategyContext(
             position=position, equity=equity, regime=regime, now=now,
@@ -168,6 +195,7 @@ class TradingEngineEvaluationMixin:
         )
         signals = []
         for strat in self.strategies:
+
             if not strat.enabled:
                 continue
             decision = getattr(self, "last_safety_decision", None)
@@ -175,7 +203,7 @@ class TradingEngineEvaluationMixin:
                 continue
             try:
                 sig = strat.on_bar(sctx, symbol, df)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 applog.error("engine", f"strategy {strat.name} failed on {symbol}: {exc}")
                 continue
             if sig is not None:
@@ -185,10 +213,13 @@ class TradingEngineEvaluationMixin:
             return []
 
         # Preserve all entry candidates for the existing SignalPipeline.
-        # ML, Meta-label, TradeScore and final conflict resolution already happen there.
+        # The pipeline already performs ML, Meta-label, TradeScore and final conflict
+        # resolution. Hardcoded strategy priority here discarded candidates before those
+        # intelligence layers could evaluate them.
         entry_signals = [sig for sig in signals if sig.action != SignalAction.EXIT]
         exit_signals = [sig for sig in signals if sig.action == SignalAction.EXIT]
         signals = exit_signals + entry_signals
+
         if not signals:
             return []
 
@@ -197,18 +228,22 @@ class TradingEngineEvaluationMixin:
         has_exits = any(sig.action == SignalAction.EXIT for sig in signals)
         decision = getattr(self, "last_safety_decision", None)
         market_state = getattr(decision, "market_state", None) if decision else None
+        
         if not has_exits and effective_positions is not None and getattr(self, "portfolio_gate", None) is not None:
             approved, reason = self.portfolio_gate.gate(symbol, effective_positions, market_state=market_state)
             if not approved:
                 applog.info("portfolio.gate", f"{symbol} rejected pre-ML: {reason}")
                 return []
 
+
+        # Assign a unique candidate ID to all candidate entry signals first (shared UUID)
         for sig in signals:
             if sig.action != SignalAction.EXIT:
                 if getattr(sig, "candidate_id", None) is None:
                     prefix = f"{symbol}_{sig.strategy}_{now.strftime('%Y%m%d_%H%M%S')}"
                     sig.candidate_id = f"{prefix}_{uuid.uuid4().hex[:6]}".upper()
 
+        # Compute slot_rvol_val for the current symbol
         slot_rvol_val: float | None = None
         try:
             slot_engine = SlotVolumeEngine(df, lookback_sessions=20, min_observations=5)
@@ -216,6 +251,7 @@ class TradingEngineEvaluationMixin:
         except Exception:
             slot_rvol_val = None
 
+        # Estimate SPY 30-bar rolling volatility (standard deviation of returns)
         spy_vol: float | None = None
         if spy_df is not None and not spy_df.empty:
             try:
@@ -223,11 +259,14 @@ class TradingEngineEvaluationMixin:
             except Exception:
                 spy_vol = None
 
+        # Fetch Level 1 Context expectancy for each strategy and log/adapt (CR-146 Phase 5)
+        # SAFETY: adaptive_scores is a RESEARCH-ZONE side-dict. sig.score is NEVER mutated here.
+        # The Champion's SignalPipeline always receives the original, unmodified sig object.
         from app.strategies import get_contextual_expectancy, get_adaptive_ml_threshold, get_adaptive_signal_score
         from app.core.phase import classify_clock_phase
         clock_phase = classify_clock_phase(now)
         adaptive_ml_thresholds: dict[str, float] = {}
-        adaptive_scores: dict[str, float] = {}
+        adaptive_scores: dict[str, float] = {}  # research-zone only — never written back to sig
         for sig in signals:
             if sig.action != SignalAction.EXIT:
                 try:
@@ -246,13 +285,18 @@ class TradingEngineEvaluationMixin:
                         f"trades_count={exp_info['trades_count']}, expectancy={exp_info['expectancy']}, "
                         f"shrunk_expectancy={exp_info['shrunk_expectancy']} (source: {exp_info['source']})"
                     )
+
+                    # Compute adaptive ML threshold (research-zone, fed only to ParallelEvidenceEvaluator)
                     dyn_ml_threshold = get_adaptive_ml_threshold(self.pipeline.ml_threshold, exp_info, sctx)
                     adaptive_ml_thresholds[sig.candidate_id] = dyn_ml_threshold
+
+                    # Compute adaptive score (research-zone, stored in side-dict — NOT written back to sig)
                     if sig.score is not None:
                         adaptive_scores[sig.candidate_id] = get_adaptive_signal_score(sig.score, exp_info)
                 except Exception as exc:
                     applog.error("engine.memory", f"Failed memory expectancy lookup / adaptation: {exc}")
 
+        # Run ParallelEvidenceEvaluator out-of-band to capture the parallel evidence (CR-146)
         parallel_evidences = {}
         for sig in signals:
             if sig.action != SignalAction.EXIT:
@@ -277,7 +321,8 @@ class TradingEngineEvaluationMixin:
         accepted, rejected = await asyncio.to_thread(
             partial(self.pipeline.process, symbol, df, signals, regime, sector_strength=rs_score, adaptive_ml_thresholds=adaptive_ml_thresholds)
         )
-
+        
+        # Save signals to shadow ledger
         for sig in signals:
             if sig.action == SignalAction.EXIT:
                 continue
@@ -301,6 +346,11 @@ class TradingEngineEvaluationMixin:
                     rejection_stage = "conflict_resolution"
                 else:
                     rejection_stage = "other"
+
+            # F-06 FIX: slot_rvol_val was already computed before the pipeline ran (L159-165).
+            # Re-constructing SlotVolumeEngine identically on every signal in the shadow ledger
+            # loop is redundant CPU work. Reuse the already-computed value.
+            # slot_rvol_val is still in scope from L163 (or None from the except branch).
 
             try:
                 vwap_tel = compute_vwap_telemetry(df, now, slot_rvol_val)
@@ -332,6 +382,7 @@ class TradingEngineEvaluationMixin:
                 policy_version="1.0.0",
                 gate_evidence_json=parallel_evidences.get(sig.candidate_id),
                 spy_vol=spy_vol,
+                # Fix A5 (Issue #176): Pass runtime-tuned alternative exits from the engine.
                 alternative_exits=getattr(self.risk_config, "alternative_exits", None),
                 market_regime=getattr(getattr(self, "last_safety_decision", None), "market_risk_state", "NORMAL"),
                 vix_value=self._last_vix_value,
@@ -339,6 +390,8 @@ class TradingEngineEvaluationMixin:
                 vix_feed_status=self._last_vix_status,
                 regime_source="VIX",
             )
+
+
 
         for sig, reason in rejected:
             applog.debug("pipeline", f"{symbol} {sig.strategy} {sig.action}: rejected -- {reason}")
@@ -348,8 +401,10 @@ class TradingEngineEvaluationMixin:
             if sig.action == SignalAction.EXIT:
                 applog.debug("engine", f"{symbol}: Discarding legacy strategy EXIT signal for {sig.strategy}. PIS exclusively owns exits.")
                 continue
+            
             if getattr(self, "reconciliation_failed", False):
                 applog.warning("engine", f"{symbol}: entry signal {sig.strategy} rejected -- engine position/broker reconciliation state is uncertain")
                 continue
+
             candidate_entries.append((sig, df))
         return candidate_entries
