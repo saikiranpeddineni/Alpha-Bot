@@ -36,14 +36,14 @@ VALID_BROKERS = ("paper_sim", "alpaca")
 class RiskConfig(BaseModel):
     """Runtime-tunable risk parameters. Tuned for active capital utilization (4% daily target)."""
     entry_order_type: str = Field("market", pattern="^(market|limit)$")
-    risk_per_trade_pct: float = Field(1.0, ge=0.01, le=5.0)        # was 0.5 — 2× capital per trade
+    risk_per_trade_pct: float = Field(0.5, ge=0.01, le=5.0)        # was 0.5 — 2× capital per trade
     max_position_pct: float = Field(20.0, ge=1.0, le=100.0)
-    max_open_positions: int = Field(8, ge=1, le=50)                  # was 4 — 2× concurrent exposure
-    max_daily_loss_pct: float = Field(3.0, ge=0.1, le=25.0)         # was 2.0 — room for higher position count
+    max_open_positions: int = Field(4, ge=1, le=50)                  # was 4 — 2× concurrent exposure
+    max_daily_loss_pct: float = Field(2.0, ge=0.1, le=25.0)         # was 2.0 — room for higher position count
     max_drawdown_pct: float = Field(10.0, ge=1.0, le=50.0)
-    consecutive_loss_limit: int = Field(4, ge=1, le=20)              # was 3 — one more loss before pause
-    cooldown_minutes: int = Field(10, ge=1, le=390)                  # was 30 — faster recovery
-    no_entry_minutes_before_close: int = Field(15, ge=0, le=180)     # was 30 — more trading time
+    consecutive_loss_limit: int = Field(3, ge=1, le=20)              # was 3 — one more loss before pause
+    cooldown_minutes: int = Field(30, ge=1, le=390)                  # was 30 — faster recovery
+    no_entry_minutes_before_close: int = Field(30, ge=0, le=180)     # was 30 — more trading time
     flatten_minutes_before_close: int = Field(5, ge=0, le=60)
     min_price: float = Field(5.0, ge=0.0)
     min_avg_dollar_volume: float = Field(100_000.0, ge=0.0)
@@ -58,10 +58,10 @@ class RiskConfig(BaseModel):
     )
     min_specialist_auc: float = Field(0.53, ge=0.50, le=1.0)
     min_stop_pct: float = Field(0.5, ge=0.0, le=5.0)
-    score_threshold_trend: float = Field(50.0, ge=0.0, le=100.0)    # was 55.0
-    score_threshold_range: float = Field(65.0, ge=0.0, le=100.0)    # was 70.0
-    score_threshold_volatile: float = Field(60.0, ge=0.0, le=100.0) # was 65.0
-    score_threshold_event: float = Field(70.0, ge=0.0, le=100.0)    # was 75.0
+    score_threshold_trend: float = Field(55.0, ge=0.0, le=100.0)    # was 55.0
+    score_threshold_range: float = Field(70.0, ge=0.0, le=100.0)    # was 70.0
+    score_threshold_volatile: float = Field(65.0, ge=0.0, le=100.0) # was 65.0
+    score_threshold_event: float = Field(75.0, ge=0.0, le=100.0)    # was 75.0
     kelly_fraction_cap: float = Field(0.20, ge=0.01, le=0.50)       # was 0.15
     max_positions_per_sector: int = Field(3, ge=1, le=10)           # was 2
     max_correlation_penalty: float = Field(0.5, ge=0.0, le=1.0)

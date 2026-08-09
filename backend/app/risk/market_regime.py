@@ -171,8 +171,8 @@ _EXTREME_VOL_THRESHOLD = 4.0   # ATR% > 4 = extreme for a single symbol
 # 5-day lookback survives weekends + single holidays without starving history.
 # Minimum 3 symbols (reduced from 5) allows graceful degradation with lower
 # confidence instead of hard UNKNOWN on thin coverage days.
-_BREADTH_LOOKBACK_DAYS = 5
-_BREADTH_MIN_SYMBOLS = 3
+_BREADTH_LOOKBACK_DAYS = 2
+_BREADTH_MIN_SYMBOLS = 5
 _BREADTH_THIN_COVERAGE_CONFIDENCE = 0.55   # < full confidence when 3-4 symbols
 _BREADTH_FULL_COVERAGE_CONFIDENCE = 0.85   # full confidence when >= 5 symbols
 
@@ -462,7 +462,7 @@ class MarketRiskAggregator:
 
             # Match breadth's weekend/single-holiday-safe history horizon.
             # This changes data availability only; stress thresholds/aggregation are unchanged.
-            start = T - timedelta(days=5)
+            start = T - timedelta(days=2)
             extreme = 0
             total = 0
             errors = 0

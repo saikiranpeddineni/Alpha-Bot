@@ -2912,7 +2912,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                 equity = self.portfolio.equity
                 if equity > 0:
                     turnover = total_volume / equity
-                    if turnover > 20.0:  # Increased from 2.0 for testing
+                    if turnover > 2.0:  # Increased from 2.0 for testing
                         return f"behavioral_loop_detector: high portfolio churn/turnover (turnover={turnover:.2f}x equity)"
         except Exception as e:
             applog.warning("engine.behavioral", f"Failed churn check: {e}")
