@@ -1166,11 +1166,11 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
             # Close/cover idempotency is position-lifecycle based, not side based.
             # Keep the guard through partial SELL exits and partial BUY covers; only
             # release it after portfolio accounting proves the original lot is gone.
-            pending_close = getattr(self, "_pending_close_symbols", None)
+            pending_close = getattr(self, "_pending_close_ttls", None)
             if pending_close is not None and symbol in pending_close:
                 local_lot = getattr(self.portfolio, "_lots", {}).get(symbol)
                 if local_lot is None or abs(float(getattr(local_lot, "qty", 0.0))) < 1e-9:
-                    self._pending_close_symbols.discard(symbol)
+                    self._pending_close_ttls.pop(symbol, None)
             if trade is not None:
                 self.perf_tracker.update(trade, now=now)
                 await asyncio.to_thread(self.db.save_trade, trade, self.mode)
@@ -1974,18 +1974,23 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
 
         # If this is a manual sell/cover (closing or reducing), add to pending-close guard so
         # strategies cannot immediately re-enter on the same/next tick before the fill drains.
-        if not hasattr(self, "_pending_close_symbols"):
-            self._pending_close_symbols = set()
         sym_upper = req.symbol.upper()
-        if not is_entry and req.side == OrderSide.SELL:
-            self._pending_close_symbols.add(sym_upper)  # long → guard against immediate re-buy
-        elif not is_entry and req.side == OrderSide.BUY:
-            self._pending_close_symbols.add(sym_upper)  # short cover → guard against immediate re-short
+        
+        import time
+        now = time.time()
+        
+        if not hasattr(self, "_pending_close_ttls"):
+            self._pending_close_ttls = {}
+            
+        if is_entry:
+            if sym_upper in self._pending_close_ttls and now < self._pending_close_ttls[sym_upper]:
+                raise ValueError(f"Cannot manually open {sym_upper} while a close/cover is in-flight")
 
         order = await self.broker.submit(req)
-        if order.status in (OrderStatus.REJECTED,) and not is_entry:
-            # Order was rejected — release the guard immediately
-            self._pending_close_symbols.discard(sym_upper)
+        
+        if not is_entry:
+            self._pending_close_ttls[sym_upper] = now + 30.0  # guard against immediate re-buy
+
         self.recent_orders.appendleft(order)
         await asyncio.to_thread(self.db.save_order, order, self.mode)
         await self._drain_fills(utcnow())
@@ -1998,16 +2003,23 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
             raise RuntimeError("Engine is not running")
         # Guard: add to pending-close so strategies cannot immediately re-enter on the same/next tick
         sym_upper = symbol.upper()
-        if not hasattr(self, "_pending_close_symbols"):
-            self._pending_close_symbols = set()
-        self._pending_close_symbols.add(sym_upper)
+        
+        import time
+        now = time.time()
+        
+        if not hasattr(self, "_pending_close_ttls"):
+            self._pending_close_ttls = {}
+        
+        if sym_upper in self._pending_close_ttls and now < self._pending_close_ttls[sym_upper]:
+            raise ValueError(f"Cannot manually close {sym_upper} while a close is already in-flight")
+            
+        self._pending_close_ttls[sym_upper] = now + 30.0
+        
         order = await self.broker.close_position(symbol, reason="manual close")
         if order is not None:
             self.recent_orders.appendleft(order)
             await asyncio.to_thread(self.db.save_order, order, self.mode)
-        else:
-            # Close failed — release guard so retries work
-            self._pending_close_symbols.discard(sym_upper)
+            
         await self._drain_fills(utcnow())
         await self._publish_positions()
         return order
