@@ -753,10 +753,10 @@ from app.ai.generation import AtomicGenerationStore, TrainingCoordinator
 class SignalModel(_LegacySignalModel):
     """Signal model with one writer coordinator and manifest-authoritative globals."""
 
-    def __init__(self, models_dir):
+    def __init__(self, models_dir, risk_config=None):
         self._training_coordinator = TrainingCoordinator()
         self._generation_store = AtomicGenerationStore(models_dir)
-        super().__init__(models_dir)
+        super().__init__(models_dir, risk_config=risk_config)
 
     def __deepcopy__(self, memo):
         """Backtests receive isolated model state without copying thread locks."""

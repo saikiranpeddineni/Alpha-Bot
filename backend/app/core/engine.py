@@ -419,7 +419,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         self.portfolio.mark_equity(account.equity, utcnow())
 
         self.trainer = ContinuousTrainer(
-            self.data, self.model, get_models_dir(), self.db.get_setting("strategies") or {},
+            self.data, self.model, get_models_dir(), self.db.get_setting("strategies") or {}, settings=self.settings
         )
         self._last_train_date = None
         self.state = EngineState.RUNNING

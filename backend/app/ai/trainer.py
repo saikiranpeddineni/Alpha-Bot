@@ -854,8 +854,9 @@ class ContinuousTrainer(_LegacyContinuousTrainer):
         model_dir: Path,
         strategy_overrides: dict[str, dict] | None = None,
         training_coordinator: TrainingCoordinator | None = None,
+        settings=None,
     ) -> None:
-        super().__init__(data, model, model_dir, strategy_overrides)
+        super().__init__(data, model, model_dir, strategy_overrides, settings=settings)
         coordinator = training_coordinator or getattr(model, "_training_coordinator", None)
         if coordinator is None:
             coordinator = TrainingCoordinator()
