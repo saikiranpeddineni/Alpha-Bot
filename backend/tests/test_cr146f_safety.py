@@ -288,14 +288,14 @@ def test_behavioral_safety_churn_turnover(client):
     engine = client.app.state.engine
     setup_healthy_mocks(engine)
     
-    # Current equity is 100k. Create high turnover (e.g. 250k volume in last 24h)
+    # Current equity is 100k. Create high turnover (e.g. 2.1M volume in last 24h)
     now_ts = datetime.now(UTC)
     trade_payload = {
         "id": "churn_trade_1",
         "symbol": "AMZN",
         "strategy": "momentum",
         "entry_price": 100.0,
-        "qty": 2500, # 250k notional volume
+        "qty": 21000, # 2.1M notional volume (21x turnover)
         "pnl": 2500.0,
         "exit_reason": "take_profit",
         "sl_hit": False,

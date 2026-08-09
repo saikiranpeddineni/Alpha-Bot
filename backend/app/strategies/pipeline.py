@@ -110,6 +110,22 @@ class SignalPipeline:
                 rejected.append((sig, "feature row unavailable (warmup)"))
                 continue
 
+            # --- Microstructure Exhaustion Context Filter ---
+            # Mathematically blocks the AI from buying the absolute top of a spike,
+            # forcing it to wait for healthy pullbacks. This improves signal quality
+            # without requiring us to widen or relax the strict PIS risk thresholds.
+            rsi2 = features.get("rsi2", 50.0)
+            velocity = features.get("price_velocity", 0.0)
+            
+            if sig.action == SignalAction.ENTER_LONG:
+                if velocity > 0.5 and rsi2 > 85.0:
+                    rejected.append((sig, f"Microstructure Exhaustion: LONG spike rejected (vel={velocity:.1f}, rsi2={rsi2:.1f})"))
+                    continue
+            elif sig.action == SignalAction.ENTER_SHORT:
+                if velocity < -0.5 and rsi2 < 15.0:
+                    rejected.append((sig, f"Microstructure Exhaustion: SHORT spike rejected (vel={velocity:.1f}, rsi2={rsi2:.1f})"))
+                    continue
+
             use_detailed = False
             if hasattr(self.model, "score_action_detailed"):
                 name = type(self.model.score_action_detailed).__name__

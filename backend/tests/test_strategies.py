@@ -171,16 +171,20 @@ def test_bb_squeeze_strategy():
     closes_high = 100.0 + rng.normal(0, 1.0, 200).cumsum()
     # 25 bars of low volatility consolidation (squeeze)
     closes_squeeze = closes_high[-1] + rng.normal(0, 0.02, 25).cumsum()
-    # 1 breakout bar
-    closes_breakout = np.array([closes_squeeze[-1] + 3.0])
+    # 1 breakout bar + 1 confirmation bar
+    closes_breakout = np.array([closes_squeeze[-1] + 3.0, closes_squeeze[-1] + 3.5])
     
     closes = np.concatenate([closes_high, closes_squeeze, closes_breakout])
     opens = np.concatenate([[closes[0]], closes[:-1]])
-    idx = pd.date_range(start="2026-01-06 14:30", periods=226, freq="1min", tz="UTC")
+    idx = pd.date_range(start="2026-01-06 14:30", periods=227, freq="1min", tz="UTC")
     df = enrich(pd.DataFrame({
         "open": opens, "high": closes + 0.02, "low": closes - 0.02, "close": closes,
-        "volume": 100000.0 * rng.lognormal(0, 0.1, 226)
+        "volume": 100000.0 * rng.lognormal(0, 0.1, 227)
     }, index=idx))
+    
+    # Arm the breakout event
+    strat.on_bar(ctx(), "TEST", df.iloc[:-1])
+    # Confirm and fire the event
     sig = strat.on_bar(ctx(), "TEST", df)
     assert sig is not None
     assert sig.action == SignalAction.ENTER_LONG
