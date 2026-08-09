@@ -40,7 +40,7 @@ def install_profit_execution_hooks(broker) -> None:
                 return await original_close(symbol, reason=reason, qty=qty)
 
             try:
-                from alpaca.trading.requests import ReplaceOrderRequest
+                from alpaca.trading.requests import ClosePositionRequest, ReplaceOrderRequest
                 from app.brokers import alpaca as legacy
                 from app.brokers.alpaca_hardening import normalize_stock_price, normalized_qty
                 from app.brokers.base import BrokerTimeoutError
@@ -72,40 +72,47 @@ def install_profit_execution_hooks(broker) -> None:
                 ]
                 stop_candidates.sort(key=lambda o: (0 if o.parent_id else 1, o.submitted_at or 0))
 
-                if stop_candidates:
-                    stop = stop_candidates[0]
-                    replace_kwargs = {"qty": normalized_qty(remaining_qty, allow_fractional=False)}
-                    replace_kwargs["stop_price"] = normalize_stock_price(stop.stop_price)
-                    if stop.order_type == OrderType.STOP_LIMIT and stop.limit_price is not None:
-                        replace_kwargs["limit_price"] = normalize_stock_price(stop.limit_price)
-
-                    raw = await legacy._call(
-                        broker._client.replace_order_by_id,
-                        stop.id,
-                        ReplaceOrderRequest(**replace_kwargs),
-                        label=f"resize_protection/{stop.id}",
+                # Never call the legacy partial-close helper if the remaining
+                # position cannot be proven protected: that helper cancels open
+                # orders before closing and would recreate the protection gap.
+                if not stop_candidates:
+                    raise RuntimeError(
+                        f"Refusing partial close for {symbol}: no authoritative protective stop found for remaining qty {remaining_qty:g}"
                     )
-                    replacement_id = str(getattr(raw, "id", "") or "")
-                    if not replacement_id:
-                        raise RuntimeError(f"broker returned no replacement id for protection {stop.id}")
 
-                    verified = await legacy._call(
-                        broker._client.get_order_by_id,
-                        replacement_id,
-                        label=f"verify_resized_protection/{replacement_id}",
+                stop = stop_candidates[0]
+                replace_kwargs = {"qty": normalized_qty(remaining_qty, allow_fractional=False)}
+                replace_kwargs["stop_price"] = normalize_stock_price(stop.stop_price)
+                if stop.order_type == OrderType.STOP_LIMIT and stop.limit_price is not None:
+                    replace_kwargs["limit_price"] = normalize_stock_price(stop.limit_price)
+
+                raw = await legacy._call(
+                    broker._client.replace_order_by_id,
+                    stop.id,
+                    ReplaceOrderRequest(**replace_kwargs),
+                    label=f"resize_protection/{stop.id}",
+                )
+                replacement_id = str(getattr(raw, "id", "") or "")
+                if not replacement_id:
+                    raise RuntimeError(f"broker returned no replacement id for protection {stop.id}")
+
+                verified = await legacy._call(
+                    broker._client.get_order_by_id,
+                    replacement_id,
+                    label=f"verify_resized_protection/{replacement_id}",
+                )
+                verified_qty = float(getattr(verified, "qty", 0.0) or 0.0)
+                if abs(verified_qty - remaining_qty) > max(1e-6, remaining_qty * 1e-6):
+                    raise RuntimeError(
+                        f"protection quantity verification failed expected={remaining_qty} actual={verified_qty}"
                     )
-                    verified_qty = float(getattr(verified, "qty", 0.0) or 0.0)
-                    if abs(verified_qty - remaining_qty) > max(1e-6, remaining_qty * 1e-6):
-                        raise RuntimeError(
-                            f"protection quantity verification failed expected={remaining_qty} actual={verified_qty}"
-                        )
 
                 # Protection quantity is now reduced to the post-scale-out exposure,
                 # so the close can execute without canceling the remaining stop.
                 raw_close = await legacy._call(
                     broker._client.close_position,
                     symbol.upper(),
-                    __import__("alpaca.trading.requests", fromlist=["ClosePositionRequest"]).ClosePositionRequest(
+                    ClosePositionRequest(
                         qty=str(int(close_qty)) if float(close_qty).is_integer() else str(round(close_qty, 9))
                     ),
                     label=f"close_position_partial_safe/{symbol}",
