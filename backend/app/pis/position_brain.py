@@ -62,7 +62,6 @@ class PositionBrain:
         self.config.validate()
 
         with self._lock:
-            # Validate symbol and initial observation
             self.symbol = symbol.upper()
             PositionObservation.validate(initial_observation)
             if initial_observation.symbol.upper() != self.symbol:
@@ -73,20 +72,18 @@ class PositionBrain:
             self.authority = PISAuthority(self.config)
             self.state_machine = PositionLifecycleStateMachine(LifecycleState.NEW)
 
-            # Bounded memory history (Priority 2)
             self._history: deque[PositionObservation] = deque(maxlen=self.config.history_max_len)
             self._history.append(initial_observation)
 
-            # Profit memory state (Priority 2, Priority 7)
             if restored_memory is not None:
                 self._profit_memory = restored_memory
-                # We need to make sure the state is updated with the initial observation to keep it fresh
                 self._profit_memory = ProfitMemoryTracker.update(self._profit_memory, initial_observation)
             else:
                 self._profit_memory = ProfitMemoryTracker.initial_state(initial_observation)
 
             self._last_observation: PositionObservation = initial_observation
             self._last_timestamp: datetime = initial_observation.timestamp
+            self._last_observed_qty: float = abs(float(initial_observation.qty))
             self._current_stop_floor: float = initial_observation.initial_stop
             self._last_decision: Optional[PISDecision] = None
             self._is_closed: bool = False
@@ -96,7 +93,6 @@ class PositionBrain:
             self._has_scaled_out: bool = False
             self._smoothed_health_score: Optional[float] = None
 
-            # Initial evaluation
             self._evaluate_internal(initial_observation)
 
     @property
@@ -110,7 +106,6 @@ class PositionBrain:
         """Check if position has executed first-stage scale-out."""
         with self._lock:
             return self._has_scaled_out
-
 
     @property
     def lifecycle(self) -> LifecycleState:
@@ -155,14 +150,7 @@ class PositionBrain:
             return len(self._history)
 
     def observe(self, obs: PositionObservation) -> PISDecision:
-        """Process a new point-in-time observation. Thread-safe evaluation (Priority 1).
-
-        Args:
-            obs: PositionObservation snapshot.
-
-        Returns:
-            PISDecision output.
-        """
+        """Process a new point-in-time observation. Thread-safe evaluation (Priority 1)."""
         return self._observe_internal(obs)
 
     def evaluate(self, obs: PositionObservation) -> PISDecision:
@@ -175,33 +163,35 @@ class PositionBrain:
             if self._is_closed:
                 raise PositionBrainClosedError(f"Cannot observe closed PositionBrain for '{self.symbol}'")
 
-            # 1. Input validation (Priority 6)
             PositionObservation.validate(obs)
 
             if obs.symbol.upper() != self.symbol:
                 raise ValueError(f"Observation symbol '{obs.symbol}' does not match brain symbol '{self.symbol}'")
 
-            # 2. Strict timestamp monotonicity check (Priority 7 - Reject time travel)
             if obs.timestamp < self._last_timestamp:
                 raise ValueError(
                     f"Time travel rejected: observation timestamp {obs.timestamp} < last timestamp {self._last_timestamp}"
                 )
 
-            # 3. Update profit memory (Priority 7)
+            observed_qty = abs(float(obs.qty))
+            # Scale-out state is derived from an observed position reduction, not from
+            # the PIS decision itself. The broker/fill/reconciliation path is authoritative.
+            if observed_qty + 1e-9 < self._last_observed_qty:
+                self._has_scaled_out = True
+                self._runner_qualified = True
+
             self._profit_memory = ProfitMemoryTracker.update(self._profit_memory, obs)
 
-            # 4. Check stagnation
             if abs(obs.current_price - self._last_observation.current_price) < 1e-4:
                 self._stagnation_counter += 1
             else:
                 self._stagnation_counter = 0
 
-            # 5. Append to history deque (Priority 2 - Bounded memory growth)
             self._history.append(obs)
             self._last_observation = obs
             self._last_timestamp = obs.timestamp
+            self._last_observed_qty = observed_qty
 
-            # 6. Evaluate and return decision
             return self._evaluate_internal(obs)
 
     def _evaluate_internal(self, obs: PositionObservation) -> PISDecision:
@@ -209,7 +199,6 @@ class PositionBrain:
         peak_r = self._profit_memory.peak_r
         trough_r = self._profit_memory.trough_r
 
-        # 1. Health evaluation with noise-filtering continuous EMA smoothing (alpha = 0.30 over 3-5 bars)
         raw_health = self.authority.health_evaluator.evaluate(obs, peak_r, trough_r)
         if self._smoothed_health_score is None:
             self._smoothed_health_score = raw_health.overall
@@ -225,17 +214,14 @@ class PositionBrain:
             news_sentiment=raw_health.news_sentiment,
         )
 
-        # 2. Market Regime Classification (Quadrant 1)
         regime, regime_conf, regime_summary = self.authority.regime_classifier.classify_regime(
             obs, self._history, health
         )
 
-        # 3. Thesis drift evaluation with Asymmetric Early Invalidation (Quadrant 2)
         thesis = self.authority.thesis_evaluator.evaluate(
             obs, trough_r, self._stagnation_counter, peak_r, history_len=len(self._history)
         )
 
-        # 4. Runner intelligence & Regime-Aware Max R capacity prediction (Quadrant 3)
         predicted_max_r, runner_prob = self.authority.runner_intelligence.predict_max_r(
             obs, peak_r, health, regime=regime
         )
@@ -245,10 +231,8 @@ class PositionBrain:
         if is_runner:
             self._runner_qualified = True
 
-        # 5. State transition rules with persistence confirmation (Priority 3)
         self._update_lifecycle(health, thesis, peak_r)
 
-        # 6. Protection floor calculation with dynamic ceiling proximity (Priority 4)
         target_stop = self.authority.protection_planner.compute_protection_floor(
             obs=obs,
             peak_r=peak_r,
@@ -260,7 +244,6 @@ class PositionBrain:
         )
         self._current_stop_floor = target_stop
 
-        # 7. Exit planner synthesis with early scratch exits and dynamic ceiling harvesting (Quadrant 2 & 3)
         decision = self.authority.exit_planner.synthesize_decision(
             obs=obs,
             lifecycle=self.state_machine.current_state,
@@ -277,22 +260,11 @@ class PositionBrain:
             runner_probability=runner_prob,
         )
 
+        # Do not mark the position as scaled out here. A PARTIAL_EXIT is only an
+        # intent until the canonical broker fill/reconciliation path reports reduced qty.
         if decision.action == ExitAction.PARTIAL_EXIT:
-            self._has_scaled_out = True
             self._runner_qualified = True
-            # Recompute stop floor with runner mode active
-            target_stop = self.authority.protection_planner.compute_protection_floor(
-                obs=obs,
-                peak_r=peak_r,
-                health=health,
-                previous_floor=self._current_stop_floor,
-                allow_relaxation=False,
-                has_scaled_out=True,
-                predicted_max_r=predicted_max_r,
-            )
-            self._current_stop_floor = target_stop
 
-        # 8. Autonomous Trade Brainstorming & Reasoning Telemetry (Quadrant 4)
         narrative = self.authority.reasoning_engine.generate_narrative(
             obs=obs,
             lifecycle=self.state_machine.current_state,
@@ -309,7 +281,6 @@ class PositionBrain:
             reason_codes=decision.reason_codes,
         )
 
-        # Inject regime and narrative into immutable PISDecision
         decision = PISDecision(
             timestamp=decision.timestamp,
             symbol=decision.symbol,
@@ -340,20 +311,12 @@ class PositionBrain:
         self._last_decision = decision
         return decision
 
-
-    def _update_lifecycle(
-        self,
-        health: TradeHealth,
-        thesis: ThesisDrift,
-        peak_r: float,
-    ) -> None:
+    def _update_lifecycle(self, health: TradeHealth, thesis: Any, peak_r: float) -> None:
         """Determine and apply state transitions with persistence gating against noise."""
         current = self.state_machine.current_state
-
         if current == LifecycleState.CLOSED:
             return
 
-        # Track degradation persistence across consecutive bars
         is_degraded_bar = thesis.is_degraded or health.overall < self.config.health_distribution_threshold
         if is_degraded_bar:
             self._degradation_counter += 1
@@ -361,12 +324,10 @@ class PositionBrain:
             self._degradation_counter = 0
 
         target = current
-
         if current == LifecycleState.NEW:
             if len(self._history) >= 2:
                 target = LifecycleState.DISCOVERY
         elif current == LifecycleState.DISCOVERY:
-            # Require persistence (>= 3 consecutive bars) before emergency exit
             if self._degradation_counter >= 3:
                 target = LifecycleState.EXIT_CANDIDATE
             elif is_degraded_bar or (len(self._history) >= 3 and health.overall <= self.config.health_weakening_threshold):
@@ -403,21 +364,12 @@ class PositionBrain:
             self.state_machine.transition_to(target, f"Health={health.overall:.2f}, PeakR={peak_r:.2f}, Degr={self._degradation_counter}")
 
     def close(self) -> None:
-        """Clean up brain state and transition lifecycle to CLOSED (Priority 11).
-
-        Ensures:
-            1. Lifecycle state transitions to CLOSED.
-            2. History deque is cleared.
-            3. References released to prevent orphan memory.
-            4. Brain marked closed to reject further observe() calls.
-        """
+        """Clean up brain state and transition lifecycle to CLOSED (Priority 11)."""
         with self._lock:
             if self._is_closed:
                 return
-
             if self.state_machine.can_transition_to(LifecycleState.CLOSED):
                 self.state_machine.transition_to(LifecycleState.CLOSED, "Explicit brain close")
-
             self._history.clear()
             self._is_closed = True
 
