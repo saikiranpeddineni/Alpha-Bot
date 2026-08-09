@@ -91,7 +91,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         self.mode: str = settings.mode
         self.last_error: str = ""
 
-        self.model = SignalModel(get_models_dir())
+
         self.insights = InsightEngine(
             gemini_api_key=settings.gemini_api_key,
             anthropic_api_key=settings.anthropic_api_key,
@@ -106,6 +106,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         self.core_watchlist: list[str] = list(self.user_watchlist)
         stored_risk = db.get_setting("risk_config") or {}
         self.risk_config = RiskConfig(**{**settings.risk_config().model_dump(), **stored_risk})
+        self.model = SignalModel(get_models_dir(), risk_config=self.risk_config)
 
         # Built by start() / ensure_data()
         self.clock = MarketClock(always_open=(self.mode == "demo"))
@@ -121,6 +122,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         self._position_peaks: dict[str, float] = {}
         self._position_troughs: dict[str, float] = {}
         self._position_initial_stops: dict[str, float | None] = {}
+        self._position_current_stops: dict[str, float | None] = {}
         # Original strategy target survives broker protection repair/reconciliation.
         self._position_take_profits: dict[str, float] = {}
         self.pis_adapter: PISEngineAdapter = PISEngineAdapter()
@@ -390,7 +392,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
             self.risk_config.ml_confidence_threshold = ml_thresh
             applog.info("engine", f"Restored active promoted ML threshold setting on startup: {ml_thresh}")
 
-        self.pipeline = SignalPipeline(self.model, ml_thresh)
+        self.pipeline = SignalPipeline(self.model, ml_thresh, risk_config=self.risk_config, settings=self.settings)
         self.evidence_evaluator = ParallelEvidenceEvaluator(
             model=self.model,
             ml_threshold=ml_thresh,
@@ -1142,6 +1144,8 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
 
             if init_stop is not None and symbol not in self._position_initial_stops:
                 self._position_initial_stops[symbol] = init_stop
+            if init_stop is not None and symbol not in self._position_current_stops:
+                self._position_current_stops[symbol] = init_stop
 
             try:
                 trade = self.portfolio.on_fill(
@@ -1185,6 +1189,8 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                     del self._position_troughs[symbol]
                 if symbol in self._position_initial_stops:
                     del self._position_initial_stops[symbol]
+                if symbol in self._position_current_stops:
+                    del self._position_current_stops[symbol]
 
                 self._trades_since_insight += 1
                 if self._trades_since_insight >= 5:

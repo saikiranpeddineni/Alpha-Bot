@@ -45,6 +45,8 @@ class TradingEngineEvaluationMixin:
                 self._position_peaks[symbol] = position.avg_entry_price
                 self._position_troughs[symbol] = position.avg_entry_price
                 self._position_initial_stops[symbol] = position.stop_loss
+            if getattr(self, "_position_current_stops", None) is not None and symbol not in self._position_current_stops:
+                self._position_current_stops[symbol] = position.stop_loss
 
             # Fetch live news sentiment if provider supports it
             news_sentiment = 0.0
@@ -60,7 +62,7 @@ class TradingEngineEvaluationMixin:
                     bar_df=df,
                     initial_stop=self._position_initial_stops.get(symbol),
                     take_profit=self._position_take_profits.get(symbol),
-                    current_stop=None,
+                    current_stop=self._position_current_stops.get(symbol),
                     news_sentiment=news_sentiment,
                 )
             except Exception as e:
@@ -92,10 +94,25 @@ class TradingEngineEvaluationMixin:
                 try:
                     applog.info("engine", f"{symbol}: PIS Unified Exit triggered: {pis_order.reason} (qty={pis_order.qty})")
                     await self._close_position_guarded(symbol, reason=pis_order.reason, qty=pis_order.qty)
+                    
+                    remaining_qty = abs(position.qty) - pis_order.qty
+                    if remaining_qty > 1e-6 and getattr(pis_decision, "target_stop", None):
+                        try:
+                            # Re-establish protection for the remaining runner
+                            broker = getattr(self, "broker", None)
+                            if broker and hasattr(broker, "update_protection"):
+                                order = await broker.update_protection(symbol, stop_loss=pis_decision.target_stop, side=position.side, qty=remaining_qty)
+                                if order is not None:
+                                    self._position_current_stops[symbol] = pis_decision.target_stop
+                        except Exception as e:
+                            applog.error("engine.exit", f"Failed to replace protection after partial fill for {symbol}: {e}")
+
                     if pis_decision is None or getattr(pis_decision, "action", None) == "FULL_EXIT" or pis_order.qty >= abs(position.qty) - 1e-6:
                         self._position_peaks.pop(symbol, None)
                         self._position_troughs.pop(symbol, None)
                         self._position_initial_stops.pop(symbol, None)
+                        if hasattr(self, "_position_current_stops"):
+                            self._position_current_stops.pop(symbol, None)
                         self._position_take_profits.pop(symbol, None)
                     return []
                 except Exception as e:
@@ -105,6 +122,16 @@ class TradingEngineEvaluationMixin:
                     # Routing failures (like Alpaca 502s) must NOT be masked as PIS AI evaluation crashes.
                     # ==================================================================================================
                     applog.error("engine.exit", f"Execution failed for PIS exit on {symbol}: {e}")
+            elif pis_decision is not None and getattr(pis_decision, "action", None) == ExitAction.UPDATE_PROTECTION:
+                if getattr(pis_decision, "target_stop", None):
+                    try:
+                        broker = getattr(self, "broker", None)
+                        if broker and hasattr(broker, "update_protection"):
+                            order = await broker.update_protection(symbol, stop_loss=pis_decision.target_stop, side=position.side, qty=abs(position.qty))
+                            if order is not None:
+                                self._position_current_stops[symbol] = pis_decision.target_stop
+                    except Exception as e:
+                        applog.error("engine.exit", f"Execution failed for PIS UPDATE_PROTECTION on {symbol}: {e}")
 
             # All exits (including strategy take profit targets) are now handled exclusively by PIS
             # to guarantee PIS acts as the single source of truth for intelligent exits.
@@ -124,6 +151,8 @@ class TradingEngineEvaluationMixin:
                 del self._position_troughs[symbol]
             if symbol in self._position_initial_stops:
                 del self._position_initial_stops[symbol]
+            if hasattr(self, "_position_current_stops") and symbol in self._position_current_stops:
+                del self._position_current_stops[symbol]
             self._position_take_profits.pop(symbol, None)
             self.pis_adapter.handle_position_closed(symbol)
 

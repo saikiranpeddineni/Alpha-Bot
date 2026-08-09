@@ -46,7 +46,11 @@ class _LegacyContinuousTrainer:
         model: SignalModel,
         model_dir: Path,
         strategy_overrides: dict[str, dict] | None = None,
+        settings=None,
     ) -> None:
+        if settings is None:
+            raise ValueError("ContinuousTrainer requires explicit settings injection (Phase 0 Config Parity).")
+        self.settings = settings
         self.data = data
         self.model = model
         self.model_dir = model_dir
@@ -337,7 +341,6 @@ class _LegacyContinuousTrainer:
         # Stripping the DataFrame creates nameless legacy artifacts that crash on schema migrations!
         # ==================================================================================================
         from app.ai.prediction import WalkForwardValidator
-        from app.config import get_settings
         
         # Prevent data leakage: The WFV must ONLY see the training portion of the data.
         # Otherwise, the final WFV model will be trained on the promotion gate's holdout set,
@@ -355,7 +358,7 @@ class _LegacyContinuousTrainer:
                 dfs_tr_s[sym] = df[mask]
 
         # Use WalkForwardValidator to find the best model architecture (LGBM, XGB, or HGB)
-        wfv = WalkForwardValidator.from_settings(get_settings(), horizon_bars=15, threshold_pct=0.10)
+        wfv = WalkForwardValidator.from_settings(self.settings, horizon_bars=15, threshold_pct=0.10)
         
         # Extract the best classifier for long and short from the walk-forward results
         res_l = wfv.run(dfs_tr_l, side="long")
@@ -573,8 +576,7 @@ class _LegacyContinuousTrainer:
                 pass  # treat as no incumbent
 
         # Minimum promotable AUC floor: never promote a specialist below this threshold (protect capital)
-        from app.config import get_settings
-        min_promotable_auc = get_settings().risk_config().min_specialist_auc
+        min_promotable_auc = self.settings.risk_config().min_specialist_auc
 
         # Promote if EITHER side independently beats its own incumbent by the threshold AND meets the min_promotable_auc floor.
         promote_long = (auc_l >= incumbent_auc_long + self.PROMOTE_THRESHOLD) and (auc_l >= min_promotable_auc)

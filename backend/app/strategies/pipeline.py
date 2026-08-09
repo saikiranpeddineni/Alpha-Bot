@@ -45,9 +45,13 @@ class SignalPipeline:
         self.ml_threshold = ml_threshold
         self.regime_weights = regime_weights or REGIME_WEIGHTS
         self.soft_composite_gating = soft_composite_gating
-        _settings = settings or get_settings()
-        _risk = risk_config or _settings.risk_config()
-        self.trade_score_engine = TradeScoreEngine(weights=_settings.trade_score_weights(), risk_config=_risk)  # type: ignore[arg-type]
+        
+        if settings is None or risk_config is None:
+            raise ValueError("SignalPipeline requires explicit settings and risk_config injection (Phase 0 Config Parity).")
+        self.risk_config = risk_config
+        self.settings = settings
+        
+        self.trade_score_engine = TradeScoreEngine(weights=settings.trade_score_weights(), risk_config=risk_config)  # type: ignore[arg-type]
         from app.ai.prediction import MetaLabelEngine
         from app.config import get_models_dir
         self.meta_label_engine = MetaLabelEngine(get_models_dir())
@@ -219,7 +223,7 @@ class SignalPipeline:
                         sig.take_profit = round(entry_price * (1 + excursion.suggested_target_pct / 100.0), 4)
                 original_stop = sig.stop_loss
                 original_target = sig.take_profit
-                min_stop_pct = get_settings().risk_config().min_stop_pct
+                min_stop_pct = self.risk_config.min_stop_pct
                 adjusted = False
                 if min_stop_pct > 0:
                     min_dist = entry_price * (min_stop_pct / 100.0)

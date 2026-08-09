@@ -69,7 +69,7 @@ class ReplayRuntime:
                     pass
                 target_symbols = list(set(base_watchlist) | live_symbols)
 
-            await self.feed.ensure_data(start_date, end_date, target_symbols)
+            await self.feed.ensure_data(start_date, end_date, target_symbols, settings=self.settings)
             
             bars = self.feed.load_bars(start_date, end_date, target_symbols)
             
@@ -179,7 +179,7 @@ class ReplayRuntime:
             
             if True:
                 engine = TradingEngine(self.settings, replay_db, runtime=TradingRuntime(clock=clock, broker=broker, data=data, ledger=ledger))
-                engine.model = SignalModel(replay_models)
+                engine.model = SignalModel(replay_models, risk_config=engine.risk_config)
                 await self._initialize_engine(engine, clock, broker, data, ledger, replay_models)
             by_ts: dict[datetime, list[dict[str, Any]]] = defaultdict(list)
             for bar in bars: by_ts[bar["ts_dt"]].append(bar)

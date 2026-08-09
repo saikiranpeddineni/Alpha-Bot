@@ -197,6 +197,7 @@ async def run_backtest(
     data: DataManager,
     model: SignalModel,
     params: BacktestParams,
+    settings,
     on_progress: Callable[[float], None] | None = None,
 ) -> BacktestResult:
     import copy
@@ -332,8 +333,8 @@ async def run_backtest(
         if params.cache_policy == CachePolicy.IMMUTABLE_CACHE_ONLY and getattr(params, "verify_dataset_immutability", False):
             before_hash = data.cache.compute_canonical_hash()
 
-        from app.config import get_settings
-        settings = get_settings()
+        if settings is None:
+            raise ValueError("run_backtest requires explicit settings injection (Phase 0 Config Parity).")
         historical_news = None
         if settings.alpaca_api_key and settings.alpaca_api_secret:
             try:
@@ -720,7 +721,7 @@ async def run_backtest(
                 if params.use_dynamic_scanner:
                     applog.info("backtest", f"[{now}] Running historical pre-market scanner...")
                     from app.core.scanner import MarketScanner
-                    scanner = MarketScanner(data, core_watchlist)
+                    scanner = MarketScanner(data, core_watchlist, risk_config=risk_cfg)
                     try:
                         from app.core.scanner import ScannerOutcome
                         outcome, scanned = await scanner.run(as_of=now)
@@ -801,7 +802,7 @@ async def run_backtest(
                 ):
                     last_intraday_scan_min = et_mins
                     from app.core.scanner import MarketScanner, ScannerOutcome
-                    scanner = MarketScanner(data, core_watchlist)
+                    scanner = MarketScanner(data, core_watchlist, risk_config=risk_cfg)
                     try:
                         outcome, scanned_result = await scanner.run(as_of=now)
                         
@@ -918,7 +919,7 @@ async def run_backtest(
                 # Compile EOD policy reflection report and auto-promote if qualified (CR-146 Phase 7)
                 try:
                     from app.strategies import generate_eod_reflection_report
-                    generate_eod_reflection_report(params.db if hasattr(params, "db") else None, now=now, engine=None)
+                    generate_eod_reflection_report(params.db if hasattr(params, "db") else None, settings=settings, now=now, engine=None)
                 except Exception as _exc:
                     applog.debug("backtest", f"Backtest EOD reflection skipped: {_exc}")
             elif not risk.hard_halted and not risk.daily_halted:

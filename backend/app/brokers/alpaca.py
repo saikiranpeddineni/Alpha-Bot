@@ -819,6 +819,43 @@ class AlpacaBroker(Broker):
         except Exception as exc:  # noqa: BLE001
             applog.warning("broker.alpaca", f"close {symbol} failed: {exc}")
             return None
+
+    async def update_protection(self, symbol: str, stop_loss: float, side: OrderSide, qty: float) -> Order | None:
+        """Replace protective stop by cancelling open orders and submitting a new Stop order."""
+        try:
+            try:
+                from alpaca.trading.requests import GetOrdersRequest
+                open_orders = await _call(
+                    self._client.get_orders,
+                    GetOrdersRequest(status="open", symbols=[symbol.upper()]),
+                    label=f"get_orders/update_protection/{symbol}"
+                )
+                for o in open_orders:
+                    await _call(self._client.cancel_order_by_id, str(o.id), label=f"cancel_order/{o.id}")
+                    applog.info("broker.alpaca", f"Cancelled order {o.id} to replace protection")
+            except Exception as e:
+                applog.warning("broker.alpaca", f"Failed to cancel open orders for {symbol} before update_protection: {e}")
+
+            if qty > 0:
+                from alpaca.trading.requests import StopOrderRequest
+                from alpaca.trading.enums import OrderSide as ASide, TimeInForce
+                req_side = ASide.SELL if side == OrderSide.BUY else ASide.BUY
+                qty_str = str(int(qty)) if float(qty).is_integer() else str(round(qty, 4))
+                req = StopOrderRequest(
+                    symbol=symbol.upper(),
+                    qty=qty_str,
+                    side=req_side,
+                    time_in_force=TimeInForce.DAY,
+                    stop_price=round(stop_loss, 2)
+                )
+                raw = await _call(self._client.submit_order, req, label=f"update_protection/{symbol}")
+                self._meta[str(raw.id)] = ("PIS", "update_protection")
+                applog.info("broker.alpaca", f"Updated protection for {symbol}: new stop {stop_loss}")
+                return self._to_order(raw)
+            return None
+        except Exception as exc:
+            applog.error("broker.alpaca", f"update_protection failed for {symbol}: {exc}")
+            return None
     async def is_shortable(self, symbol: str) -> bool:
         if self._shorting_enabled is False:
             return False

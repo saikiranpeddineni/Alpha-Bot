@@ -447,7 +447,8 @@ class RiskManager:
             order_type = OrderType.MARKET
             limit_price = None
 
-        executable_target = round(float(take_profit), 2) if take_profit is not None else None
+        # ALL targets are handled exclusively by PIS. No native broker targets (per Phase 1 invariant).
+        executable_target = None
         order = OrderRequest(
             symbol=symbol,
             side=side,

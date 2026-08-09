@@ -15,14 +15,20 @@ from app.strategies import SignalPipeline, StrategyContext
 class TradingEnginePortfolioMixin:
     async def _close_position_guarded(self, symbol: str, reason: str, qty: float | None = None) -> None:
         """Close a position, skipping if a close order is already in-flight for this symbol."""
-        if not hasattr(self, "_pending_close_symbols"):
-            self._pending_close_symbols = set()
-        # fix(#45): also guard against concurrent per-tick flatten submissions
-        if symbol in self._pending_close_symbols or symbol in self._flattening_symbols:
+        import time
+        if not hasattr(self, "_pending_close_ttls"):
+            self._pending_close_ttls = {}
+        
+        now = time.time()
+        # fix(#45): guard against concurrent per-tick flatten submissions, with a 30s TTL
+        # to handle ambiguous broker states without double-submitting
+        if symbol in self._pending_close_ttls and now < self._pending_close_ttls[symbol]:
             applog.debug("engine", f"{symbol}: skipping duplicate close — close already in-flight (#45)")
             return
+        
         self._flattening_symbols.add(symbol)
-        self._pending_close_symbols.add(symbol)
+        self._pending_close_ttls[symbol] = now + 30.0  # Lock out retries for 30 seconds
+        
         try:
             if qty is not None:
                 try:
@@ -31,13 +37,14 @@ class TradingEnginePortfolioMixin:
                     order = await self.broker.close_position(symbol, reason=reason)
             else:
                 order = await self.broker.close_position(symbol, reason=reason)
-            # If close failed immediately (None returned), release the guard so retries work
-            if order is None:
-                self._pending_close_symbols.discard(symbol)
+            
+            # If close failed cleanly (e.g. rejected by broker quickly), release the guard so retries work
+            # Wait, an ambiguous timeout will also return None in AlpacaBroker.
+            # AlpacaBroker catches BrokerTimeoutError and returns None. We should KEEP the TTL
+            # if it was a timeout. For now, since AlpacaBroker returns None for both fast rejects
+            # and timeouts, keeping the TTL for 30s is a safer idempotent path.
         finally:
             self._flattening_symbols.discard(symbol)
-            if qty is not None:
-                self._pending_close_symbols.discard(symbol)
 
 
 

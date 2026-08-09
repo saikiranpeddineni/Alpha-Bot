@@ -83,6 +83,10 @@ class Broker:
     async def close_position(self, symbol: str, reason: str = "manual", qty: float | None = None) -> Order | None:  # pragma: no cover
         return None
 
+    async def update_protection(self, symbol: str, stop_loss: float, side: OrderSide, qty: float) -> Order | None:  # pragma: no cover
+        """Replace or create a standalone stop-loss order for an existing position."""
+        return None
+
     async def flatten_all(self, reason: str = "flatten") -> list[Order]:  # pragma: no cover
         return []
 

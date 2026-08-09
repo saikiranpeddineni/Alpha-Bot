@@ -408,12 +408,7 @@ class ShadowLedger:
             if alternative_exits is not None:
                 alt_policies = alternative_exits
             else:
-                from app.config import get_settings
-                try:
-                    settings = get_settings()
-                    alt_policies = settings.risk_config().alternative_exits
-                except Exception:
-                    alt_policies = [
+                alt_policies = [
                         {"policy_id": "exit_bracket_tight", "take_profit_pct": 1.0, "stop_loss_pct": 0.5},
                         {"policy_id": "exit_bracket_wide", "take_profit_pct": 3.0, "stop_loss_pct": 1.5},
                         {"policy_id": "exit_atr_trailing", "trailing_stop_atr_mult": 2.0},
