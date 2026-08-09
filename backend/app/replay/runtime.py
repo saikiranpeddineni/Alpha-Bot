@@ -250,7 +250,7 @@ class ReplayRuntime:
         active = engine.db.get_setting("active_policy_snapshot")
         ml = float(active["ml_threshold"]) if active and "ml_threshold" in active else float(engine.db.get_setting("ml_threshold") or engine.risk_config.ml_confidence_threshold)
         engine.risk_config.ml_confidence_threshold = ml
-        engine.pipeline = SignalPipeline(engine.model, ml)
+        engine.pipeline = SignalPipeline(engine.model, ml, risk_config=engine.risk_config, settings=engine.settings)
         engine.evidence_evaluator = ParallelEvidenceEvaluator(model=engine.model, ml_threshold=ml, meta_label_engine=engine.pipeline.meta_label_engine, trade_score_engine=engine.pipeline.trade_score_engine)
 
         for strategy in engine.strategies:
