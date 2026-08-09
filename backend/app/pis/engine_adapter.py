@@ -65,6 +65,7 @@ class PISEngineAdapter:
         # Priority 10: Handle zero quantity or invalid position
         if position.qty == 0 or position.avg_entry_price <= 0:
             self.service.close_brain(symbol)
+            from app.db.database import Database
             db = Database.active()
             if db:
                 db.delete_pis_profit_memory(mode=self.mode, symbol=symbol)
@@ -191,6 +192,7 @@ class PISEngineAdapter:
         """Handle position close event from engine and retire position-scoped PIS memory."""
         symbol_key = symbol.upper()
         self.service.close_brain(symbol_key)
+        from app.db.database import Database
         db = Database.active()
         if db:
             db.delete_pis_profit_memory(mode=self.mode, symbol=symbol_key)
