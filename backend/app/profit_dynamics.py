@@ -14,10 +14,10 @@ from typing import Any
 def _runtime_risk_config() -> Any:
     """Load the current persisted risk configuration when available."""
     try:
-        from app.config import RiskConfig, get_settings
+        from app.config import RiskConfig
         from app.db.database import Database
 
-        base = get_settings().risk_config().model_dump()
+        base = RiskConfig().model_dump()
         db = Database.active()
         stored = db.get_setting("risk_config") if db else None
         if isinstance(stored, dict):
@@ -58,7 +58,7 @@ def adaptive_ml_threshold(base_threshold: float, exp_info: dict | None, sctx: An
     edge_signal = math.tanh(expectancy / edge_scale)
     adaptive_weight = float(getattr(cfg, "adaptive_model_weight"))
     neutral = 0.5
-    available_room = min(abs(base - neutral), abs(1.0 - base))
+    available_room = min(base, 1.0 - base)
     adjustment = available_room * adaptive_weight * evidence_confidence * edge_signal
     threshold = base - adjustment
 
