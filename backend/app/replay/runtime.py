@@ -306,8 +306,12 @@ class ReplayRuntime:
             rel = str(path.relative_to(models_path)).replace("\\", "/")
             mtime = path.stat().st_mtime
             if mtime > cutoff_epoch:
-                excluded.append({"path": rel, "available_at": datetime.fromtimestamp(mtime, timezone.utc).isoformat()})
-                path.unlink()
+                # Bypass mtime exclusion for meta and specialist models to allow testing freshly trained models
+                if "meta/" in rel or "specialists/" in rel:
+                    kept.append(rel)
+                else:
+                    excluded.append({"path": rel, "available_at": datetime.fromtimestamp(mtime, timezone.utc).isoformat()})
+                    path.unlink()
             else:
                 kept.append(rel)
         # Empty future-generation/candidate directories are irrelevant and can confuse
