@@ -22,7 +22,7 @@ class BrokerTimeoutError(RuntimeError):
     """Raised when a broker HTTP call exceeds its configured wall-clock budget.
 
     Callers must treat this as an *ambiguous* result: the request may or may
-    not have reached the broker.  They must NOT assume success or clean failure.
+    may not have reached the broker. They must NOT assume success or clean failure.
     """
 
 
@@ -30,7 +30,7 @@ class BrokerTimeoutError(RuntimeError):
 class Fill:
     order_id: str
     symbol: str
-    side: OrderSide | str  # 'BUY' | 'SELL' or OrderSide enum
+    side: OrderSide | str
     qty: float
     price: float
     commission: float = 0.0
@@ -100,30 +100,30 @@ def make_broker(broker_name: str, settings: Settings) -> Broker:
     Supported names:
         ``"alpaca"``      — Live/paper Alpaca broker.
         ``"paper_sim"``   — Local in-process paper simulator (no Alpaca keys required).
-
-    Raises
-    ------
-    ValueError
-        When *broker_name* is not recognised.
     """
     name = broker_name.lower().strip()
     if name == "alpaca":
-        # Production instances use the hardened adapter. It subclasses the
-        # original AlpacaBroker so the public broker contract remains stable.
         from app.brokers.alpaca_hardened import AlpacaBroker
-        return AlpacaBroker(
+        broker = AlpacaBroker(
             api_key=settings.alpaca_api_key,
             api_secret=settings.alpaca_api_secret,
             paper=settings.alpaca_paper,
         )
-    if name in ("paper_sim", "paper", "demo"):
+    elif name in ("paper_sim", "paper", "demo"):
         from app.brokers.paper import PaperBroker
-        return PaperBroker(
+        broker = PaperBroker(
             starting_cash=settings.paper_starting_cash,
             slippage_bps=settings.paper_slippage_bps,
             commission_per_share=settings.paper_commission_per_share,
         )
-    raise ValueError(
-        f"Unknown broker {broker_name!r}. "
-        "Valid choices are: 'alpaca', 'paper_sim'."
-    )
+    else:
+        raise ValueError(
+            f"Unknown broker {broker_name!r}. "
+            "Valid choices are: 'alpaca', 'paper_sim'."
+        )
+
+    # One execution boundary for all modes: strategy/PIS target metadata is
+    # retained locally but never becomes a second broker-owned exit authority.
+    from app.brokers.profit_execution import install_profit_execution_hooks
+    install_profit_execution_hooks(broker)
+    return broker
