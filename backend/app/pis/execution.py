@@ -49,6 +49,7 @@ class PISExecutionAdapter:
                 stop_price=target_stop,
                 strategy=f"PISProtection[{decision.lifecycle_state.value}]",
                 reason=f"PIS Protection Update: {reason_str}",
+                role="exit",
             )
 
         if decision.action not in (ExitAction.PARTIAL_EXIT, ExitAction.FULL_EXIT):
@@ -74,4 +75,5 @@ class PISExecutionAdapter:
             qty=qty_to_close,
             strategy=f"PISDiscretionaryExit[{decision.lifecycle_state.value}]",
             reason=f"PIS Exit Reason: {reason_str}",
+            role="exit",
         )

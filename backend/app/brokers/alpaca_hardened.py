@@ -373,6 +373,7 @@ class AlpacaBroker(legacy.AlpacaBroker):
             stop_price=stop_loss,
             strategy="emergency_protection",
             reason="PIS broker protection",
+            role="exit",
         )
         return await self.submit(request)
 

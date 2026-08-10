@@ -321,6 +321,7 @@ class PaperBroker(Broker):
             order_type=OrderType.MARKET,
             strategy=pos.strategy,
             reason=reason,
+            role="exit",
         )
         # Position exits always fill immediately at the latest price, even in
         # next_open mode: stops/targets/flatten act on the observed bar.

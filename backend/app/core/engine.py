@@ -380,7 +380,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
 
         # Restore strategy mapping & reconstruct portfolio lots for active positions from database
         try:
-            positions = await self.broker.positions()
+            positions = await self._cached_broker_positions()
             self._reconcile_positions(positions)
         except Exception as exc:
             self.reconciliation_failed = True
@@ -536,6 +536,18 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
     # ------------------------------------------------------------------
     # the tick
     # ------------------------------------------------------------------
+
+    async def _cached_broker_positions(self) -> list:
+        if self.broker is None:
+            return []
+        # Cache per tick to avoid rate-limiting (e.g. Alpaca 200 req/min)
+        if getattr(self, "_positions_cache_tick", None) == getattr(self, "_tick_count", 0):
+            return getattr(self, "_positions_cache", [])
+        
+        positions = await self.broker.positions()
+        self._positions_cache = positions
+        self._positions_cache_tick = getattr(self, "_tick_count", 0)
+        return positions
 
     async def _tick(self) -> None:
         assert self.data and self.broker and self.risk and self.portfolio and self.pipeline
@@ -720,7 +732,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
 
         try:
             account = await self.broker.account()
-            positions = await self.broker.positions()
+            positions = await self._cached_broker_positions()
             self._reconcile_positions(positions)
         except Exception as exc:
             self.reconciliation_failed = True
@@ -1109,7 +1121,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         broker_positions_map = {}
         if self.broker is not None:
             try:
-                positions = await self.broker.positions()
+                positions = await self._cached_broker_positions()
                 broker_positions_map = {p.symbol.upper(): float(p.qty) for p in positions}
             except Exception as exc:
                 applog.error("engine", f"Failed to fetch broker positions for fill application: {exc}")
@@ -1378,7 +1390,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         if self.broker is None:
             return
         try:
-            positions = await self.broker.positions()
+            positions = await self._cached_broker_positions()
         except Exception:  # noqa: BLE001
             return
         self.publish("positions", [p.to_payload() for p in positions])
@@ -1982,16 +1994,18 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
             raise RuntimeError("Hard halt active -- reset the kill switch first")
 
         # Risk gateway: block manual entry orders in live mode
-        positions = await self.broker.positions()
+        positions = await self._cached_broker_positions()
         is_entry = True
         pos = next((p for p in positions if p.symbol == req.symbol), None)
         if pos is not None and abs(pos.qty) > 1e-9:
             if pos.qty > 0:  # Long position
                 if req.side == OrderSide.SELL and req.qty <= pos.qty:
                     is_entry = False  # Reducing or closing long is allowed
+                    req.role = "exit"
             else:  # Short position
                 if req.side == OrderSide.BUY and req.qty <= abs(pos.qty):
                     is_entry = False  # Reducing or closing short is allowed
+                    req.role = "exit"
 
         if self.mode == "live" and is_entry:
             raise RuntimeError(
@@ -2199,7 +2213,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
             pending_symbols: set[str] = set()
             try:
                 if self.broker:
-                    positions = await self.broker.positions()
+                    positions = await self._cached_broker_positions()
                     open_symbols = {p.symbol.upper() for p in positions}
                     open_orders = await self.broker.open_orders()
                     pending_symbols = {o.symbol.upper() for o in open_orders}
@@ -2594,7 +2608,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         broker_syms: dict[str, float] = {}
         if diagnostics["broker_connected"]:
             try:
-                broker_positions = await self.broker.positions()
+                broker_positions = await self._cached_broker_positions()
                 broker_syms = {p.symbol: float(p.qty) for p in broker_positions if hasattr(p, "symbol") and abs(float(p.qty)) > 1e-9}
                 lots = getattr(self.portfolio, "_lots", {}) if self.portfolio else {}
                 db_syms = {sym: float(lot.qty) for sym, lot in lots.items() if hasattr(lot, "qty") and abs(float(lot.qty)) > 1e-9} if isinstance(lots, dict) else {}
