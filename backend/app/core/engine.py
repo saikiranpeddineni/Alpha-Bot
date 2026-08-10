@@ -1117,16 +1117,6 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         # fix(#51): enforce causal replay order — sort by (ts ASC, order_id, cumulative_qty ASC)
         fills = sorted(fills, key=lambda f: (f.ts, f.order_id or "", getattr(f, "cumulative_qty", 0.0) or 0.0))
 
-        # Fetch current broker positions to enforce authoritative state during fill processing
-        broker_positions_map = {}
-        if self.broker is not None:
-            try:
-                positions = await self._cached_broker_positions()
-                broker_positions_map = {p.symbol.upper(): float(p.qty) for p in positions}
-            except Exception as exc:
-                applog.error("engine", f"Failed to fetch broker positions for fill application: {exc}")
-
-
         order_by_id = {}
         for o in self.recent_orders:
             order_by_id[o.id] = o
@@ -1188,10 +1178,9 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                 self._position_current_stops[symbol] = init_stop
 
             try:
-                broker_pos = broker_positions_map.get(symbol)
                 trade = self.portfolio.on_fill(
                     fill, peak_price=peak, trough_price=trough, initial_stop=init_stop,
-                    risk_manager=self.risk, now=now, broker_position=broker_pos
+                    risk_manager=self.risk, now=now
                 )
             except Exception:
                 # The broker reservation is volatile only. If durable portfolio

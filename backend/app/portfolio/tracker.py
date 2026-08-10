@@ -314,8 +314,7 @@ class PortfolioTracker:
 
     def on_fill(self, fill: Fill, peak_price: float | None = None, trough_price: float | None = None,
                 initial_stop: float | None = None, risk_state: dict | None = None,
-                risk_manager: Any | None = None, now: datetime | None = None,
-                broker_position: float | None = None) -> TradeRecord | None:
+                risk_manager: Any | None = None, now: datetime | None = None) -> TradeRecord | None:
         if fill.broker_fill_key and fill.cumulative_qty is not None and fill.broker_mode:
             from app.db.database import Database
             db = Database.active()
@@ -330,7 +329,7 @@ class PortfolioTracker:
                 effective.qty = delta
                 before = copy.deepcopy(self.__dict__)
                 try:
-                    res = self._apply_fill(effective, peak_price, trough_price, initial_stop, broker_position=broker_position)
+                    res = self._apply_fill(effective, peak_price, trough_price, initial_stop)
                     trade = res.closed_trade if isinstance(res, FillApplicationResult) else res
                     if trade is not None and risk_manager is not None:
                         risk_manager.on_trade_closed(trade, now=now)
@@ -344,14 +343,14 @@ class PortfolioTracker:
                     self.__dict__.clear()
                     self.__dict__.update(before)
                     raise
-        res = self._apply_fill(fill, peak_price, trough_price, initial_stop, broker_position=broker_position)
+        res = self._apply_fill(fill, peak_price, trough_price, initial_stop)
         trade = res.closed_trade if isinstance(res, FillApplicationResult) else res
         if trade is not None and risk_manager is not None:
             risk_manager.on_trade_closed(trade, now=now)
         return trade
 
     def _apply_fill(self, fill: Fill, peak_price: float | None = None, trough_price: float | None = None,
-                    initial_stop: float | None = None, broker_position: float | None = None) -> FillApplicationResult:
+                    initial_stop: float | None = None) -> FillApplicationResult:
         symbol = fill.symbol.upper()
         signed = fill.qty if fill.side == OrderSide.BUY else -fill.qty
         lot = self._lots.get(symbol)
@@ -366,9 +365,6 @@ class PortfolioTracker:
                 return FillApplicationResult()
             if fill.strategy and ("close" in fill.strategy.lower() or "exit" in fill.strategy.lower() or "flatten" in fill.strategy.lower()):
                 applog.error("portfolio", f"[{fill.ts}] REJECTED phantom position creation: fill claims to close/exit {symbol} but no local lot exists.")
-                return FillApplicationResult()
-            if broker_position is not None and abs(broker_position) < 1e-9:
-                applog.error("portfolio", f"[{fill.ts}] REJECTED phantom position creation: fill {symbol} but broker reports no position.")
                 return FillApplicationResult()
 
         if lot is None or abs(lot.qty) < 1e-9:
