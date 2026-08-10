@@ -28,9 +28,15 @@ class TrendPullback(Strategy):
         Regime.TREND_UP: 1.20, Regime.TREND_DOWN: 1.20, Regime.RANGE: 0.80, Regime.VOLATILE: 0.80
     }
     default_params = {
-        "min_er20": 0.35,             # Efficiency Ratio (Trend strength)
-        "max_vol_z": 0.5,             # Max volume z-score on the pullback (low volume dip)
-        "min_wick_ratio": 0.40,       # Rejection wick must be 40% of candle
+        "min_er20": 0.35,
+        "max_vol_z": 0.5,
+        "min_wick_ratio": 0.40,
+        "value_zone_atr_mult": 0.5,
+        "trend_spread_min_pct": 0.20,
+        "long_rsi_min": 40.0,
+        "long_rsi_max": 55.0,
+        "short_rsi_min": 45.0,
+        "short_rsi_max": 60.0,
         "reward_risk": 3.0,
     }
 
@@ -59,14 +65,23 @@ class TrendPullback(Strategy):
             return None
 
         p = self.params
+        for col in ["er20", "ema20", "ema50", "rsi14", "vol_z", "atr14"]:
+            if col not in df.columns or pd.isna(df[col].iloc[-1]):
+                return None
+
+        min_er20 = float(p["min_er20"])
+        max_vol_z = float(p["max_vol_z"])
+        min_wick_ratio = float(p["min_wick_ratio"])
+        value_zone_atr_mult = float(p["value_zone_atr_mult"])
+        trend_spread_min_pct = float(p["trend_spread_min_pct"]) / 100.0
+        long_rsi_min = float(p["long_rsi_min"])
+        long_rsi_max = float(p["long_rsi_max"])
+        short_rsi_min = float(p["short_rsi_min"])
+        short_rsi_max = float(p["short_rsi_max"])
+        reward_risk = float(p["reward_risk"])
 
         last_row = df.iloc[-1]
         
-        # Required indicators
-        for col in ["er20", "ema20", "ema50", "rsi14", "vol_z", "atr14"]:
-            if col not in last_row or pd.isna(last_row[col]):
-                return None
-
         er20 = float(last_row["er20"])
         ema20 = float(last_row["ema20"])
         ema50 = float(last_row["ema50"])
@@ -81,28 +96,24 @@ class TrendPullback(Strategy):
         
         candle_range = max(high_px - low_px, 1e-6)
 
-        # Trend Strength Check
-        if er20 < p["min_er20"]:
+        if er20 < min_er20:
             return None
 
-        is_uptrend = (ema20 > ema50) and ((ema20 - ema50) / ema50 >= 0.002)
-        is_downtrend = (ema20 < ema50) and ((ema50 - ema20) / ema50 >= 0.002)
+        is_uptrend = (ema20 > ema50) and ((ema20 - ema50) / ema50 >= trend_spread_min_pct)
+        is_downtrend = (ema20 < ema50) and ((ema50 - ema20) / ema50 >= trend_spread_min_pct)
 
-        # High volume invalidates the "low volume pullback" thesis
-        if vol_z > p["max_vol_z"]:
+        if vol_z > max_vol_z:
             return None
 
         # Long Setup (Uptrend Pullback)
         if is_uptrend:
-            # 1. Price dipped into the Value Zone (between EMA20 and EMA50 - small buffer)
-            if low_px <= ema20 and low_px >= (ema50 - 0.5 * atr14):
-                # 2. RSI is cooled down (not overbought, not oversold)
-                if 40.0 <= rsi14 <= 55.0:
-                    # 3. Trigger: Bullish rejection candle closing back above EMA20
+            stop_loss = ema50 - value_zone_atr_mult * atr14
+            if low_px <= ema20 and low_px >= stop_loss:
+                if long_rsi_min <= rsi14 <= long_rsi_max:
                     lower_wick = min(open_px, close_px) - low_px
                     wick_ratio = lower_wick / candle_range
                     
-                    if close_px > open_px and close_px > ema20 and wick_ratio >= p["min_wick_ratio"]:
+                    if close_px > open_px and close_px > ema20 and wick_ratio >= min_wick_ratio:
                         confidence = min(0.90, 0.55 + (0.15 * min(2.0, er20)) + (0.10 * min(1.0, wick_ratio)))
                         return Signal(
                             symbol=symbol,
@@ -111,27 +122,31 @@ class TrendPullback(Strategy):
                             strategy=self.name,
                             reason=f"Trend pullback (er20 {er20:.2f}, wick {wick_ratio:.2f})",
                             price=close_px,
-                            score=0.80, # Very high probability setup
-                            stop_loss=ema50 - 0.5 * atr14,
-                            take_profit=close_px + (close_px - (ema50 - 0.5 * atr14)) * reward_risk,
+                            score=0.80,
+                            stop_loss=stop_loss,
+                            take_profit=close_px + (close_px - stop_loss) * reward_risk,
                         )
 
         # Short Setup (Downtrend Pullback)
         elif is_downtrend:
-            # 1. Price popped into the Value Zone
-            if high_px >= ema20 and high_px <= (ema50 + 0.5 * atr14):
-                # 2. RSI is cooled down
-                if 45.0 <= rsi14 <= 60.0:
-                    # 3. Trigger: Bearish rejection candle closing back below EMA20
+            stop_loss = ema50 + value_zone_atr_mult * atr14
+            if high_px >= ema20 and high_px <= stop_loss:
+                if short_rsi_min <= rsi14 <= short_rsi_max:
                     upper_wick = high_px - max(open_px, close_px)
                     wick_ratio = upper_wick / candle_range
                     
-                    if close_px < open_px and close_px < ema20 and wick_ratio >= p["min_wick_ratio"]:
+                    if close_px < open_px and close_px < ema20 and wick_ratio >= min_wick_ratio:
+                        confidence = min(0.90, 0.55 + (0.15 * min(2.0, er20)) + (0.10 * min(1.0, wick_ratio)))
                         return Signal(
                             symbol=symbol,
                             action=SignalAction.ENTER_SHORT,
+                            confidence=round(confidence, 4),
                             strategy=self.name,
+                            reason=f"Trend pullback short (er20 {er20:.2f}, wick {wick_ratio:.2f})",
+                            price=close_px,
                             score=0.80,
+                            stop_loss=stop_loss,
+                            take_profit=close_px - (stop_loss - close_px) * reward_risk,
                         )
 
         return None
