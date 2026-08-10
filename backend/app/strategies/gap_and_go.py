@@ -29,11 +29,12 @@ class GapAndGo(Strategy):
         Regime.TREND_UP: 1.15, Regime.TREND_DOWN: 1.15, Regime.RANGE: 0.70, Regime.VOLATILE: 0.90
     }
     default_params = {
-        "min_gap_pct": 2.0,           # Minimum gap percentage
-        "vol_z_min": 1.5,             # Minimum volume Z-score
-        "start_time": "09:35",        # Only trade after the first 5 minutes established
-        "end_time": "11:30",          # Stop trading after morning drive
+        "min_gap_pct": 2.0,
+        "vol_z_min": 1.5,
+        "start_time": "09:35",
+        "end_time": "11:30",
         "reward_risk": 2.5,
+        "stop_buffer": 0.05,
     }
 
     def __init__(self, params: dict | None = None, enabled: bool = True) -> None:
@@ -71,8 +72,10 @@ class GapAndGo(Strategy):
         if ctx.mover_change_pct is None:
             return None
 
-        gap_pct = ctx.mover_change_pct
-        min_gap = p["min_gap_pct"]
+        gap_pct = float(ctx.mover_change_pct)
+        min_gap = float(p["min_gap_pct"])
+        reward_risk = float(p["reward_risk"])
+        stop_buffer = float(p["stop_buffer"])
         is_gap_up = gap_pct >= min_gap
         is_gap_down = gap_pct <= -min_gap
 
@@ -88,7 +91,7 @@ class GapAndGo(Strategy):
         vol_z = float(last_row["vol_z"])
 
         # Require high relative volume
-        if vol_z < p["vol_z_min"]:
+        if vol_z < float(p["vol_z_min"]):
             return None
 
         # Calculate confidence based on volume and trend alignment
@@ -98,7 +101,6 @@ class GapAndGo(Strategy):
         # Long Setup (Gap Up)
         if is_gap_up:
             if close_px > vwap and ema9 > ema20 and close_px > open_px:
-                # Confirmed gap & go long
                 return Signal(
                     symbol=symbol,
                     action=SignalAction.ENTER_LONG,
@@ -107,14 +109,13 @@ class GapAndGo(Strategy):
                     reason=f"Gap up continuation breakout (vol z {vol_z:.1f})",
                     price=close_px,
                     score=0.75,
-                    stop_loss=ema20 - 0.05,
+                    stop_loss=ema20 - stop_buffer,
                     take_profit=close_px + (close_px - ema20) * reward_risk,
                 )
 
         # Short Setup (Gap Down)
         elif is_gap_down:
             if close_px < vwap and ema9 < ema20 and close_px < open_px:
-                # Confirmed gap & go short
                 return Signal(
                     symbol=symbol,
                     action=SignalAction.ENTER_SHORT,
@@ -123,6 +124,8 @@ class GapAndGo(Strategy):
                     reason=f"Gap down continuation breakdown (vol z {vol_z:.1f})",
                     price=close_px,
                     score=0.75,
-                    stop_loss=ema20 + 0.05,
+                    stop_loss=ema20 + stop_buffer,
                     take_profit=close_px - (ema20 - close_px) * reward_risk,
                 )
+
+        return None
