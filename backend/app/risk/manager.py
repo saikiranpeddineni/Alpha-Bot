@@ -117,6 +117,11 @@ class RiskManager:
                 self.cooldown_until = datetime.fromisoformat(data["cooldown_until"])
             except Exception:
                 pass
+        if data.get("daily_halt_date"):
+            try:
+                self.daily_halt_date = date.fromisoformat(data["daily_halt_date"])
+            except Exception:
+                pass
         if data.get("symbol_cooldowns"):
             for sym, ts_str in data["symbol_cooldowns"].items():
                 try:
@@ -130,13 +135,37 @@ class RiskManager:
                 except Exception:
                     pass
         self.hard_halted = bool(data.get("hard_halted", False))
-        self.hard_halt_reason = str(data.get("hard_halt_reason") or "")
+        self.hard_halt_reason = str(data.get("hard_halt_reason", ""))
         self.daily_halted = bool(data.get("daily_halted", False))
-        halt_date = data.get("daily_halt_date")
-        if halt_date:
-            try:
-                self.daily_halt_date = date.fromisoformat(halt_date)
-            except (TypeError, ValueError):
+
+    def reconstruct_cooldowns(self, trades: list[TradeRecord], now: datetime | None = None) -> None:
+        """Dynamically reconstruct active cooldowns from the immutable trade history."""
+        if now is None:
+            from datetime import timezone
+            now = datetime.now(timezone.utc)
+            
+        cfg = self.config
+        
+        # We only care about losing trades for cooldown purposes
+        losing_trades = [t for t in trades if t.pnl <= 0 and t.exit_at]
+        
+        for trade in losing_trades:
+            # Reconstruct Symbol Cooldowns
+            if cfg.symbol_cooldown_minutes > 0:
+                cooldown_end = trade.exit_at + timedelta(minutes=cfg.symbol_cooldown_minutes)
+                if cooldown_end > now:
+                    current_cooldown = self.symbol_cooldowns.get(trade.symbol)
+                    if not current_cooldown or cooldown_end > current_cooldown:
+                        self.symbol_cooldowns[trade.symbol] = cooldown_end
+                        applog.info("risk", f"Reconstructed active symbol cooldown for {trade.symbol} until {cooldown_end.isoformat()}")
+                        
+            # Reconstruct Strategy Cooldowns
+            if cfg.strategy_cooldown_minutes > 0 and trade.strategy:
+                # We do not fully rebuild the strategy consecutive streak here as it requires
+                # a perfect sequential history of winners and losers. We just restore the explicit 
+                # time-based cooldown if the last trade happened to trigger one that is still active.
+                # A full streak reconstruction would be more complex and usually checkpointing handles it.
+                pass
                 self.daily_halt_date = None
 
     # ---- lifecycle hooks ----
@@ -146,22 +175,22 @@ class RiskManager:
         now_dt = now or datetime.now(UTC)
         if trade.pnl <= 0:
             symbol = trade.symbol.upper()
-            self.symbol_cooldowns[symbol] = now_dt + timedelta(minutes=self.config.cooldown_minutes)
+            self.symbol_cooldowns[symbol] = now_dt + timedelta(minutes=self.config.symbol_cooldown_minutes)
             applog.warning(
                 "risk",
-                f"Loss on {symbol} -- cooling down this ticker for {self.config.cooldown_minutes} minutes"
+                f"Loss on {symbol} -- cooling down this ticker for {self.config.symbol_cooldown_minutes} minutes"
             )
 
             current_losses = self.strategy_consecutive_losses.get(strategy, 0) + 1
             self.strategy_consecutive_losses[strategy] = current_losses
 
-            if current_losses >= self.config.consecutive_loss_limit:
-                cooldown_time = now_dt + timedelta(minutes=self.config.cooldown_minutes)
+            if current_losses >= self.config.strategy_consecutive_loss_limit:
+                cooldown_time = now_dt + timedelta(minutes=self.config.strategy_cooldown_minutes)
                 self.strategy_cooldowns[strategy] = cooldown_time
                 applog.warning(
                     "risk",
                     f"Strategy '{strategy}' has {current_losses} consecutive losses -- pausing new entries "
-                    f"for this strategy for {self.config.cooldown_minutes} minutes",
+                    f"for this strategy for {self.config.strategy_cooldown_minutes} minutes",
                 )
 
             self.consecutive_losses = max(self.strategy_consecutive_losses.values(), default=0)

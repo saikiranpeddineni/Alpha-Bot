@@ -132,6 +132,21 @@ class TradingEngineEvaluationMixin:
                     # Do NOT wrap the above `_close_position_guarded` routing call inside the PIS evaluation try-block.
                     # Routing failures (like Alpaca 502s) must NOT be masked as PIS AI evaluation crashes.
                     # ==================================================================================================
+                    
+                    # P0-5: Advanced-order/PIS execution protection 
+                    # If protection recreation failed during a partial close, the position is no longer safely protected.
+                    # We must immediately degrade it to PROTECTION_DEGRADED and force a full emergency exit/reconciliation.
+                    if "ProtectionRecreationError" in str(type(e).__name__):
+                        applog.error("engine.exit", f"CRITICAL: PROTECTION_DEGRADED for {symbol}. Forced reconciliation required: {e}")
+                        if not hasattr(self, "_degraded_symbols"):
+                            self._degraded_symbols = set()
+                        self._degraded_symbols.add(symbol)
+                        # Attempt an immediate, unguarded full flatten since protection is lost
+                        try:
+                            await self.broker.close_position(symbol, reason="CRITICAL: PROTECTION_DEGRADED (Full Flatten)")
+                        except Exception as flatten_e:
+                            applog.error("engine.exit", f"Failed to fully flatten degraded position {symbol}: {flatten_e}")
+                            
                     applog.error("engine.exit", f"Execution failed for PIS action on {symbol}: {e}")
 
             # All exits (including strategy take profit targets) are now handled exclusively by PIS

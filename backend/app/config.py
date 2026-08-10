@@ -41,8 +41,9 @@ class RiskConfig(BaseModel):
     max_open_positions: int = Field(4, ge=1, le=50)                  # was 4 — 2× concurrent exposure
     max_daily_loss_pct: float = Field(2.0, ge=0.1, le=25.0)         # was 2.0 — room for higher position count
     max_drawdown_pct: float = Field(10.0, ge=1.0, le=50.0)
-    consecutive_loss_limit: int = Field(3, ge=1, le=20)              # was 3 — one more loss before pause
-    cooldown_minutes: int = Field(30, ge=1, le=390)                  # was 30 — faster recovery
+    symbol_cooldown_minutes: int = Field(30, ge=0, le=390)                  # was 30
+    strategy_consecutive_loss_limit: int = Field(3, ge=1, le=20)            # was 3
+    strategy_cooldown_minutes: int = Field(30, ge=0, le=390)                # was 30
     no_entry_minutes_before_close: int = Field(30, ge=0, le=180)     # was 30 — more trading time
     flatten_minutes_before_close: int = Field(5, ge=0, le=60)
     min_price: float = Field(5.0, ge=0.0)
@@ -128,8 +129,9 @@ class Settings(BaseSettings):
     max_open_positions: int = Field(8, validation_alias="MAX_OPEN_POSITIONS")                # was 4
     max_daily_loss_pct: float = Field(3.0, validation_alias="MAX_DAILY_LOSS_PCT")            # was 2.0
     max_drawdown_pct: float = Field(10.0, validation_alias="MAX_DRAWDOWN_PCT")
-    consecutive_loss_limit: int = Field(4, validation_alias="CONSECUTIVE_LOSS_LIMIT")        # was 3
-    cooldown_minutes: int = Field(10, validation_alias="COOLDOWN_MINUTES")                   # was 30
+    symbol_cooldown_minutes: int = Field(10, validation_alias="COOLDOWN_MINUTES")                   # was 30
+    strategy_consecutive_loss_limit: int = Field(4, validation_alias="CONSECUTIVE_LOSS_LIMIT")        # was 3
+    strategy_cooldown_minutes: int = Field(10, validation_alias="STRATEGY_COOLDOWN_MINUTES")
     no_entry_minutes_before_close: int = Field(15, validation_alias="NO_ENTRY_MINUTES_BEFORE_CLOSE")  # was 30
     flatten_minutes_before_close: int = Field(5, validation_alias="FLATTEN_MINUTES_BEFORE_CLOSE")
     min_price: float = Field(5.0, validation_alias="MIN_PRICE")
@@ -216,8 +218,9 @@ class Settings(BaseSettings):
             max_open_positions=self.max_open_positions,
             max_daily_loss_pct=self.max_daily_loss_pct,
             max_drawdown_pct=self.max_drawdown_pct,
-            consecutive_loss_limit=self.consecutive_loss_limit,
-            cooldown_minutes=self.cooldown_minutes,
+            symbol_cooldown_minutes=self.symbol_cooldown_minutes,
+            strategy_consecutive_loss_limit=self.strategy_consecutive_loss_limit,
+            strategy_cooldown_minutes=self.strategy_cooldown_minutes,
             no_entry_minutes_before_close=self.no_entry_minutes_before_close,
             flatten_minutes_before_close=self.flatten_minutes_before_close,
             min_price=self.min_price,

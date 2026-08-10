@@ -109,9 +109,11 @@ class OrderRequest(BaseModel):
     client_order_id: str = Field(default_factory=new_id)
     strategy: str = "manual"
     reason: str = ""
+    role: str = "entry"
     time_in_force: str = "day"
     signal_timestamp_utc: datetime | None = None
     decision_bar_timestamp_utc: datetime | None = None
+    role: str = "entry"
     @model_validator(mode="after")
     def validate_execution_prices(self) -> OrderRequest:
         if self.qty <= 0:

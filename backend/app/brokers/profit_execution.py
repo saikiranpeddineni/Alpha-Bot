@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import functools
 
+class ProtectionRecreationError(Exception):
+    """Raised when broker protection cannot be safely recreated after advanced-order cancellation."""
+
 
 def install_profit_execution_hooks(broker) -> None:
     """Install idempotent broker hooks for target metadata and partial exits."""
@@ -58,7 +61,7 @@ def install_profit_execution_hooks(broker) -> None:
                 # Full exits can safely use the existing broker helper because no
                 # position remains that needs protection.
                 if remaining_qty <= 0:
-                    return await original_close(symbol, reason=reason, qty=close_qty)
+                    return await original_close(symbol, reason=reason, qty=None)
 
                 protective_side = OrderSide.SELL if position.qty > 0 else OrderSide.BUY
                 open_orders = await broker.open_orders()
@@ -86,12 +89,34 @@ def install_profit_execution_hooks(broker) -> None:
                 if stop.order_type == OrderType.STOP_LIMIT and stop.limit_price is not None:
                     replace_kwargs["limit_price"] = normalize_stock_price(stop.limit_price)
 
-                raw = await legacy._call(
-                    broker._client.replace_order_by_id,
-                    stop.id,
-                    ReplaceOrderRequest(**replace_kwargs),
-                    label=f"resize_protection/{stop.id}",
-                )
+                try:
+                    raw = await legacy._call(
+                        broker._client.replace_order_by_id,
+                        stop.id,
+                        ReplaceOrderRequest(**replace_kwargs),
+                        label=f"resize_protection/{stop.id}",
+                    )
+                except Exception as exc:
+                    # Alpaca rejects qty changes on advanced orders (OTO/Bracket).
+                    if "qty cannot be changed" in str(exc).lower():
+                        from alpaca.trading.requests import StopOrderRequest
+                        from alpaca.trading.enums import TimeInForce
+                        
+                        await legacy._call(broker._client.cancel_order_by_id, stop.id, label=f"cancel_advanced_stop/{stop.id}")
+                        
+                        req = StopOrderRequest(
+                            symbol=symbol.upper(),
+                            qty=replace_kwargs["qty"],
+                            side=stop.side,
+                            time_in_force=TimeInForce.DAY,
+                            stop_price=replace_kwargs["stop_price"],
+                        )
+                        try:
+                            raw = await legacy._call(broker._client.submit_order, req, label=f"recreate_protection/{symbol}")
+                        except Exception as recreate_exc:
+                            raise ProtectionRecreationError(f"CRITICAL: Failed to recreate protection for {symbol}: {recreate_exc}")
+                    else:
+                        raise
                 replacement_id = str(getattr(raw, "id", "") or "")
                 if not replacement_id:
                     raise RuntimeError(f"broker returned no replacement id for protection {stop.id}")

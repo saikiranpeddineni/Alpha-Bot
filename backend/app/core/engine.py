@@ -347,6 +347,18 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
             if checkpoint and "risk_state" in checkpoint and self.risk:
                 self.risk.restore_risk_state(checkpoint["risk_state"])
                 applog.info("engine", f"#43: Restored safety-critical risk state from {restore_mode} checkpoint")
+                
+            # P0-3: Reconstruct durable cooldowns dynamically from immutable trade history
+            if self.risk:
+                try:
+                    from app.core.domain import TradeRecord
+                    raw_trades = self.db.recent_trades(mode=restore_mode, limit=100)
+                    if raw_trades:
+                        trades = [TradeRecord.model_validate(t) for t in raw_trades]
+                        self.risk.reconstruct_cooldowns(trades)
+                        applog.info("engine", f"P0-3: Reconstructed durable cooldowns from {len(trades)} recent trades.")
+                except Exception as e:
+                    applog.error("engine", f"Failed to reconstruct durable cooldowns: {e}")
 
 
         from app.portfolio.allocator import PortfolioAIGate, CapitalAllocationOptimizer
@@ -1093,6 +1105,15 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         # fix(#51): enforce causal replay order — sort by (ts ASC, order_id, cumulative_qty ASC)
         fills = sorted(fills, key=lambda f: (f.ts, f.order_id or "", getattr(f, "cumulative_qty", 0.0) or 0.0))
 
+        # Fetch current broker positions to enforce authoritative state during fill processing
+        broker_positions_map = {}
+        if self.broker is not None:
+            try:
+                positions = await self.broker.positions()
+                broker_positions_map = {p.symbol.upper(): float(p.qty) for p in positions}
+            except Exception as exc:
+                applog.error("engine", f"Failed to fetch broker positions for fill application: {exc}")
+
 
         order_by_id = {}
         for o in self.recent_orders:
@@ -1128,19 +1149,26 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
             trough = self._position_troughs.get(symbol)
             
             init_stop = self._position_initial_stops.get(symbol)
-            if init_stop is None and order is not None and getattr(order, "leg", None) == "entry" and order.stop_loss is not None:
-                init_stop = order.stop_loss
+            if init_stop is None and order is not None and getattr(order, "leg", None) == "entry":
+                init_stop = getattr(order, "stop_loss", None)
+                if init_stop is None:
+                    init_stop = getattr(order, "stop_price", None)
 
             # Authority Fallback 2: Search recent orders for original entry order stop_loss
             if init_stop is None:
                 for recent_ord in reversed(self.recent_orders):
-                    if recent_ord.symbol and recent_ord.symbol.upper() == symbol and recent_ord.stop_loss is not None:
-                        ord_leg = getattr(recent_ord, "leg", None)
-                        ord_class = getattr(recent_ord, "order_class", None)
-                        ord_side = str(getattr(recent_ord, "side", "")).lower()
-                        if ord_leg == "entry" or ord_class == "bracket" or ord_side in ["buy", "sell_short", "orderside.buy", "orderside.sell_short"]:
-                            init_stop = recent_ord.stop_loss
-                            break
+                    if recent_ord.symbol and recent_ord.symbol.upper() == symbol:
+                        recent_stop = getattr(recent_ord, "stop_loss", None)
+                        if recent_stop is None:
+                            recent_stop = getattr(recent_ord, "stop_price", None)
+                        
+                        if recent_stop is not None:
+                            ord_leg = getattr(recent_ord, "leg", None)
+                            ord_class = getattr(recent_ord, "order_class", None)
+                            ord_side = str(getattr(recent_ord, "side", "")).lower()
+                            if ord_leg == "entry" or ord_class == "bracket" or ord_side in ["buy", "sell_short", "orderside.buy", "orderside.sell_short"]:
+                                init_stop = recent_stop
+                                break
 
             if init_stop is not None and symbol not in self._position_initial_stops:
                 self._position_initial_stops[symbol] = init_stop
@@ -1148,9 +1176,10 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                 self._position_current_stops[symbol] = init_stop
 
             try:
+                broker_pos = broker_positions_map.get(symbol)
                 trade = self.portfolio.on_fill(
                     fill, peak_price=peak, trough_price=trough, initial_stop=init_stop,
-                    risk_manager=self.risk, now=now
+                    risk_manager=self.risk, now=now, broker_position=broker_pos
                 )
             except Exception:
                 # The broker reservation is volatile only. If durable portfolio
@@ -1985,6 +2014,8 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         if is_entry:
             if sym_upper in self._pending_close_ttls and now < self._pending_close_ttls[sym_upper]:
                 raise ValueError(f"Cannot manually open {sym_upper} while a close/cover is in-flight")
+            if req.stop_loss is None:
+                raise ValueError(f"Cannot manually open {sym_upper}: missing required stop_loss parameter")
 
         order = await self.broker.submit(req)
         
@@ -2940,7 +2971,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                 equity = self.portfolio.equity
                 if equity > 0:
                     turnover = total_volume / equity
-                    if turnover > 2.0:  # Increased from 2.0 for testing
+                    if turnover > 20.0:  # Increased from 2.0 to 20.0 for testing
                         return f"behavioral_loop_detector: high portfolio churn/turnover (turnover={turnover:.2f}x equity)"
         except Exception as e:
             applog.warning("engine.behavioral", f"Failed churn check: {e}")

@@ -108,6 +108,10 @@ class AlpacaBroker(legacy.AlpacaBroker):
         return order
 
     async def submit(self, req: OrderRequest) -> Order:
+        # P0-4: Strict Broker API Level Stop-Loss Gate
+        if req.role == "entry" and req.stop_loss is None:
+            raise RuntimeError(f"CRITICAL: Refusing to submit entry order for {req.symbol} without an explicit stop-loss. This violates immutable risk geometry invariants.")
+            
         from alpaca.trading.enums import OrderClass, OrderSide as ASide, TimeInForce
         from alpaca.trading.requests import (
             LimitOrderRequest,
