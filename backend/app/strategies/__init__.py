@@ -13,3 +13,9 @@ get_adaptive_ml_threshold = adaptive_ml_threshold
 get_adaptive_signal_score = adaptive_signal_score
 
 from app.strategies.reflection import generate_eod_reflection_report  # noqa: F401
+
+# Install only execution-boundary integrity fixes. Research/adaptive evidence
+# remains observable to the research evaluator but cannot silently change the
+# Champion ML/Meta thresholds.
+from app.strategies.runtime_integrity import install_runtime_integrity
+install_runtime_integrity()
