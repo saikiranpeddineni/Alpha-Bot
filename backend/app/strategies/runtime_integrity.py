@@ -53,13 +53,30 @@ def _install_champion_threshold_boundary() -> None:
     original_process = SignalPipeline.process
 
     @wraps(original_process)
-    def champion_process(self, *args, **kwargs):
+    def champion_process(
+        self,
+        symbol,
+        df,
+        signals,
+        regime,
+        features=None,
+        sector_strength=None,
+        adaptive_ml_thresholds=None,
+    ):
         # Contextual/adaptive thresholds are research evidence. The Champion
         # pipeline uses its configured runtime threshold, which can still be
         # changed by the existing policy/configuration machinery. No threshold
         # is widened or lowered here.
-        kwargs["adaptive_ml_thresholds"] = None
-        return original_process(self, *args, **kwargs)
+        return original_process(
+            self,
+            symbol,
+            df,
+            signals,
+            regime,
+            features=features,
+            sector_strength=sector_strength,
+            adaptive_ml_thresholds=None,
+        )
 
     champion_process._champion_boundary_installed = True
     SignalPipeline.process = champion_process
