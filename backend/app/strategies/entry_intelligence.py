@@ -53,8 +53,8 @@ def _reversal_confirmed(sig: Signal, df: pd.DataFrame) -> bool:
 def _directional_contradictions(sig: Signal, df: pd.DataFrame) -> list[str]:
     reasons: list[str] = []
     side = sig.side
-    mover = sig.mover_bias
-    rs = sig.rs_score
+    mover = getattr(sig, "mover_bias", None)
+    rs = getattr(sig, "rs_score", None)
 
     if side == "long" and mover == "loser" and rs is not None and rs < 0.45:
         reasons.append("directional_context_conflict: loser_mover_and_weak_relative_strength")
@@ -74,29 +74,24 @@ def _directional_contradictions(sig: Signal, df: pd.DataFrame) -> list[str]:
         elif side == "short" and ema9 > ema20 and slope_conflict and not reversal:
             reasons.append("trend_context_conflict: confirmed_short_term_trend_opposes_short")
 
-    # News is independent evidence, but the market's reaction is the final sanity
-    # check. A headline that is nominally adverse should not veto a thesis when price
-    # is already absorbing it with a confirmed reaction.
-    if sig.news_context_available and sig.news_catalyst:
-        age = sig.news_age_seconds
+    news_available = bool(getattr(sig, "news_context_available", False))
+    news_catalyst = getattr(sig, "news_catalyst", None)
+    if news_available and news_catalyst:
+        age = getattr(sig, "news_age_seconds", None)
+        confidence = float(getattr(sig, "news_confidence", 0.0) or 0.0)
+        direction = str(getattr(sig, "news_direction", "neutral") or "neutral")
         fresh = age is not None and age <= 1800
-        material = sig.news_catalyst in {"financing", "regulatory", "earnings"}
-        if fresh and material and sig.news_confidence >= 0.55:
+        material = news_catalyst in {"financing", "regulatory", "earnings"}
+        if fresh and material and confidence >= 0.55:
             reaction = _normalized_short_term_move(df)
-            adverse = (
-                side == "long" and sig.news_direction == "bearish"
-            ) or (
-                side == "short" and sig.news_direction == "bullish"
-            )
+            adverse = (side == "long" and direction == "bearish") or (side == "short" and direction == "bullish")
             if adverse:
                 absorbed = reaction is not None and (
                     (side == "long" and reaction >= 0.10)
                     or (side == "short" and reaction <= -0.10)
                 )
                 if not absorbed:
-                    reasons.append(
-                        f"news_context_conflict: fresh_material_{sig.news_direction}_{sig.news_catalyst}_catalyst"
-                    )
+                    reasons.append(f"news_context_conflict: fresh_material_{direction}_{news_catalyst}_catalyst")
 
     return reasons
 
@@ -104,12 +99,12 @@ def _directional_contradictions(sig: Signal, df: pd.DataFrame) -> list[str]:
 def _macro_context_conflicts(sig: Signal, df: pd.DataFrame, regime: Regime | str | None) -> list[str]:
     """Add one soft macro/chop contradiction only when the setup is already weak."""
     regime_name = getattr(regime, "value", str(regime) if regime is not None else "")
-    if sig.strategy not in {"momentum", "gap_and_go", "trend_pullback"}:
+    if getattr(sig, "strategy", None) not in {"momentum", "gap_and_go", "trend_pullback"}:
         return []
     if str(regime_name).upper() not in {"RANGE", "VOLATILE"}:
         return []
-    rs = sig.rs_score
-    mover = sig.mover_bias
+    rs = getattr(sig, "rs_score", None)
+    mover = getattr(sig, "mover_bias", None)
     if rs is None and not mover:
         return ["macro_context_conflict: choppy_regime_without_symbol_confirmation"]
     if rs is not None and 0.47 <= rs <= 0.53 and mover in {None, "neutral"}:
@@ -118,7 +113,10 @@ def _macro_context_conflicts(sig: Signal, df: pd.DataFrame, regime: Regime | str
 
 
 def _extension_conflicts(sig: Signal, df: pd.DataFrame) -> list[str]:
-    if len(df) < 20 or "atr14" not in df.columns:
+    """Flag only genuine range-edge extension, not ordinary tests of resistance/support."""
+    if len(df) < 20 or "atr14" not in df.columns or "close" not in df.columns:
+        return []
+    if "high" not in df.columns or "low" not in df.columns:
         return []
     close = float(df["close"].iloc[-1])
     atr = float(df["atr14"].iloc[-1])
@@ -129,9 +127,13 @@ def _extension_conflicts(sig: Signal, df: pd.DataFrame) -> list[str]:
     high20 = float(lookback["high"].max())
     low20 = float(lookback["low"].min())
     side = sig.side
-    if side == "long" and close >= high20 - 0.25 * atr and sig.mover_bias != "gainer":
+    mover = getattr(sig, "mover_bias", None)
+    # Require a true extension beyond the recent range by 0.10 ATR. Merely touching
+    # the prior high/low is not evidence of exhaustion and should not suppress a
+    # legitimate breakout opportunity.
+    if side == "long" and close > high20 + 0.10 * atr and mover != "gainer":
         return ["entry_location_conflict: long_is_extended_without_mover_confirmation"]
-    if side == "short" and close <= low20 + 0.25 * atr and sig.mover_bias != "loser":
+    if side == "short" and close < low20 - 0.10 * atr and mover != "loser":
         return ["entry_location_conflict: short_is_extended_without_mover_confirmation"]
     return []
 
@@ -145,13 +147,13 @@ def assess_entry_context(sig: Signal, df: pd.DataFrame, regime: Regime | str | N
     all_reasons = reasons + _macro_context_conflicts(sig, df, regime) + _extension_conflicts(sig, df)
     evidence = {
         "regime": getattr(regime, "value", str(regime) if regime is not None else None),
-        "mover_bias": sig.mover_bias,
-        "rs_score": sig.rs_score,
-        "news_direction": sig.news_direction,
-        "news_sentiment": sig.news_sentiment,
-        "news_confidence": sig.news_confidence,
-        "news_catalyst": sig.news_catalyst,
-        "news_age_seconds": sig.news_age_seconds,
+        "mover_bias": getattr(sig, "mover_bias", None),
+        "rs_score": getattr(sig, "rs_score", None),
+        "news_direction": getattr(sig, "news_direction", "neutral"),
+        "news_sentiment": getattr(sig, "news_sentiment", None),
+        "news_confidence": getattr(sig, "news_confidence", 0.0),
+        "news_catalyst": getattr(sig, "news_catalyst", None),
+        "news_age_seconds": getattr(sig, "news_age_seconds", None),
         "news_reaction_atr": _normalized_short_term_move(df),
         "context_conflict_count": len(all_reasons),
     }
@@ -217,19 +219,16 @@ def assess_thesis_continuity(db, sig: Signal, now) -> EntryContextAssessment:
     if previous_mover and sig.mover_bias and previous_mover != sig.mover_bias:
         return EntryContextAssessment(True)
 
-    # A genuinely new, fresh material catalyst can invalidate the old thesis.
-    # Do not suppress the opportunity merely because the same symbol/direction lost
-    # earlier. This is intentionally evidence-based rather than timer-based.
     fresh_news = (
-        sig.news_context_available
-        and sig.news_age_seconds is not None
+        getattr(sig, "news_context_available", False)
+        and getattr(sig, "news_age_seconds", None) is not None
         and sig.news_age_seconds <= 1800
-        and sig.news_confidence >= 0.70
-        and sig.news_catalyst in {"financing", "regulatory", "earnings", "corporate"}
+        and float(getattr(sig, "news_confidence", 0.0) or 0.0) >= 0.70
+        and getattr(sig, "news_catalyst", None) in {"financing", "regulatory", "earnings", "corporate"}
     )
     news_supports_side = (
-        (sig.side == "long" and sig.news_direction == "bullish")
-        or (sig.side == "short" and sig.news_direction == "bearish")
+        (sig.side == "long" and getattr(sig, "news_direction", "neutral") == "bullish")
+        or (sig.side == "short" and getattr(sig, "news_direction", "neutral") == "bearish")
     )
     if fresh_news and news_supports_side:
         return EntryContextAssessment(
