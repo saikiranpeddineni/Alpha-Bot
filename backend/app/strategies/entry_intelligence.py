@@ -19,6 +19,17 @@ class EntryContextAssessment:
     evidence: dict[str, float | str | bool | None] = field(default_factory=dict)
 
 
+def _normalized_short_term_move(df: pd.DataFrame) -> float | None:
+    """Return the latest 4-bar move normalized by the current ATR."""
+    if len(df) < 5 or "close" not in df.columns or "atr14" not in df.columns:
+        return None
+    atr = float(df["atr14"].iloc[-1])
+    if atr <= 0:
+        return None
+    closes = df["close"].astype(float)
+    return (float(closes.iloc[-1]) - float(closes.iloc[-5])) / max(atr, 1e-9)
+
+
 def _reversal_confirmed(sig: Signal, df: pd.DataFrame) -> bool:
     """Return True when a counter-trend signal has actual structure confirmation.
 
@@ -62,27 +73,28 @@ def _directional_contradictions(sig: Signal, df: pd.DataFrame) -> list[str]:
         # signal is not a confirmed structural reversal.
         reversal = _reversal_confirmed(sig, df)
         slope_conflict = False
-        if "atr14" in df.columns and len(df) >= 5:
-            atr = float(df["atr14"].iloc[-1])
-            closes = df["close"].astype(float)
-            slope_r = (float(closes.iloc[-1]) - float(closes.iloc[-5])) / max(atr, 1e-9)
+        slope_r = _normalized_short_term_move(df)
+        if slope_r is not None:
             slope_conflict = slope_r <= -0.10 if side == "long" else slope_r >= 0.10
         if side == "long" and ema9 < ema20 and slope_conflict and not reversal:
             reasons.append("trend_context_conflict: confirmed_short_term_trend_opposes_long")
         elif side == "short" and ema9 > ema20 and slope_conflict and not reversal:
             reasons.append("trend_context_conflict: confirmed_short_term_trend_opposes_short")
 
-    # News is independent evidence. Only material, fresh catalysts are strong
-    # enough to count as a contradiction; ordinary/stale headlines remain context.
+    # News is independent evidence, but the market's reaction is the final sanity
+    # check. A headline that is nominally bearish should not veto a long thesis when
+    # price is already absorbing it with a confirmed positive reaction, and vice versa.
     if sig.news_context_available and sig.news_catalyst:
         age = sig.news_age_seconds
         fresh = age is not None and age <= 1800
         material = sig.news_catalyst in {"financing", "regulatory", "earnings"}
         if fresh and material and sig.news_confidence >= 0.55:
-            if side == "long" and sig.news_direction == "bearish":
-                reasons.append(f"news_context_conflict: fresh_material_bearish_{sig.news_catalyst}_catalyst")
-            elif side == "short" and sig.news_direction == "bullish":
-                reasons.append(f"news_context_conflict: fresh_material_bullish_{sig.news_catalyst}_catalyst")
+            reaction = _normalized_short_term_move(df)
+            adverse = side == "long" and sig.news_direction == "bearish" or side == "short" and sig.news_direction == "bullish"
+            if adverse:
+                absorbed = reaction is not None and ((side == "long" and reaction >= 0.10) or (side == "short" and reaction <= -0.10))
+                if not absorbed:
+                    reasons.append(f"news_context_conflict: fresh_material_{sig.news_direction}_{sig.news_catalyst}_catalyst")
 
     return reasons
 
@@ -143,6 +155,7 @@ def assess_entry_context(sig: Signal, df: pd.DataFrame, regime: Regime | str | N
         "news_confidence": sig.news_confidence,
         "news_catalyst": sig.news_catalyst,
         "news_age_seconds": sig.news_age_seconds,
+        "news_reaction_atr": _normalized_short_term_move(df),
         "context_conflict_count": len(all_reasons),
     }
     if len(all_reasons) >= 2:
