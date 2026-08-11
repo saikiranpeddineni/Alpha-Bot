@@ -68,7 +68,7 @@ def test_countertrend_reversal_is_not_blanket_blocked():
     assert result.allowed is True
 
 
-def test_fresh_material_news_is_evidence_not_automatic_veto():
+def test_fresh_material_news_is_contradiction_when_price_confirms_it():
     sig = _signal(
         SignalAction.ENTER_LONG,
         news_context_available=True,
@@ -77,10 +77,26 @@ def test_fresh_material_news_is_evidence_not_automatic_veto():
         news_catalyst="financing",
         news_age_seconds=120,
     )
-    result = assess_entry_context(sig, _bars([100.0 + i * 0.15 for i in range(25)], ema9=101.5, ema20=100.0), Regime.TREND_UP)
-    # Only the news contradiction exists; the multi-factor boundary therefore allows it.
+    closes = [100.0 + i * 0.15 for i in range(20)] + [103.0, 102.8, 102.6, 102.4, 102.2]
+    result = assess_entry_context(sig, _bars(closes, ema9=101.5, ema20=100.0), Regime.TREND_UP)
     assert result.allowed is True
-    assert len(result.reasons) == 1
+    assert any("news_context_conflict" in reason for reason in result.reasons)
+
+
+def test_adverse_news_is_not_a_contradiction_when_price_absorbs_it():
+    sig = _signal(
+        SignalAction.ENTER_LONG,
+        news_context_available=True,
+        news_direction="bearish",
+        news_confidence=0.9,
+        news_catalyst="financing",
+        news_age_seconds=120,
+    )
+    closes = [100.0 + i * 0.15 for i in range(25)]
+    result = assess_entry_context(sig, _bars(closes, ema9=101.5, ema20=100.0), Regime.TREND_UP)
+    assert result.allowed is True
+    assert not any("news_context_conflict" in reason for reason in result.reasons)
+    assert result.evidence["news_reaction_atr"] is not None
 
 
 def test_choppy_momentum_is_softly_flagged_not_globally_blocked():
