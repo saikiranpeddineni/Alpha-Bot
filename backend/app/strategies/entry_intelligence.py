@@ -15,6 +15,18 @@ import pandas as pd
 from app.core.domain import Regime, Signal, SignalAction
 
 
+# Named policy constants make the existing behavior explicit and prevent the
+# same heuristic from being duplicated with subtly different magic numbers.
+SHORT_TERM_SLOPE_R = 0.10
+EXTENSION_R = 0.10
+NEWS_FRESH_SECONDS = 30 * 60
+NEWS_MATERIAL_CONFIDENCE = 0.55
+WEAK_RS = 0.45
+STRONG_RS = 0.55
+NEUTRAL_RS_LOW = 0.47
+NEUTRAL_RS_HIGH = 0.53
+
+
 @dataclass(frozen=True)
 class EntryContextAssessment:
     allowed: bool
@@ -49,8 +61,8 @@ def _reversal_confirmed(sig: Signal, df: pd.DataFrame) -> bool:
     prev_low = float(df["low"].iloc[-7:-1].min()) if "low" in df.columns else float(prior.min())
 
     if sig.side == "long":
-        return slope_r >= 0.10 and last > prev_high
-    return slope_r <= -0.10 and last < prev_low
+        return slope_r >= SHORT_TERM_SLOPE_R and last > prev_high
+    return slope_r <= -SHORT_TERM_SLOPE_R and last < prev_low
 
 
 def _directional_contradictions(sig: Signal, df: pd.DataFrame) -> list[str]:
@@ -59,9 +71,9 @@ def _directional_contradictions(sig: Signal, df: pd.DataFrame) -> list[str]:
     mover = getattr(sig, "mover_bias", None)
     rs = getattr(sig, "rs_score", None)
 
-    if side == "long" and mover == "loser" and rs is not None and rs < 0.45:
+    if side == "long" and mover == "loser" and rs is not None and rs < WEAK_RS:
         reasons.append("directional_context_conflict: loser_mover_and_weak_relative_strength")
-    elif side == "short" and mover == "gainer" and rs is not None and rs > 0.55:
+    elif side == "short" and mover == "gainer" and rs is not None and rs > STRONG_RS:
         reasons.append("directional_context_conflict: gainer_mover_and_strong_relative_strength")
 
     if "ema9" in df.columns and "ema20" in df.columns:
@@ -71,7 +83,7 @@ def _directional_contradictions(sig: Signal, df: pd.DataFrame) -> list[str]:
         slope_conflict = False
         slope_r = _normalized_short_term_move(df)
         if slope_r is not None:
-            slope_conflict = slope_r <= -0.10 if side == "long" else slope_r >= 0.10
+            slope_conflict = slope_r <= -SHORT_TERM_SLOPE_R if side == "long" else slope_r >= SHORT_TERM_SLOPE_R
         if side == "long" and ema9 < ema20 and slope_conflict and not reversal:
             reasons.append("trend_context_conflict: confirmed_short_term_trend_opposes_long")
         elif side == "short" and ema9 > ema20 and slope_conflict and not reversal:
@@ -83,15 +95,15 @@ def _directional_contradictions(sig: Signal, df: pd.DataFrame) -> list[str]:
         age = getattr(sig, "news_age_seconds", None)
         confidence = float(getattr(sig, "news_confidence", 0.0) or 0.0)
         direction = str(getattr(sig, "news_direction", "neutral") or "neutral")
-        fresh = age is not None and age <= 1800
+        fresh = age is not None and age <= NEWS_FRESH_SECONDS
         material = news_catalyst in {"financing", "regulatory", "earnings"}
-        if fresh and material and confidence >= 0.55:
+        if fresh and material and confidence >= NEWS_MATERIAL_CONFIDENCE:
             reaction = _normalized_short_term_move(df)
             adverse = (side == "long" and direction == "bearish") or (side == "short" and direction == "bullish")
             if adverse:
                 absorbed = reaction is not None and (
-                    (side == "long" and reaction >= 0.10)
-                    or (side == "short" and reaction <= -0.10)
+                    (side == "long" and reaction >= SHORT_TERM_SLOPE_R)
+                    or (side == "short" and reaction <= -SHORT_TERM_SLOPE_R)
                 )
                 if not absorbed:
                     reasons.append(f"news_context_conflict: fresh_material_{direction}_{news_catalyst}_catalyst")
@@ -110,13 +122,13 @@ def _macro_context_conflicts(sig: Signal, df: pd.DataFrame, regime: Regime | str
     mover = getattr(sig, "mover_bias", None)
     if rs is None and not mover:
         return ["macro_context_conflict: choppy_regime_without_symbol_confirmation"]
-    if rs is not None and 0.47 <= rs <= 0.53 and mover in {None, "neutral"}:
+    if rs is not None and NEUTRAL_RS_LOW <= rs <= NEUTRAL_RS_HIGH and mover in {None, "neutral"}:
         return ["macro_context_conflict: choppy_regime_and_neutral_symbol_confirmation"]
     return []
 
 
 def _extension_conflicts(sig: Signal, df: pd.DataFrame) -> list[str]:
-    """Flag only genuine extension beyond the prior range, not a normal breakout test."""
+    """Flag only genuine range-edge extension, not ordinary tests of resistance/support."""
     if len(df) < 21 or "atr14" not in df.columns or "close" not in df.columns:
         return []
     if "high" not in df.columns or "low" not in df.columns:
@@ -126,16 +138,14 @@ def _extension_conflicts(sig: Signal, df: pd.DataFrame) -> list[str]:
     if atr <= 0 or close <= 0:
         return []
 
-    # Exclude the current bar. Including it made the previous implementation
-    # mathematically incapable of detecting a close beyond its own high/low range.
     prior_range = df.iloc[-21:-1]
     high20 = float(prior_range["high"].max())
     low20 = float(prior_range["low"].min())
     side = sig.side
     mover = getattr(sig, "mover_bias", None)
-    if side == "long" and close > high20 + 0.10 * atr and mover != "gainer":
+    if side == "long" and close > high20 + EXTENSION_R * atr and mover != "gainer":
         return ["entry_location_conflict: long_is_extended_without_mover_confirmation"]
-    if side == "short" and close < low20 - 0.10 * atr and mover != "loser":
+    if side == "short" and close < low20 - EXTENSION_R * atr and mover != "loser":
         return ["entry_location_conflict: short_is_extended_without_mover_confirmation"]
     return []
 
