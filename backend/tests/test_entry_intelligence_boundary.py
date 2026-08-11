@@ -2,12 +2,12 @@ from datetime import UTC, datetime
 
 import pandas as pd
 
+from app.core.clock import MarketClock
 from app.core.domain import Regime, Signal, SignalAction, TradeRecord
+from app.config import RiskConfig
+from app.risk.manager import RiskManager
 from app.strategies.entry_intelligence import assess_entry_context
 from app.strategies.pipeline import SignalPipeline
-from app.risk.manager import RiskManager
-from app.config import RiskConfig, Settings
-from app.core.clock import MarketClock
 
 
 def _bars(close: float = 100.0, atr: float = 1.0) -> pd.DataFrame:
@@ -78,10 +78,10 @@ def test_signal_carries_context_evidence_fields():
     assert sig.news_sentiment == -0.4
 
 
-def test_risk_boundary_can_record_failed_thesis_without_fixed_timer(monkeypatch):
-    # This test validates the existing RiskManager contract remains usable with
-    # the runtime integrity wrapper installed by app.strategies.
-    risk = RiskManager(RiskConfig(), MarketClock(always_open=True))
+def test_risk_boundary_can_record_failed_thesis_without_fixed_timer():
+    # The runtime boundary is evidence-based; disable the legacy timer for this
+    # unit test so the assertion specifically exercises thesis continuity.
+    risk = RiskManager(RiskConfig(symbol_cooldown_minutes=0), MarketClock(always_open=True))
     now = datetime.now(UTC)
     trade = TradeRecord(
         symbol="TEST",
