@@ -1,4 +1,6 @@
 from __future__ import annotations
+from app.config import RiskConfig
+from app.config import Settings
 
 import asyncio
 import hashlib
@@ -117,7 +119,7 @@ async def test_3_requested_vs_actual_range_reporting(tmp_path, empty_cache):
     prov = BlockingProvider(should_fail=True)
     dm = DataManager(prov, tmp_path / "test_cache.db")
 
-    model = SignalModel(DATA_DIR / "models")
+    model = SignalModel(DATA_DIR / "models", risk_config=RiskConfig())
     params = BacktestParams(
         symbols=["SPY", "QQQ"],
         start=datetime(2026, 7, 6, 0, 0, tzinfo=UTC),
@@ -125,7 +127,7 @@ async def test_3_requested_vs_actual_range_reporting(tmp_path, empty_cache):
         cache_policy=CachePolicy.IMMUTABLE_CACHE_ONLY,
     )
     
-    result = await run_backtest(dm, model, params)
+    result = await run_backtest(dm, model, params, settings=Settings())
     
     assert result.requested_start == params.start
     assert result.requested_end == params.end
@@ -156,7 +158,7 @@ async def test_4_mixed_source_provenance_tracking(tmp_path, empty_cache):
     dm = DataManager(prov, tmp_path / "test_cache.db")
     dm.cache_policy = CachePolicy.DEFAULT
 
-    model = SignalModel(DATA_DIR / "models")
+    model = SignalModel(DATA_DIR / "models", risk_config=RiskConfig())
     params = BacktestParams(
         symbols=["SPY", "QQQ"],
         start=datetime(2026, 7, 6, 9, 30, tzinfo=UTC),
@@ -164,7 +166,7 @@ async def test_4_mixed_source_provenance_tracking(tmp_path, empty_cache):
         cache_policy=CachePolicy.DEFAULT,
     )
     
-    result = await run_backtest(dm, model, params)
+    result = await run_backtest(dm, model, params, settings=Settings())
     assert result.data_source_mode == "MIXED"
     assert result.provenance["SPY"]["source"] == "cache"
     assert result.provenance["QQQ"]["source"] == "network"
@@ -195,7 +197,7 @@ async def test_3b_partial_warmup_is_optional_cache_context(tmp_path):
         cache_policy=CachePolicy.IMMUTABLE_CACHE_ONLY,
     )
 
-    result = await run_backtest(dm, SignalModel(DATA_DIR / "models"), params)
+    result = await run_backtest(dm, SignalModel(DATA_DIR / "models", risk_config=RiskConfig()), params, settings=Settings())
 
     assert result.actual_data_start == warmup_times[0].to_pydatetime()
     assert result.actual_data_end <= params.end
@@ -234,7 +236,7 @@ async def test_3c_requested_range_is_explicitly_end_bounded(tmp_path):
         cache_policy=CachePolicy.IMMUTABLE_CACHE_ONLY,
     )
 
-    result = await run_backtest(dm, SignalModel(DATA_DIR / "models"), params)
+    result = await run_backtest(dm, SignalModel(DATA_DIR / "models", risk_config=RiskConfig()), params, settings=Settings())
 
     assert result.actual_data_end <= params.end
     assert result.actual_data_end != future_ts
@@ -259,7 +261,7 @@ async def test_5_dataset_immutability_assertion(tmp_path, empty_cache):
     prov = BlockingProvider(should_fail=True)
     dm = DataManager(prov, tmp_path / "test_cache.db")
 
-    model = SignalModel(DATA_DIR / "models")
+    model = SignalModel(DATA_DIR / "models", risk_config=RiskConfig())
     params = BacktestParams(
         symbols=["SPY"],
         start=datetime(2026, 7, 6, 9, 30, tzinfo=UTC),
@@ -283,7 +285,7 @@ async def test_5_dataset_immutability_assertion(tmp_path, empty_cache):
 
     try:
         with pytest.raises(ValueError) as excinfo:
-            await run_backtest(dm, model, params)
+            await run_backtest(dm, model, params, settings=Settings())
         assert "HISTORICAL_DATASET_MUTATED_DURING_RUN" in str(excinfo.value)
     finally:
         # Restore monkeypatch
@@ -347,7 +349,7 @@ async def test_7_july_6_10_oracle_regression():
         raise AssertionError(f"ORACLE DATASET IDENTITY MISMATCH: Expected {EXPECTED_DATASET_SHA256}, got {actual_dataset_sha}")
 
     # Check model SHA-256
-    model = SignalModel(DATA_DIR / "models")
+    model = SignalModel(DATA_DIR / "models", risk_config=RiskConfig())
     model.meta["trained_at"] = "2026-07-01T00:00:00+00:00"
     
     def get_file_sha256(path):
@@ -402,7 +404,7 @@ async def test_7_july_6_10_oracle_regression():
 
     # Run and assert counts
     dm = DataManager(BlockingProvider(should_fail=True), cache_path)
-    result = await run_backtest(dm, model, params)
+    result = await run_backtest(dm, model, params, settings=Settings())
     
     assert len(result.shadow_signals) == 262
     assert sum(1 for s in result.shadow_signals if s.get("rejection_stage") == "ml_gate") == 256
@@ -434,7 +436,7 @@ async def test_8_june_8_july_10_oracle_regression():
     if actual_dataset_sha != EXPECTED_DATASET_SHA256:
         raise AssertionError(f"ORACLE DATASET IDENTITY MISMATCH: Expected {EXPECTED_DATASET_SHA256}, got {actual_dataset_sha}")
 
-    model = SignalModel(DATA_DIR / "models")
+    model = SignalModel(DATA_DIR / "models", risk_config=RiskConfig())
     model.meta["trained_at"] = "2026-05-01T00:00:00+00:00"
     
     def get_file_sha256(path):
@@ -471,7 +473,7 @@ async def test_8_june_8_july_10_oracle_regression():
     )
 
     dm = DataManager(BlockingProvider(should_fail=True), cache_path)
-    result = await run_backtest(dm, model, params)
+    result = await run_backtest(dm, model, params, settings=Settings())
 
     assert len(result.shadow_signals) == 1299
     assert len(result.trades) == 13

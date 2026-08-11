@@ -1,5 +1,8 @@
 """Tests for issue 046 — specialist AUC side-specificity and log clarity."""
 from __future__ import annotations
+from app.config import RiskConfig
+from app.config import Settings
+
 import hashlib
 import pytest
 import joblib
@@ -63,7 +66,7 @@ def make_specialist_artifact_legacy(tmp_path: Path, symbol: str, auc: float) -> 
 def test_side_specific_auc_routing(tmp_path):
     """ENTER_LONG uses auc_long; ENTER_SHORT uses auc_short."""
     make_specialist_artifact(tmp_path, 'AAPL', auc_long=0.62, auc_short=0.42)
-    model = SignalModel(tmp_path)
+    model = SignalModel(tmp_path, risk_config=RiskConfig())
     spec = model._specialists.get('AAPL')
     assert spec is not None
     assert spec['auc_long'] == 0.62
@@ -73,7 +76,7 @@ def test_side_specific_auc_routing(tmp_path):
 def test_legacy_artifact_backfills_side_aucs(tmp_path):
     """Legacy artifacts with only `auc` get backfilled with auc_long and auc_short."""
     make_specialist_artifact_legacy(tmp_path, 'MU', auc=0.55)
-    model = SignalModel(tmp_path)
+    model = SignalModel(tmp_path, risk_config=RiskConfig())
     spec = model._specialists.get('MU')
     assert spec is not None
     assert 'auc_long' in spec
@@ -86,7 +89,7 @@ def test_validation_log_includes_side_label(tmp_path, capfd):
     """VALIDATION FAILED log includes (long) or (short) side label."""
     import logging
     make_specialist_artifact(tmp_path, 'NVDA', auc_long=0.40, auc_short=0.40)
-    model = SignalModel(tmp_path)
+    model = SignalModel(tmp_path, risk_config=RiskConfig())
 
     import numpy as np
     from app.ai.features import FEATURE_COLUMNS

@@ -1,3 +1,4 @@
+from app.config import Settings
 import pytest
 import pandas as pd
 from datetime import datetime
@@ -55,7 +56,7 @@ def dummy_features() -> pd.Series:
 def test_rsi2_base_fallback_veto_enforced_1130():
     """Test 1: RSI2 LONG at 11:30 ET with BASE_FALLBACK ML < 0.52 -> Strictly REJECTED by ml_gate."""
     mock_model = DummySignalModel(prob=0.38, model_source="BASE", specialist_status="NO_ARTIFACT")
-    pipeline = SignalPipeline(model=mock_model, ml_threshold=0.52)
+    pipeline = SignalPipeline(model=mock_model, ml_threshold=0.52, risk_config=RiskConfig(), settings=Settings())
     
     ts_et = datetime(2026, 7, 21, 11, 30, tzinfo=ET)
     df = make_dummy_df(ts_et)
@@ -88,7 +89,7 @@ def test_rsi2_base_fallback_veto_enforced_1130():
 def test_rsi2_real_model_not_bypassed_1130():
     """Test 2: RSI2 LONG at 11:30 ET with REAL_MODEL / Specialist ML < 0.52 -> REJECTED by ml_gate."""
     mock_model = DummySignalModel(prob=0.38, model_source="SPECIALIST", specialist_status="SPECIALIST_USED")
-    pipeline = SignalPipeline(model=mock_model, ml_threshold=0.52)
+    pipeline = SignalPipeline(model=mock_model, ml_threshold=0.52, risk_config=RiskConfig(), settings=Settings())
     
     ts_et = datetime(2026, 7, 21, 11, 30, tzinfo=ET)
     df = make_dummy_df(ts_et)
@@ -121,7 +122,7 @@ def test_rsi2_real_model_not_bypassed_1130():
 def test_momentum_base_fallback_not_bypassed_1130():
     """Test 3: Momentum LONG at 11:30 ET with BASE_FALLBACK ML < 0.52 -> REJECTED by ml_gate."""
     mock_model = DummySignalModel(prob=0.38, model_source="BASE", specialist_status="NO_ARTIFACT")
-    pipeline = SignalPipeline(model=mock_model, ml_threshold=0.52)
+    pipeline = SignalPipeline(model=mock_model, ml_threshold=0.52, risk_config=RiskConfig(), settings=Settings())
     
     ts_et = datetime(2026, 7, 21, 11, 30, tzinfo=ET)
     df = make_dummy_df(ts_et)
@@ -154,7 +155,7 @@ def test_momentum_base_fallback_not_bypassed_1130():
 def test_rsi2_base_fallback_veto_enforced_1330():
     """Test 4: RSI2 LONG at 13:30 ET with BASE_FALLBACK ML < 0.52 -> Strictly REJECTED by ml_gate."""
     mock_model = DummySignalModel(prob=0.38, model_source="BASE", specialist_status="NO_ARTIFACT")
-    pipeline = SignalPipeline(model=mock_model, ml_threshold=0.52)
+    pipeline = SignalPipeline(model=mock_model, ml_threshold=0.52, risk_config=RiskConfig(), settings=Settings())
     
     ts_et = datetime(2026, 7, 21, 13, 30, tzinfo=ET)
     df = make_dummy_df(ts_et)
@@ -187,7 +188,7 @@ def test_rsi2_base_fallback_veto_enforced_1330():
 def test_rsi2_base_fallback_outside_window_1430():
     """Test 5: RSI2 LONG at 14:30 ET with BASE_FALLBACK ML < 0.52 -> REJECTED by ml_gate outside 11:00-14:00 ET window."""
     mock_model = DummySignalModel(prob=0.38, model_source="BASE", specialist_status="NO_ARTIFACT")
-    pipeline = SignalPipeline(model=mock_model, ml_threshold=0.52)
+    pipeline = SignalPipeline(model=mock_model, ml_threshold=0.52, risk_config=RiskConfig(), settings=Settings())
     
     ts_et = datetime(2026, 7, 21, 14, 30, tzinfo=ET)
     df = make_dummy_df(ts_et)
@@ -220,7 +221,7 @@ def test_rsi2_base_fallback_outside_window_1430():
 def test_strict_ml_veto_across_times():
     """Verify ML gate vetoes weak signals strictly across all time horizons."""
     mock_model = DummySignalModel(prob=0.38, model_source="BASE", specialist_status="NO_ARTIFACT")
-    pipeline = SignalPipeline(model=mock_model, ml_threshold=0.52)
+    pipeline = SignalPipeline(model=mock_model, ml_threshold=0.52, risk_config=RiskConfig(), settings=Settings())
     feats = dummy_features()
     
     times = [

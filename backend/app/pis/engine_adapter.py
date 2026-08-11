@@ -65,6 +65,10 @@ class PISEngineAdapter:
         # Priority 10: Handle zero quantity or invalid position
         if position.qty == 0 or position.avg_entry_price <= 0:
             self.service.close_brain(symbol)
+            from app.db.database import Database
+            db = Database.active()
+            if db:
+                db.delete_pis_profit_memory(mode=self.mode, symbol=symbol)
             raise ValueError(f"Invalid position state for PIS evaluation: qty={position.qty}, avg_entry={position.avg_entry_price}")
 
         # Extract latest bar price attributes safely
@@ -185,8 +189,13 @@ class PISEngineAdapter:
         return order_req, decision
 
     def handle_position_closed(self, symbol: str) -> None:
-        """Handle position close event from engine."""
-        self.service.close_brain(symbol.upper())
+        """Handle position close event from engine and retire position-scoped PIS memory."""
+        symbol_key = symbol.upper()
+        self.service.close_brain(symbol_key)
+        from app.db.database import Database
+        db = Database.active()
+        if db:
+            db.delete_pis_profit_memory(mode=self.mode, symbol=symbol_key)
 
     def get_telemetry(self) -> Dict[str, Any]:
         """Get service telemetry."""

@@ -216,7 +216,7 @@ async def test_reconciliation_failure_blocks_entries_but_allows_exits(tmp_path, 
 
     async def fake_pis_evaluate(*args, **kwargs):
         from types import SimpleNamespace
-        return SimpleNamespace(symbol="AAPL", qty=10, reason="take_profit_hit"), None
+        return SimpleNamespace(symbol="AAPL", qty=10, reason="take_profit_hit", order_type="market"), None
 
     engine.pis_adapter.evaluate_position_exit = fake_pis_evaluate
 

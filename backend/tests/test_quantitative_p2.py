@@ -8,6 +8,8 @@ Run with:
 """
 
 from __future__ import annotations
+from app.config import RiskConfig
+from app.config import Settings
 
 from datetime import UTC, datetime, timedelta
 
@@ -219,7 +221,7 @@ class TestRegimeAdaptiveModels:
     def test_train_adaptive_with_regime_key(self, tmp_path):
         from app.ai.model import SignalModel
         from app.indicators.ta import enrich
-        model = SignalModel(tmp_path / "models")
+        model = SignalModel(tmp_path / "models", risk_config=RiskConfig())
         df = enrich(_make_multi_day_df(3))
         frames = {"SYM": df}
         result = model.train_adaptive(frames, horizon_bars=5, threshold_pct=0.05,
@@ -231,7 +233,7 @@ class TestRegimeAdaptiveModels:
     def test_train_adaptive_global_slot_when_no_regime_key(self, tmp_path):
         from app.ai.model import SignalModel
         from app.indicators.ta import enrich
-        model = SignalModel(tmp_path / "models")
+        model = SignalModel(tmp_path / "models", risk_config=RiskConfig())
         df = enrich(_make_multi_day_df(3))
         frames = {"SYM": df}
         result = model.train_adaptive(frames, horizon_bars=5, threshold_pct=0.05,
@@ -244,7 +246,7 @@ class TestRegimeAdaptiveModels:
         """Regime-specific models should not overwrite the global adaptive slot."""
         from app.ai.model import SignalModel
         from app.indicators.ta import enrich
-        model = SignalModel(tmp_path / "models")
+        model = SignalModel(tmp_path / "models", risk_config=RiskConfig())
         df = enrich(_make_multi_day_df(3))
         frames = {"SYM": df}
         model.train_adaptive(frames, save_to_disk=False, regime_key="range")
@@ -262,7 +264,7 @@ class TestPipelinePhase2:
         from app.strategies.pipeline import SignalPipeline
         model = MagicMock()
         model.score_action.return_value = 0.72
-        return SignalPipeline(model, ml_threshold=0.55)
+        return SignalPipeline(model, ml_threshold=0.55, risk_config=RiskConfig(), settings=Settings())
 
     def test_untrained_meta_does_not_block(self, tmp_path):
         from app.core.domain import Regime, Signal, SignalAction
@@ -362,7 +364,7 @@ class TestSpecialistFallback:
         models_dir = tmp_path / "models"
         spec_dir = models_dir / "specialists"
         spec_dir.mkdir(parents=True)
-        model = SignalModel(models_dir)
+        model = SignalModel(models_dir, risk_config=RiskConfig())
 
         # 2. Mock base model p_up and p_down to return fixed values
         monkeypatch.setattr(model, "p_up", lambda feats, regime_key=None: 0.65)
@@ -531,7 +533,7 @@ def test_proportional_target_scaling():
     mock_model.score_action_detailed.return_value = score_action_res
     mock_model.score_action.return_value = 0.60
 
-    pipeline = SignalPipeline(mock_model, ml_threshold=0.55)
+    pipeline = SignalPipeline(mock_model, ml_threshold=0.55, risk_config=RiskConfig(), settings=Settings())
     # Patch get_settings to return our mock settings
     import app.strategies.pipeline
     orig_get_settings = app.strategies.pipeline.get_settings
@@ -593,7 +595,7 @@ def test_vwap_semantic_target_preserved_when_stop_floor_applied():
     mock_model.score_action_detailed.return_value = score_action_res
     mock_model.score_action.return_value = 0.60
 
-    pipeline = SignalPipeline(mock_model, ml_threshold=0.55)
+    pipeline = SignalPipeline(mock_model, ml_threshold=0.55, risk_config=RiskConfig(), settings=Settings())
     # Patch get_settings to return our mock settings
     import app.strategies.pipeline
     orig_get_settings = app.strategies.pipeline.get_settings

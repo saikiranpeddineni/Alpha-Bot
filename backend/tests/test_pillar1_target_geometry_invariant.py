@@ -1,3 +1,5 @@
+from app.config import RiskConfig
+from app.config import Settings
 import pytest
 import pandas as pd
 import numpy as np
@@ -45,7 +47,7 @@ def sample_features(dummy_df):
 def pipeline(monkeypatch):
     settings = get_settings()
     risk_cfg = settings.risk_config()
-    model = SignalModel(models_dir=MODELS_DIR)
+    model = SignalModel(models_dir=MODELS_DIR, risk_config=RiskConfig())
     p = SignalPipeline(model=model, risk_config=risk_cfg, settings=settings)
     p.ml_threshold = 0.0
     from app.ai.prediction import MetaPrediction

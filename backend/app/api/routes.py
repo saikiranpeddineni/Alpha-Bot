@@ -232,6 +232,7 @@ class ManualOrderBody(BaseModel):
     qty: float = Field(gt=0, le=100_000)
     order_type: OrderType = OrderType.MARKET
     limit_price: float | None = Field(default=None, gt=0)
+    stop_loss: float | None = Field(default=None, gt=0)
 
 
 @router.post("/orders")
@@ -245,6 +246,7 @@ async def submit_order(body: ManualOrderBody, request: Request) -> dict:
         qty=body.qty,
         order_type=body.order_type,
         limit_price=body.limit_price,
+        stop_loss=body.stop_loss,
         strategy="manual",
         reason="manual order",
     )

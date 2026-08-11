@@ -22,6 +22,9 @@ Acceptance criteria covered (from issue #91):
 """
 
 from __future__ import annotations
+from app.config import RiskConfig
+from app.config import Settings
+
 
 import asyncio
 import math
@@ -259,7 +262,7 @@ def _make_scanner_all_down(err):
         history=_history,
         provider=SimpleNamespace(supports_asset_discovery=False),
     )
-    scanner = MarketScanner(dm, [])
+    scanner = MarketScanner(dm, [], risk_config=RiskConfig())
     return scanner
 
 
@@ -347,7 +350,7 @@ def _make_scanner_with_state(forced_state: MarketRiskState) -> MarketScanner:
         history=_history,
         provider=SimpleNamespace(supports_asset_discovery=False),
     )
-    scanner = MarketScanner(dm, [])
+    scanner = MarketScanner(dm, [], risk_config=RiskConfig())
 
     async def _fake_assess(as_of=None):
         return forced_state, 0.85, [f"{forced_state.value}_reason"]
@@ -420,7 +423,7 @@ async def test_046_regression_panic_atr_returns_panic():
         history=_history,
         provider=SimpleNamespace(supports_asset_discovery=False),
     )
-    scanner = MarketScanner(dm, [])
+    scanner = MarketScanner(dm, [], risk_config=RiskConfig())
     result = await scanner.check_spy_volatility()
     assert result is SpyVolatilityState.PANIC
 
@@ -437,7 +440,7 @@ async def test_046_regression_normal_atr_returns_safe():
         history=_history,
         provider=SimpleNamespace(supports_asset_discovery=False),
     )
-    scanner = MarketScanner(dm, [])
+    scanner = MarketScanner(dm, [], risk_config=RiskConfig())
     result = await scanner.check_spy_volatility()
     assert result is SpyVolatilityState.SAFE
 
@@ -543,7 +546,7 @@ async def test_isolated_breadth_stress_keeps_dynamic_pipeline_alive():
         history=_history,
         provider=SimpleNamespace(supports_asset_discovery=False),
     )
-    scanner = MarketScanner(dm, [])
+    scanner = MarketScanner(dm, [], risk_config=RiskConfig())
     state, conf, reasons = await scanner._assess_market_risk()
     assert state is MarketRiskState.CAUTION
 

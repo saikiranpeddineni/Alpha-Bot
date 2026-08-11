@@ -67,7 +67,7 @@ class ReplayBroker(Broker):
         side=OrderSide.SELL if pos.qty>0 else OrderSide.BUY
         close_qty = min(abs(pos.qty), qty) if qty is not None and qty > 0 else abs(pos.qty)
         return await self.submit(OrderRequest(symbol=symbol.upper(),qty=close_qty,side=side,order_type=OrderType.MARKET,
-                                              client_order_id=self._id(f"close_{symbol.upper()}"),strategy=pos.strategy,reason=reason))
+                                              client_order_id=self._id(f"close_{symbol.upper()}"),strategy=pos.strategy,reason=reason,role="exit"))
     async def flatten_all(self, reason: str="flatten") -> list[Order]:
         out=[]
         for symbol in sorted(list(self._positions)):

@@ -108,6 +108,10 @@ class AlpacaBroker(legacy.AlpacaBroker):
         return order
 
     async def submit(self, req: OrderRequest) -> Order:
+        # P0-4: Strict Broker API Level Stop-Loss Gate
+        if req.role == "entry" and req.stop_loss is None:
+            raise RuntimeError(f"CRITICAL: Refusing to submit entry order for {req.symbol} without an explicit stop-loss. This violates immutable risk geometry invariants.")
+            
         from alpaca.trading.enums import OrderClass, OrderSide as ASide, TimeInForce
         from alpaca.trading.requests import (
             LimitOrderRequest,
@@ -270,7 +274,7 @@ class AlpacaBroker(legacy.AlpacaBroker):
         """Replace one live bracket/OCO exit leg and verify broker truth.
 
         Alpaca documents that a successful PATCH does not prove the replacement
-        won the race with an execution.  Therefore the returned replacement ID is
+        won the race with an execution. Therefore the returned replacement ID is
         re-fetched and its requested price is verified before callers may treat
         the new protection as authoritative.
         """
@@ -318,6 +322,60 @@ class AlpacaBroker(legacy.AlpacaBroker):
         except Exception as exc:  # noqa: BLE001
             applog.warning("broker.alpaca", f"replace {order_id} failed: {exc}")
             return None
+
+    async def update_protection(self, symbol: str, stop_loss: float, side: OrderSide, qty: float) -> Order | None:
+        """Make a PIS protection decision effective at the broker.
+
+        Existing bracket/OTO stop legs are replaced in place so the broker keeps
+        the native exit relationship. If no live stop exists, create exactly one
+        standalone STOP order. Ambiguous replacement results are not followed by
+        a blind duplicate order.
+        """
+        symbol = symbol.upper()
+        stop_loss = normalize_stock_price(stop_loss)
+        qty = normalized_qty(qty, allow_fractional=False)
+        protective_side = OrderSide.SELL if side == OrderSide.BUY else OrderSide.BUY
+
+        try:
+            open_orders = await self.open_orders()
+        except BrokerTimeoutError:
+            applog.error("broker.alpaca", f"PIS protection lookup timed out for {symbol}; leaving existing protection untouched")
+            return None
+        except Exception as exc:
+            applog.error("broker.alpaca", f"PIS protection lookup failed for {symbol}: {exc}")
+            return None
+
+        stop_candidates = [
+            order for order in open_orders
+            if order.symbol.upper() == symbol
+            and order.order_type in (OrderType.STOP, OrderType.STOP_LIMIT)
+            and order.side == protective_side
+            and order.status in (OrderStatus.SUBMITTED, OrderStatus.PARTIALLY_FILLED)
+        ]
+
+        # Prefer a child protection leg belonging to the entry bracket/OTO.
+        stop_candidates.sort(key=lambda order: (0 if order.parent_id else 1, order.submitted_at or 0), reverse=False)
+
+        if stop_candidates:
+            existing = stop_candidates[0]
+            if existing.stop_price is not None and abs(float(existing.stop_price) - stop_loss) <= 0.005:
+                return existing
+            replacement = await self.replace_exit_leg(existing.id, stop_price=stop_loss)
+            if replacement is not None:
+                replacement.stop_loss = stop_loss
+            return replacement
+
+        request = OrderRequest(
+            symbol=symbol,
+            side=protective_side,
+            qty=qty,
+            order_type=OrderType.STOP,
+            stop_price=stop_loss,
+            strategy="emergency_protection",
+            reason="PIS broker protection",
+            role="exit",
+        )
+        return await self.submit(request)
 
     async def cancel_all(self) -> None:
         """Request cancellation and verify no open orders remain."""
