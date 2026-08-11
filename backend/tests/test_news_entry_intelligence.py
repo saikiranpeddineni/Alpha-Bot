@@ -76,6 +76,20 @@ def test_news_analyzer_prefers_consensus_direction_and_freshness():
     assert context.confidence >= 0.5
 
 
+def test_contradictory_headlines_do_not_create_false_high_confidence():
+    analyzer = NewsSentimentAnalyzer()
+    now = datetime.now(UTC)
+    context = analyzer.build_context(
+        [
+            {"headline": "Company beats estimates and raises guidance", "created_at": (now - timedelta(minutes=2)).isoformat()},
+            {"headline": "Company misses estimates and cuts guidance", "created_at": (now - timedelta(minutes=3)).isoformat()},
+        ],
+        now=now,
+    )
+    assert abs(context.sentiment) < 0.10
+    assert context.confidence < 0.5
+
+
 def test_undated_news_is_context_only_not_fresh():
     analyzer = NewsSentimentAnalyzer()
     now = datetime.now(UTC)
