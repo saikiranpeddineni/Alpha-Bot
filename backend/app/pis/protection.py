@@ -90,6 +90,33 @@ class AdaptiveProtectionPlanner:
             # Below activation threshold: cleanly maintain initial stop loss or previous floor
             # Preserves initial risk geometry and prevents sub-noise shakeouts
             candidate_floor = previous_floor if previous_floor is not None else initial_stop
+            
+            # Intermediate Deterioration Protection
+            # If a trade establishes early profitability but structurally deteriorates
+            # before reaching formal runner activation (1.50R), protect accumulated value dynamically.
+            intermediate_peak_threshold = getattr(self.config, "intermediate_protection_min_r", 0.20)
+            
+            if peak_r >= intermediate_peak_threshold:
+                # Assess structural/health deterioration
+                r_giveback = peak_r - obs.r_multiple
+                is_deteriorating = False
+                intermediate_locked_r = -1.0 # fallback
+                
+                # Severe deterioration: Lock breakeven (+0.05R for slippage/fees)
+                if health.overall < 0.40 or r_giveback >= 0.70:
+                    intermediate_locked_r = 0.05
+                    is_deteriorating = True
+                # Moderate deterioration: Halve the risk (move stop to -0.5R)
+                elif health.overall < 0.55 or r_giveback >= 0.40:
+                    intermediate_locked_r = -0.50
+                    is_deteriorating = True
+                    
+                if is_deteriorating:
+                    intermediate_floor = entry + (side * intermediate_locked_r * risk)
+                    if side > 0:
+                        candidate_floor = max(candidate_floor, intermediate_floor)
+                    else:
+                        candidate_floor = min(candidate_floor, intermediate_floor)
         else:
             # 2. Dynamic giveback calculation based on peak R and predicted capacity
             if peak_r >= self.config.runner_qualification_r or proximity >= 0.75:
