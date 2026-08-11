@@ -31,11 +31,7 @@ def _normalized_short_term_move(df: pd.DataFrame) -> float | None:
 
 
 def _reversal_confirmed(sig: Signal, df: pd.DataFrame) -> bool:
-    """Return True when a counter-trend signal has actual structure confirmation.
-
-    This intentionally avoids a blanket trend-direction veto. A reversal is allowed
-    when price has broken recent structure and short-term slope confirms the new side.
-    """
+    """Return True when a counter-trend signal has actual structure confirmation."""
     if len(df) < 8 or "atr14" not in df.columns or "close" not in df.columns:
         return False
     atr = float(df["atr14"].iloc[-1])
@@ -68,9 +64,6 @@ def _directional_contradictions(sig: Signal, df: pd.DataFrame) -> list[str]:
     if "ema9" in df.columns and "ema20" in df.columns:
         ema9 = float(df["ema9"].iloc[-1])
         ema20 = float(df["ema20"].iloc[-1])
-        # EMA disagreement alone is not enough. Treat it as a true contradiction
-        # only when the short-term slope also confirms that direction and the
-        # signal is not a confirmed structural reversal.
         reversal = _reversal_confirmed(sig, df)
         slope_conflict = False
         slope_r = _normalized_short_term_move(df)
@@ -82,30 +75,34 @@ def _directional_contradictions(sig: Signal, df: pd.DataFrame) -> list[str]:
             reasons.append("trend_context_conflict: confirmed_short_term_trend_opposes_short")
 
     # News is independent evidence, but the market's reaction is the final sanity
-    # check. A headline that is nominally bearish should not veto a long thesis when
-    # price is already absorbing it with a confirmed positive reaction, and vice versa.
+    # check. A headline that is nominally adverse should not veto a thesis when price
+    # is already absorbing it with a confirmed reaction.
     if sig.news_context_available and sig.news_catalyst:
         age = sig.news_age_seconds
         fresh = age is not None and age <= 1800
         material = sig.news_catalyst in {"financing", "regulatory", "earnings"}
         if fresh and material and sig.news_confidence >= 0.55:
             reaction = _normalized_short_term_move(df)
-            adverse = side == "long" and sig.news_direction == "bearish" or side == "short" and sig.news_direction == "bullish"
+            adverse = (
+                side == "long" and sig.news_direction == "bearish"
+            ) or (
+                side == "short" and sig.news_direction == "bullish"
+            )
             if adverse:
-                absorbed = reaction is not None and ((side == "long" and reaction >= 0.10) or (side == "short" and reaction <= -0.10))
+                absorbed = reaction is not None and (
+                    (side == "long" and reaction >= 0.10)
+                    or (side == "short" and reaction <= -0.10)
+                )
                 if not absorbed:
-                    reasons.append(f"news_context_conflict: fresh_material_{sig.news_direction}_{sig.news_catalyst}_catalyst")
+                    reasons.append(
+                        f"news_context_conflict: fresh_material_{sig.news_direction}_{sig.news_catalyst}_catalyst"
+                    )
 
     return reasons
 
 
 def _macro_context_conflicts(sig: Signal, df: pd.DataFrame, regime: Regime | str | None) -> list[str]:
-    """Add one soft macro/chop contradiction only when the setup is already weak.
-
-    This is intentionally conservative: a RANGE/VOLATILE regime never blocks
-    momentum by itself. It only becomes a conflict when the symbol also lacks
-    directional confirmation.
-    """
+    """Add one soft macro/chop contradiction only when the setup is already weak."""
     regime_name = getattr(regime, "value", str(regime) if regime is not None else "")
     if sig.strategy not in {"momentum", "gap_and_go", "trend_pullback"}:
         return []
@@ -164,7 +161,7 @@ def assess_entry_context(sig: Signal, df: pd.DataFrame, regime: Regime | str | N
 
 
 def assess_thesis_continuity(db, sig: Signal, now) -> EntryContextAssessment:
-    """Block repeated same-session negative theses, not trades by elapsed time."""
+    """Block repeated same-session negative theses unless materially new evidence exists."""
     if db is None or sig.action not in (SignalAction.ENTER_LONG, SignalAction.ENTER_SHORT):
         return EntryContextAssessment(True)
 
@@ -219,6 +216,33 @@ def assess_thesis_continuity(db, sig: Signal, now) -> EntryContextAssessment:
     previous_mover = latest.get("mover_bias")
     if previous_mover and sig.mover_bias and previous_mover != sig.mover_bias:
         return EntryContextAssessment(True)
+
+    # A genuinely new, fresh material catalyst can invalidate the old thesis.
+    # Do not suppress the opportunity merely because the same symbol/direction lost
+    # earlier. This is intentionally evidence-based rather than timer-based.
+    fresh_news = (
+        sig.news_context_available
+        and sig.news_age_seconds is not None
+        and sig.news_age_seconds <= 1800
+        and sig.news_confidence >= 0.70
+        and sig.news_catalyst in {"financing", "regulatory", "earnings", "corporate"}
+    )
+    news_supports_side = (
+        (sig.side == "long" and sig.news_direction == "bullish")
+        or (sig.side == "short" and sig.news_direction == "bearish")
+    )
+    if fresh_news and news_supports_side:
+        return EntryContextAssessment(
+            True,
+            ("thesis_continuity_overridden: fresh_material_catalyst_supports_new_thesis",),
+            {
+                "previous_realized_r": realized,
+                "previous_regime": previous_regime,
+                "current_regime": current_regime,
+                "news_catalyst": sig.news_catalyst,
+                "news_confidence": sig.news_confidence,
+            },
+        )
 
     return EntryContextAssessment(
         False,
