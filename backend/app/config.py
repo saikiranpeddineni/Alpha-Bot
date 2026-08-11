@@ -9,65 +9,63 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
+import contextvars
 
 from pydantic import AliasChoices, BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from typing import Any
-
-import contextvars
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = REPO_ROOT / "data"
-MODELS_DIR = DATA_DIR / "models"  # Kept for simple script access
+MODELS_DIR = DATA_DIR / "models"
 
 _replay_models_dir: contextvars.ContextVar[Path | None] = contextvars.ContextVar("replay_models_dir", default=None)
+
 
 def get_models_dir() -> Path:
     mock = _replay_models_dir.get()
     return mock if mock is not None else MODELS_DIR
 
-FRONTEND_DIST = REPO_ROOT / "frontend" / "dist"
 
+FRONTEND_DIST = REPO_ROOT / "frontend" / "dist"
 VALID_MODES = ("demo", "paper", "live")
 VALID_PROVIDERS = ("auto", "synthetic", "yahoo", "alpaca")
 VALID_BROKERS = ("paper_sim", "alpaca")
 
 
 class RiskConfig(BaseModel):
-    """Runtime-tunable risk parameters. Tuned for active capital utilization (4% daily target)."""
+    """Canonical runtime risk and decision parameters."""
     entry_order_type: str = Field("market", pattern="^(market|limit)$")
-    risk_per_trade_pct: float = Field(0.5, ge=0.01, le=5.0)        # was 0.5 — 2× capital per trade
+    risk_per_trade_pct: float = Field(0.5, ge=0.01, le=5.0)
     max_position_pct: float = Field(20.0, ge=1.0, le=100.0)
-    max_open_positions: int = Field(4, ge=1, le=50)                  # was 4 — 2× concurrent exposure
-    max_daily_loss_pct: float = Field(2.0, ge=0.1, le=25.0)         # was 2.0 — room for higher position count
+    max_open_positions: int = Field(4, ge=1, le=50)
+    max_daily_loss_pct: float = Field(2.0, ge=0.1, le=25.0)
     max_drawdown_pct: float = Field(10.0, ge=1.0, le=50.0)
-    symbol_cooldown_minutes: int = Field(30, ge=0, le=390)                  # was 30
-    strategy_consecutive_loss_limit: int = Field(3, ge=1, le=20)            # was 3
-    strategy_cooldown_minutes: int = Field(30, ge=0, le=390)                # was 30
-    no_entry_minutes_before_close: int = Field(30, ge=0, le=180)     # was 30 — more trading time
+    symbol_cooldown_minutes: int = Field(30, ge=0, le=390)
+    strategy_consecutive_loss_limit: int = Field(3, ge=1, le=20)
+    strategy_cooldown_minutes: int = Field(30, ge=0, le=390)
+    no_entry_minutes_before_close: int = Field(30, ge=0, le=180)
     flatten_minutes_before_close: int = Field(5, ge=0, le=60)
     min_price: float = Field(5.0, ge=0.0)
     min_avg_dollar_volume: float = Field(100_000.0, ge=0.0)
     ml_confidence_threshold: float = Field(0.52, ge=0.0, le=1.0)
-    regime_ml_thresholds: dict[str, float] = Field(
-        default={
-            "NORMAL": 0.50,
-            "CAUTION": 0.52,
-            "STRESS": 0.55,
-            "PANIC": 0.62,
-        }
-    )
+    regime_ml_thresholds: dict[str, float] = Field(default_factory=lambda: {
+        "NORMAL": 0.50,
+        "CAUTION": 0.52,
+        "STRESS": 0.55,
+        "PANIC": 0.62,
+    })
     min_specialist_auc: float = Field(0.53, ge=0.50, le=1.0)
     min_stop_pct: float = Field(0.5, ge=0.0, le=5.0)
-    score_threshold_trend: float = Field(55.0, ge=0.0, le=100.0)    # was 55.0
-    score_threshold_range: float = Field(70.0, ge=0.0, le=100.0)    # was 70.0
-    score_threshold_volatile: float = Field(65.0, ge=0.0, le=100.0) # was 65.0
-    score_threshold_event: float = Field(75.0, ge=0.0, le=100.0)    # was 75.0
-    kelly_fraction_cap: float = Field(0.20, ge=0.01, le=0.50)       # was 0.15
-    max_positions_per_sector: int = Field(3, ge=1, le=10)           # was 2
+    score_threshold_trend: float = Field(55.0, ge=0.0, le=100.0)
+    score_threshold_range: float = Field(70.0, ge=0.0, le=100.0)
+    score_threshold_volatile: float = Field(65.0, ge=0.0, le=100.0)
+    score_threshold_event: float = Field(75.0, ge=0.0, le=100.0)
+    kelly_fraction_cap: float = Field(0.20, ge=0.01, le=0.50)
+    max_positions_per_sector: int = Field(3, ge=1, le=10)
     max_correlation_penalty: float = Field(0.5, ge=0.0, le=1.0)
-    harvest_risk_multiplier: float = Field(3.0, ge=1.0, le=5.0)     # was 2.5 — bigger A+ sizing
-    midday_score_boost: float = Field(10.0, ge=0.0, le=50.0)        # was 15.0 — lighter midday throttle
+    harvest_risk_multiplier: float = Field(3.0, ge=1.0, le=5.0)
+    midday_score_boost: float = Field(10.0, ge=0.0, le=50.0)
     midday_start_et: int = Field(690, ge=570, le=960)
     midday_end_et: int = Field(795, ge=570, le=960)
     rsi2_base_fallback_bypass_enabled: bool = Field(True)
@@ -76,19 +74,19 @@ class RiskConfig(BaseModel):
     bb_squeeze_base_fallback_bypass_enabled: bool = Field(True)
     bb_squeeze_base_fallback_bypass_start_et: int = Field(840, ge=570, le=960)
     bb_squeeze_base_fallback_bypass_end_et: int = Field(930, ge=570, le=960)
-    scanner_watchlist_ttl: int = Field(15, ge=1, le=30)             # was 3 — hold scanner symbols longer
+    scanner_watchlist_ttl: int = Field(15, ge=1, le=30)
     promotion_min_valid_observations: int = Field(30, ge=1, le=1000)
     promotion_min_win_rate_pct: float = Field(50.0, ge=0.0, le=100.0)
     promotion_min_expectancy_r: float = Field(0.1, ge=-1.0, le=10.0)
-    alternative_exits: list[dict] = Field(
-        default=[
-            {"policy_id": "exit_bracket_tight", "take_profit_pct": 1.0, "stop_loss_pct": 0.5},
-            {"policy_id": "exit_bracket_wide", "take_profit_pct": 3.0, "stop_loss_pct": 1.5},
-            {"policy_id": "exit_atr_trailing", "trailing_stop_atr_mult": 2.0},
-            {"policy_id": "exit_hybrid_breakeven_atr", "breakeven_r_trigger": 0.30, "trail_r_trigger": 0.75, "tight_trail_r_trigger": 1.50},
-        ]
-    )
+    alternative_exits: list[dict] = Field(default_factory=lambda: [
+        {"policy_id": "exit_bracket_tight", "take_profit_pct": 1.0, "stop_loss_pct": 0.5},
+        {"policy_id": "exit_bracket_wide", "take_profit_pct": 3.0, "stop_loss_pct": 1.5},
+        {"policy_id": "exit_atr_trailing", "trailing_stop_atr_mult": 2.0},
+        {"policy_id": "exit_hybrid_breakeven_atr", "breakeven_r_trigger": 0.30, "trail_r_trigger": 0.75, "tight_trail_r_trigger": 1.50},
+    ])
     adaptive_model_weight: float = Field(0.30, ge=0.0, le=1.0)
+    ml_hard_reject_threshold: float = Field(0.48, ge=0.0, le=1.0)
+    ml_gray_zone_margin: float = Field(0.04, ge=0.0, le=0.25)
 
 
 class Settings(BaseSettings):
@@ -97,20 +95,18 @@ class Settings(BaseSettings):
         extra="ignore", case_sensitive=False,
     )
 
-    strategy_config: dict[str, dict[str, Any]] = Field(
-        default={
-            "momentum": {"enabled": True, "params": {}},
-            "mean_reversion": {"enabled": True, "params": {}},
-            "breakout": {"enabled": True, "params": {}},
-            "vwap_cross": {"enabled": True, "params": {}},
-            "orb": {"enabled": True, "params": {}},
-            "bb_squeeze": {"enabled": True, "params": {}},
-            "gap_and_go": {"enabled": True, "params": {}},
-            "trend_pullback": {"enabled": True, "params": {}},
-            "liquidity_sweep": {"enabled": True, "params": {}},
-            "relative_strength": {"enabled": True, "params": {}},
-        }
-    )
+    strategy_config: dict[str, dict[str, Any]] = Field(default_factory=lambda: {
+        "momentum": {"enabled": True, "params": {}},
+        "mean_reversion": {"enabled": True, "params": {}},
+        "breakout": {"enabled": True, "params": {}},
+        "vwap_cross": {"enabled": True, "params": {}},
+        "orb": {"enabled": True, "params": {}},
+        "bb_squeeze": {"enabled": True, "params": {}},
+        "gap_and_go": {"enabled": True, "params": {}},
+        "trend_pullback": {"enabled": True, "params": {}},
+        "liquidity_sweep": {"enabled": True, "params": {}},
+        "relative_strength": {"enabled": True, "params": {}},
+    })
 
     host: str = Field("0.0.0.0", validation_alias=AliasChoices("ALPHADESK_HOST", "HOST"))
     port: int = Field(8742, validation_alias=AliasChoices("ALPHADESK_PORT", "PORT"))
@@ -124,15 +120,15 @@ class Settings(BaseSettings):
     slack_webhook_url: str = Field("", validation_alias="SLACK_WEBHOOK_URL")
 
     entry_order_type: str = Field("market", validation_alias="ENTRY_ORDER_TYPE")
-    risk_per_trade_pct: float = Field(1.0, validation_alias="RISK_PER_TRADE_PCT")           # was 0.5
+    risk_per_trade_pct: float = Field(1.0, validation_alias="RISK_PER_TRADE_PCT")
     max_position_pct: float = Field(20.0, validation_alias="MAX_POSITION_PCT")
-    max_open_positions: int = Field(8, validation_alias="MAX_OPEN_POSITIONS")                # was 4
-    max_daily_loss_pct: float = Field(3.0, validation_alias="MAX_DAILY_LOSS_PCT")            # was 2.0
+    max_open_positions: int = Field(8, validation_alias="MAX_OPEN_POSITIONS")
+    max_daily_loss_pct: float = Field(3.0, validation_alias="MAX_DAILY_LOSS_PCT")
     max_drawdown_pct: float = Field(10.0, validation_alias="MAX_DRAWDOWN_PCT")
-    symbol_cooldown_minutes: int = Field(10, validation_alias="COOLDOWN_MINUTES")                   # was 30
-    strategy_consecutive_loss_limit: int = Field(4, validation_alias="CONSECUTIVE_LOSS_LIMIT")        # was 3
+    symbol_cooldown_minutes: int = Field(10, validation_alias="COOLDOWN_MINUTES")
+    strategy_consecutive_loss_limit: int = Field(4, validation_alias="CONSECUTIVE_LOSS_LIMIT")
     strategy_cooldown_minutes: int = Field(10, validation_alias="STRATEGY_COOLDOWN_MINUTES")
-    no_entry_minutes_before_close: int = Field(15, validation_alias="NO_ENTRY_MINUTES_BEFORE_CLOSE")  # was 30
+    no_entry_minutes_before_close: int = Field(15, validation_alias="NO_ENTRY_MINUTES_BEFORE_CLOSE")
     flatten_minutes_before_close: int = Field(5, validation_alias="FLATTEN_MINUTES_BEFORE_CLOSE")
     min_price: float = Field(5.0, validation_alias="MIN_PRICE")
     min_avg_dollar_volume: float = Field(100_000.0, validation_alias="MIN_AVG_DOLLAR_VOLUME")
@@ -146,14 +142,18 @@ class Settings(BaseSettings):
     score_threshold_range: float = Field(70.0, validation_alias="SCORE_THRESHOLD_RANGE")
     score_threshold_volatile: float = Field(65.0, validation_alias="SCORE_THRESHOLD_VOLATILE")
     score_threshold_event: float = Field(75.0, validation_alias="SCORE_THRESHOLD_EVENT")
-
-    paper_starting_cash: float = Field(100_000.0, validation_alias="PAPER_STARTING_CASH")
-    paper_slippage_bps: float = Field(2.0, validation_alias="PAPER_SLIPPAGE_BPS")
-    paper_commission_per_share: float = Field(0.0, validation_alias="PAPER_COMMISSION_PER_SHARE")
-    poll_interval_sec: float = Field(5.0, validation_alias="POLL_INTERVAL_SEC")
-    demo_bar_seconds: float = Field(5.0, validation_alias="DEMO_BAR_SECONDS")
-    default_watchlist: str = Field("SPY,QQQ,AAPL,NVDA,TSLA,MSFT,AMD,META", validation_alias="DEFAULT_WATCHLIST")
-
+    midday_score_boost: float = Field(15.0, validation_alias="MIDDAY_SCORE_BOOST")
+    midday_start_et: int = Field(690, validation_alias="MIDDAY_START_ET")
+    midday_end_et: int = Field(795, validation_alias="MIDDAY_END_ET")
+    rsi2_base_fallback_bypass_enabled: bool = Field(True, validation_alias="RSI2_BASE_FALLBACK_BYPASS_ENABLED")
+    rsi2_base_fallback_bypass_start_et: int = Field(660, validation_alias="RSI2_BASE_FALLBACK_BYPASS_START_ET")
+    rsi2_base_fallback_bypass_end_et: int = Field(840, validation_alias="RSI2_BASE_FALLBACK_BYPASS_END_ET")
+    bb_squeeze_base_fallback_bypass_enabled: bool = Field(True, validation_alias="BB_SQUEEZE_BASE_FALLBACK_BYPASS_ENABLED")
+    bb_squeeze_base_fallback_bypass_start_et: int = Field(840, validation_alias="BB_SQUEEZE_BASE_FALLBACK_BYPASS_START_ET")
+    bb_squeeze_base_fallback_bypass_end_et: int = Field(930, validation_alias="BB_SQUEEZE_BASE_FALLBACK_BYPASS_END_ET")
+    dq_min_bars_warmup: int = Field(50, validation_alias="DQ_MIN_BARS_WARMUP")
+    db_path: str = Field("", validation_alias="ALPHADESK_DB_PATH")
+    admin_token: str = Field("", validation_alias="ALPHADESK_ADMIN_TOKEN")
     ml_confidence_threshold: float = Field(0.55, validation_alias="ML_CONFIDENCE_THRESHOLD")
     ml_horizon_bars: int = Field(15, validation_alias="ML_HORIZON_BARS")
     gemini_api_key: str = Field("", validation_alias=AliasChoices("GEMINI_API_KEY", "GOOGLE_API_KEY"))
@@ -169,18 +169,12 @@ class Settings(BaseSettings):
     trade_score_w6: float = Field(0.05, validation_alias="TRADE_SCORE_W6")
     dq_max_gap_minutes: int = Field(5, validation_alias="DQ_MAX_GAP_MINUTES")
     dq_max_spread_pct: float = Field(0.5, validation_alias="DQ_MAX_SPREAD_PCT")
-    midday_score_boost: float = Field(15.0, validation_alias="MIDDAY_SCORE_BOOST")
-    midday_start_et: int = Field(690, validation_alias="MIDDAY_START_ET")
-    midday_end_et: int = Field(795, validation_alias="MIDDAY_END_ET")
-    rsi2_base_fallback_bypass_enabled: bool = Field(True, validation_alias="RSI2_BASE_FALLBACK_BYPASS_ENABLED")
-    rsi2_base_fallback_bypass_start_et: int = Field(660, validation_alias="RSI2_BASE_FALLBACK_BYPASS_START_ET")
-    rsi2_base_fallback_bypass_end_et: int = Field(840, validation_alias="RSI2_BASE_FALLBACK_BYPASS_END_ET")
-    bb_squeeze_base_fallback_bypass_enabled: bool = Field(True, validation_alias="BB_SQUEEZE_BASE_FALLBACK_BYPASS_ENABLED")
-    bb_squeeze_base_fallback_bypass_start_et: int = Field(840, validation_alias="BB_SQUEEZE_BASE_FALLBACK_BYPASS_START_ET")
-    bb_squeeze_base_fallback_bypass_end_et: int = Field(930, validation_alias="BB_SQUEEZE_BASE_FALLBACK_BYPASS_END_ET")
-    dq_min_bars_warmup: int = Field(50, validation_alias="DQ_MIN_BARS_WARMUP")
-    db_path: str = Field("", validation_alias="ALPHADESK_DB_PATH")
-    admin_token: str = Field("", validation_alias="ALPHADESK_ADMIN_TOKEN")
+    paper_starting_cash: float = Field(100_000.0, validation_alias="PAPER_STARTING_CASH")
+    paper_slippage_bps: float = Field(2.0, validation_alias="PAPER_SLIPPAGE_BPS")
+    paper_commission_per_share: float = Field(0.0, validation_alias="PAPER_COMMISSION_PER_SHARE")
+    poll_interval_sec: float = Field(5.0, validation_alias="POLL_INTERVAL_SEC")
+    demo_bar_seconds: float = Field(5.0, validation_alias="DEMO_BAR_SECONDS")
+    default_watchlist: str = Field("SPY,QQQ,AAPL,NVDA,TSLA,MSFT,AMD,META", validation_alias="DEFAULT_WATCHLIST")
 
     def model_post_init(self, __context) -> None:  # noqa: ANN001
         if self.mode not in VALID_MODES:
@@ -239,8 +233,8 @@ class Settings(BaseSettings):
             rsi2_base_fallback_bypass_start_et=self.rsi2_base_fallback_bypass_start_et,
             rsi2_base_fallback_bypass_end_et=self.rsi2_base_fallback_bypass_end_et,
             bb_squeeze_base_fallback_bypass_enabled=self.bb_squeeze_base_fallback_bypass_enabled,
-            bb_squeeze_base_fallback_bypass_start_et=self.bb_squeeze_base_fallback_bypass_start_et,
-            bb_squeeze_base_fallback_bypass_end_et=self.bb_squeeze_base_fallback_bypass_end_et,
+            bb_squeeze_base_fallback_bypass_start_et=self.bb_squeeze_base_fallback_start_et,
+            bb_squeeze_base_fallback_bypass_end_et=self.bb_squeeze_base_fallback_end_et,
             kelly_fraction_cap=self.kelly_fraction_cap,
             max_positions_per_sector=self.max_positions_per_sector,
             max_correlation_penalty=self.max_correlation_penalty,
