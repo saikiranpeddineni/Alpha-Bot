@@ -1,12 +1,11 @@
-"""Production-path integrity bridges for the existing AlphaDesk architecture.
+"""Production-path compatibility bridges for the existing AlphaDesk architecture.
 
-This module is intentionally a compatibility layer, not a second trading
-architecture. The canonical entry-context decision lives in
-``engine_evaluation.py`` and PIS remains the canonical discretionary exit path.
+The canonical trading decisions remain in the existing engine, pipeline, risk,
+and PIS modules. This module only preserves compatibility behavior that cannot
+be expressed safely at the existing call sites without changing public APIs.
 """
 from __future__ import annotations
 
-import asyncio
 from datetime import UTC, datetime, timedelta
 from functools import wraps
 from typing import Any
@@ -19,7 +18,6 @@ def install_runtime_integrity() -> None:
     _install_champion_threshold_boundary()
     _install_dynamic_mover_context_bridge()
     _install_risk_state_persistence()
-    _install_event_calendar_news_bridge()
 
 
 def get_dynamic_mover_context(symbol: str) -> dict[str, Any]:
@@ -63,7 +61,12 @@ def _install_champion_threshold_boundary() -> None:
 
 
 def _install_dynamic_mover_context_bridge() -> None:
-    """Carry the scanner's live mover evidence into the existing strategies."""
+    """Carry scanner mover evidence into legacy direct strategy callers.
+
+    The normal engine path already supplies mover context through StrategyContext.
+    This bridge is retained only for direct strategy callers that predate that
+    canonical path; it does not create a second trading decision.
+    """
     from app.core.scanner import MarketScanner
     from app.strategies.gap_and_go import GapAndGo
     from app.strategies.momentum import MomentumCross
@@ -159,18 +162,24 @@ def _rebuild_strategy_cooldown_state(risk_manager, trades, now: datetime) -> Non
 
 
 def _install_risk_state_persistence() -> None:
-    """Preserve valid restored cooldowns without creating a new risk policy."""
+    """Preserve valid restored cooldowns without changing risk policy."""
     from app.risk.manager import RiskManager
 
     if getattr(RiskManager.reconstruct_cooldowns, "_runtime_state_installed", False):
         return
-
     original_reconstruct = RiskManager.reconstruct_cooldowns
     original_roll = RiskManager.roll_session
 
     @wraps(original_reconstruct)
     def reconstruct_with_state(self, trades, now=None):
+        # The legacy method contains a stale state mutation that can erase the
+        # daily-halt date during startup reconstruction. Preserve safety state
+        # around that compatibility call while rebuilding cooldowns.
+        saved_daily_halted = self.daily_halted
+        saved_daily_halt_date = self.daily_halt_date
         result = original_reconstruct(self, trades, now)
+        self.daily_halted = saved_daily_halted
+        self.daily_halt_date = saved_daily_halt_date
         now_dt = now or datetime.now(UTC)
         _rebuild_strategy_cooldown_state(self, trades, now_dt)
         return result
@@ -213,47 +222,3 @@ def _install_risk_state_persistence() -> None:
     reconstruct_with_state._runtime_state_installed = True
     RiskManager.reconstruct_cooldowns = reconstruct_with_state
     RiskManager.roll_session = roll_session_with_persistence
-
-
-def _install_event_calendar_news_bridge() -> None:
-    """Let the existing EventCalendar use Alpaca news with its TradingClient."""
-    from app.core.calendar import EventCalendar
-
-    if getattr(EventCalendar._fetch_news, "_alpaca_news_bridge_installed", False):
-        return
-    original_fetch = EventCalendar._fetch_news
-
-    @wraps(original_fetch)
-    async def fetch_news_with_bridge(self, symbols, start, end, limit=20):
-        client = self._alpaca
-        if client is not None and hasattr(client, "get_news"):
-            return await original_fetch(self, symbols, start, end, limit)
-
-        api_key = getattr(client, "_api_key", None) if client is not None else None
-        api_secret = getattr(client, "_secret_key", None) if client is not None else None
-        if not api_key or not api_secret:
-            return []
-
-        import requests
-
-        params = {"start": start, "end": end, "limit": limit, "sort": "desc"}
-        if symbols:
-            params["symbols"] = ",".join(symbols[:10])
-
-        def request_news():
-            response = requests.get(
-                "https://data.alpaca.markets/v1beta1/news",
-                headers={"APCA-API-KEY-ID": api_key, "APCA-API-SECRET-KEY": api_secret},
-                params=params,
-                timeout=5.0,
-            )
-            response.raise_for_status()
-            return response.json().get("news", []) or []
-
-        try:
-            return await asyncio.to_thread(request_news)
-        except Exception:
-            return []
-
-    fetch_news_with_bridge._alpaca_news_bridge_installed = True
-    EventCalendar._fetch_news = fetch_news_with_bridge
