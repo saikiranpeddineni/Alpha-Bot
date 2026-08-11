@@ -86,6 +86,7 @@ def test_bearish_financing_news_is_entry_contradiction_for_long():
         news_direction="bearish",
         news_confidence=0.9,
         news_catalyst="financing",
+        news_age_seconds=120,
     )
     result = assess_entry_context(sig, _frame(long_trend=False), Regime.TREND_UP)
     assert result.allowed is False
@@ -99,6 +100,7 @@ def test_bullish_news_does_not_block_long_on_its_own():
         news_direction="bullish",
         news_confidence=0.9,
         news_catalyst="corporate",
+        news_age_seconds=120,
     )
     result = assess_entry_context(sig, _frame(long_trend=True), Regime.TREND_UP)
     assert result.allowed is True
@@ -111,6 +113,7 @@ def test_bullish_news_is_entry_contradiction_for_short_with_trend_conflict():
         news_direction="bullish",
         news_confidence=0.9,
         news_catalyst="corporate",
+        news_age_seconds=120,
     )
     result = assess_entry_context(sig, _frame(long_trend=True), Regime.TREND_UP)
     assert result.allowed is False
