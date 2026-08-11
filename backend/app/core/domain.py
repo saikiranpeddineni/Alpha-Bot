@@ -100,11 +100,9 @@ class Signal(BaseModel):
         if self.action == SignalAction.ENTER_SHORT:
             return "short"
         return "exit"
-
     @property
     def ml_confidence(self) -> float | None:
         return self.ml_probability
-
     @property
     def trade_score(self) -> float | None:
         return float(self.score) * 100.0 if self.score is not None else None
@@ -223,3 +221,49 @@ class TradeRecord(BaseModel):
     candidate_id: str | None = None
     initial_stop: float | None = None
     initial_risk: float | None = None
+    signal_timestamp_utc: datetime | None = None
+    decision_bar_timestamp_utc: datetime | None = None
+    order_submitted_timestamp_utc: datetime | None = None
+    entry_fill_timestamp_utc: datetime | None = None
+    exit_signal_timestamp_utc: datetime | None = None
+    exit_fill_timestamp_utc: datetime | None = None
+    mfe: float | None = None
+    mae: float | None = None
+    mfe_pct: float | None = None
+    mae_pct: float | None = None
+    capture_efficiency: float | None = None
+    hold_bars: int = 0
+    metadata: dict[str, Any] | None = None
+
+class AccountSnapshot(BaseModel):
+    equity: float
+    cash: float
+    buying_power: float
+    ts: datetime = Field(default_factory=utcnow)
+class Quote(BaseModel):
+    symbol: str
+    price: float
+    change_pct: float = 0.0
+    volume: float = 0.0
+    ts: datetime = Field(default_factory=utcnow)
+class InsightItem(BaseModel):
+    id: str = Field(default_factory=new_id)
+    ts: datetime = Field(default_factory=utcnow)
+    kind: str
+    title: str
+    detail: str
+    symbol: str | None = None
+    severity: str = "info"
+class EngineState(StrEnum):
+    STOPPED = "stopped"
+    RUNNING = "running"
+    HALTED = "halted"
+    SAFE_MODE = "safe_mode"
+class SafetyDecision(BaseModel):
+    system_state: str
+    market_risk_state: str
+    allow_new_entries: bool
+    risk_multiplier: float
+    allowed_strategies: list[str]
+    require_exit_only: bool
+    halt_reason: str | None = None
