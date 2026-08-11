@@ -9,7 +9,6 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 from pydantic import BaseModel, Field, model_validator
-
 import contextvars
 from typing import Callable
 
@@ -83,6 +82,13 @@ class Signal(BaseModel):
     mover_change_pct: float = 0.0
     rs_score: float | None = None
     news_sentiment: float | None = None
+    news_direction: str = "neutral"
+    news_confidence: float = 0.0
+    news_headline_count: int = 0
+    news_fresh_headline_count: int = 0
+    news_age_seconds: float | None = None
+    news_catalyst: str | None = None
+    news_context_available: bool = False
     context_conflict_count: int = 0
     context_conflict_reasons: list[str] = Field(default_factory=list)
     thesis_continuity_blocked: bool = False
@@ -120,7 +126,6 @@ class OrderRequest(BaseModel):
     time_in_force: str = "day"
     signal_timestamp_utc: datetime | None = None
     decision_bar_timestamp_utc: datetime | None = None
-    role: str = "entry"
     @model_validator(mode="after")
     def validate_execution_prices(self) -> OrderRequest:
         if self.qty <= 0:
@@ -218,53 +223,3 @@ class TradeRecord(BaseModel):
     candidate_id: str | None = None
     initial_stop: float | None = None
     initial_risk: float | None = None
-    signal_timestamp_utc: datetime | None = None
-    decision_bar_timestamp_utc: datetime | None = None
-    order_submitted_timestamp_utc: datetime | None = None
-    entry_fill_timestamp_utc: datetime | None = None
-    exit_signal_timestamp_utc: datetime | None = None
-    exit_fill_timestamp_utc: datetime | None = None
-    mfe: float | None = None
-    mae: float | None = None
-    mfe_pct: float | None = None
-    mae_pct: float | None = None
-    capture_efficiency: float | None = None
-    hold_bars: int = 0
-    metadata: dict[str, Any] | None = None
-
-class AccountSnapshot(BaseModel):
-    equity: float
-    cash: float
-    buying_power: float
-    ts: datetime = Field(default_factory=utcnow)
-class Quote(BaseModel):
-    symbol: str
-    price: float
-    change_pct: float = 0.0
-    volume: float = 0.0
-    ts: datetime = Field(default_factory=utcnow)
-class InsightItem(BaseModel):
-    id: str = Field(default_factory=new_id)
-    ts: datetime = Field(default_factory=utcnow)
-    kind: str
-    title: str
-    detail: str
-    symbol: str | None = None
-    severity: str = "info"
-class EngineState(StrEnum):
-    STOPPED = "stopped"
-    RUNNING = "running"
-    HALTED = "halted"
-    SAFE_MODE = "safe_mode"
-class SafetyDecision(BaseModel):
-    system_state: str
-    market_risk_state: str
-    allow_new_entries: bool
-    risk_multiplier: float
-    allowed_strategies: list[str]
-    require_exit_only: bool
-    halt_reason: str | None = None
-
-    @property
-    def market_state(self) -> str:
-        return self.market_risk_state
