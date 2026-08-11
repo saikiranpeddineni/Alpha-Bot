@@ -7,9 +7,11 @@ from app.pis.sentiment import NewsSentimentAnalyzer
 from app.strategies.entry_intelligence import assess_entry_context
 
 
-def _frame(long_trend: bool = False) -> pd.DataFrame:
+def _frame(long_trend: bool = False, breakout: bool = False) -> pd.DataFrame:
     rows = 25
     close = [100.0 + i * (0.2 if long_trend else -0.2) for i in range(rows)]
+    if breakout:
+        close[-1] = max(close[:-1]) + 0.25
     high = [v + 0.5 for v in close]
     low = [v - 0.5 for v in close]
     return pd.DataFrame(
@@ -40,12 +42,7 @@ def test_news_analyzer_identifies_financing_catalyst_and_direction():
     analyzer = NewsSentimentAnalyzer()
     now = datetime.now(UTC)
     context = analyzer.build_context(
-        [
-            {
-                "headline": "INTC announces secondary share offering and dilution",
-                "created_at": (now - timedelta(minutes=2)).isoformat(),
-            }
-        ],
+        [{"headline": "INTC announces secondary share offering and dilution", "created_at": (now - timedelta(minutes=2)).isoformat()}],
         now=now,
     )
     assert context.direction == "bearish"
@@ -77,6 +74,16 @@ def test_news_analyzer_prefers_consensus_direction_and_freshness():
     assert context.direction == "bullish"
     assert context.fresh_headline_count == 2
     assert context.confidence >= 0.5
+
+
+def test_undated_news_is_context_only_not_fresh():
+    analyzer = NewsSentimentAnalyzer()
+    now = datetime.now(UTC)
+    context = analyzer.build_context([{"headline": "Company announces financing and dilution"}], now=now)
+    assert context.headline_count == 1
+    assert context.fresh_headline_count == 0
+    assert context.newest_age_seconds is None
+    assert context.confidence < 0.5
 
 
 def test_bearish_financing_news_is_entry_contradiction_for_long():
@@ -118,3 +125,9 @@ def test_bullish_news_is_entry_contradiction_for_short_with_trend_conflict():
     result = assess_entry_context(sig, _frame(long_trend=True), Regime.TREND_UP)
     assert result.allowed is False
     assert any("news_context_conflict" in reason for reason in result.reasons)
+
+
+def test_breakout_touch_is_not_extension_rejection():
+    sig = _signal(SignalAction.ENTER_LONG, mover_bias=None, rs_score=None)
+    result = assess_entry_context(sig, _frame(long_trend=True, breakout=False), Regime.TREND_UP)
+    assert not any("entry_location_conflict" in reason for reason in result.reasons)
