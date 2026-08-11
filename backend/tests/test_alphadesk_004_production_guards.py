@@ -121,7 +121,7 @@ class _ShadowDb:
         ]
 
 
-def test_new_material_catalyst_can_reopen_same_direction_after_loss():
+def test_new_material_catalyst_is_recorded_without_restrictive_thesis_veto():
     sig = _signal(
         SignalAction.ENTER_LONG,
         news_context_available=True,
@@ -132,7 +132,8 @@ def test_new_material_catalyst_can_reopen_same_direction_after_loss():
     )
     result = assess_thesis_continuity(_ShadowDb(), sig, datetime.now(UTC))
     assert result.allowed is True
-    assert any("fresh_material_catalyst" in reason for reason in result.reasons)
+    assert any("thesis_history_observation" in reason for reason in result.reasons)
+    assert result.evidence["previous_realized_r"] == -1.0
 
 
 def test_restart_does_not_clear_restored_cooldowns():
@@ -145,3 +146,13 @@ def test_restart_does_not_clear_restored_cooldowns():
     risk.roll_session(date.today())
     assert "PANW" in risk.symbol_cooldowns
     assert "momentum" in risk.strategy_cooldowns
+
+
+def test_restart_preserves_restored_daily_halt_state():
+    install_runtime_integrity()
+    risk = RiskManager(RiskConfig(), _Clock())
+    risk.daily_halted = True
+    risk.daily_halt_date = date.today()
+    risk.reconstruct_cooldowns([], datetime.now(UTC))
+    assert risk.daily_halted is True
+    assert risk.daily_halt_date == date.today()
