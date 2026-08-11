@@ -19,6 +19,30 @@ class EntryContextAssessment:
     evidence: dict[str, float | str | bool | None] = field(default_factory=dict)
 
 
+def _reversal_confirmed(sig: Signal, df: pd.DataFrame) -> bool:
+    """Return True when a counter-trend signal has actual structure confirmation.
+
+    This intentionally avoids a blanket trend-direction veto. A reversal is allowed
+    when price has broken recent structure and short-term slope confirms the new side.
+    """
+    if len(df) < 8 or "atr14" not in df.columns or "close" not in df.columns:
+        return False
+    atr = float(df["atr14"].iloc[-1])
+    if atr <= 0:
+        return False
+
+    closes = df["close"].astype(float)
+    last = float(closes.iloc[-1])
+    prior = closes.iloc[-5:-1]
+    slope_r = (last - float(closes.iloc[-5])) / max(atr, 1e-9)
+    prev_high = float(df["high"].iloc[-7:-1].max()) if "high" in df.columns else float(prior.max())
+    prev_low = float(df["low"].iloc[-7:-1].min()) if "low" in df.columns else float(prior.min())
+
+    if sig.side == "long":
+        return slope_r >= 0.10 and last > prev_high
+    return slope_r <= -0.10 and last < prev_low
+
+
 def _directional_contradictions(sig: Signal, df: pd.DataFrame) -> list[str]:
     reasons: list[str] = []
     side = sig.side
@@ -33,20 +57,55 @@ def _directional_contradictions(sig: Signal, df: pd.DataFrame) -> list[str]:
     if "ema9" in df.columns and "ema20" in df.columns:
         ema9 = float(df["ema9"].iloc[-1])
         ema20 = float(df["ema20"].iloc[-1])
-        if side == "long" and ema9 < ema20:
-            reasons.append("trend_context_conflict: short_term_trend_opposes_long")
-        elif side == "short" and ema9 > ema20:
-            reasons.append("trend_context_conflict: short_term_trend_opposes_short")
+        # EMA disagreement alone is not enough. Treat it as a true contradiction
+        # only when the short-term slope also confirms that direction and the
+        # signal is not a confirmed structural reversal.
+        reversal = _reversal_confirmed(sig, df)
+        slope_conflict = False
+        if "atr14" in df.columns and len(df) >= 5:
+            atr = float(df["atr14"].iloc[-1])
+            closes = df["close"].astype(float)
+            slope_r = (float(closes.iloc[-1]) - float(closes.iloc[-5])) / max(atr, 1e-9)
+            slope_conflict = slope_r <= -0.10 if side == "long" else slope_r >= 0.10
+        if side == "long" and ema9 < ema20 and slope_conflict and not reversal:
+            reasons.append("trend_context_conflict: confirmed_short_term_trend_opposes_long")
+        elif side == "short" and ema9 > ema20 and slope_conflict and not reversal:
+            reasons.append("trend_context_conflict: confirmed_short_term_trend_opposes_short")
 
-    # News is treated as independent evidence. It is not a standalone veto:
-    # the existing multi-conflict boundary still requires another contradiction.
+    # News is independent evidence. Only material, fresh catalysts are strong
+    # enough to count as a contradiction; ordinary/stale headlines remain context.
     if sig.news_context_available and sig.news_catalyst:
-        if side == "long" and sig.news_direction == "bearish":
-            reasons.append(f"news_context_conflict: bearish_{sig.news_catalyst}_catalyst")
-        elif side == "short" and sig.news_direction == "bullish":
-            reasons.append(f"news_context_conflict: bullish_{sig.news_catalyst}_catalyst")
+        age = sig.news_age_seconds
+        fresh = age is not None and age <= 1800
+        material = sig.news_catalyst in {"financing", "regulatory", "earnings"}
+        if fresh and material and sig.news_confidence >= 0.55:
+            if side == "long" and sig.news_direction == "bearish":
+                reasons.append(f"news_context_conflict: fresh_material_bearish_{sig.news_catalyst}_catalyst")
+            elif side == "short" and sig.news_direction == "bullish":
+                reasons.append(f"news_context_conflict: fresh_material_bullish_{sig.news_catalyst}_catalyst")
 
     return reasons
+
+
+def _macro_context_conflicts(sig: Signal, df: pd.DataFrame, regime: Regime | str | None) -> list[str]:
+    """Add one soft macro/chop contradiction only when the setup is already weak.
+
+    This is intentionally conservative: a RANGE/VOLATILE regime never blocks
+    momentum by itself. It only becomes a conflict when the symbol also lacks
+    directional confirmation.
+    """
+    regime_name = getattr(regime, "value", str(regime) if regime is not None else "")
+    if sig.strategy not in {"momentum", "gap_and_go", "trend_pullback"}:
+        return []
+    if str(regime_name).upper() not in {"RANGE", "VOLATILE"}:
+        return []
+    rs = sig.rs_score
+    mover = sig.mover_bias
+    if rs is None and not mover:
+        return ["macro_context_conflict: choppy_regime_without_symbol_confirmation"]
+    if rs is not None and 0.47 <= rs <= 0.53 and mover in {None, "neutral"}:
+        return ["macro_context_conflict: choppy_regime_and_neutral_symbol_confirmation"]
+    return []
 
 
 def _extension_conflicts(sig: Signal, df: pd.DataFrame) -> list[str]:
@@ -74,7 +133,7 @@ def assess_entry_context(sig: Signal, df: pd.DataFrame, regime: Regime | str | N
         return EntryContextAssessment(True)
 
     reasons = _directional_contradictions(sig, df)
-    all_reasons = reasons + _extension_conflicts(sig, df)
+    all_reasons = reasons + _macro_context_conflicts(sig, df, regime) + _extension_conflicts(sig, df)
     evidence = {
         "regime": getattr(regime, "value", str(regime) if regime is not None else None),
         "mover_bias": sig.mover_bias,
