@@ -48,6 +48,12 @@ from app.core.durable_engine import DurableTradingEngine
 from app.core.applog import applog, configure_std_logging
 from app.core.alerting import init_alerting, stop_alerting
 from app.db.database import Database
+from app.strategies.runtime_integrity import install_runtime_integrity
+
+# The strategy package installs early compatibility boundaries. Re-run after
+# DurableTradingEngine is imported so the final candidate boundary can safely
+# wrap TradingEngineEvaluationMixin without import-order/circular-import risk.
+install_runtime_integrity()
 
 
 def _json_safe(value):
@@ -141,8 +147,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_headers=["*"],
     )
 
-    # Dashboard history is deliberately registered before the legacy runtime
-    # routes so GET /orders and GET /trades resolve to the durable ledger.
     app.include_router(dashboard_history_router)
     app.include_router(router)
     app.include_router(replay_router)
