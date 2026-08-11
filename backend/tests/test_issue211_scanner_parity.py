@@ -1,3 +1,5 @@
+from app.config import RiskConfig
+from app.config import Settings
 import asyncio
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -39,7 +41,7 @@ async def test_scanner_staleness_across_0930_boundary():
         data_frames[sym] = df
 
     data_mgr = MockDataManager(data_frames)
-    scanner = MarketScanner(data_mgr, core_watchlist=["AVGO", "ORCL", "SKHY"])
+    scanner = MarketScanner(data_mgr, core_watchlist=["AVGO", "ORCL", "SKHY"], risk_config=RiskConfig())
 
     # Test times: 09:00 ET, 09:29 ET, 09:30 ET, 10:00 ET on a trading day after dates[-1]
     day = dates[-1] + pd.Timedelta(days=1)
@@ -63,7 +65,7 @@ async def test_scanner_outcome_failed_on_systemic_data_issues(monkeypatch):
     """Verify that systemic data missing/staleness returns ScannerOutcome.FAILED."""
     # Data manager with empty data for all symbols
     data_mgr = MockDataManager({})
-    scanner = MarketScanner(data_mgr, core_watchlist=["AVGO"])
+    scanner = MarketScanner(data_mgr, core_watchlist=["AVGO"], risk_config=RiskConfig())
 
     async def mock_assess(as_of=None):
         from app.risk.market_regime import MarketRiskState

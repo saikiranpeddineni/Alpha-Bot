@@ -1,3 +1,4 @@
+from app.config import Settings
 import pytest
 import pandas as pd
 import numpy as np
@@ -20,7 +21,7 @@ def mock_data_manager():
 
 @pytest.mark.anyio
 async def test_spy_volatility_checks(mock_data_manager):
-    scanner = MarketScanner(mock_data_manager, ["SPY", "QQQ"])
+    scanner = MarketScanner(mock_data_manager, ["SPY", "QQQ"], risk_config=RiskConfig())
     
     # Mock VIX history returning low volatility (hourly bars)
     idx = pd.date_range(end=datetime.now(UTC), periods=300, freq="1h", tz="UTC")
@@ -80,7 +81,7 @@ async def test_pool_screener_filtering(mock_data_manager):
 
 @pytest.mark.anyio
 async def test_scanner_panic_fallback(mock_data_manager):
-    scanner = MarketScanner(mock_data_manager, ["SPY", "QQQ"])
+    scanner = MarketScanner(mock_data_manager, ["SPY", "QQQ"], risk_config=RiskConfig())
     
     # First 280 bars: low volatility. Last 20 bars: high volatility spike.
     idx = pd.date_range(end=datetime.now(UTC), periods=300, freq="1h", tz="UTC")

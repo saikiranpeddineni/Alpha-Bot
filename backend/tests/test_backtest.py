@@ -1,6 +1,8 @@
 """Backtest engine end-to-end tests on deterministic synthetic data."""
 
 from __future__ import annotations
+from app.config import RiskConfig
+from app.config import Settings
 
 from datetime import UTC, datetime
 
@@ -22,7 +24,7 @@ def data(tmp_path) -> DataManager:
 
 @pytest.fixture
 def model(tmp_path) -> SignalModel:
-    return SignalModel(tmp_path / "models")  # untrained -> heuristic gate
+    return SignalModel(tmp_path / "models", risk_config=RiskConfig())  # untrained -> heuristic gate
 
 
 def test_generate_day_is_deterministic():
@@ -44,7 +46,7 @@ async def test_backtest_runs_and_reports(data, model, risk_config):
         starting_cash=100_000.0,
         risk=risk_config,
     )
-    result = await run_backtest(data, model, params)
+    result = await run_backtest(data, model, params, settings=Settings())
     assert result.bars_processed > 2000
     assert len(result.equity_curve) > 100
     m = result.metrics
@@ -68,7 +70,7 @@ async def test_backtest_no_overnight_positions(data, model, risk_config):
         end=datetime(2026, 1, 9, 23, 59, tzinfo=UTC),
         risk=risk_config,
     )
-    result = await run_backtest(data, model, params)
+    result = await run_backtest(data, model, params, settings=Settings())
     from zoneinfo import ZoneInfo
 
     et = ZoneInfo("America/New_York")
@@ -85,8 +87,9 @@ async def test_backtest_ml_gate_off_trades_at_least_as_much(data, model, risk_co
         end=datetime(2026, 1, 7, 23, 59, tzinfo=UTC),
         risk=risk_config,
     )
-    gated = await run_backtest(data, model, BacktestParams(use_ml_gate=True, **kwargs))
-    ungated = await run_backtest(data, model, BacktestParams(use_ml_gate=False, **kwargs))
+    from app.config import Settings
+    gated = await run_backtest(data, model, BacktestParams(use_ml_gate=True, **kwargs), Settings())
+    ungated = await run_backtest(data, model, BacktestParams(use_ml_gate=False, **kwargs), Settings())
     assert ungated.metrics["total_trades"] >= gated.metrics["total_trades"]
 
 
@@ -97,7 +100,7 @@ async def test_backtest_rejects_empty_range(data, model):
         end=datetime(2026, 1, 4, 23, 0, tzinfo=UTC),  # Sunday
     )
     with pytest.raises(ValueError):
-        await run_backtest(data, model, params)
+        await run_backtest(data, model, params, settings=Settings())
 
 
 def test_metrics_math():
@@ -145,7 +148,7 @@ async def test_backtest_dynamic_scanner_runs(data, model, risk_config, monkeypat
         use_dynamic_scanner=True,
         risk=risk_config,
     )
-    result = await run_backtest(data, model, params)
+    result = await run_backtest(data, model, params, settings=Settings())
     # Even with scanner enabled the backtest must produce a valid result
     assert result.bars_processed >= 0
     assert isinstance(result.metrics, dict)
@@ -193,7 +196,7 @@ async def test_run_backtest_temporal_leakage_gating(data, model, risk_config):
         risk=risk_config,
         ignore_temporal_leakage=False,
     )
-    res_enforce = await run_backtest(data, model, params_enforce)
+    res_enforce = await run_backtest(data, model, params_enforce, settings=Settings())
     assert res_enforce.bars_processed > 0
 
     # Case 2: ignore_temporal_leakage is True -> backtest_start_time is bypassed/None
@@ -205,6 +208,6 @@ async def test_run_backtest_temporal_leakage_gating(data, model, risk_config):
         risk=risk_config,
         ignore_temporal_leakage=True,
     )
-    res_ignore = await run_backtest(data, model, params_ignore)
+    res_ignore = await run_backtest(data, model, params_ignore, settings=Settings())
     assert res_ignore.bars_processed > 0
 

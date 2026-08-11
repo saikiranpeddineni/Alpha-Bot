@@ -522,7 +522,7 @@ async def run_backtest(
             model.backtest_start_time = None
         else:
             model.backtest_start_time = params.start
-        pipeline = SignalPipeline(model, risk_cfg.ml_confidence_threshold if params.use_ml_gate else 0.0)
+        pipeline = SignalPipeline(model, risk_cfg.ml_confidence_threshold if params.use_ml_gate else 0.0, risk_config=risk_cfg, settings=settings)
         # Set backtest_start_time on meta label engine to prevent MetaLabel temporal leakage
         if hasattr(pipeline, "meta_label_engine") and pipeline.meta_label_engine is not None:
             if params.ignore_temporal_leakage:

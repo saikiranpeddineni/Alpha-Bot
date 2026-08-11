@@ -11,6 +11,9 @@ Covers the 7 production validation items:
   7. Restart/recovery never resurrects stale intents in live mode
 """
 from __future__ import annotations
+from app.config import RiskConfig
+from app.config import Settings
+
 
 import math
 from datetime import datetime, timedelta, UTC
@@ -363,7 +366,7 @@ async def test_stress_returns_defensive_watchlist_only():
     from app.core.scanner import MarketScanner, ScannerOutcome, DEFENSIVE_WATCHLIST, MarketRiskState
 
     dm = MagicMock()
-    scanner = MarketScanner(dm, ["AAPL"])
+    scanner = MarketScanner(dm, ["AAPL"], risk_config=RiskConfig())
     scanner._assess_market_risk = AsyncMock(
         return_value=(MarketRiskState.STRESS, 0.9, ["VIX_HIGH"])
     )
@@ -381,7 +384,7 @@ async def test_panic_returns_defensive_watchlist_only():
     from app.core.scanner import MarketScanner, ScannerOutcome, DEFENSIVE_WATCHLIST, MarketRiskState
 
     dm = MagicMock()
-    scanner = MarketScanner(dm, ["AAPL"])
+    scanner = MarketScanner(dm, ["AAPL"], risk_config=RiskConfig())
     scanner._assess_market_risk = AsyncMock(
         return_value=(MarketRiskState.PANIC, 0.95, ["SPY_CRASH"])
     )
@@ -400,7 +403,7 @@ async def test_shadow_pipeline_crash_still_returns_defensive_watchlist():
     from app.core.scanner import MarketScanner, ScannerOutcome, DEFENSIVE_WATCHLIST, MarketRiskState
 
     dm = MagicMock()
-    scanner = MarketScanner(dm, ["AAPL"])
+    scanner = MarketScanner(dm, ["AAPL"], risk_config=RiskConfig())
     scanner._assess_market_risk = AsyncMock(
         return_value=(MarketRiskState.STRESS, 0.9, ["VIX_HIGH"])
     )

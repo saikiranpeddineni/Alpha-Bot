@@ -24,8 +24,8 @@ def temp_db(tmp_path: Path) -> Database:
 
 def test_parallel_evaluator_observational_equivalence(risk_config: RiskConfig, tmp_path: Path):
     # Setup SignalModel and pipeline
-    model = SignalModel(models_dir=tmp_path)
-    pipeline = SignalPipeline(model, risk_config.ml_confidence_threshold)
+    model = SignalModel(models_dir=tmp_path, risk_config=RiskConfig())
+    pipeline = SignalPipeline(model, risk_config.ml_confidence_threshold, risk_config=RiskConfig(), settings=Settings())
     evaluator = ParallelEvidenceEvaluator(
         model=model,
         ml_threshold=risk_config.ml_confidence_threshold,

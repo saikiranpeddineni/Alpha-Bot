@@ -1,6 +1,9 @@
 """AI layer tests: features, regime detection, model gate, training."""
 
 from __future__ import annotations
+from app.config import RiskConfig
+from app.config import Settings
+
 
 import numpy as np
 import pandas as pd
@@ -37,7 +40,7 @@ def test_training_set_labels_are_forward_looking():
 
 
 def test_heuristic_gate_direction(tmp_path):
-    model = SignalModel(tmp_path / "models")
+    model = SignalModel(tmp_path / "models", risk_config=RiskConfig())
     assert not model.is_trained
     up = latest_feature_row(compute_features(make_bars(200, drift=0.0008, seed=2)))
     down = latest_feature_row(compute_features(make_bars(200, drift=-0.0008, seed=2)))
@@ -51,7 +54,7 @@ def test_heuristic_gate_direction(tmp_path):
 
 def test_live_model_has_no_backtest_start_time(tmp_path):
     """Live scoring must not depend on a backtest-only attribute being injected."""
-    model = SignalModel(tmp_path / "models")
+    model = SignalModel(tmp_path / "models", risk_config=RiskConfig())
     assert model.backtest_start_time is None
 
 
@@ -63,12 +66,12 @@ def test_model_train_save_load(tmp_path):
     # Extend with a second day for enough samples
     for sym in list(frames):
         frames[sym] = pd.concat([frames[sym], generate_day(sym, pd.Timestamp("2026-01-06").date())])
-    model = SignalModel(tmp_path / "models")
+    model = SignalModel(tmp_path / "models", risk_config=RiskConfig())
     info = model.train(frames, horizon_bars=10, threshold_pct=0.05)
     assert info["trained"]
     assert info["samples"] > 500
     assert 0.0 <= info["validation_accuracy"] <= 1.0
-    reloaded = SignalModel(tmp_path / "models")
+    reloaded = SignalModel(tmp_path / "models", risk_config=RiskConfig())
     assert reloaded.is_trained
     row = latest_feature_row(compute_features(frames["SPY"]))
     p = reloaded.p_up(row)
@@ -106,7 +109,7 @@ def test_adaptive_model_tuning(tmp_path):
     for sym in list(frames):
         frames[sym] = pd.concat([frames[sym], generate_day(sym, pd.Timestamp("2026-01-06").date())])
     
-    model = SignalModel(tmp_path / "models")
+    model = SignalModel(tmp_path / "models", risk_config=RiskConfig())
     
     model.train(frames, horizon_bars=10, threshold_pct=0.05)
     assert model.is_trained

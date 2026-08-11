@@ -1,3 +1,5 @@
+from app.config import RiskConfig
+from app.config import Settings
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -31,7 +33,7 @@ async def test_stage1_diagnostics_make_zero_extra_provider_calls():
 
     history_mock = AsyncMock(side_effect=history)
     scanner = MarketScanner(
-        SimpleNamespace(provider=provider, history=history_mock, original_history=history_mock),
+        SimpleNamespace(provider=provider, history=history_mock, original_history=history_mock, risk_config=RiskConfig()),
         ["SPY"],
     )
 

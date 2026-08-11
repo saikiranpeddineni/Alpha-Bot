@@ -1,3 +1,4 @@
+from app.config import RiskConfig
 import pytest
 from datetime import date, datetime, timedelta, UTC
 from unittest.mock import AsyncMock, MagicMock
