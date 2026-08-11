@@ -21,13 +21,7 @@ class NewsContext:
 
 
 class NewsSentimentAnalyzer:
-    """Deterministic event-aware headline analyzer used by the live trading path.
-
-    The analyzer deliberately stays local and replayable. It does not introduce an
-    LLM or a second architecture. It extracts event meaning from the existing news
-    feed, then lets entry_intelligence combine that evidence with the observed
-    price/volume reaction.
-    """
+    """Deterministic event-aware headline analyzer used by the live trading path."""
 
     def __init__(self):
         self.bullish_keywords = {
@@ -56,7 +50,6 @@ class NewsSentimentAnalyzer:
             "corporate": {"acquire", "acquires", "acquisition", "merger", "deal", "contract", "award", "partner", "partnership"},
             "analyst": {"upgrade", "downgrade", "outperform", "underperform", "price target", "analyst"},
         }
-        # Phrase-level evidence is intentionally stronger than isolated words.
         self.bullish_phrases = {
             "beats estimates": 1.4,
             "beats expectations": 1.4,
@@ -123,13 +116,11 @@ class NewsSentimentAnalyzer:
             elif word in self.bearish_keywords:
                 clause_score -= multiplier
             clause_weight = 1.0
-        # Phrase evidence dominates isolated keyword noise but both contribute.
         score += 0.55 * clause_score
         return round(math.tanh(score), 2)
 
     def catalyst_for_headline(self, text: str) -> str | None:
         lowered = (text or "").lower()
-        # Prefer the most market-material event family when several are mentioned.
         priority = ("financing", "regulatory", "earnings", "corporate", "analyst")
         matches = {
             catalyst: sum(1 for keyword in keywords if keyword in lowered)
@@ -152,7 +143,7 @@ class NewsSentimentAnalyzer:
 
     def build_context(self, items: list[dict], now: datetime | None = None) -> NewsContext:
         now = now or datetime.now(UTC)
-        normalized: list[tuple[datetime, str]] = []
+        normalized: list[tuple[datetime | None, str]] = []
         for item in items:
             headline = str(item.get("headline") or "").strip()
             if not headline:
@@ -167,21 +158,19 @@ class NewsSentimentAnalyzer:
                     ts = ts.astimezone(UTC)
                 except (TypeError, ValueError):
                     ts = None
-            if ts is None:
-                ts = now
+            # Missing timestamps are still valid contextual evidence, but they
+            # must never be fabricated as "now" and therefore cannot become a
+            # fresh-catalyst veto solely because the provider omitted metadata.
             normalized.append((ts, headline))
 
-        normalized.sort(key=lambda pair: pair[0], reverse=True)
+        normalized.sort(key=lambda pair: pair[0] or datetime.min.replace(tzinfo=UTC), reverse=True)
         headlines = [headline for _, headline in normalized[:10]]
-        ages = [max(0.0, (now - ts).total_seconds()) for ts, _ in normalized]
-        # Six hours remains the broad evidence window for context, while the live
-        # entry boundary separately treats genuinely fresh catalysts more strongly.
+        ages = [max(0.0, (now - ts).total_seconds()) for ts, _ in normalized if ts is not None]
         fresh_count = sum(age <= 6 * 3600 for age in ages)
-        newest_age = ages[0] if ages else None
+        newest_age = min(ages) if ages else None
         score = self.analyze_headlines(headlines)
         direction = "bullish" if score > 0 else "bearish" if score < 0 else "neutral"
 
-        # Confidence measures agreement and freshness, not just keyword magnitude.
         per_headline = [self.analyze_headline(h) for h in headlines[:5]]
         non_neutral = [s for s in per_headline if abs(s) >= 0.10]
         agreement = 0.0
