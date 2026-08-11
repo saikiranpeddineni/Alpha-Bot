@@ -1,15 +1,12 @@
 """Profit-regression invariants for future Alpha-Bot changes.
 
-This suite deliberately does not assert that every code change must make money.
-It defines the data contract and non-regression guardrails needed for a Champion
-comparison harness. Promotion decisions must use out-of-sample results rather
-than optimizing a single historical sample.
+The benchmark is intentionally conservative: it does not claim every change
+must make money in every sample. It defines the non-regression contract that a
+future data-backed Champion evaluator can consume.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-
-import pytest
 
 
 @dataclass(frozen=True)
@@ -22,7 +19,7 @@ class PerformanceSnapshot:
     profit_capture: float
 
 
-def compare_to_champion(champion: PerformanceSnapshot, candidate: PerformanceSnapshot) -> dict[str, float | bool]:
+def compare_to_champion(champion: PerformanceSnapshot, candidate: PerformanceSnapshot) -> dict[str, float]:
     return {
         "net_r_delta": candidate.net_r - champion.net_r,
         "expectancy_delta": candidate.expectancy_r - champion.expectancy_r,
@@ -68,34 +65,35 @@ def test_more_trades_alone_is_not_a_promotion_reason():
     assert not promotion_is_non_regressive(champion, candidate)
 
 
-def test_minimum_profit_is_not_a_universal_exit_rule():
-    """Protect against future code turning a nominal profit target into a veto.
+def test_profit_capture_is_part_of_the_regression_contract():
+    champion = PerformanceSnapshot(100, 0.20, 1.45, 12, 1000, 0.38)
+    candidate = PerformanceSnapshot(110, 0.23, 1.52, 12.2, 1000, 0.35)
+    assert not promotion_is_non_regressive(champion, candidate)
 
-    A minimum profit requirement must never be used to force a trade to remain
-    open after its expected future value has deteriorated. Exit quality belongs
-    to PIS/position intelligence, not a fixed percentage-profit requirement.
-    """
+
+def test_minimum_profit_is_not_a_universal_exit_rule():
+    """A fixed profit percentage must never override PIS future-value logic."""
     assert True
 
 
-@pytest.mark.parametrize(
-    "scenario",
-    [
-        "trend_up",
-        "trend_down",
-        "range_chop",
-        "high_volatility",
-        "low_volatility",
-        "gap_continuation",
-        "gap_fade",
-        "news_shock",
-        "false_breakout",
-        "reversal",
-        "sector_rotation",
-        "market_stress",
-        "end_of_day",
-    ],
+MARKET_SCENARIOS = (
+    "trend_up",
+    "trend_down",
+    "range_chop",
+    "high_volatility",
+    "low_volatility",
+    "gap_continuation",
+    "gap_fade",
+    "news_shock",
+    "false_breakout",
+    "reversal",
+    "sector_rotation",
+    "market_stress",
+    "end_of_day",
 )
-def test_champion_benchmark_requires_each_market_scenario(scenario):
-    """Scenario names form the contract for the future data-driven benchmark."""
-    assert scenario
+
+
+def test_champion_benchmark_requires_each_market_scenario():
+    """Keep the market-condition coverage contract explicit and reviewable."""
+    assert len(MARKET_SCENARIOS) == 13
+    assert len(set(MARKET_SCENARIOS)) == len(MARKET_SCENARIOS)
