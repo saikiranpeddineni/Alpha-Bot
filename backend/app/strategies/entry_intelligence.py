@@ -116,8 +116,8 @@ def _macro_context_conflicts(sig: Signal, df: pd.DataFrame, regime: Regime | str
 
 
 def _extension_conflicts(sig: Signal, df: pd.DataFrame) -> list[str]:
-    """Flag only genuine range-edge extension, not ordinary tests of resistance/support."""
-    if len(df) < 20 or "atr14" not in df.columns or "close" not in df.columns:
+    """Flag only genuine extension beyond the prior range, not a normal breakout test."""
+    if len(df) < 21 or "atr14" not in df.columns or "close" not in df.columns:
         return []
     if "high" not in df.columns or "low" not in df.columns:
         return []
@@ -126,14 +126,13 @@ def _extension_conflicts(sig: Signal, df: pd.DataFrame) -> list[str]:
     if atr <= 0 or close <= 0:
         return []
 
-    lookback = df.iloc[-20:]
-    high20 = float(lookback["high"].max())
-    low20 = float(lookback["low"].min())
+    # Exclude the current bar. Including it made the previous implementation
+    # mathematically incapable of detecting a close beyond its own high/low range.
+    prior_range = df.iloc[-21:-1]
+    high20 = float(prior_range["high"].max())
+    low20 = float(prior_range["low"].min())
     side = sig.side
     mover = getattr(sig, "mover_bias", None)
-    # Require a true extension beyond the recent range by 0.10 ATR. Merely touching
-    # the prior high/low is not evidence of exhaustion and should not suppress a
-    # legitimate breakout opportunity.
     if side == "long" and close > high20 + 0.10 * atr and mover != "gainer":
         return ["entry_location_conflict: long_is_extended_without_mover_confirmation"]
     if side == "short" and close < low20 - 0.10 * atr and mover != "loser":
@@ -166,14 +165,7 @@ def assess_entry_context(sig: Signal, df: pd.DataFrame, regime: Regime | str | N
 
 
 def assess_thesis_continuity(db, sig: Signal, now) -> EntryContextAssessment:
-    """Use prior outcomes as adaptive evidence, never as an emotional hard veto.
-
-    The engine already has contextual expectancy/ML adaptation for historical
-    performance. This function therefore records the latest same-day outcome
-    as evidence but does not automatically block a new candidate merely because
-    an earlier attempt lost. A current thesis must be judged by current market
-    evidence; otherwise a losing trade would create path-dependent behavior.
-    """
+    """Use prior outcomes as adaptive evidence, never as an emotional hard veto."""
     if db is None or sig.action not in (SignalAction.ENTER_LONG, SignalAction.ENTER_SHORT):
         return EntryContextAssessment(True)
 
@@ -220,9 +212,6 @@ def assess_thesis_continuity(db, sig: Signal, now) -> EntryContextAssessment:
     _, latest, realized = candidates[0]
     previous_regime = latest.get("regime") or latest.get("market_regime")
     previous_mover = latest.get("mover_bias")
-
-    # Keep this history visible to telemetry/shadow analysis, but do not turn a
-    # prior loss into a hard block. A new signal is a new decision point.
     return EntryContextAssessment(
         True,
         ("thesis_history_observation: prior_same_day_outcome_available",),
