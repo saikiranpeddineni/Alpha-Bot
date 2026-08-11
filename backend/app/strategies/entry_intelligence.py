@@ -2,6 +2,9 @@
 
 This module uses evidence already present on the existing signal/context path.
 It does not change ML, Meta, PIS, risk, or execution thresholds.
+
+The guiding principle is evidence over emotion: prior outcomes are context,
+not a permanent veto. Current market evidence remains authoritative.
 """
 from __future__ import annotations
 
@@ -163,7 +166,14 @@ def assess_entry_context(sig: Signal, df: pd.DataFrame, regime: Regime | str | N
 
 
 def assess_thesis_continuity(db, sig: Signal, now) -> EntryContextAssessment:
-    """Block repeated same-session negative theses unless materially new evidence exists."""
+    """Use prior outcomes as adaptive evidence, never as an emotional hard veto.
+
+    The engine already has contextual expectancy/ML adaptation for historical
+    performance. This function therefore records the latest same-day outcome
+    as evidence but does not automatically block a new candidate merely because
+    an earlier attempt lost. A current thesis must be judged by current market
+    evidence; otherwise a losing trade would create path-dependent behavior.
+    """
     if db is None or sig.action not in (SignalAction.ENTER_LONG, SignalAction.ENTER_SHORT):
         return EntryContextAssessment(True)
 
@@ -208,49 +218,19 @@ def assess_thesis_continuity(db, sig: Signal, now) -> EntryContextAssessment:
 
     candidates.sort(key=lambda item: item[0], reverse=True)
     _, latest, realized = candidates[0]
-    if realized >= 0:
-        return EntryContextAssessment(True)
-
     previous_regime = latest.get("regime") or latest.get("market_regime")
-    if previous_regime and current_regime and str(previous_regime) != str(current_regime):
-        return EntryContextAssessment(True)
-
     previous_mover = latest.get("mover_bias")
-    if previous_mover and sig.mover_bias and previous_mover != sig.mover_bias:
-        return EntryContextAssessment(True)
 
-    fresh_news = (
-        getattr(sig, "news_context_available", False)
-        and getattr(sig, "news_age_seconds", None) is not None
-        and sig.news_age_seconds <= 1800
-        and float(getattr(sig, "news_confidence", 0.0) or 0.0) >= 0.70
-        and getattr(sig, "news_catalyst", None) in {"financing", "regulatory", "earnings", "corporate"}
-    )
-    news_supports_side = (
-        (sig.side == "long" and getattr(sig, "news_direction", "neutral") == "bullish")
-        or (sig.side == "short" and getattr(sig, "news_direction", "neutral") == "bearish")
-    )
-    if fresh_news and news_supports_side:
-        return EntryContextAssessment(
-            True,
-            ("thesis_continuity_overridden: fresh_material_catalyst_supports_new_thesis",),
-            {
-                "previous_realized_r": realized,
-                "previous_regime": previous_regime,
-                "current_regime": current_regime,
-                "news_catalyst": sig.news_catalyst,
-                "news_confidence": sig.news_confidence,
-            },
-        )
-
+    # Keep this history visible to telemetry/shadow analysis, but do not turn a
+    # prior loss into a hard block. A new signal is a new decision point.
     return EntryContextAssessment(
-        False,
-        ("thesis_continuity_conflict: latest_same_day_same_direction_thesis_was_negative",),
+        True,
+        ("thesis_history_observation: prior_same_day_outcome_available",),
         {
             "previous_realized_r": realized,
             "previous_regime": previous_regime,
             "current_regime": current_regime,
             "previous_mover_bias": previous_mover,
-            "current_mover_bias": sig.mover_bias,
+            "current_mover_bias": getattr(sig, "mover_bias", None),
         },
     )
