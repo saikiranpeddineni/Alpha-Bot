@@ -1,5 +1,8 @@
 """Tests for issue 049 — scanner shortlist caching."""
 from __future__ import annotations
+from app.config import RiskConfig
+from app.config import Settings
+
 import pytest
 import asyncio
 from datetime import timedelta, datetime, UTC
@@ -85,14 +88,14 @@ async def test_scanner_persists_discovery_on_datamanager():
     with tempfile.TemporaryDirectory() as tmp:
         data_manager = DataManager(mock_provider, Path(tmp) / "test.db")
         # Run Scanner 1
-        scanner1 = MarketScanner(data_manager, ["SPY"])
+        scanner1 = MarketScanner(data_manager, ["SPY"], risk_config=RiskConfig())
         symbols1 = await scanner1._stage1_symbols()
         assert len(symbols1) == 2
         assert mock_provider.discover_assets.call_count == 1
         assert mock_provider.get_quotes.call_count == 1
 
         # Run Scanner 2 (new instance, same DataManager)
-        scanner2 = MarketScanner(data_manager, ["SPY"])
+        scanner2 = MarketScanner(data_manager, ["SPY"], risk_config=RiskConfig())
         symbols2 = await scanner2._stage1_symbols()
         assert len(symbols2) == 2
         assert mock_provider.discover_assets.call_count == 1  # unchanged

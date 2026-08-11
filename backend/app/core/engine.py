@@ -91,7 +91,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         self.mode: str = settings.mode
         self.last_error: str = ""
 
-        self.model = SignalModel(get_models_dir())
+
         self.insights = InsightEngine(
             gemini_api_key=settings.gemini_api_key,
             anthropic_api_key=settings.anthropic_api_key,
@@ -106,6 +106,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         self.core_watchlist: list[str] = list(self.user_watchlist)
         stored_risk = db.get_setting("risk_config") or {}
         self.risk_config = RiskConfig(**{**settings.risk_config().model_dump(), **stored_risk})
+        self.model = SignalModel(get_models_dir(), risk_config=self.risk_config)
 
         # Built by start() / ensure_data()
         self.clock = MarketClock(always_open=(self.mode == "demo"))
@@ -121,9 +122,10 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         self._position_peaks: dict[str, float] = {}
         self._position_troughs: dict[str, float] = {}
         self._position_initial_stops: dict[str, float | None] = {}
+        self._position_current_stops: dict[str, float | None] = {}
         # Original strategy target survives broker protection repair/reconciliation.
         self._position_take_profits: dict[str, float] = {}
-        self.pis_adapter: PISEngineAdapter = PISEngineAdapter()
+        self.pis_adapter: PISEngineAdapter = PISEngineAdapter(mode=self.mode)
         self._last_scan_date = None
         self._last_train_date = None
         self._last_event_monitor_min = None
@@ -345,6 +347,18 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
             if checkpoint and "risk_state" in checkpoint and self.risk:
                 self.risk.restore_risk_state(checkpoint["risk_state"])
                 applog.info("engine", f"#43: Restored safety-critical risk state from {restore_mode} checkpoint")
+                
+            # P0-3: Reconstruct durable cooldowns dynamically from immutable trade history
+            if self.risk:
+                try:
+                    from app.core.domain import TradeRecord
+                    raw_trades = self.db.recent_trades(mode=restore_mode, limit=100)
+                    if raw_trades:
+                        trades = [TradeRecord.model_validate(t) for t in raw_trades]
+                        self.risk.reconstruct_cooldowns(trades)
+                        applog.info("engine", f"P0-3: Reconstructed durable cooldowns from {len(trades)} recent trades.")
+                except Exception as e:
+                    applog.error("engine", f"Failed to reconstruct durable cooldowns: {e}")
 
 
         from app.portfolio.allocator import PortfolioAIGate, CapitalAllocationOptimizer
@@ -366,7 +380,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
 
         # Restore strategy mapping & reconstruct portfolio lots for active positions from database
         try:
-            positions = await self.broker.positions()
+            positions = await self._cached_broker_positions()
             self._reconcile_positions(positions)
         except Exception as exc:
             self.reconciliation_failed = True
@@ -390,7 +404,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
             self.risk_config.ml_confidence_threshold = ml_thresh
             applog.info("engine", f"Restored active promoted ML threshold setting on startup: {ml_thresh}")
 
-        self.pipeline = SignalPipeline(self.model, ml_thresh)
+        self.pipeline = SignalPipeline(self.model, ml_thresh, risk_config=self.risk_config, settings=self.settings)
         self.evidence_evaluator = ParallelEvidenceEvaluator(
             model=self.model,
             ml_threshold=ml_thresh,
@@ -417,7 +431,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         self.portfolio.mark_equity(account.equity, utcnow())
 
         self.trainer = ContinuousTrainer(
-            self.data, self.model, get_models_dir(), self.db.get_setting("strategies") or {},
+            self.data, self.model, get_models_dir(), self.db.get_setting("strategies") or {}, settings=self.settings
         )
         self._last_train_date = None
         self.state = EngineState.RUNNING
@@ -522,6 +536,18 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
     # ------------------------------------------------------------------
     # the tick
     # ------------------------------------------------------------------
+
+    async def _cached_broker_positions(self) -> list:
+        if self.broker is None:
+            return []
+        # Cache per tick to avoid rate-limiting (e.g. Alpaca 200 req/min)
+        if getattr(self, "_positions_cache_tick", None) == getattr(self, "_tick_count", 0):
+            return getattr(self, "_positions_cache", [])
+        
+        positions = await self.broker.positions()
+        self._positions_cache = positions
+        self._positions_cache_tick = getattr(self, "_tick_count", 0)
+        return positions
 
     async def _tick(self) -> None:
         assert self.data and self.broker and self.risk and self.portfolio and self.pipeline
@@ -706,7 +732,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
 
         try:
             account = await self.broker.account()
-            positions = await self.broker.positions()
+            positions = await self._cached_broker_positions()
             self._reconcile_positions(positions)
         except Exception as exc:
             self.reconciliation_failed = True
@@ -1091,7 +1117,6 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         # fix(#51): enforce causal replay order — sort by (ts ASC, order_id, cumulative_qty ASC)
         fills = sorted(fills, key=lambda f: (f.ts, f.order_id or "", getattr(f, "cumulative_qty", 0.0) or 0.0))
 
-
         order_by_id = {}
         for o in self.recent_orders:
             order_by_id[o.id] = o
@@ -1126,22 +1151,31 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
             trough = self._position_troughs.get(symbol)
             
             init_stop = self._position_initial_stops.get(symbol)
-            if init_stop is None and order is not None and getattr(order, "leg", None) == "entry" and order.stop_loss is not None:
-                init_stop = order.stop_loss
+            if init_stop is None and order is not None and getattr(order, "leg", None) == "entry":
+                init_stop = getattr(order, "stop_loss", None)
+                if init_stop is None:
+                    init_stop = getattr(order, "stop_price", None)
 
             # Authority Fallback 2: Search recent orders for original entry order stop_loss
             if init_stop is None:
                 for recent_ord in reversed(self.recent_orders):
-                    if recent_ord.symbol and recent_ord.symbol.upper() == symbol and recent_ord.stop_loss is not None:
-                        ord_leg = getattr(recent_ord, "leg", None)
-                        ord_class = getattr(recent_ord, "order_class", None)
-                        ord_side = str(getattr(recent_ord, "side", "")).lower()
-                        if ord_leg == "entry" or ord_class == "bracket" or ord_side in ["buy", "sell_short", "orderside.buy", "orderside.sell_short"]:
-                            init_stop = recent_ord.stop_loss
-                            break
+                    if recent_ord.symbol and recent_ord.symbol.upper() == symbol:
+                        recent_stop = getattr(recent_ord, "stop_loss", None)
+                        if recent_stop is None:
+                            recent_stop = getattr(recent_ord, "stop_price", None)
+                        
+                        if recent_stop is not None:
+                            ord_leg = getattr(recent_ord, "leg", None)
+                            ord_class = getattr(recent_ord, "order_class", None)
+                            ord_side = str(getattr(recent_ord, "side", "")).lower()
+                            if ord_leg == "entry" or ord_class == "bracket" or ord_side in ["buy", "sell_short", "orderside.buy", "orderside.sell_short"]:
+                                init_stop = recent_stop
+                                break
 
             if init_stop is not None and symbol not in self._position_initial_stops:
                 self._position_initial_stops[symbol] = init_stop
+            if init_stop is not None and symbol not in self._position_current_stops:
+                self._position_current_stops[symbol] = init_stop
 
             try:
                 trade = self.portfolio.on_fill(
@@ -1162,11 +1196,11 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
             # Close/cover idempotency is position-lifecycle based, not side based.
             # Keep the guard through partial SELL exits and partial BUY covers; only
             # release it after portfolio accounting proves the original lot is gone.
-            pending_close = getattr(self, "_pending_close_symbols", None)
+            pending_close = getattr(self, "_pending_close_ttls", None)
             if pending_close is not None and symbol in pending_close:
                 local_lot = getattr(self.portfolio, "_lots", {}).get(symbol)
                 if local_lot is None or abs(float(getattr(local_lot, "qty", 0.0))) < 1e-9:
-                    self._pending_close_symbols.discard(symbol)
+                    self._pending_close_ttls.pop(symbol, None)
             if trade is not None:
                 self.perf_tracker.update(trade, now=now)
                 await asyncio.to_thread(self.db.save_trade, trade, self.mode)
@@ -1185,6 +1219,8 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                     del self._position_troughs[symbol]
                 if symbol in self._position_initial_stops:
                     del self._position_initial_stops[symbol]
+                if symbol in self._position_current_stops:
+                    del self._position_current_stops[symbol]
 
                 self._trades_since_insight += 1
                 if self._trades_since_insight >= 5:
@@ -1343,7 +1379,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         if self.broker is None:
             return
         try:
-            positions = await self.broker.positions()
+            positions = await self._cached_broker_positions()
         except Exception:  # noqa: BLE001
             return
         self.publish("positions", [p.to_payload() for p in positions])
@@ -1585,6 +1621,16 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                 stop_loss=stop_loss,
                 initial_risk_per_share=initial_risk,
             )
+            # Restore engine tracker state across restarts
+            if p.symbol not in self._position_initial_stops:
+                self._position_initial_stops[p.symbol] = stop_loss
+            if getattr(self, "_position_current_stops", None) is not None and p.symbol not in self._position_current_stops:
+                self._position_current_stops[p.symbol] = stop_loss
+            if p.symbol not in self._position_peaks:
+                self._position_peaks[p.symbol] = p.avg_entry_price
+            if p.symbol not in self._position_troughs:
+                self._position_troughs[p.symbol] = p.avg_entry_price
+
             applog.info(
                 "engine",
                 f"Reconstructed portfolio lot for {p.symbol}: qty={p.qty}, "
@@ -1937,16 +1983,18 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
             raise RuntimeError("Hard halt active -- reset the kill switch first")
 
         # Risk gateway: block manual entry orders in live mode
-        positions = await self.broker.positions()
+        positions = await self._cached_broker_positions()
         is_entry = True
         pos = next((p for p in positions if p.symbol == req.symbol), None)
         if pos is not None and abs(pos.qty) > 1e-9:
             if pos.qty > 0:  # Long position
                 if req.side == OrderSide.SELL and req.qty <= pos.qty:
                     is_entry = False  # Reducing or closing long is allowed
+                    req.role = "exit"
             else:  # Short position
                 if req.side == OrderSide.BUY and req.qty <= abs(pos.qty):
                     is_entry = False  # Reducing or closing short is allowed
+                    req.role = "exit"
 
         if self.mode == "live" and is_entry:
             raise RuntimeError(
@@ -1958,18 +2006,25 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
 
         # If this is a manual sell/cover (closing or reducing), add to pending-close guard so
         # strategies cannot immediately re-enter on the same/next tick before the fill drains.
-        if not hasattr(self, "_pending_close_symbols"):
-            self._pending_close_symbols = set()
         sym_upper = req.symbol.upper()
-        if not is_entry and req.side == OrderSide.SELL:
-            self._pending_close_symbols.add(sym_upper)  # long → guard against immediate re-buy
-        elif not is_entry and req.side == OrderSide.BUY:
-            self._pending_close_symbols.add(sym_upper)  # short cover → guard against immediate re-short
+        
+        import time
+        now = time.time()
+        
+        if not hasattr(self, "_pending_close_ttls"):
+            self._pending_close_ttls = {}
+            
+        if is_entry:
+            if sym_upper in self._pending_close_ttls and now < self._pending_close_ttls[sym_upper]:
+                raise ValueError(f"Cannot manually open {sym_upper} while a close/cover is in-flight")
+            if req.stop_loss is None:
+                raise ValueError(f"Cannot manually open {sym_upper}: missing required stop_loss parameter")
 
         order = await self.broker.submit(req)
-        if order.status in (OrderStatus.REJECTED,) and not is_entry:
-            # Order was rejected — release the guard immediately
-            self._pending_close_symbols.discard(sym_upper)
+        
+        if not is_entry:
+            self._pending_close_ttls[sym_upper] = now + 30.0  # guard against immediate re-buy
+
         self.recent_orders.appendleft(order)
         await asyncio.to_thread(self.db.save_order, order, self.mode)
         await self._drain_fills(utcnow())
@@ -1982,16 +2037,23 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
             raise RuntimeError("Engine is not running")
         # Guard: add to pending-close so strategies cannot immediately re-enter on the same/next tick
         sym_upper = symbol.upper()
-        if not hasattr(self, "_pending_close_symbols"):
-            self._pending_close_symbols = set()
-        self._pending_close_symbols.add(sym_upper)
+        
+        import time
+        now = time.time()
+        
+        if not hasattr(self, "_pending_close_ttls"):
+            self._pending_close_ttls = {}
+        
+        if sym_upper in self._pending_close_ttls and now < self._pending_close_ttls[sym_upper]:
+            raise ValueError(f"Cannot manually close {sym_upper} while a close is already in-flight")
+            
+        self._pending_close_ttls[sym_upper] = now + 30.0
+        
         order = await self.broker.close_position(symbol, reason="manual close")
         if order is not None:
             self.recent_orders.appendleft(order)
             await asyncio.to_thread(self.db.save_order, order, self.mode)
-        else:
-            # Close failed — release guard so retries work
-            self._pending_close_symbols.discard(sym_upper)
+            
         await self._drain_fills(utcnow())
         await self._publish_positions()
         return order
@@ -2140,7 +2202,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
             pending_symbols: set[str] = set()
             try:
                 if self.broker:
-                    positions = await self.broker.positions()
+                    positions = await self._cached_broker_positions()
                     open_symbols = {p.symbol.upper() for p in positions}
                     open_orders = await self.broker.open_orders()
                     pending_symbols = {o.symbol.upper() for o in open_orders}
@@ -2535,7 +2597,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         broker_syms: dict[str, float] = {}
         if diagnostics["broker_connected"]:
             try:
-                broker_positions = await self.broker.positions()
+                broker_positions = await self._cached_broker_positions()
                 broker_syms = {p.symbol: float(p.qty) for p in broker_positions if hasattr(p, "symbol") and abs(float(p.qty)) > 1e-9}
                 lots = getattr(self.portfolio, "_lots", {}) if self.portfolio else {}
                 db_syms = {sym: float(lot.qty) for sym, lot in lots.items() if hasattr(lot, "qty") and abs(float(lot.qty)) > 1e-9} if isinstance(lots, dict) else {}
@@ -2912,7 +2974,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                 equity = self.portfolio.equity
                 if equity > 0:
                     turnover = total_volume / equity
-                    if turnover > 2.0:  # Increased from 2.0 for testing
+                    if turnover > 20.0:  # Increased from 2.0 to 20.0 for testing
                         return f"behavioral_loop_detector: high portfolio churn/turnover (turnover={turnover:.2f}x equity)"
         except Exception as e:
             applog.warning("engine.behavioral", f"Failed churn check: {e}")

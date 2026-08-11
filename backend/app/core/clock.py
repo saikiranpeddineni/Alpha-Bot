@@ -35,6 +35,9 @@ class MarketClock:
 
     @staticmethod
     def to_et(dt: datetime) -> datetime:
+        if dt.tzinfo is None:
+            # Enforce UTC for any naive datetime to prevent system-local timezone corruption
+            dt = dt.replace(tzinfo=UTC)
         return dt.astimezone(ET)
 
     def is_trading_day(self, d: date) -> bool:

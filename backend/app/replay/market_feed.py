@@ -41,10 +41,9 @@ class ReplayMarketFeed:
         self.data_path = data_path or (DATA_DIR / "replay_bars.jsonl")
         self.symbols: set[str] = set()
 
-    async def ensure_data(self, start_date: str, end_date: str, symbols: list[str]) -> None:
+    async def ensure_data(self, start_date: str, end_date: str, symbols: list[str], settings=None) -> None:
         """Download missing 1-minute historical data into the replay JSONL cache."""
         import shutil
-        from app.config import get_settings
         from app.data.alpaca_data import AlpacaDataProvider
         from app.core.applog import applog
         from datetime import timedelta
@@ -95,7 +94,8 @@ class ReplayMarketFeed:
 
         applog.info("replay.feed", f"Downloading missing historical data for {len(missing_symbols)} symbols: {start_date} to {end_date}")
         
-        settings = get_settings()
+        if settings is None:
+            raise ValueError("ReplayMarketFeed.ensure_data requires explicit settings injection (Phase 0 Config Parity).")
         try:
             provider = AlpacaDataProvider(api_key=settings.alpaca_api_key, api_secret=settings.alpaca_api_secret)
         except RuntimeError:

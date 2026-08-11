@@ -69,7 +69,7 @@ class ReplayRuntime:
                     pass
                 target_symbols = list(set(base_watchlist) | live_symbols)
 
-            await self.feed.ensure_data(start_date, end_date, target_symbols)
+            await self.feed.ensure_data(start_date, end_date, target_symbols, settings=self.settings)
             
             bars = self.feed.load_bars(start_date, end_date, target_symbols)
             
@@ -179,7 +179,7 @@ class ReplayRuntime:
             
             if True:
                 engine = TradingEngine(self.settings, replay_db, runtime=TradingRuntime(clock=clock, broker=broker, data=data, ledger=ledger))
-                engine.model = SignalModel(replay_models)
+                engine.model = SignalModel(replay_models, risk_config=engine.risk_config)
                 await self._initialize_engine(engine, clock, broker, data, ledger, replay_models)
             by_ts: dict[datetime, list[dict[str, Any]]] = defaultdict(list)
             for bar in bars: by_ts[bar["ts_dt"]].append(bar)
@@ -250,7 +250,7 @@ class ReplayRuntime:
         active = engine.db.get_setting("active_policy_snapshot")
         ml = float(active["ml_threshold"]) if active and "ml_threshold" in active else float(engine.db.get_setting("ml_threshold") or engine.risk_config.ml_confidence_threshold)
         engine.risk_config.ml_confidence_threshold = ml
-        engine.pipeline = SignalPipeline(engine.model, ml)
+        engine.pipeline = SignalPipeline(engine.model, ml, risk_config=engine.risk_config, settings=engine.settings)
         engine.evidence_evaluator = ParallelEvidenceEvaluator(model=engine.model, ml_threshold=ml, meta_label_engine=engine.pipeline.meta_label_engine, trade_score_engine=engine.pipeline.trade_score_engine)
 
         for strategy in engine.strategies:
@@ -306,8 +306,12 @@ class ReplayRuntime:
             rel = str(path.relative_to(models_path)).replace("\\", "/")
             mtime = path.stat().st_mtime
             if mtime > cutoff_epoch:
-                excluded.append({"path": rel, "available_at": datetime.fromtimestamp(mtime, timezone.utc).isoformat()})
-                path.unlink()
+                # Bypass mtime exclusion for meta and specialist models to allow testing freshly trained models
+                if "meta/" in rel or "specialists/" in rel:
+                    kept.append(rel)
+                else:
+                    excluded.append({"path": rel, "available_at": datetime.fromtimestamp(mtime, timezone.utc).isoformat()})
+                    path.unlink()
             else:
                 kept.append(rel)
         # Empty future-generation/candidate directories are irrelevant and can confuse

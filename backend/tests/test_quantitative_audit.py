@@ -1,6 +1,8 @@
 """Regression tests verifying quantitative audit defect fixes and parity checks."""
 
 from __future__ import annotations
+from app.config import RiskConfig
+from app.config import Settings
 
 import json
 import pathlib
@@ -364,7 +366,7 @@ def test_stage5_conflict_resolution_invariant():
     )
     mock_model._meta_label_engine = mock_meta
     
-    pipeline = SignalPipeline(model=mock_model, ml_threshold=0.55)
+    pipeline = SignalPipeline(model=mock_model, ml_threshold=0.55, risk_config=RiskConfig(), settings=Settings())
     pipeline.meta_label_engine = mock_meta
     pipeline.trade_score_engine.compute = MagicMock(side_effect=[80.0, 90.0])
     

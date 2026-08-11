@@ -140,22 +140,23 @@ class MarketScanner:
             data_manager=data_manager,
             universe_symbols=list(CANDIDATE_POOL),
         )
-        from app.config import get_settings
-        cfg = self.risk_config or get_settings().risk_config()
-        self._gap_scanner = PreMarketGapScanner(data_manager=data_manager, min_price=cfg.min_price)
+        if risk_config is None:
+            raise ValueError("MarketScanner requires explicit risk_config injection (Phase 0 Config Parity).")
+        self.risk_config = risk_config
+        self._gap_scanner = PreMarketGapScanner(data_manager=data_manager, min_price=risk_config.min_price)
 
     async def _stage1_symbols(self, as_of: datetime | None = None) -> list[str]:
         """Resolve bounded Stage-1 input without current-data replay leakage."""
         provider = self.data.provider
         discovery_supported = bool(getattr(provider, "supports_asset_discovery", False))
         acquire_discovery = None
-        if as_of is None and discovery_supported:
+        if discovery_supported:
             discovery = getattr(self, "_discovery", None)
             if discovery is None:
                 discovery = getattr(self.data, "_discovery", None)
             if discovery is None:
                 discovery = DiscoveryCoordinator(
-                    provider, feed="iex", asset_cache_ttl=timedelta(hours=6),
+                    provider, feed="iex", asset_cache_ttl=timedelta(minutes=30),
                     batch_size=200, request_budget=10, shortlist_limit=50,
                 )
                 self._discovery = discovery
@@ -167,15 +168,14 @@ class MarketScanner:
         )
         symbols_list = list(symbols)
 
-        # Inject gap movers and intraday top gainers/losers only in live/production mode
-        if as_of is None:
-            try:
-                dynamic_movers = await self._gap_scanner.get_gap_movers()
-                if dynamic_movers:
-                    applog.info("scanner", f"[Discovery] Injected {len(dynamic_movers)} dynamic movers into Stage 1 pool.")
-                    symbols_list.extend(dynamic_movers)
-            except Exception as exc:
-                applog.error("scanner", f"[Discovery] Failed to fetch dynamic movers: {exc}")
+        # Inject gap movers and intraday top gainers/losers in both live and shadow modes
+        try:
+            dynamic_movers = await self._gap_scanner.get_gap_movers()
+            if dynamic_movers:
+                applog.info("scanner", f"[Discovery] Injected {len(dynamic_movers)} dynamic movers into Stage 1 pool.")
+                symbols_list.extend(dynamic_movers)
+        except Exception as exc:
+            applog.error("scanner", f"[Discovery] Failed to fetch dynamic movers: {exc}")
 
         return sorted(list(set(symbols_list)))
 
@@ -328,8 +328,7 @@ class MarketScanner:
                         pass
                     record["price"] = price
 
-                    from app.config import get_settings
-                    cfg = self.risk_config or get_settings().risk_config()
+                    cfg = self.risk_config
 
                     record["filter_price"] = {
                         "actual": price,

@@ -9,7 +9,6 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 from pydantic import BaseModel, Field, model_validator
-
 import contextvars
 from typing import Callable
 
@@ -79,6 +78,20 @@ class Signal(BaseModel):
     discovery_source: str | None = None
     scanner_score: float | None = None
     scanner_auc: float | None = None
+    mover_bias: str | None = None
+    mover_change_pct: float = 0.0
+    rs_score: float | None = None
+    news_sentiment: float | None = None
+    news_direction: str = "neutral"
+    news_confidence: float = 0.0
+    news_headline_count: int = 0
+    news_fresh_headline_count: int = 0
+    news_age_seconds: float | None = None
+    news_catalyst: str | None = None
+    news_context_available: bool = False
+    context_conflict_count: int = 0
+    context_conflict_reasons: list[str] = Field(default_factory=list)
+    thesis_continuity_blocked: bool = False
 
     @property
     def side(self) -> str:
@@ -87,11 +100,9 @@ class Signal(BaseModel):
         if self.action == SignalAction.ENTER_SHORT:
             return "short"
         return "exit"
-
     @property
     def ml_confidence(self) -> float | None:
         return self.ml_probability
-
     @property
     def trade_score(self) -> float | None:
         return float(self.score) * 100.0 if self.score is not None else None
@@ -109,6 +120,7 @@ class OrderRequest(BaseModel):
     client_order_id: str = Field(default_factory=new_id)
     strategy: str = "manual"
     reason: str = ""
+    role: str = "entry"
     time_in_force: str = "day"
     signal_timestamp_utc: datetime | None = None
     decision_bar_timestamp_utc: datetime | None = None

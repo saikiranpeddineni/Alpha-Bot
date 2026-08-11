@@ -102,18 +102,20 @@ class DurableTradingEngine(TradingEngine):
 
     async def _close_position_guarded(self, symbol: str, reason: str, qty: float | None = None) -> None:
         """Canonical duplicate-close guard plus immediate close-order persistence."""
-        if not hasattr(self, "_pending_close_symbols"):
-            self._pending_close_symbols = set()
-        if symbol in self._pending_close_symbols or symbol in self._flattening_symbols:
+        import time
+        if not hasattr(self, "_pending_close_ttls"):
+            self._pending_close_ttls = {}
+        
+        now = time.time()
+        if symbol in self._pending_close_ttls and now < self._pending_close_ttls[symbol]:
             applog.debug("engine", f"{symbol}: skipping duplicate close — close already in-flight (#45)")
             return
 
         self._flattening_symbols.add(symbol)
-        self._pending_close_symbols.add(symbol)
+        self._pending_close_ttls[symbol] = now + 30.0
         try:
             order = await self.broker.close_position(symbol, reason=reason, qty=qty)
             if order is None:
-                self._pending_close_symbols.discard(symbol)
                 return
             self.recent_orders.appendleft(order)
             self.db.save_order(order, self.mode)

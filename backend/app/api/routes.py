@@ -232,6 +232,7 @@ class ManualOrderBody(BaseModel):
     qty: float = Field(gt=0, le=100_000)
     order_type: OrderType = OrderType.MARKET
     limit_price: float | None = Field(default=None, gt=0)
+    stop_loss: float | None = Field(default=None, gt=0)
 
 
 @router.post("/orders")
@@ -245,6 +246,7 @@ async def submit_order(body: ManualOrderBody, request: Request) -> dict:
         qty=body.qty,
         order_type=body.order_type,
         limit_price=body.limit_price,
+        stop_loss=body.stop_loss,
         strategy="manual",
         reason="manual order",
     )
@@ -364,10 +366,10 @@ async def run_trainer(request: Request) -> dict:
             from app.ai.trainer import ContinuousTrainer
             from app.config import get_models_dir
             engine.trainer = ContinuousTrainer(
-                data,
-                engine.model,
-                get_models_dir(),
-                engine.db.get_setting("strategies") or {},
+                data=engine.data,
+                model=engine.model,
+                model_dir=get_models_dir(),
+                settings=engine.settings,
             )
         except Exception as exc:
             raise HTTPException(status_code=503, detail=f"Trainer not initialized and failed to start: {exc}") from exc
@@ -470,9 +472,10 @@ async def post_backtest(body: BacktestBody, request: Request) -> dict:
         )
         try:
             result: BacktestResult = await run_backtest(
-                data,
+                engine.data,
                 engine.model,
                 params,
+                settings=engine.settings,
                 on_progress=lambda frac: hub.publish("backtest_progress", {"progress": round(frac, 3)}),
             )
         except ValueError as exc:

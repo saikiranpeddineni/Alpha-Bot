@@ -11,7 +11,7 @@ from app.strategies.memory import _canonical_realized_r
 from app.config import DATA_DIR
 
 
-def generate_eod_reflection_report(db: Database, now: datetime | None = None, engine: Any | None = None) -> str:
+def generate_eod_reflection_report(db: Database, settings, now: datetime | None = None, engine: Any | None = None) -> str:
     """Analyzes the performance of Champion vs active Challengers and generates a comparative EOD reflection report.
     If a Challenger satisfies statistical promotion rules, automatically promotes it to production.
     """
@@ -52,20 +52,18 @@ def generate_eod_reflection_report(db: Database, now: datetime | None = None, en
         return hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:16]
 
     # Get active champion config fingerprint
-    def get_champion_config_fingerprint(db_inst) -> str:
+    def get_champion_config_fingerprint(db_inst, settings_obj) -> str:
         snapshot = db_inst.get_setting("active_policy_snapshot")
         if not snapshot:
-            from app.config import get_settings
-            settings = get_settings()
             snapshot = {
                 "policy_id": "champion",
-                "ml_threshold": settings.ml_confidence_threshold,
+                "ml_threshold": settings_obj.ml_confidence_threshold,
                 "score_threshold_offset": 0.0,
-                "risk_config": settings.risk_config().model_dump()
+                "risk_config": settings_obj.risk_config().model_dump()
             }
         return get_config_fingerprint(snapshot)
 
-    champion_config_fp = get_champion_config_fingerprint(db)
+    champion_config_fp = get_champion_config_fingerprint(db, settings)
 
     # 1. Global Champion Stats (for the baseline report view)
     champ_global_total = 0
@@ -361,9 +359,7 @@ def generate_eod_reflection_report(db: Database, now: datetime | None = None, en
     # 3. Portfolio-level Virtual Simulation Comparison
     try:
         from app.portfolio.simulator import VirtualPortfolioSimulator, SimulationConfig
-        from app.config import get_settings
         
-        settings = get_settings()
         risk_cfg = settings.risk_config()
         sim_cfg = SimulationConfig(
             starting_capital=settings.paper_starting_cash or 100000.0,

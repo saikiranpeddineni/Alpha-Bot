@@ -104,7 +104,10 @@ def _sigmoid(z: float) -> float:
 
 class _LegacySignalModel:
 
-    def __init__(self, models_dir: Path) -> None:
+    def __init__(self, models_dir: Path, risk_config=None) -> None:
+        if risk_config is None:
+            raise ValueError("SignalModel requires explicit risk_config injection (Phase 0 Config Parity).")
+        self.risk_config = risk_config
         self.models_dir = models_dir
         self.models_dir.mkdir(parents=True, exist_ok=True)
         self._model_long = None
@@ -246,8 +249,7 @@ class _LegacySignalModel:
         has been trained, it will be used instead of the global adaptive model.
         """
         if self.is_trained:
-            from app.config import get_settings
-            w_adaptive = get_settings().risk_config().adaptive_model_weight
+            w_adaptive = self.risk_config.adaptive_model_weight
             w_global = 1.0 - w_adaptive
             x = pd.DataFrame([features[FEATURE_COLUMNS].to_numpy(dtype=float)], columns=FEATURE_COLUMNS)
             p_global = float(predict_proba_safe(self._model_long, x)[0, 1])
@@ -265,8 +267,7 @@ class _LegacySignalModel:
     def p_down(self, features: pd.Series, regime_key: str | None = None) -> float:
         """Probability of a favorable downward move for the latest bar."""
         if self._model_short is not None:
-            from app.config import get_settings
-            w_adaptive = get_settings().risk_config().adaptive_model_weight
+            w_adaptive = self.risk_config.adaptive_model_weight
             w_global = 1.0 - w_adaptive
             x = pd.DataFrame([features[FEATURE_COLUMNS].to_numpy(dtype=float)], columns=FEATURE_COLUMNS)
             p_global = float(predict_proba_safe(self._model_short, x)[0, 1])
@@ -370,8 +371,7 @@ class _LegacySignalModel:
         self, features: pd.Series | None, action: SignalAction, symbol: str | None = None, regime_key: str | None = None
     ) -> ScoreActionResult:
         """Probability the move is favorable for the proposed action, with detailed routing metadata."""
-        from app.config import get_settings
-        min_auc = get_settings().risk_config().min_specialist_auc
+        min_auc = self.risk_config.min_specialist_auc
 
         if features is None:
             return ScoreActionResult(0.5, "BASE", "NO_ARTIFACT", None, min_auc, "features is None")
@@ -753,10 +753,10 @@ from app.ai.generation import AtomicGenerationStore, TrainingCoordinator
 class SignalModel(_LegacySignalModel):
     """Signal model with one writer coordinator and manifest-authoritative globals."""
 
-    def __init__(self, models_dir):
+    def __init__(self, models_dir, risk_config=None):
         self._training_coordinator = TrainingCoordinator()
         self._generation_store = AtomicGenerationStore(models_dir)
-        super().__init__(models_dir)
+        super().__init__(models_dir, risk_config=risk_config)
 
     def __deepcopy__(self, memo):
         """Backtests receive isolated model state without copying thread locks."""
@@ -811,13 +811,15 @@ class SignalModel(_LegacySignalModel):
             return self._heuristic_p_up(features)
         x = pd.DataFrame([features[FEATURE_COLUMNS].to_numpy(dtype=float)], columns=FEATURE_COLUMNS)  # noqa: F405
         p_global = float(predict_proba_safe(global_long, x)[0, 1])  # noqa: F405
+        w_adaptive = self.risk_config.adaptive_model_weight
+        w_global = 1.0 - w_adaptive
         reg_model = self._regime_adaptive_long.get(regime_key or "")
         if reg_model is not None:
             p_adaptive = float(predict_proba_safe(reg_model, x)[0, 1])  # noqa: F405
-            return 0.70 * p_global + 0.30 * p_adaptive
+            return w_global * p_global + w_adaptive * p_adaptive
         if self._adaptive_long is not None:
             p_adaptive = float(predict_proba_safe(self._adaptive_long, x)[0, 1])  # noqa: F405
-            return 0.70 * p_global + 0.30 * p_adaptive
+            return w_global * p_global + w_adaptive * p_adaptive
         return p_global
 
     def p_down(self, features, regime_key=None) -> float:
@@ -827,13 +829,15 @@ class SignalModel(_LegacySignalModel):
             return 1.0 - self.p_up(features)
         x = pd.DataFrame([features[FEATURE_COLUMNS].to_numpy(dtype=float)], columns=FEATURE_COLUMNS)  # noqa: F405
         p_global = float(predict_proba_safe(global_short, x)[0, 1])  # noqa: F405
+        w_adaptive = self.risk_config.adaptive_model_weight
+        w_global = 1.0 - w_adaptive
         reg_model = self._regime_adaptive_short.get(regime_key or "")
         if reg_model is not None:
             p_adaptive = float(predict_proba_safe(reg_model, x)[0, 1])  # noqa: F405
-            return 0.70 * p_global + 0.30 * p_adaptive
+            return w_global * p_global + w_adaptive * p_adaptive
         if self._adaptive_short is not None:
             p_adaptive = float(predict_proba_safe(self._adaptive_short, x)[0, 1])  # noqa: F405
-            return 0.70 * p_global + 0.30 * p_adaptive
+            return w_global * p_global + w_adaptive * p_adaptive
         return p_global
 
     def train(self, *args, **kwargs) -> dict:

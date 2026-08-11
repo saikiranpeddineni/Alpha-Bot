@@ -15,14 +15,20 @@ from app.strategies import SignalPipeline, StrategyContext
 class TradingEnginePortfolioMixin:
     async def _close_position_guarded(self, symbol: str, reason: str, qty: float | None = None) -> None:
         """Close a position, skipping if a close order is already in-flight for this symbol."""
-        if not hasattr(self, "_pending_close_symbols"):
-            self._pending_close_symbols = set()
-        # fix(#45): also guard against concurrent per-tick flatten submissions
-        if symbol in self._pending_close_symbols or symbol in self._flattening_symbols:
+        import time
+        if not hasattr(self, "_pending_close_ttls"):
+            self._pending_close_ttls = {}
+
+        now = time.time()
+        # fix(#45): guard against concurrent per-tick flatten submissions, with a 30s TTL
+        # to handle ambiguous broker states without double-submitting
+        if symbol in self._pending_close_ttls and now < self._pending_close_ttls[symbol]:
             applog.debug("engine", f"{symbol}: skipping duplicate close — close already in-flight (#45)")
             return
+
         self._flattening_symbols.add(symbol)
-        self._pending_close_symbols.add(symbol)
+        self._pending_close_ttls[symbol] = now + 30.0  # Lock out retries for 30 seconds
+
         try:
             if qty is not None:
                 try:
@@ -31,18 +37,20 @@ class TradingEnginePortfolioMixin:
                     order = await self.broker.close_position(symbol, reason=reason)
             else:
                 order = await self.broker.close_position(symbol, reason=reason)
-            # If close failed immediately (None returned), release the guard so retries work
-            if order is None:
-                self._pending_close_symbols.discard(symbol)
+
+            # If close failed cleanly (e.g. rejected by broker quickly), release the guard so retries work.
+            # Ambiguous timeouts are intentionally covered by the TTL because the broker may have accepted
+            # the order even though the client did not receive a definitive response.
         finally:
             self._flattening_symbols.discard(symbol)
-            if qty is not None:
-                self._pending_close_symbols.discard(symbol)
 
+    def _reconcile_positions(self, positions: list[Position]) -> None:
+        """Synchronously reconcile local lots to authoritative broker positions.
 
-
-    async def _reconcile_positions(self, positions: list[Position]) -> None:
-        """Reconcile local lots to authoritative broker positions without erasing matching lot state."""
+        This method is intentionally synchronous because all current callers invoke it without
+        awaiting. The database calls used here are synchronous, and making this method async caused
+        the coroutine to be silently dropped, leaving broker/local/PIS state unreconciled.
+        """
         broker_symbols = {p.symbol for p in positions if abs(float(p.qty)) > 1e-9}
         for local_symbol in list(self.portfolio._lots):
             if local_symbol not in broker_symbols:
@@ -64,20 +72,18 @@ class TradingEnginePortfolioMixin:
 
             strat = "manual"
             if hasattr(self.broker, "_symbol_strategies"):
-                db_strat = await asyncio.to_thread(self.db.get_latest_entry_order_strategy, p.symbol, self.mode)
+                db_strat = self.db.get_latest_entry_order_strategy(p.symbol, self.mode)
                 if db_strat:
                     self.broker._symbol_strategies[p.symbol] = db_strat
                     strat = db_strat
                     applog.info("engine", f"Restored strategy '{db_strat}' for active position {p.symbol}")
 
             # Position ownership comes from the latest true ENTRY, never from a
-            # newer emergency/protective order.  This keeps UI attribution and
-            # strategy-specific exit management bound to the strategy that opened
-            # the surviving position.
-            entry_payload = await asyncio.to_thread(self.db.get_latest_entry_order_payload, p.symbol, self.mode)
+            # newer emergency/protective order.
+            entry_payload = self.db.get_latest_entry_order_payload(p.symbol, self.mode)
             if not isinstance(entry_payload, dict):
                 entry_payload = None
-            fallback_payload = await asyncio.to_thread(self.db.get_latest_order_payload, p.symbol, self.mode)
+            fallback_payload = self.db.get_latest_order_payload(p.symbol, self.mode)
             if not isinstance(fallback_payload, dict):
                 fallback_payload = None
             order_payload = entry_payload or fallback_payload
@@ -86,6 +92,7 @@ class TradingEnginePortfolioMixin:
                 p.strategy = strat
                 if hasattr(self.broker, "_symbol_strategies"):
                     self.broker._symbol_strategies[p.symbol] = strat
+
             stop_loss = None
             take_profit = None
             initial_risk = None
@@ -93,11 +100,6 @@ class TradingEnginePortfolioMixin:
             if order_payload:
                 stop_loss = order_payload.get("stop_loss")
                 take_profit = order_payload.get("take_profit")
-                # F-14 FIX: Use try/float() instead of isinstance(x, MagicMock) guards.
-                # The MagicMock check was the only reason unittest.mock was imported in
-                # production code. A safe float conversion handles all non-numeric values
-                # (including mock objects in tests) without test infrastructure in the
-                # production import graph.
                 try:
                     stop_loss = float(stop_loss) if stop_loss is not None else None
                 except (TypeError, ValueError):
@@ -118,11 +120,19 @@ class TradingEnginePortfolioMixin:
                     except Exception:
                         pass
 
-            # fix(#41): local DB stop_loss metadata is stored for initial lot tracking,
-            # but MUST NOT count as proof of authoritative broker-side protection.
+            # Local DB stop metadata is not proof of authoritative broker protection.
             if stop_loss is None or stop_loss <= 0:
-                applog.error("engine.risk", f"CRITICAL: Position {p.symbol} has no authoritative broker-side stop-loss! Flattening immediately.")
-                asyncio.create_task(self._close_position_guarded(p.symbol, reason="CRITICAL: Missing broker-side stop-loss", qty=abs(p.qty)))
+                applog.error(
+                    "engine.risk",
+                    f"CRITICAL: Position {p.symbol} has no authoritative broker-side stop-loss! Flattening immediately."
+                )
+                asyncio.create_task(
+                    self._close_position_guarded(
+                        p.symbol,
+                        reason="CRITICAL: Missing broker-side stop-loss",
+                        qty=abs(p.qty),
+                    )
+                )
                 stop_loss = 0.0
                 initial_risk = 0.0
 
@@ -141,4 +151,3 @@ class TradingEnginePortfolioMixin:
                 f"avg_price={p.avg_entry_price}, strategy={strat}, stop_loss={stop_loss}",
             )
         self.reconciliation_failed = False
-

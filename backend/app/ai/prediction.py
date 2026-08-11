@@ -868,8 +868,11 @@ class MetaLabelEngine:
 
     # Strategies that REQUIRE a trained MetaLabel model to pass.
     # If the model is absent, candidates are REJECTED (fail-closed).
-    # Strategies not listed here are BYPASSED when no model is available.
-    MANDATORY_STRATEGIES: frozenset = frozenset()
+    # All strategies are mandatory by default in Phase 4 safety rules.
+    @property
+    def MANDATORY_STRATEGIES(self) -> frozenset:
+        from app.strategies.base import REGISTRY
+        return frozenset(REGISTRY.keys())
 
     def __init__(self, models_dir: "Path") -> None:  # type: ignore[name-defined]
         from pathlib import Path as _Path

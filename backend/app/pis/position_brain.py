@@ -87,6 +87,7 @@ class PositionBrain:
 
             self._last_observation: PositionObservation = initial_observation
             self._last_timestamp: datetime = initial_observation.timestamp
+            self._last_observed_qty: float = abs(float(initial_observation.qty))
             self._current_stop_floor: float = initial_observation.initial_stop
             self._last_decision: Optional[PISDecision] = None
             self._is_closed: bool = False
@@ -187,6 +188,13 @@ class PositionBrain:
                     f"Time travel rejected: observation timestamp {obs.timestamp} < last timestamp {self._last_timestamp}"
                 )
 
+            observed_qty = abs(float(obs.qty))
+            # Scale-out state is confirmed by an observed position reduction, not by the
+            # PIS decision itself. Broker fill/reconciliation remains authoritative.
+            if observed_qty + 1e-9 < self._last_observed_qty:
+                self._has_scaled_out = True
+                self._runner_qualified = True
+
             # 3. Update profit memory (Priority 7)
             self._profit_memory = ProfitMemoryTracker.update(self._profit_memory, obs)
 
@@ -200,6 +208,7 @@ class PositionBrain:
             self._history.append(obs)
             self._last_observation = obs
             self._last_timestamp = obs.timestamp
+            self._last_observed_qty = observed_qty
 
             # 6. Evaluate and return decision
             return self._evaluate_internal(obs)
@@ -277,20 +286,10 @@ class PositionBrain:
             runner_probability=runner_prob,
         )
 
+        # A PARTIAL_EXIT is an execution intent. Do not mark scale-out state until
+        # the canonical broker/reconciliation path observes the reduced quantity.
         if decision.action == ExitAction.PARTIAL_EXIT:
-            self._has_scaled_out = True
             self._runner_qualified = True
-            # Recompute stop floor with runner mode active
-            target_stop = self.authority.protection_planner.compute_protection_floor(
-                obs=obs,
-                peak_r=peak_r,
-                health=health,
-                previous_floor=self._current_stop_floor,
-                allow_relaxation=False,
-                has_scaled_out=True,
-                predicted_max_r=predicted_max_r,
-            )
-            self._current_stop_floor = target_stop
 
         # 8. Autonomous Trade Brainstorming & Reasoning Telemetry (Quadrant 4)
         narrative = self.authority.reasoning_engine.generate_narrative(

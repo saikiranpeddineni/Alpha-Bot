@@ -1,3 +1,4 @@
+from app.config import Settings
 import pytest
 import pandas as pd
 from datetime import datetime
@@ -55,7 +56,7 @@ def dummy_features() -> pd.Series:
 def test_bb_squeeze_short_base_fallback_no_bypass_1430():
     """Test 1: BB Squeeze SHORT at 14:30 ET with BASE_FALLBACK ML < 0.52 -> REJECTED by ml_gate (Bypass removed)."""
     mock_model = DummySignalModel(prob=0.35, model_source="BASE", specialist_status="NO_ARTIFACT")
-    pipeline = SignalPipeline(model=mock_model, ml_threshold=0.52)
+    pipeline = SignalPipeline(model=mock_model, ml_threshold=0.52, risk_config=RiskConfig(), settings=Settings())
     
     ts_et = datetime(2026, 7, 21, 14, 30, tzinfo=ET)
     df = make_dummy_df(ts_et)
@@ -88,7 +89,7 @@ def test_bb_squeeze_short_base_fallback_no_bypass_1430():
 def test_bb_squeeze_long_not_bypassed_1430():
     """Test 2: BB Squeeze LONG at 14:30 ET with BASE_FALLBACK ML < 0.52 -> REJECTED by ml_gate (LONGs not bypassed!)."""
     mock_model = DummySignalModel(prob=0.35, model_source="BASE", specialist_status="NO_ARTIFACT")
-    pipeline = SignalPipeline(model=mock_model, ml_threshold=0.52)
+    pipeline = SignalPipeline(model=mock_model, ml_threshold=0.52, risk_config=RiskConfig(), settings=Settings())
     
     ts_et = datetime(2026, 7, 21, 14, 30, tzinfo=ET)
     df = make_dummy_df(ts_et)
@@ -121,7 +122,7 @@ def test_bb_squeeze_long_not_bypassed_1430():
 def test_bb_squeeze_specialist_not_bypassed_1430():
     """Test 3: BB Squeeze SHORT at 14:30 ET with SPECIALIST ML < 0.52 -> REJECTED by ml_gate (Specialists not bypassed!)."""
     mock_model = DummySignalModel(prob=0.35, model_source="SPECIALIST", specialist_status="SPECIALIST_USED")
-    pipeline = SignalPipeline(model=mock_model, ml_threshold=0.52)
+    pipeline = SignalPipeline(model=mock_model, ml_threshold=0.52, risk_config=RiskConfig(), settings=Settings())
     
     ts_et = datetime(2026, 7, 21, 14, 30, tzinfo=ET)
     df = make_dummy_df(ts_et)
@@ -154,7 +155,7 @@ def test_bb_squeeze_specialist_not_bypassed_1430():
 def test_bb_squeeze_short_before_window_1359():
     """Test 4: BB Squeeze SHORT at 13:59 ET -> REJECTED by ml_gate (before 14:00 ET window)."""
     mock_model = DummySignalModel(prob=0.35, model_source="BASE", specialist_status="NO_ARTIFACT")
-    pipeline = SignalPipeline(model=mock_model, ml_threshold=0.52)
+    pipeline = SignalPipeline(model=mock_model, ml_threshold=0.52, risk_config=RiskConfig(), settings=Settings())
     
     ts_et = datetime(2026, 7, 21, 13, 59, tzinfo=ET)
     df = make_dummy_df(ts_et)
@@ -187,7 +188,7 @@ def test_bb_squeeze_short_before_window_1359():
 def test_boundary_and_killswitch_bb_squeeze():
     """Test 5 & 6: Boundaries (13:59 REJECT, 14:00 BYPASS, 15:29 BYPASS, 15:30 REJECT) & Kill-switch test."""
     mock_model = DummySignalModel(prob=0.35, model_source="BASE", specialist_status="NO_ARTIFACT")
-    pipeline = SignalPipeline(model=mock_model, ml_threshold=0.52)
+    pipeline = SignalPipeline(model=mock_model, ml_threshold=0.52, risk_config=RiskConfig(), settings=Settings())
     feats = dummy_features()
     
     # 13:59 ET -> Should REJECT

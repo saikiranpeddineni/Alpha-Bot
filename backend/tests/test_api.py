@@ -62,7 +62,7 @@ def test_engine_start_stop_demo(client):
     positions = client.get("/api/positions")
     assert positions.status_code == 200
 
-    order = client.post("/api/orders", json={"symbol": "SPY", "side": "buy", "qty": 5})
+    order = client.post("/api/orders", json={"symbol": "SPY", "side": "buy", "qty": 5, "stop_loss": 95.0})
     assert order.status_code == 200, order.text
     assert order.json()["status"] == "filled"
     positions = client.get("/api/positions").json()

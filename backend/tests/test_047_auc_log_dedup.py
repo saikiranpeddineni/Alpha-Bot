@@ -1,5 +1,8 @@
 """Tests for issue 047 — per-session specialist AUC log deduplication."""
 from __future__ import annotations
+from app.config import RiskConfig
+from app.config import Settings
+
 import pytest
 import joblib
 import logging
@@ -41,7 +44,7 @@ def make_failing_specialist(tmp_path: Path, symbol: str) -> None:
 def test_auc_warning_logged_only_once_per_session(tmp_path, caplog):
     """VALIDATION FAILED logged at INFO first time, DEBUG on subsequent calls."""
     make_failing_specialist(tmp_path, 'SOFI')
-    model = SignalModel(tmp_path)
+    model = SignalModel(tmp_path, risk_config=RiskConfig())
     features = pd.Series(np.ones(len(FEATURE_COLUMNS)) * 0.5, index=FEATURE_COLUMNS)
 
     with caplog.at_level(logging.DEBUG):
@@ -60,7 +63,7 @@ def test_auc_warning_logged_only_once_per_session(tmp_path, caplog):
 def test_auc_warn_set_resets_on_reload(tmp_path, caplog):
     """After _load(), the dedup set resets so first call logs at INFO again."""
     make_failing_specialist(tmp_path, 'MU')
-    model = SignalModel(tmp_path)
+    model = SignalModel(tmp_path, risk_config=RiskConfig())
     features = pd.Series(np.ones(len(FEATURE_COLUMNS)) * 0.5, index=FEATURE_COLUMNS)
 
     with caplog.at_level(logging.DEBUG):

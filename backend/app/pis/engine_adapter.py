@@ -31,9 +31,11 @@ class PISEngineAdapter:
         self,
         service: Optional[PISService] = None,
         config: Optional[PISConfig] = None,
+        mode: str = "live",
     ) -> None:
         self.config = config or PISConfig()
         self.service = service or PISService(self.config)
+        self.mode = mode
 
     async def evaluate_position_exit(
         self,
@@ -63,6 +65,10 @@ class PISEngineAdapter:
         # Priority 10: Handle zero quantity or invalid position
         if position.qty == 0 or position.avg_entry_price <= 0:
             self.service.close_brain(symbol)
+            from app.db.database import Database
+            db = Database.active()
+            if db:
+                db.delete_pis_profit_memory(mode=self.mode, symbol=symbol)
             raise ValueError(f"Invalid position state for PIS evaluation: qty={position.qty}, avg_entry={position.avg_entry_price}")
 
         # Extract latest bar price attributes safely
@@ -143,14 +149,11 @@ class PISEngineAdapter:
         db = Database.active()
         
         restored_memory = None
-        mode = "live" # Actually we need the execution mode. If not available, use "unknown"
-        mode = getattr(position, "mode", "live") # Actually, position model doesn't have mode, but it's fine
-        # We can extract mode from somewhere, but engine_adapter doesn't know mode.
-        # Let's just use "live" for now or a property of PISEngineAdapter
+        mode = self.mode
         
         if db and self.service.get_brain(symbol) is None:
             # We are about to create a new brain, try to restore memory
-            mem_dict = await asyncio.to_thread(db.get_pis_profit_memory, mode="live", symbol=symbol)
+            mem_dict = await asyncio.to_thread(db.get_pis_profit_memory, mode=mode, symbol=symbol)
             if mem_dict:
                 try:
                     restored_memory = ProfitMemoryState(
@@ -170,7 +173,7 @@ class PISEngineAdapter:
             if brain:
                 await asyncio.to_thread(
                     db.save_pis_profit_memory,
-                    mode="live",
+                    mode=mode,
                     symbol=symbol,
                     payload={
                         "peak_r": brain.peak_r,
@@ -186,8 +189,13 @@ class PISEngineAdapter:
         return order_req, decision
 
     def handle_position_closed(self, symbol: str) -> None:
-        """Handle position close event from engine."""
-        self.service.close_brain(symbol.upper())
+        """Handle position close event from engine and retire position-scoped PIS memory."""
+        symbol_key = symbol.upper()
+        self.service.close_brain(symbol_key)
+        from app.db.database import Database
+        db = Database.active()
+        if db:
+            db.delete_pis_profit_memory(mode=self.mode, symbol=symbol_key)
 
     def get_telemetry(self) -> Dict[str, Any]:
         """Get service telemetry."""

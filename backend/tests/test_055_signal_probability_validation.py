@@ -5,6 +5,8 @@ and boolean values, and that ScoreActionResult / score_action_detailed never
 presents an unvalidated probability to the pipeline threshold comparison.
 """
 from __future__ import annotations
+from app.config import RiskConfig
+from app.config import Settings
 
 import math
 from pathlib import Path
@@ -111,7 +113,7 @@ class TestPipelineInvalidScoreFailClosed:
     def _make_pipeline(self, model):
         from app.strategies.pipeline import SignalPipeline
         with patch("app.ai.prediction.MetaLabelEngine"):
-            pl = SignalPipeline(model=model, ml_threshold=0.55)
+            pl = SignalPipeline(model=model, ml_threshold=0.55, risk_config=RiskConfig(), settings=Settings())
         return pl
 
     def _make_signal(self, action=SignalAction.ENTER_LONG):

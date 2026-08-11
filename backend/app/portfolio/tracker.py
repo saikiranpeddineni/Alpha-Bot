@@ -207,8 +207,7 @@ class PortfolioTracker:
     def note_stop(self, symbol: str, stop_loss: float | None) -> None:
         """Record a broker-confirmed stop while preserving immutable entry risk.
 
-        The first valid stop may establish original R geometry when the entry fill
-        did not carry it.  Later trailing, breakeven, or runner ratchets update only
+        Later trailing, breakeven, or runner ratchets update only
         the current stop and can never rewrite the original R denominator.
         """
         lot = self._lots.get(symbol.upper())
@@ -216,16 +215,10 @@ class PortfolioTracker:
             return
         stop = float(stop_loss)
         lot.stop_loss = stop
-        if (
-            lot.initial_stop_loss is None
-            and lot.initial_risk_per_share is None
-            and lot.initial_risk_dollars <= 0
-        ):
-            risk_per_share = abs(float(lot.avg_price) - stop)
-            if risk_per_share > 1e-12:
-                lot.initial_stop_loss = stop
-                lot.initial_risk_per_share = risk_per_share
-                lot.initial_risk_dollars = abs(float(lot.qty)) * risk_per_share
+        
+        # P0-1: Initial risk MUST be established at the time of entry (in on_fill).
+        # We explicitly DO NOT retroactively establish initial_risk_per_share here 
+        # if it is missing, as that violates the immutable risk geometry invariant.
 
     def open_positions(self) -> dict[str, _OpenLot]:
         return {s: lot for s, lot in self._lots.items() if abs(lot.qty) >= 1e-9}
@@ -361,6 +354,19 @@ class PortfolioTracker:
         symbol = fill.symbol.upper()
         signed = fill.qty if fill.side == OrderSide.BUY else -fill.qty
         lot = self._lots.get(symbol)
+        
+        if lot is None or abs(lot.qty) < 1e-9:
+            # P0-0 Invariant: A missing local lot must never be sufficient evidence to create a new position.
+            # Local position state is built solely by authoritative periodic reconciliation (engine_portfolio.py),
+            # and entries should only be processed if they arrive as part of the normal lifecycle.
+            # If the strategy was an exit/flatten, do NOT create a phantom long/short.
+            if fill.reason and ("close" in fill.reason.lower() or "exit" in fill.reason.lower() or "flatten" in fill.reason.lower()):
+                applog.error("portfolio", f"[{fill.ts}] REJECTED phantom position creation: fill claims to close/exit {symbol} but no local lot exists.")
+                return FillApplicationResult()
+            if fill.strategy and ("close" in fill.strategy.lower() or "exit" in fill.strategy.lower() or "flatten" in fill.strategy.lower()):
+                applog.error("portfolio", f"[{fill.ts}] REJECTED phantom position creation: fill claims to close/exit {symbol} but no local lot exists.")
+                return FillApplicationResult()
+
         if lot is None or abs(lot.qty) < 1e-9:
             self._lots[symbol] = _OpenLot(qty=signed, avg_price=fill.price, entry_ts=fill.ts, strategy=fill.strategy, commission_basis=fill.commission)
             if initial_stop is not None:
@@ -377,13 +383,8 @@ class PortfolioTracker:
             lot.avg_price = (lot.avg_price * lot.qty + fill.price * signed) / total
             lot.qty = total
             lot.commission_basis += fill.commission
-            if initial_stop is not None:
-                lot.stop_loss = initial_stop
-                if lot.initial_stop_loss is None:
-                    lot.initial_stop_loss = initial_stop
-                added_risk_dollars = abs(signed) * abs(fill.price - initial_stop)
-                lot.initial_risk_dollars += added_risk_dollars
-                lot.initial_risk_per_share = lot.initial_risk_dollars / abs(total) if total != 0 else lot.initial_risk_per_share
+            # P0-1: Initial risk geometry is immutable. If it wasn't provided at entry, we do NOT 
+            # allow trailing stops or scaling fills to retroactively infer it.
             side_str = "BOUGHT MORE" if signed > 0 else "SOLD MORE SHORT"
             total_amt = abs(signed) * fill.price
             applog.info("portfolio", f"[{fill.ts}] {side_str} {symbol}: {abs(signed):g} shares @ {fill.price:.2f} (Total Amt: ${total_amt:,.2f} | {fill.strategy})")
@@ -412,8 +413,8 @@ class PortfolioTracker:
             r_multiple = round(pnl / init_risk_dollars, 4)
             init_risk = init_risk_dollars / lot.closing_qty if lot.closing_qty > 0 else lot.initial_risk_per_share
         else:
-            init_risk = lot.initial_risk_per_share
-            r_multiple = round(pnl / (init_risk * lot.closing_qty), 4) if (init_risk and lot.closing_qty > 0) else None
+            r_multiple = None
+            init_risk = None
         best = peak_price if peak_price is not None else fill.price
         worst = trough_price if trough_price is not None else fill.price
         mfe_val = (best - lot.avg_price) if original_direction > 0 else (lot.avg_price - best)
@@ -432,7 +433,17 @@ class PortfolioTracker:
             self._lots[symbol] = _OpenLot(qty=remainder, avg_price=fill.price, entry_ts=fill.ts, strategy=fill.strategy, commission_basis=remaining_fill_fee)
         action_str = "SOLD" if trade.side == "long" else "BOUGHT TO COVER"
         pct_str = f"{trade.pnl_pct:+.2f}%" if trade.pnl_pct else "0.0%"
-        applog.info("portfolio", f"[{fill.ts}] {action_str} {symbol}: {lot.closing_qty:g} shares @ {avg_exit:.2f} -> P&L: {pnl:+.2f} ({pct_str}) ({fill.reason or 'exit'}) | Entered: {trade.entry_at}")
+        
+        r_str = f" | {trade.r_multiple:+.2f}R" if trade.r_multiple is not None else ""
+        
+        if trade.initial_stop and trade.initial_risk:
+            risk_src = "INITIAL_LOCKED"
+            stop_str = f" [Entry: {lot.avg_price:.2f} | Stop: {trade.initial_stop:.2f} | Risk/Sh: {trade.initial_risk:.2f} | Risk Source: {risk_src}]"
+        else:
+            risk_src = "UNKNOWN"
+            stop_str = f" [Entry: {lot.avg_price:.2f} | Stop: UNKNOWN | Risk/Sh: UNKNOWN | Risk Source: {risk_src}]"
+            
+        applog.info("portfolio", f"[{fill.ts}] {action_str} {symbol}: {lot.closing_qty:g} shares @ {avg_exit:.2f} -> P&L: ${pnl:+.2f} ({pct_str}){r_str}{stop_str} ({fill.reason or 'exit'}) | Entered: {trade.entry_at}")
         return FillApplicationResult(realized_pnl_fragment=pnl_fragment, closed_trade=trade, position_closed=True)
 
     def stats(self) -> dict:

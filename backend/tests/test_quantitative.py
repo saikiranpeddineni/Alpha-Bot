@@ -256,7 +256,7 @@ class TestPipelineTradeScore:
 
         model = MagicMock()
         model.score_action.return_value = 0.30  # below any threshold
-        pipe = SignalPipeline(model, ml_threshold=0.55)
+        pipe = SignalPipeline(model, ml_threshold=0.55, risk_config=RiskConfig(), settings=Settings())
 
         sig = Signal(symbol="AAPL", action=SignalAction.EXIT,
                      confidence=0.9, strategy="orb", reason="test")
@@ -272,7 +272,7 @@ class TestPipelineTradeScore:
 
         model = MagicMock()
         model.score_action.return_value = 0.40  # below ml_threshold
-        pipe = SignalPipeline(model, ml_threshold=0.55)
+        pipe = SignalPipeline(model, ml_threshold=0.55, risk_config=RiskConfig(), settings=Settings())
 
         sig = Signal(symbol="AAPL", action=SignalAction.ENTER_LONG,
                      confidence=0.9, strategy="orb", reason="test",

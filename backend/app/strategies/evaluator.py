@@ -98,7 +98,7 @@ class ParallelEvidenceEvaluator:
 
             # ---- Gate 2: Meta-Label Gate ----
             side_str = "long" if sig.action == SignalAction.ENTER_LONG else "short"
-            meta_pred = self.meta_label_engine.predict(sig.strategy, features, side=side_str)
+            meta_pred = self.meta_label_engine.predict(sig.strategy, features, side=side_str, adaptive_threshold=target_ml_threshold)
             meta_passed = meta_pred.approved
             meta_prob = meta_pred.prob_profitable
             meta_rejection_reason = None if meta_passed else f"Meta-label {meta_pred.decision} [{meta_pred.source}]: {meta_pred.reason}"
