@@ -1,8 +1,7 @@
 """Contextual entry intelligence for Champion candidates.
 
-The module does not tune ML/Meta thresholds. It evaluates whether a candidate
-is internally consistent with the market/symbol context and records evidence
-for the existing decision pipeline.
+This module uses evidence already present on the existing signal/context path.
+It does not change ML, Meta, PIS, risk, or execution thresholds.
 """
 from __future__ import annotations
 
@@ -39,6 +38,14 @@ def _directional_contradictions(sig: Signal, df: pd.DataFrame) -> list[str]:
         elif side == "short" and ema9 > ema20:
             reasons.append("trend_context_conflict: short_term_trend_opposes_short")
 
+    # News is treated as independent evidence. It is not a standalone veto:
+    # the existing multi-conflict boundary still requires another contradiction.
+    if sig.news_context_available and sig.news_catalyst:
+        if side == "long" and sig.news_direction == "bearish":
+            reasons.append(f"news_context_conflict: bearish_{sig.news_catalyst}_catalyst")
+        elif side == "short" and sig.news_direction == "bullish":
+            reasons.append(f"news_context_conflict: bullish_{sig.news_catalyst}_catalyst")
+
     return reasons
 
 
@@ -54,9 +61,6 @@ def _extension_conflicts(sig: Signal, df: pd.DataFrame) -> list[str]:
     high20 = float(lookback["high"].max())
     low20 = float(lookback["low"].min())
     side = sig.side
-
-    # A breakout at an extreme is acceptable when scanner mover context confirms
-    # the same direction. Otherwise it is treated as an entry-location conflict.
     if side == "long" and close >= high20 - 0.25 * atr and sig.mover_bias != "gainer":
         return ["entry_location_conflict: long_is_extended_without_mover_confirmation"]
     if side == "short" and close <= low20 + 0.25 * atr and sig.mover_bias != "loser":
@@ -65,46 +69,30 @@ def _extension_conflicts(sig: Signal, df: pd.DataFrame) -> list[str]:
 
 
 def assess_entry_context(sig: Signal, df: pd.DataFrame, regime: Regime | str | None) -> EntryContextAssessment:
-    """Reject only when independent context signals materially contradict a thesis.
-
-    A single weak contextual signal never vetoes a Champion candidate. The
-    boundary requires at least two independent contradictions.
-    """
+    """Reject only when independent context signals materially contradict a thesis."""
     if sig.action not in (SignalAction.ENTER_LONG, SignalAction.ENTER_SHORT):
         return EntryContextAssessment(True)
 
     reasons = _directional_contradictions(sig, df)
     all_reasons = reasons + _extension_conflicts(sig, df)
+    evidence = {
+        "regime": getattr(regime, "value", str(regime) if regime is not None else None),
+        "mover_bias": sig.mover_bias,
+        "rs_score": sig.rs_score,
+        "news_direction": sig.news_direction,
+        "news_sentiment": sig.news_sentiment,
+        "news_confidence": sig.news_confidence,
+        "news_catalyst": sig.news_catalyst,
+        "news_age_seconds": sig.news_age_seconds,
+        "context_conflict_count": len(all_reasons),
+    }
     if len(all_reasons) >= 2:
-        return EntryContextAssessment(
-            False,
-            tuple(all_reasons),
-            {
-                "regime": getattr(regime, "value", str(regime) if regime is not None else None),
-                "mover_bias": sig.mover_bias,
-                "rs_score": sig.rs_score,
-                "context_conflict_count": len(all_reasons),
-            },
-        )
-
-    return EntryContextAssessment(
-        True,
-        tuple(all_reasons),
-        {
-            "regime": getattr(regime, "value", str(regime) if regime is not None else None),
-            "mover_bias": sig.mover_bias,
-            "rs_score": sig.rs_score,
-            "context_conflict_count": len(all_reasons),
-        },
-    )
+        return EntryContextAssessment(False, tuple(all_reasons), evidence)
+    return EntryContextAssessment(True, tuple(all_reasons), evidence)
 
 
 def assess_thesis_continuity(db, sig: Signal, now) -> EntryContextAssessment:
-    """Block repeated same-session negative theses, not trades by elapsed time.
-
-    A new trade is allowed when direction, regime, or mover context materially
-    changes. This is intentionally evidence-based rather than a fixed cooldown.
-    """
+    """Block repeated same-session negative theses, not trades by elapsed time."""
     if db is None or sig.action not in (SignalAction.ENTER_LONG, SignalAction.ENTER_SHORT):
         return EntryContextAssessment(True)
 
