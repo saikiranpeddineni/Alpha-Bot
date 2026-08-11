@@ -22,21 +22,14 @@ def get_dynamic_mover_context(symbol: str) -> dict[str, Any]:
 
 def _install_champion_threshold_boundary() -> None:
     from app.strategies.pipeline import SignalPipeline
-
     if getattr(SignalPipeline.process, "_champion_boundary_installed", False):
         return
-
     original_process = SignalPipeline.process
 
     @wraps(original_process)
     def champion_process(self, symbol, df, signals, regime, features=None, sector_strength=None, adaptive_ml_thresholds=None):
-        # Research/adaptive thresholds must never silently change Champion ML/Meta execution.
         return original_process(
-            self,
-            symbol,
-            df,
-            signals,
-            regime,
+            self, symbol, df, signals, regime,
             features=features,
             sector_strength=sector_strength,
             adaptive_ml_thresholds=None,
@@ -103,10 +96,8 @@ def _install_dynamic_mover_context_bridge() -> None:
 def _install_entry_context_boundary() -> None:
     from app.strategies.pipeline import SignalPipeline
     from app.strategies.entry_intelligence import assess_entry_context
-
     if getattr(SignalPipeline.process, "_entry_context_boundary_installed", False):
         return
-
     original_process = SignalPipeline.process
 
     @wraps(original_process)
@@ -126,11 +117,7 @@ def _install_entry_context_boundary() -> None:
                 filtered.append(sig)
 
         accepted, rejected = original_process(
-            self,
-            symbol,
-            df,
-            filtered,
-            regime,
+            self, symbol, df, filtered, regime,
             features=features,
             sector_strength=sector_strength,
             adaptive_ml_thresholds=None,
@@ -143,14 +130,8 @@ def _install_entry_context_boundary() -> None:
 
 
 def _install_thesis_continuity_boundary() -> None:
-    """Prevent immediate same-thesis re-entry after a realized loss.
-
-    This is not a fixed cooldown. It compares the next signal's direction and
-    market regime with the context of the latest losing trade. A direction or
-    regime change therefore remains eligible.
-    """
+    """Block repeated same-thesis entries after a loss, without a timer."""
     from app.risk.manager import RiskManager
-
     if getattr(RiskManager.on_trade_closed, "_thesis_boundary_installed", False):
         return
 
@@ -174,7 +155,6 @@ def _install_thesis_continuity_boundary() -> None:
         if getattr(trade, "pnl", 0.0) <= 0:
             _LAST_LOSS_CONTEXT[str(trade.symbol).upper()] = _context_from_trade(trade)
         else:
-            # A profitable thesis proves the symbol is not in a negative-repeat state.
             _LAST_LOSS_CONTEXT.pop(str(trade.symbol).upper(), None)
         return result
 
@@ -199,7 +179,8 @@ def _install_thesis_continuity_boundary() -> None:
         same_side = previous.get("side") == signal.side
         current_regime = getattr(signal.regime, "value", str(signal.regime) if signal.regime is not None else None)
         previous_regime = previous.get("regime")
-        same_regime = not previous_regime or not current_regime or str(previous_regime) == str(current_regime)
+        # We only block when both sides of the comparison have explicit regime evidence.
+        same_regime = bool(previous_regime and current_regime and str(previous_regime) == str(current_regime))
         previous_mover = previous.get("mover_bias")
         mover_changed = bool(previous_mover and signal.mover_bias and previous_mover != signal.mover_bias)
 
