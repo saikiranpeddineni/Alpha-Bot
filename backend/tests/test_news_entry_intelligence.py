@@ -52,6 +52,31 @@ def test_news_analyzer_identifies_financing_catalyst_and_direction():
     assert context.catalyst == "financing"
     assert context.fresh_headline_count == 1
     assert context.headline_count == 1
+    assert context.confidence > 0.5
+
+
+def test_news_analyzer_understands_event_phrases_and_negation():
+    analyzer = NewsSentimentAnalyzer()
+    assert analyzer.analyze_headline("Company beats estimates and raises guidance") > 0.5
+    assert analyzer.analyze_headline("Company misses estimates and cuts guidance") < -0.5
+    assert analyzer.analyze_headline("Company denies dilution reports") > 0
+    assert analyzer.catalyst_for_headline("Company faces SEC investigation after secondary offering") == "financing"
+
+
+def test_news_analyzer_prefers_consensus_direction_and_freshness():
+    analyzer = NewsSentimentAnalyzer()
+    now = datetime.now(UTC)
+    context = analyzer.build_context(
+        [
+            {"headline": "Company beats estimates and raises guidance", "created_at": (now - timedelta(minutes=2)).isoformat()},
+            {"headline": "Analyst reiterates neutral rating", "created_at": (now - timedelta(hours=5)).isoformat()},
+            {"headline": "Company wins major contract", "created_at": (now - timedelta(minutes=8)).isoformat()},
+        ],
+        now=now,
+    )
+    assert context.direction == "bullish"
+    assert context.fresh_headline_count == 2
+    assert context.confidence >= 0.5
 
 
 def test_bearish_financing_news_is_entry_contradiction_for_long():
