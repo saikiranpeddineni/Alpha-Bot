@@ -6,7 +6,7 @@ import pandas as pd
 from app.core.domain import Regime, SignalAction
 from app.config import RiskConfig
 from app.risk.manager import RiskManager
-from app.strategies.entry_intelligence import assess_entry_context
+from app.strategies.entry_intelligence import assess_entry_context, assess_thesis_continuity
 from app.strategies.runtime_integrity import install_runtime_integrity
 
 
@@ -105,6 +105,34 @@ def test_choppy_momentum_is_softly_flagged_not_globally_blocked():
     result = assess_entry_context(sig, _bars(closes, ema9=100.0, ema20=100.0), Regime.RANGE)
     assert result.allowed is True
     assert any("macro_context_conflict" in reason for reason in result.reasons)
+
+
+class _ShadowDb:
+    def get_shadow_signals(self, limit=500):
+        return [
+            {
+                "symbol": "TEST",
+                "direction": "long",
+                "timestamp": datetime.now(UTC).isoformat(),
+                "regime": "trend_up",
+                "mover_bias": "neutral",
+                "outcomes": {"60m": {"realized_r": -1.0}},
+            }
+        ]
+
+
+def test_new_material_catalyst_can_reopen_same_direction_after_loss():
+    sig = _signal(
+        SignalAction.ENTER_LONG,
+        news_context_available=True,
+        news_direction="bullish",
+        news_confidence=0.85,
+        news_catalyst="earnings",
+        news_age_seconds=120,
+    )
+    result = assess_thesis_continuity(_ShadowDb(), sig, datetime.now(UTC))
+    assert result.allowed is True
+    assert any("fresh_material_catalyst" in reason for reason in result.reasons)
 
 
 def test_restart_does_not_clear_restored_cooldowns():
