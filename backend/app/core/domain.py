@@ -79,6 +79,14 @@ class Signal(BaseModel):
     discovery_source: str | None = None
     scanner_score: float | None = None
     scanner_auc: float | None = None
+    # Canonical entry-context evidence. These are observational inputs to the
+    # decision boundary, not alternative ML/Meta thresholds.
+    mover_bias: str | None = None
+    mover_change_pct: float = 0.0
+    rs_score: float | None = None
+    context_conflict_count: int = 0
+    context_conflict_reasons: list[str] = Field(default_factory=list)
+    thesis_continuity_blocked: bool = False
 
     @property
     def side(self) -> str:
@@ -257,3 +265,8 @@ class SafetyDecision(BaseModel):
     allowed_strategies: list[str]
     require_exit_only: bool
     halt_reason: str | None = None
+
+    @property
+    def market_state(self) -> str:
+        """Canonical compatibility view used by the portfolio gate."""
+        return self.market_risk_state
