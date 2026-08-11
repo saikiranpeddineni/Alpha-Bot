@@ -1,17 +1,11 @@
-"""Production-path integrity guards for dynamic market intelligence.
-
-The module installs small, idempotent compatibility boundaries at startup.
-It keeps research-only adaptive values out of Champion ML/Meta execution,
-ensures scanner context reaches strategy signals, and makes contradictory
-entry context visible to the existing pipeline before expensive inference.
-"""
+"""Production-path integrity guards for dynamic market intelligence."""
 from __future__ import annotations
 
 from functools import wraps
 from typing import Any
 
-
 _CURRENT_MOVER_CONTEXT: dict[str, dict[str, Any]] = {}
+_LAST_LOSS_CONTEXT: dict[str, dict[str, Any]] = {}
 
 
 def install_runtime_integrity() -> None:
@@ -19,15 +13,14 @@ def install_runtime_integrity() -> None:
     _install_champion_threshold_boundary()
     _install_dynamic_mover_context_bridge()
     _install_entry_context_boundary()
+    _install_thesis_continuity_boundary()
 
 
 def get_dynamic_mover_context(symbol: str) -> dict[str, Any]:
-    """Return the latest scanner-derived mover context for a symbol."""
     return dict(_CURRENT_MOVER_CONTEXT.get(symbol.upper(), {}))
 
 
 def _install_champion_threshold_boundary() -> None:
-    """Keep contextual/adaptive thresholds in research, not Champion execution."""
     from app.strategies.pipeline import SignalPipeline
 
     if getattr(SignalPipeline.process, "_champion_boundary_installed", False):
@@ -36,18 +29,8 @@ def _install_champion_threshold_boundary() -> None:
     original_process = SignalPipeline.process
 
     @wraps(original_process)
-    def champion_process(
-        self,
-        symbol,
-        df,
-        signals,
-        regime,
-        features=None,
-        sector_strength=None,
-        adaptive_ml_thresholds=None,
-    ):
-        # The Champion boundary intentionally ignores research-zone adaptive
-        # thresholds. Existing configured runtime thresholds remain authoritative.
+    def champion_process(self, symbol, df, signals, regime, features=None, sector_strength=None, adaptive_ml_thresholds=None):
+        # Research/adaptive thresholds must never silently change Champion ML/Meta execution.
         return original_process(
             self,
             symbol,
@@ -64,7 +47,6 @@ def _install_champion_threshold_boundary() -> None:
 
 
 def _install_dynamic_mover_context_bridge() -> None:
-    """Bridge live scanner mover context into strategy-produced Signals."""
     from app.core.scanner import MarketScanner
     from app.strategies.gap_and_go import GapAndGo
     from app.strategies.momentum import MomentumCross
@@ -104,11 +86,8 @@ def _install_dynamic_mover_context_bridge() -> None:
                         ctx.mover_change_pct = float(entry.get("change_pct", 0.0) or 0.0)
                     except (TypeError, ValueError):
                         ctx.mover_change_pct = 0.0
-
             signal = method(self, ctx, symbol, df)
             if signal is not None:
-                # Typed Signal fields make this contract explicit rather than
-                # relying on ad-hoc attributes or a second context source.
                 signal.mover_bias = getattr(ctx, "mover_bias", None)
                 signal.mover_change_pct = float(getattr(ctx, "mover_change_pct", 0.0) or 0.0)
                 signal.rs_score = getattr(ctx, "rs_score", None)
@@ -122,7 +101,6 @@ def _install_dynamic_mover_context_bridge() -> None:
 
 
 def _install_entry_context_boundary() -> None:
-    """Apply evidence-based context consistency before Champion inference."""
     from app.strategies.pipeline import SignalPipeline
     from app.strategies.entry_intelligence import assess_entry_context
 
@@ -132,31 +110,20 @@ def _install_entry_context_boundary() -> None:
     original_process = SignalPipeline.process
 
     @wraps(original_process)
-    def context_aware_process(
-        self,
-        symbol,
-        df,
-        signals,
-        regime,
-        features=None,
-        sector_strength=None,
-        adaptive_ml_thresholds=None,
-    ):
+    def context_aware_process(self, symbol, df, signals, regime, features=None, sector_strength=None, adaptive_ml_thresholds=None):
         filtered = []
         context_rejections: list[tuple[Any, str]] = []
         for sig in signals:
-            if getattr(sig, "action", None).value not in ("enter_long", "enter_short"):
+            if sig.action.value not in ("enter_long", "enter_short"):
                 filtered.append(sig)
                 continue
-
             assessment = assess_entry_context(sig, df, regime)
             sig.context_conflict_count = len(assessment.reasons)
             sig.context_conflict_reasons = list(assessment.reasons)
             if not assessment.allowed:
-                reason = "Entry context conflict: " + "; ".join(assessment.reasons)
-                context_rejections.append((sig, reason))
-                continue
-            filtered.append(sig)
+                context_rejections.append((sig, "Entry context conflict: " + "; ".join(assessment.reasons)))
+            else:
+                filtered.append(sig)
 
         accepted, rejected = original_process(
             self,
@@ -170,8 +137,78 @@ def _install_entry_context_boundary() -> None:
         )
         return accepted, context_rejections + rejected
 
-    # Preserve the marker from the Champion wrapper as well so repeated imports
-    # cannot stack wrappers indefinitely.
     context_aware_process._entry_context_boundary_installed = True
     context_aware_process._champion_boundary_installed = True
     SignalPipeline.process = context_aware_process
+
+
+def _install_thesis_continuity_boundary() -> None:
+    """Prevent immediate same-thesis re-entry after a realized loss.
+
+    This is not a fixed cooldown. It compares the next signal's direction and
+    market regime with the context of the latest losing trade. A direction or
+    regime change therefore remains eligible.
+    """
+    from app.risk.manager import RiskManager
+
+    if getattr(RiskManager.on_trade_closed, "_thesis_boundary_installed", False):
+        return
+
+    original_close = RiskManager.on_trade_closed
+    original_permit = RiskManager.is_entry_permitted
+    original_reconstruct = RiskManager.reconstruct_cooldowns
+
+    def _context_from_trade(trade) -> dict[str, Any]:
+        metadata = getattr(trade, "metadata", None) or {}
+        return {
+            "strategy": getattr(trade, "strategy", None),
+            "side": getattr(trade, "side", None),
+            "regime": metadata.get("regime") or metadata.get("market_regime"),
+            "mover_bias": metadata.get("mover_bias"),
+            "exit_at": getattr(trade, "exit_at", None),
+        }
+
+    @wraps(original_close)
+    def on_trade_closed_with_context(self, trade, now=None):
+        result = original_close(self, trade, now)
+        if getattr(trade, "pnl", 0.0) <= 0:
+            _LAST_LOSS_CONTEXT[str(trade.symbol).upper()] = _context_from_trade(trade)
+        else:
+            # A profitable thesis proves the symbol is not in a negative-repeat state.
+            _LAST_LOSS_CONTEXT.pop(str(trade.symbol).upper(), None)
+        return result
+
+    @wraps(original_reconstruct)
+    def reconstruct_with_context(self, trades, now=None):
+        result = original_reconstruct(self, trades, now)
+        for trade in trades:
+            if getattr(trade, "pnl", 0.0) <= 0:
+                _LAST_LOSS_CONTEXT[str(trade.symbol).upper()] = _context_from_trade(trade)
+        return result
+
+    @wraps(original_permit)
+    def permit_with_context(self, signal, now=None):
+        decision = original_permit(self, signal, now)
+        if not decision.approved:
+            return decision
+
+        previous = _LAST_LOSS_CONTEXT.get(signal.symbol.upper())
+        if not previous:
+            return decision
+
+        same_side = previous.get("side") == signal.side
+        current_regime = getattr(signal.regime, "value", str(signal.regime) if signal.regime is not None else None)
+        previous_regime = previous.get("regime")
+        same_regime = not previous_regime or not current_regime or str(previous_regime) == str(current_regime)
+        previous_mover = previous.get("mover_bias")
+        mover_changed = bool(previous_mover and signal.mover_bias and previous_mover != signal.mover_bias)
+
+        if same_side and same_regime and not mover_changed:
+            signal.thesis_continuity_blocked = True
+            return type(decision)(False, "same-thesis re-entry blocked after prior loss; direction/regime context unchanged")
+        return decision
+
+    on_trade_closed_with_context._thesis_boundary_installed = True
+    RiskManager.on_trade_closed = on_trade_closed_with_context
+    RiskManager.reconstruct_cooldowns = reconstruct_with_context
+    RiskManager.is_entry_permitted = permit_with_context
