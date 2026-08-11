@@ -51,36 +51,16 @@ class NewsSentimentAnalyzer:
             "analyst": {"upgrade", "downgrade", "outperform", "underperform", "price target", "analyst"},
         }
         self.bullish_phrases = {
-            "beats estimates": 1.4,
-            "beats expectations": 1.4,
-            "raises guidance": 1.5,
-            "raises outlook": 1.5,
-            "strong guidance": 1.2,
-            "record revenue": 1.2,
-            "record profit": 1.2,
-            "positive outlook": 1.0,
-            "wins contract": 1.0,
-            "receives approval": 1.1,
-            "no dilution": 1.2,
-            "denies dilution": 1.2,
-            "denies reports": 0.7,
-            "shares rise": 0.8,
+            "beats estimates": 1.4, "beats expectations": 1.4, "raises guidance": 1.5, "raises outlook": 1.5,
+            "strong guidance": 1.2, "record revenue": 1.2, "record profit": 1.2, "positive outlook": 1.0,
+            "wins contract": 1.0, "receives approval": 1.1, "no dilution": 1.2, "denies dilution": 1.2,
+            "denies reports": 0.7, "shares rise": 0.8,
         }
         self.bearish_phrases = {
-            "misses estimates": 1.4,
-            "misses expectations": 1.4,
-            "cuts guidance": 1.5,
-            "lowers guidance": 1.5,
-            "lowers outlook": 1.5,
-            "weak outlook": 1.2,
-            "going concern": 1.6,
-            "secondary offering": 1.3,
-            "stock offering": 1.1,
-            "shares offered": 1.1,
-            "regulatory investigation": 1.4,
-            "fraud investigation": 1.6,
-            "recall announced": 1.1,
-            "shares fall": 0.8,
+            "misses estimates": 1.4, "misses expectations": 1.4, "cuts guidance": 1.5, "lowers guidance": 1.5,
+            "lowers outlook": 1.5, "weak outlook": 1.2, "going concern": 1.6, "secondary offering": 1.3,
+            "stock offering": 1.1, "shares offered": 1.1, "regulatory investigation": 1.4,
+            "fraud investigation": 1.6, "recall announced": 1.1, "shares fall": 0.8,
         }
 
     def _phrase_score(self, lowered: str) -> float:
@@ -158,9 +138,6 @@ class NewsSentimentAnalyzer:
                     ts = ts.astimezone(UTC)
                 except (TypeError, ValueError):
                     ts = None
-            # Missing timestamps are still valid contextual evidence, but they
-            # must never be fabricated as "now" and therefore cannot become a
-            # fresh-catalyst veto solely because the provider omitted metadata.
             normalized.append((ts, headline))
 
         normalized.sort(key=lambda pair: pair[0] or datetime.min.replace(tzinfo=UTC), reverse=True)
@@ -174,9 +151,13 @@ class NewsSentimentAnalyzer:
         per_headline = [self.analyze_headline(h) for h in headlines[:5]]
         non_neutral = [s for s in per_headline if abs(s) >= 0.10]
         agreement = 0.0
-        if non_neutral:
+        if non_neutral and abs(score) >= 0.10:
             same_direction = sum(1 for s in non_neutral if (s > 0) == (score > 0))
             agreement = same_direction / len(non_neutral)
+        # A near-zero aggregate with meaningful bullish and bearish headlines is
+        # conflicting evidence, not high-confidence neutrality.
+        if non_neutral and abs(score) < 0.10:
+            agreement = 0.0
         freshness_factor = min(1.0, fresh_count / 3.0)
         magnitude_factor = min(1.0, abs(score))
         confidence = min(1.0, 0.45 * magnitude_factor + 0.35 * agreement + 0.20 * freshness_factor)
