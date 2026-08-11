@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pandas as pd
 
 from app.core.domain import Regime, SignalAction
-from app.config import RiskConfig
+from app.config import RiskConfig, Settings
 from app.risk.manager import RiskManager
 from app.strategies.entry_intelligence import assess_entry_context, assess_thesis_continuity
 from app.strategies.runtime_integrity import install_runtime_integrity
@@ -156,3 +156,12 @@ def test_restart_preserves_restored_daily_halt_state():
     risk.reconstruct_cooldowns([], datetime.now(UTC))
     assert risk.daily_halted is True
     assert risk.daily_halt_date == date.today()
+
+
+def test_pipeline_intelligence_thresholds_are_canonical_and_configurable():
+    settings = Settings()
+    risk = settings.risk_config()
+    assert risk.ml_hard_reject_threshold == 0.48
+    assert risk.ml_gray_zone_margin == 0.04
+    assert risk.ml_hard_reject_threshold == RiskConfig().ml_hard_reject_threshold
+    assert risk.ml_gray_zone_margin == RiskConfig().ml_gray_zone_margin
