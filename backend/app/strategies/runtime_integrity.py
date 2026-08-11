@@ -14,6 +14,7 @@ def install_runtime_integrity() -> None:
     _install_dynamic_mover_context_bridge()
     _install_entry_context_boundary()
     _install_thesis_continuity_boundary()
+    _install_engine_entry_boundary()
 
 
 def get_dynamic_mover_context(symbol: str) -> dict[str, Any]:
@@ -171,7 +172,6 @@ def _install_thesis_continuity_boundary() -> None:
         decision = original_permit(self, signal, now)
         if not decision.approved:
             return decision
-
         previous = _LAST_LOSS_CONTEXT.get(signal.symbol.upper())
         if not previous:
             return decision
@@ -179,7 +179,6 @@ def _install_thesis_continuity_boundary() -> None:
         same_side = previous.get("side") == signal.side
         current_regime = getattr(signal.regime, "value", str(signal.regime) if signal.regime is not None else None)
         previous_regime = previous.get("regime")
-        # We only block when both sides of the comparison have explicit regime evidence.
         same_regime = bool(previous_regime and current_regime and str(previous_regime) == str(current_regime))
         previous_mover = previous.get("mover_bias")
         mover_changed = bool(previous_mover and signal.mover_bias and previous_mover != signal.mover_bias)
@@ -193,3 +192,59 @@ def _install_thesis_continuity_boundary() -> None:
     RiskManager.on_trade_closed = on_trade_closed_with_context
     RiskManager.reconstruct_cooldowns = reconstruct_with_context
     RiskManager.is_entry_permitted = permit_with_context
+
+
+def _install_engine_entry_boundary() -> None:
+    """Apply durable thesis/news checks to the final candidate boundary."""
+    try:
+        from app.core.engine_evaluation import TradingEngineEvaluationMixin
+    except Exception:
+        # The engine module is still being imported. main.py calls this installer
+        # again after the engine class is fully loaded.
+        return
+
+    method = TradingEngineEvaluationMixin._evaluate_symbol
+    if getattr(method, "_entry_boundary_installed", False):
+        return
+
+    from app.strategies.entry_intelligence import assess_thesis_continuity
+
+    @wraps(method)
+    async def evaluate_with_entry_intelligence(self, symbol, position, equity, now, effective_positions=None):
+        candidates = await method(self, symbol, position, equity, now, effective_positions)
+        if not candidates:
+            return candidates
+
+        out = []
+        for sig, df in candidates:
+            # Re-check failed-thesis continuity at the final execution boundary
+            # using durable shadow evidence. No fixed elapsed-time cooldown.
+            thesis = assess_thesis_continuity(getattr(self, "db", None), sig, now)
+            if not thesis.allowed:
+                sig.thesis_continuity_blocked = True
+                from app.core.applog import applog
+                applog.info("engine.entry", f"{sig.symbol}: rejected at final entry boundary: {'; '.join(thesis.reasons)}")
+                continue
+
+            # News is already an input to PIS. For entries, use the same provider
+            # when available so an adverse catalyst cannot be invisible until exit.
+            news_sentiment = 0.0
+            try:
+                data = getattr(self, "data", None)
+                if data is not None and hasattr(data, "get_news_sentiment"):
+                    news_sentiment = float(await data.get_news_sentiment(sig.symbol))
+            except Exception:
+                news_sentiment = 0.0
+            sig.news_sentiment = news_sentiment
+
+            if sig.side == "long" and news_sentiment <= -0.5:
+                applog.info("engine.entry", f"{sig.symbol}: rejected adverse news context for LONG ({news_sentiment:.3f})")
+                continue
+            if sig.side == "short" and news_sentiment >= 0.5:
+                applog.info("engine.entry", f"{sig.symbol}: rejected adverse news context for SHORT ({news_sentiment:.3f})")
+                continue
+            out.append((sig, df))
+        return out
+
+    evaluate_with_entry_intelligence._entry_boundary_installed = True
+    TradingEngineEvaluationMixin._evaluate_symbol = evaluate_with_entry_intelligence
