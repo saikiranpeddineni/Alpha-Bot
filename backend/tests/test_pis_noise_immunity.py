@@ -95,6 +95,11 @@ def test_opening_pullback_does_not_shake_out():
     obs4 = _make_obs(price=101.00, close=101.00, low=100.40, high=101.05, t_offset_sec=240)
     dec4 = brain.observe(obs4)
     assert dec4.action == ExitAction.PARTIAL_EXIT
+    assert brain.has_scaled_out is False
+    
+    # Bar 5: Broker confirms scale out qty drop
+    obs5 = _make_obs(price=101.00, close=101.00, low=100.40, high=101.05, qty=50.0, t_offset_sec=300)
+    dec5 = brain.observe(obs5)
     assert brain.has_scaled_out is True
 
 

@@ -77,17 +77,12 @@ def test_pis_scale_out_at_1r() -> None:
     assert dec3.action == ExitAction.PARTIAL_EXIT
     assert dec3.exit_ratio == 0.50
     assert ReasonCode.SCALE_OUT_TARGET in dec3.reason_codes
-    assert brain.has_scaled_out is True
+    assert brain.has_scaled_out is False
 
     # Check order request built by adapter
     order_req = PISExecutionAdapter.build_order_request(dec3, obs3)
     assert order_req is not None
     assert order_req.qty == 50.0
-
-    # Check that stop floor moved to at least breakeven + wide ATR trailing stop
-    # breakeven = 100.0 + (0.05 * 5.0) = 100.25
-    # wide trail = 105.0 - (2.0 * 2.0) = 101.0
-    assert brain.current_stop_floor >= 100.25
 
     # 4. Pullback to 103.0 (+0.6R) -> Does NOT exit early because runner uses wide trail!
     # Floor is 101.0, price is 103.0 > 101.0
@@ -95,6 +90,11 @@ def test_pis_scale_out_at_1r() -> None:
     dec4 = brain.observe(obs4)
     assert dec4.action in (ExitAction.HOLD, ExitAction.UPDATE_PROTECTION)
     assert brain.has_scaled_out is True
+
+    # Check that stop floor moved to at least breakeven + wide ATR trailing stop
+    # breakeven = 100.0 + (0.05 * 5.0) = 100.25
+    # wide trail = 105.0 - (2.0 * 2.0) = 101.0
+    assert brain.current_stop_floor >= 100.25
 
     # 5. Massive trend continuation to 115.0 (+3.0R)
     # Stop floor trails up: 115.0 - (2.0 * 2.0) = 111.0

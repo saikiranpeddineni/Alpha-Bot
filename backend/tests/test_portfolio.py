@@ -71,7 +71,7 @@ def test_flip_creates_trade_and_new_lot():
 
 def test_r_multiple_uses_noted_stop():
     p = PortfolioTracker()
-    p.on_fill(fill(qty=10, price=100.0))
+    p.on_fill(fill(qty=10, price=100.0), initial_stop=98.0)
     p.note_stop("AAPL", 98.0)  # $2 initial risk/share
     trade = p.on_fill(fill(side=OrderSide.SELL, qty=10, price=104.0))
     assert trade.r_multiple == pytest.approx(2.0)
@@ -79,7 +79,7 @@ def test_r_multiple_uses_noted_stop():
 
 def test_r_multiple_uses_noted_stop_short():
     p = PortfolioTracker()
-    p.on_fill(fill(side=OrderSide.SELL, qty=10, price=100.0))
+    p.on_fill(fill(side=OrderSide.SELL, qty=10, price=100.0), initial_stop=102.0)
     p.note_stop("AAPL", 102.0)
     trade = p.on_fill(fill(side=OrderSide.BUY, qty=10, price=96.0))
     assert trade.r_multiple == pytest.approx(2.0)
@@ -87,7 +87,7 @@ def test_r_multiple_uses_noted_stop_short():
 
 def test_noted_stop_risk_is_immutable_across_ratchets():
     p = PortfolioTracker()
-    p.on_fill(fill(qty=10, price=100.0))
+    p.on_fill(fill(qty=10, price=100.0), initial_stop=98.0)
     p.note_stop("AAPL", 98.0)
     p.note_stop("AAPL", 99.0)
     p.note_stop("AAPL", 101.0)

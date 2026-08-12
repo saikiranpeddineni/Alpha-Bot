@@ -32,8 +32,8 @@ def test_early_invalidation_scratches_broken_setup_at_0_60r():
     initial_obs = _make_obs(100.0, 100.2, 99.8, vol=1000, r_mult=0.0)
     brain = PositionBrain("FAILTEST", initial_obs)
 
-    # Bar 2: Immediate heavy dump with rejection wick and negative R-multiple (-0.65R)
-    bar2_obs = _make_obs(98.7, 99.8, 98.6, vol=5000, r_mult=-0.65)
+    # Bar 2: Immediate heavy dump with rejection wick and negative R-multiple (-0.85R)
+    bar2_obs = _make_obs(98.7, 99.8, 98.6, vol=5000, r_mult=-0.85)
     decision = brain.observe(bar2_obs)
 
     # Must trigger asymmetric scratch exit

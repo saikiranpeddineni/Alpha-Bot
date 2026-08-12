@@ -7,12 +7,15 @@ import json
 import logging
 from typing import Any
 import pandas as pd
+import dataclasses
 
 from app.core.domain import Regime, Signal, SignalAction
 from app.core.applog import applog
 from app.strategies.base import REGISTRY
 from app.ai.features import latest_feature_row
 from app.ai.prediction import ExcursionEstimate
+from app.strategies.pipeline import _REGIME_KEY
+from app.ai.model import ScoreActionResult, _validate_signal_probability
 
 
 class ParallelEvidenceEvaluator:
@@ -51,7 +54,6 @@ class ParallelEvidenceEvaluator:
             target_ml_threshold = ml_threshold if ml_threshold is not None else self.ml_threshold
 
             # ---- Gate 1: ML Probability Gate ----
-            from app.strategies.pipeline import _REGIME_KEY
             regime_key = _REGIME_KEY.get(regime)
 
             use_detailed = False
@@ -64,7 +66,6 @@ class ParallelEvidenceEvaluator:
                 score_res = self.model.score_action_detailed(features, sig.action, symbol=symbol, regime_key=regime_key)
             else:
                 prob = self.model.score_action(features, sig.action, symbol=symbol, regime_key=regime_key)
-                from app.ai.model import ScoreActionResult
                 score_res = ScoreActionResult(
                     probability=prob,
                     model_source="BASE",
@@ -73,7 +74,6 @@ class ParallelEvidenceEvaluator:
                     specialist_min_auc=0.53,
                     fallback_reason=None if prob is not None else "score_action returned None"
                 )
-            import dataclasses
             dyn_min_auc = 0.53
             score_res = dataclasses.replace(score_res, specialist_min_auc=dyn_min_auc)
 
@@ -81,7 +81,6 @@ class ParallelEvidenceEvaluator:
             ml_passed = False
             ml_rejection_reason = None
             if ml is not None:
-                from app.ai.model import _validate_signal_probability
                 _, val_reason = _validate_signal_probability(ml)
                 if val_reason is not None:
                     ml = None

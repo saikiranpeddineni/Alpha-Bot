@@ -801,9 +801,16 @@ class AlpacaBroker(Broker):
                     GetOrdersRequest(status="open", symbols=[symbol.upper()]),
                     label=f"get_orders/close_position/{symbol}"
                 )
+                canceled_any = False
                 for o in open_orders:
                     await _call(self._client.cancel_order_by_id, str(o.id), label=f"cancel_order/{o.id}")
                     applog.info("broker.alpaca", f"Cancelled outstanding open order {o.id} for {symbol} to release held qty")
+                    canceled_any = True
+                
+                if canceled_any:
+                    import asyncio
+                    # Allow Alpaca backend to asynchronously clear the held_for_orders quantity
+                    await asyncio.sleep(1.5)
             except Exception as e:
                 applog.warning("broker.alpaca", f"Failed to cancel open orders for {symbol} before close: {e}")
 
@@ -838,9 +845,16 @@ class AlpacaBroker(Broker):
                     GetOrdersRequest(status="open", symbols=[symbol.upper()]),
                     label=f"get_orders/update_protection/{symbol}"
                 )
+                canceled_any = False
                 for o in open_orders:
                     await _call(self._client.cancel_order_by_id, str(o.id), label=f"cancel_order/{o.id}")
                     applog.info("broker.alpaca", f"Cancelled order {o.id} to replace protection")
+                    canceled_any = True
+                
+                if canceled_any:
+                    import asyncio
+                    # Allow Alpaca backend to asynchronously clear the held_for_orders quantity
+                    await asyncio.sleep(1.5)
             except Exception as e:
                 applog.warning("broker.alpaca", f"Failed to cancel open orders for {symbol} before update_protection: {e}")
 
