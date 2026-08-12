@@ -51,9 +51,10 @@ jobs:
           PYTHONPATH: backend
         run: |
           set -o pipefail
-          pytest -q backend/tests \
+          timeout --signal=TERM --kill-after=30s 8m pytest -q backend/tests \
             --ignore=backend/tests/test_replay_loopholes.py \
             -k 'not test_kelly_is_disabled_due_to_incompatibility and not test_backtest_uses_shared_allocation_path' \
+            --durations=20 \
             --junitxml=production-invariants.xml 2>&1 | tee production-invariants.log
       - name: Run production integrity regressions explicitly
         id: production_integrity
@@ -62,7 +63,7 @@ jobs:
           PYTHONPATH: backend
         run: |
           set -o pipefail
-          pytest -q backend/tests/test_production_integrity.py \
+          timeout --signal=TERM --kill-after=30s 5m pytest -q backend/tests/test_production_integrity.py \
             --junitxml=production-integrity.xml 2>&1 | tee production-integrity.log
       - name: Run replay loophole invariants excluding local oracle fixtures
         id: replay_invariants
@@ -71,7 +72,7 @@ jobs:
           PYTHONPATH: backend
         run: |
           set -o pipefail
-          pytest -q backend/tests/test_replay_loopholes.py \
+          timeout --signal=TERM --kill-after=30s 5m pytest -q backend/tests/test_replay_loopholes.py \
             -k 'not oracle_regression' \
             --junitxml=replay-invariants.xml 2>&1 | tee replay-invariants.log
       - name: Upload CI diagnostics
