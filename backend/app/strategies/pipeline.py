@@ -56,8 +56,6 @@ class SignalPipeline:
         from app.ai.prediction import MetaLabelEngine
         from app.config import get_models_dir
         self.meta_label_engine = MetaLabelEngine(get_models_dir())
-        # Shadow challengers are intentionally not instantiated here. Champion owns only
-        # authoritative ML/Meta/TradeScore behavior; research consumers live behind ShadowResearchRuntime.
         if not hasattr(model, "_meta_label_engine") or model._meta_label_engine is None:
             model._meta_label_engine = self.meta_label_engine
         self._is_event_day: bool = False
@@ -83,8 +81,6 @@ class SignalPipeline:
 
     def should_enforce_ml_veto(self, strategy: str, action: SignalAction, model_source: str,
                                specialist_status: str, mins_et: int) -> bool:
-        # We now strictly trust the AI pipeline.
-        # All manual bypass hacks have been removed.
         return True
 
     def process(self, symbol: str, df: pd.DataFrame, signals: list[Signal], regime: Regime,
@@ -156,67 +152,59 @@ class SignalPipeline:
                     sig.ml_gate_decision = "REJECT"
                     rejected.append((sig, "ML model temporal bypass (look-ahead bias protection)"))
                     continue
-                else:
-                    sig.ml_gate_decision = "REJECT"
-                    rejected.append((sig, f"ML probability unavailable ({score_res.fallback_reason or 'unknown reason'})"))
-                    continue
-            else:
-                sig.ml_probability = round(ml, 4)
-                from zoneinfo import ZoneInfo
-                from datetime import datetime, UTC
-                et_tz = ZoneInfo("America/New_York")
-                if df is not None and len(df) > 0 and hasattr(df.index, "tz_convert"):
-                    try:
-                        now_et = df.index[-1].tz_convert(et_tz)
-                    except Exception:
-                        now_et = datetime.now(et_tz)
-                elif df is not None and len(df) > 0 and isinstance(df.index[-1], datetime):
-                    now_et = df.index[-1].astimezone(et_tz) if df.index[-1].tzinfo else df.index[-1].replace(tzinfo=UTC).astimezone(et_tz)
-                else:
+                sig.ml_gate_decision = "REJECT"
+                rejected.append((sig, f"ML probability unavailable ({score_res.fallback_reason or 'unknown reason'})"))
+                continue
+            
+            sig.ml_probability = round(ml, 4)
+            from zoneinfo import ZoneInfo
+            from datetime import datetime, UTC
+            et_tz = ZoneInfo("America/New_York")
+            if df is not None and len(df) > 0 and hasattr(df.index, "tz_convert"):
+                try:
+                    now_et = df.index[-1].tz_convert(et_tz)
+                except Exception:
                     now_et = datetime.now(et_tz)
-                mins_et = now_et.hour * 60 + now_et.minute
-                enforce_veto = self.should_enforce_ml_veto(sig.strategy, sig.action, score_res.model_source,
-                                                           score_res.specialist_status, mins_et)
+            elif df is not None and len(df) > 0 and isinstance(df.index[-1], datetime):
+                now_et = df.index[-1].astimezone(et_tz) if df.index[-1].tzinfo else df.index[-1].replace(tzinfo=UTC).astimezone(et_tz)
+            else:
+                now_et = datetime.now(et_tz)
+            mins_et = now_et.hour * 60 + now_et.minute
+            enforce_veto = self.should_enforce_ml_veto(sig.strategy, sig.action, score_res.model_source,
+                                                       score_res.specialist_status, mins_et)
+            current_threshold = self.ml_threshold
+            if adaptive_ml_thresholds and getattr(sig, "candidate_id", None) in adaptive_ml_thresholds:
+                current_threshold = adaptive_ml_thresholds[sig.candidate_id]
 
-                current_threshold = self.ml_threshold
-                if adaptive_ml_thresholds and getattr(sig, "candidate_id", None) in adaptive_ml_thresholds:
-                    current_threshold = adaptive_ml_thresholds[sig.candidate_id]
-
-                # Catalyst-conditioned evidence fusion: if a fresh material catalyst
-                # is independently confirmed by price/relative-strength evidence, move
-                # the statistical probability toward the existing threshold rather than
-                # blindly rejecting the anomaly. The configured threshold itself is unchanged.
-                catalyst_adjusted_ml = ml
-                catalyst_rescued = False
-                if catalyst_exceptional and ml < current_threshold:
-                    catalyst_adjusted_ml = ml + (current_threshold - ml) * catalyst_strength
-                    if catalyst_adjusted_ml >= current_threshold:
-                        ml = float(current_threshold)
-                        catalyst_rescued = True
-                        sig.ml_gate_decision = "CATALYST_CONTEXT_RESCUED"
-                        applog.info("pipeline", f"{symbol}: ML catalyst rescue | raw={score_res:.4f if False else catalyst_evidence.get('catalyst_conviction')} effective={ml:.4f} threshold={current_threshold:.4f}")
-
-                hard_reject_cutoff = getattr(self.trade_score_engine.risk_config, "ml_hard_reject_threshold", 0.48)
-                if not catalyst_rescued and ml < current_threshold:
-                    if self.soft_composite_gating and ml >= (current_threshold - 0.04):
-                        sig.ml_gate_decision = "GRAY_ZONE_EVALUATION"
-                        applog.info("pipeline", f"{symbol}: ML gray zone active ({ml:.4f} in [{(current_threshold - 0.04):.2f}, {current_threshold:.2f}]). Evaluating Meta & TradeScore.")
-                    elif ml < hard_reject_cutoff:
-                        applog.info("pipeline", f"{symbol}: ML confidence {ml:.4f} < hard cutoff {hard_reject_cutoff:.2f}. Rejected.")
-                        sig.ml_gate_decision = "REJECT"
-                        rejected.append((sig, f"ML confidence {ml:.4f} < threshold {current_threshold:.4f}"))
-                        continue
-                    elif enforce_veto:
-                        sig.ml_gate_decision = "REJECT"
-                        rejected.append((sig, f"ML confidence {ml:.4f} < threshold {current_threshold:.4f}"))
-                        continue
-                    else:
-                        sig.ml_gate_decision = "BASE_FALLBACK_BYPASS"
-                        applog.info("pipeline", f"{symbol}: {sig.strategy.upper()} BASE_FALLBACK ML advisory bypass active: prob={ml:.4f} < threshold={current_threshold:.4f} (mins_et={mins_et})")
-                elif catalyst_rescued:
+            catalyst_rescued = False
+            if catalyst_exceptional and ml < current_threshold:
+                catalyst_adjusted_ml = ml + (current_threshold - ml) * catalyst_strength
+                if catalyst_adjusted_ml >= current_threshold:
+                    ml = float(current_threshold)
+                    sig.ml_probability = round(ml, 4)
+                    catalyst_rescued = True
                     sig.ml_gate_decision = "CATALYST_CONTEXT_RESCUED"
+                    applog.info("pipeline", f"{symbol}: ML catalyst rescue | raw={score_res_probability( score_res.probability ) if False else 'validated'} effective={ml:.4f} threshold={current_threshold:.4f}")
+
+            hard_reject_cutoff = getattr(self.trade_score_engine.risk_config, "ml_hard_reject_threshold", 0.48)
+            if not catalyst_rescued and ml < current_threshold:
+                if self.soft_composite_gating and ml >= (current_threshold - 0.04):
+                    sig.ml_gate_decision = "GRAY_ZONE_EVALUATION"
+                    applog.info("pipeline", f"{symbol}: ML gray zone active ({ml:.4f} in [{(current_threshold - 0.04):.2f}, {current_threshold:.2f}]). Evaluating Meta & TradeScore.")
+                elif ml < hard_reject_cutoff:
+                    applog.info("pipeline", f"{symbol}: ML confidence {ml:.4f} < hard cutoff {hard_reject_cutoff:.2f}. Rejected.")
+                    sig.ml_gate_decision = "REJECT"
+                    rejected.append((sig, f"ML confidence {ml:.4f} < threshold {current_threshold:.4f}"))
+                    continue
+                elif enforce_veto:
+                    sig.ml_gate_decision = "REJECT"
+                    rejected.append((sig, f"ML confidence {ml:.4f} < threshold {current_threshold:.4f}"))
+                    continue
                 else:
-                    sig.ml_gate_decision = "PASS"
+                    sig.ml_gate_decision = "BASE_FALLBACK_BYPASS"
+                    applog.info("pipeline", f"{symbol}: {sig.strategy.upper()} BASE_FALLBACK ML advisory bypass active: prob={ml:.4f} < threshold={current_threshold:.4f} (mins_et={mins_et})")
+            elif not catalyst_rescued:
+                sig.ml_gate_decision = "PASS"
 
             from app.ai.prediction import ExcursionEstimate
             excursion = ExcursionEstimate.from_atr(atr_pct)
@@ -232,7 +220,6 @@ class SignalPipeline:
                     is_valid_short = (sig.action == SignalAction.ENTER_SHORT and native_stop > entry_price and native_target < entry_price)
                     if (is_valid_long or is_valid_short) and native_risk > 1e-9:
                         native_R = native_reward / native_risk
-
                 if sig.action == SignalAction.ENTER_SHORT:
                     if sig.stop_loss is None:
                         sig.stop_loss = round(entry_price * (1 + excursion.suggested_stop_pct / 100.0), 4)
@@ -259,7 +246,6 @@ class SignalPipeline:
                     if orig_risk > 0:
                         new_reward = abs(entry_price - sig.stop_loss) * (orig_reward / orig_risk)
                         sig.take_profit = round(entry_price + new_reward, 4) if sig.action == SignalAction.ENTER_LONG else round(entry_price - new_reward, 4)
-
                 if sig.strategy != "vwap_reversion" and native_R is not None and native_R > 0 and sig.stop_loss is not None and sig.take_profit is not None:
                     adjusted_risk = abs(entry_price - sig.stop_loss)
                     if adjusted_risk > 1e-9:
@@ -274,7 +260,6 @@ class SignalPipeline:
             meta_threshold = self.ml_threshold
             if adaptive_ml_thresholds and getattr(sig, "candidate_id", None) in adaptive_ml_thresholds:
                 meta_threshold = adaptive_ml_thresholds[sig.candidate_id]
-
             meta_pred = self.meta_label_engine.predict(sig.strategy, features, side=side_str, adaptive_threshold=meta_threshold)
             meta_rescued = False
             effective_meta_prob = meta_pred.prob_profitable
@@ -308,7 +293,6 @@ class SignalPipeline:
                 trade_score, regime, is_event_day=self._is_event_day,
                 threshold_boost=self.trade_score_engine.risk_config.midday_score_boost if (self._midday_active and is_breakout) else 0.0)
             score_rescued = False
-            effective_trade_score = trade_score
             if not approved and catalyst_exceptional:
                 effective_trade_score = trade_score + (threshold - trade_score) * catalyst_strength
                 if effective_trade_score >= threshold:
@@ -334,5 +318,5 @@ class SignalPipeline:
             winner = entries[0]
             accepted.append(winner)
             for loser in entries[1:]:
-                rejected.append((loser, f"lost conflict to {winner.strategy} (score {winner.score:.4f})"))
+                rejected.append((loser, f"lost conflict to {winner.strategy} (score {winner.score:.4f}))"))
         return accepted, rejected
