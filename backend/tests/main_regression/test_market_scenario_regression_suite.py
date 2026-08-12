@@ -67,10 +67,11 @@ def test_range_market_with_no_symbol_confirmation_remains_tradable_but_flagged()
     _assert_allowed(result); assert any("macro_context_conflict" in r for r in result.reasons)
 
 
-def test_fresh_material_adverse_news_confirms_a_contradiction():
+def test_fresh_material_adverse_news_is_recorded_without_single_signal_veto():
     sig = _signal("long", news_context_available=True, news_direction="bearish", news_confidence=.90, news_catalyst="financing", news_age_seconds=120)
     result = assess_entry_context(sig, _bars([100-i*.25 for i in range(30)]), Regime.TREND_DOWN)
-    _assert_blocked(result); assert any("news_context_conflict" in r for r in result.reasons)
+    _assert_allowed(result)
+    assert any("news_context_conflict" in r for r in result.reasons)
 
 
 def test_fresh_adverse_news_is_absorbed_and_does_not_block():
@@ -91,7 +92,7 @@ def test_breakout_test_is_not_called_exhaustion():
 
 
 def test_genuine_extension_without_mover_confirmation_is_flagged():
-    result = assess_entry_context(_signal("long", mover_bias="neutral", rs_score=.50), _bars([100+i*.05 for i in range(19)]+[102]), Regime.TREND_UP)
+    result = assess_entry_context(_signal("long", mover_bias="neutral", rs_score=.50), _bars([100+i*.05 for i in range(20)]+[102]), Regime.TREND_UP)
     assert any("entry_location_conflict" in r for r in result.reasons)
 
 
