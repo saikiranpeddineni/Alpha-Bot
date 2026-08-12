@@ -19,10 +19,7 @@ from app.strategies.entry_intelligence import assess_entry_context, assess_thesi
 
 def _signal(side: str = "long", **overrides):
     action = SignalAction.ENTER_LONG if side == "long" else SignalAction.ENTER_SHORT
-    values = {"action": action, "side": side, "strategy": "momentum", "symbol": "TEST",
-              "mover_bias": None, "rs_score": None, "news_context_available": False,
-              "news_direction": "neutral", "news_sentiment": 0.0, "news_confidence": 0.0,
-              "news_catalyst": None, "news_age_seconds": None, "regime": Regime.TREND_UP}
+    values = {"action": action, "side": side, "strategy": "momentum", "symbol": "TEST", "mover_bias": None, "rs_score": None, "news_context_available": False, "news_direction": "neutral", "news_sentiment": 0.0, "news_confidence": 0.0, "news_catalyst": None, "news_age_seconds": None, "regime": Regime.TREND_UP}
     values.update(overrides)
     return SimpleNamespace(**values)
 
@@ -30,10 +27,7 @@ def _signal(side: str = "long", **overrides):
 def _bars(closes, *, atr=1.0, ema9=None, ema20=None, volume=None):
     closes = list(map(float, closes)); n = len(closes)
     ema9 = closes[-1] if ema9 is None else ema9; ema20 = closes[-1] if ema20 is None else ema20
-    return pd.DataFrame({"close": closes, "high": [x + .20 for x in closes],
-                         "low": [x - .20 for x in closes], "atr14": [float(atr)] * n,
-                         "ema9": [float(ema9)] * n, "ema20": [float(ema20)] * n,
-                         "volume": volume if volume is not None else [100_000] * n})
+    return pd.DataFrame({"close": closes, "high": [x + .20 for x in closes], "low": [x - .20 for x in closes], "atr14": [float(atr)] * n, "ema9": [float(ema9)] * n, "ema20": [float(ema20)] * n, "volume": volume if volume is not None else [100_000] * n})
 
 
 def _assert_allowed(result): assert result.allowed is True, result.reasons
@@ -41,12 +35,7 @@ def _assert_allowed(result): assert result.allowed is True, result.reasons
 def _assert_blocked(result): assert result.allowed is False, result.reasons
 
 
-@pytest.mark.parametrize("side,closes,regime,mover,rs", [
-    ("long", [100 + i*.35 for i in range(30)], Regime.TREND_UP, "gainer", .70),
-    ("short", [110 - i*.35 for i in range(30)], Regime.TREND_DOWN, "loser", .30),
-    ("long", [105,104.7,104.4,104.1,103.8,103.5,103.7,104,104.4,104.9,105.5,106], Regime.TREND_DOWN, None, None),
-    ("short", [95,95.3,95.6,95.9,96.2,96.5,96.3,96,95.6,95.1,94.5,94], Regime.TREND_UP, None, None),
-])
+@pytest.mark.parametrize("side,closes,regime,mover,rs", [("long", [100 + i*.35 for i in range(30)], Regime.TREND_UP, "gainer", .70), ("short", [110 - i*.35 for i in range(30)], Regime.TREND_DOWN, "loser", .30), ("long", [105,104.7,104.4,104.1,103.8,103.5,103.7,104,104.4,104.9,105.5,106], Regime.TREND_DOWN, None, None), ("short", [95,95.3,95.6,95.9,96.2,96.5,96.3,96,95.6,95.1,94.5,94], Regime.TREND_UP, None, None)])
 def test_strong_opportunities_are_not_over_restricted(side, closes, regime, mover, rs):
     _assert_allowed(assess_entry_context(_signal(side, mover_bias=mover, rs_score=rs), _bars(closes), regime))
 
@@ -67,10 +56,10 @@ def test_range_market_with_no_symbol_confirmation_remains_tradable_but_flagged()
     _assert_allowed(result); assert any("macro_context_conflict" in r for r in result.reasons)
 
 
-def test_fresh_material_adverse_news_is_recorded_without_single_signal_veto():
+def test_fresh_material_adverse_news_is_rejected_when_price_confirms_the_adverse_move():
     sig = _signal("long", news_context_available=True, news_direction="bearish", news_confidence=.90, news_catalyst="financing", news_age_seconds=120)
     result = assess_entry_context(sig, _bars([100-i*.25 for i in range(30)]), Regime.TREND_DOWN)
-    _assert_allowed(result)
+    _assert_blocked(result)
     assert any("news_context_conflict" in r for r in result.reasons)
 
 
