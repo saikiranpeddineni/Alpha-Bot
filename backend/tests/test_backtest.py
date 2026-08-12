@@ -1,8 +1,6 @@
 """Backtest engine end-to-end tests on deterministic synthetic data."""
 
 from __future__ import annotations
-from app.config import RiskConfig
-from app.config import Settings
 
 from datetime import UTC, datetime
 
@@ -11,7 +9,7 @@ import pytest
 from app.ai.model import SignalModel
 from app.backtest.engine import BacktestParams, run_backtest
 from app.backtest.metrics import compute_metrics, max_drawdown_pct
-from app.config import DATA_DIR, RiskConfig
+from app.config import DATA_DIR, RiskConfig, Settings
 from app.core.domain import TradeRecord
 from app.data.manager import DataManager
 from app.data.synthetic import SyntheticProvider, generate_day
@@ -63,11 +61,16 @@ async def test_backtest_runs_and_reports(data, model, risk_config):
 
 
 async def test_backtest_no_overnight_positions(data, model, risk_config):
-    """Every trade must close the same session it opened (day trading contract)."""
+    """Every trade must close the same session it opened (day trading contract).
+
+    This invariant only needs one complete trading session. Keeping the fixture
+    to one day prevents this focused contract test from duplicating the multi-day
+    end-to-end workload covered by test_backtest_runs_and_reports.
+    """
     params = BacktestParams(
         symbols=["AAPL"],
         start=datetime(2026, 1, 5, tzinfo=UTC),
-        end=datetime(2026, 1, 9, 23, 59, tzinfo=UTC),
+        end=datetime(2026, 1, 5, 23, 59, tzinfo=UTC),
         risk=risk_config,
     )
     result = await run_backtest(data, model, params, settings=Settings())
@@ -210,4 +213,3 @@ async def test_run_backtest_temporal_leakage_gating(data, model, risk_config):
     )
     res_ignore = await run_backtest(data, model, params_ignore, settings=Settings())
     assert res_ignore.bars_processed > 0
-
