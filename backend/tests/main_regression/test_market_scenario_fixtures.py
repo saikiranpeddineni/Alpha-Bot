@@ -28,14 +28,23 @@ def _signal(scenario):
     )
 
 
-def _bars(closes):
+def _bars(closes, mover_bias):
+    # Adverse mover fixtures deliberately include an opposing EMA structure so
+    # the test supplies the second independent contradiction required by the
+    # production entry-intelligence contract.
+    if mover_bias == "loser":
+        ema9, ema20 = closes[-1] - 1.0, closes[-1] + 1.0
+    elif mover_bias == "gainer":
+        ema9, ema20 = closes[-1] + 1.0, closes[-1] - 1.0
+    else:
+        ema9 = ema20 = closes[-1]
     return pd.DataFrame({
         "close": list(closes),
         "high": [x + .20 for x in closes],
         "low": [x - .20 for x in closes],
         "atr14": [1.0] * len(closes),
-        "ema9": [closes[-1]] * len(closes),
-        "ema20": [closes[-1]] * len(closes),
+        "ema9": [ema9] * len(closes),
+        "ema20": [ema20] * len(closes),
         "volume": [100_000] * len(closes),
     })
 
@@ -43,7 +52,7 @@ def _bars(closes):
 def test_all_market_fixtures_execute_through_canonical_entry_intelligence():
     assert len(SCENARIOS) == 13
     for scenario in SCENARIOS:
-        result = assess_entry_context(_signal(scenario), _bars(scenario.closes), scenario.regime)
+        result = assess_entry_context(_signal(scenario), _bars(scenario.closes, scenario.mover_bias), scenario.regime)
         assert result.allowed is scenario.expect_allowed, (
             f"{scenario.name}: expected allowed={scenario.expect_allowed}, "
             f"got {result.allowed}; reasons={result.reasons}"
