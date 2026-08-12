@@ -134,6 +134,53 @@ def _news_assessment(sig: Signal, df: pd.DataFrame) -> tuple[float, list[str], d
     return weight, reasons, evidence
 
 
+def assess_catalyst_conviction(sig: Signal, df: pd.DataFrame) -> tuple[bool, float, dict[str, Any]]:
+    """Score a fresh material catalyst using only existing signal context.
+
+    This is not a new gate or subsystem. It is a bounded evidence-fusion helper
+    used by the existing pipeline when deciding whether an extreme statistical
+    anomaly may represent a genuine catalyst-driven regime change.
+
+    The strength is derived from existing news confidence and independent price
+    confirmation (mover bias, relative strength, and short-term ATR-normalized
+    movement). No global ML/PIS/risk threshold is modified.
+    """
+    catalyst = getattr(sig, "news_catalyst", None)
+    age = getattr(sig, "news_age_seconds", None)
+    confidence = float(getattr(sig, "news_confidence", 0.0) or 0.0)
+    direction = str(getattr(sig, "news_direction", "neutral") or "neutral")
+    available = bool(getattr(sig, "news_context_available", False))
+    material = catalyst in {"earnings", "financing", "regulatory"}
+    fresh = age is not None and age <= NEWS_FRESH_SECONDS
+    supportive = (sig.side == "long" and direction == "bullish") or (sig.side == "short" and direction == "bearish")
+    mover = getattr(sig, "mover_bias", None)
+    rs = getattr(sig, "rs_score", None)
+    slope_r = _normalized_short_term_move(df)
+    mover_confirm = mover == ("gainer" if sig.side == "long" else "loser")
+    rs_confirm = (rs is not None and rs >= 0.55) if sig.side == "long" else (rs is not None and rs <= 0.45)
+    slope_confirm = (slope_r is not None and slope_r >= SHORT_TERM_SLOPE_R) if sig.side == "long" else (slope_r is not None and slope_r <= -SHORT_TERM_SLOPE_R)
+    confirmations = int(mover_confirm) + int(rs_confirm) + int(slope_confirm)
+
+    eligible = available and fresh and material and supportive and confidence >= NEWS_MATERIAL_CONFIDENCE and confirmations >= 2
+    strength = min(1.0, confidence * (confirmations / 3.0)) if eligible else 0.0
+    evidence = {
+        "catalyst_available": available,
+        "catalyst": catalyst,
+        "catalyst_material": material,
+        "catalyst_fresh": fresh,
+        "catalyst_direction": direction,
+        "catalyst_confidence": confidence,
+        "catalyst_supportive": supportive,
+        "catalyst_mover_confirmed": mover_confirm,
+        "catalyst_rs_confirmed": rs_confirm,
+        "catalyst_slope_confirmed": slope_confirm,
+        "catalyst_confirmations": confirmations,
+        "catalyst_conviction": round(strength, 4),
+        "catalyst_exceptional": eligible,
+    }
+    return eligible, strength, evidence
+
+
 def _entry_location_assessment(sig: Signal, df: pd.DataFrame) -> tuple[float, list[str], dict[str, Any]]:
     if len(df) < 21 or not {"close", "high", "low", "atr14"}.issubset(df.columns):
         return 0.0, [], {}
@@ -161,11 +208,16 @@ def assess_entry_context(sig: Signal, df: pd.DataFrame, regime: Regime | str | N
     conviction -= news_weight; reasons.extend(news_reasons); evidence.update(news_evidence)
     extension_weight, extension_reasons, extension_evidence = _entry_location_assessment(sig, df)
     conviction -= extension_weight; reasons.extend(extension_reasons); evidence.update(extension_evidence)
+    catalyst_exceptional, catalyst_strength, catalyst_evidence = assess_catalyst_conviction(sig, df)
+    evidence.update(catalyst_evidence)
+    if catalyst_exceptional:
+        reasons.append("catalyst_context_support: exceptional_material_catalyst_confirmed")
+        conviction = min(1.0, conviction + (1.0 - conviction) * catalyst_strength * 0.35)
 
     rs = getattr(sig, "rs_score", None); mover = getattr(sig, "mover_bias", None); regime_name = str(getattr(regime, "value", regime) or "").lower()
     if regime_name == Regime.RANGE.value and mover in {None, "neutral"} and (rs is None or 0.47 <= rs <= 0.53):
         conviction -= 0.08; reasons.append("macro_context_conflict: range_without_symbol_confirmation")
-    if regime_name == Regime.VOLATILE.value and not evidence.get("direction_ok", False):
+    if regime_name == Regime.VOLATILE.value and not evidence.get("direction_ok", False) and not catalyst_exceptional:
         conviction -= 0.10; reasons.append("macro_context_conflict: volatile_without_directional_confirmation")
 
     conviction = max(0.0, min(1.0, conviction))
