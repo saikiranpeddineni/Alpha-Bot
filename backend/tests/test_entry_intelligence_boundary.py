@@ -1,13 +1,9 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pandas as pd
 
-from app.core.clock import MarketClock
-from app.core.domain import Regime, Signal, SignalAction, TradeRecord
-from app.config import RiskConfig
-from app.risk.manager import RiskManager
-from app.strategies.entry_intelligence import assess_entry_context
-from app.strategies.pipeline import SignalPipeline
+from app.core.domain import Regime, Signal, SignalAction
+from app.strategies.entry_intelligence import assess_entry_context, assess_thesis_continuity
 
 
 def _bars(close: float = 100.0, atr: float = 1.0) -> pd.DataFrame:
@@ -78,28 +74,35 @@ def test_signal_carries_context_evidence_fields():
     assert sig.news_sentiment == -0.4
 
 
-def test_risk_boundary_can_record_failed_thesis_without_fixed_timer():
-    # The runtime boundary is evidence-based; disable the legacy timer for this
-    # unit test so the assertion specifically exercises thesis continuity.
-    risk = RiskManager(RiskConfig(symbol_cooldown_minutes=0), MarketClock(always_open=True))
+def test_thesis_continuity_blocks_repeated_same_context_losses():
     now = datetime.now(UTC)
-    trade = TradeRecord(
-        symbol="TEST",
-        side="long",
-        qty=10,
-        entry_price=100,
-        exit_price=99,
-        entry_at=now,
-        exit_at=now,
-        pnl=-10,
-        pnl_pct=-1,
-        strategy="momentum",
-        metadata={"regime": "range", "mover_bias": "gainer"},
-    )
-    risk.on_trade_closed(trade, now=now)
+
+    class DB:
+        def get_shadow_signals(self, limit=500):
+            return [
+                {
+                    "symbol": "TEST",
+                    "direction": "long",
+                    "timestamp": (now - timedelta(minutes=20)).isoformat(),
+                    "regime": "range",
+                    "mover_bias": "gainer",
+                    "outcomes": {"60m": {"realized_r": -0.8}},
+                },
+                {
+                    "symbol": "TEST",
+                    "direction": "long",
+                    "timestamp": (now - timedelta(minutes=8)).isoformat(),
+                    "regime": "range",
+                    "mover_bias": "gainer",
+                    "outcomes": {"60m": {"realized_r": -0.6}},
+                },
+            ]
+
     sig = _signal(SignalAction.ENTER_LONG)
     sig.regime = Regime.RANGE
     sig.mover_bias = "gainer"
-    decision = risk.is_entry_permitted(sig, now=now)
-    assert decision.approved is False
-    assert "same-thesis" in decision.reason
+    result = assess_thesis_continuity(DB(), sig, now)
+
+    assert result.allowed is False
+    assert "thesis_continuity_conflict: repeated_same_context_losses" in result.reasons
+    assert result.evidence["reentry_policy"] == "adaptive_block"
