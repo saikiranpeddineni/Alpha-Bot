@@ -185,7 +185,8 @@ def assess_thesis_continuity(db, sig: Signal, now) -> EntryContextAssessment:
         return EntryContextAssessment(True)
 
     direction = sig.side
-    current_regime = getattr(sig.regime, "value", str(sig.regime) if sig.regime is not None else None)
+    signal_regime = getattr(sig, "regime", None)
+    current_regime = getattr(signal_regime, "value", str(signal_regime) if signal_regime is not None else None)
     candidates = []
     for record in records:
         if str(record.get("symbol", "")).upper() != sig.symbol.upper():
