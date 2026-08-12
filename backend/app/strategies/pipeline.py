@@ -155,7 +155,7 @@ class SignalPipeline:
                 sig.ml_gate_decision = "REJECT"
                 rejected.append((sig, f"ML probability unavailable ({score_res.fallback_reason or 'unknown reason'})"))
                 continue
-            
+
             sig.ml_probability = round(ml, 4)
             from zoneinfo import ZoneInfo
             from datetime import datetime, UTC
@@ -177,6 +177,7 @@ class SignalPipeline:
                 current_threshold = adaptive_ml_thresholds[sig.candidate_id]
 
             catalyst_rescued = False
+            raw_ml = ml
             if catalyst_exceptional and ml < current_threshold:
                 catalyst_adjusted_ml = ml + (current_threshold - ml) * catalyst_strength
                 if catalyst_adjusted_ml >= current_threshold:
@@ -184,7 +185,7 @@ class SignalPipeline:
                     sig.ml_probability = round(ml, 4)
                     catalyst_rescued = True
                     sig.ml_gate_decision = "CATALYST_CONTEXT_RESCUED"
-                    applog.info("pipeline", f"{symbol}: ML catalyst rescue | raw={score_res_probability( score_res.probability ) if False else 'validated'} effective={ml:.4f} threshold={current_threshold:.4f}")
+                    applog.info("pipeline", f"{symbol}: ML catalyst rescue | raw={raw_ml:.4f} effective={ml:.4f} threshold={current_threshold:.4f}")
 
             hard_reject_cutoff = getattr(self.trade_score_engine.risk_config, "ml_hard_reject_threshold", 0.48)
             if not catalyst_rescued and ml < current_threshold:
@@ -318,5 +319,5 @@ class SignalPipeline:
             winner = entries[0]
             accepted.append(winner)
             for loser in entries[1:]:
-                rejected.append((loser, f"lost conflict to {winner.strategy} (score {winner.score:.4f}))"))
+                rejected.append((loser, f"lost conflict to {winner.strategy} (score {winner.score:.4f})"))
         return accepted, rejected
