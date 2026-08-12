@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 from datetime import UTC, date, datetime, timedelta
+from functools import lru_cache
 
 import numpy as np
 import pandas as pd
@@ -57,6 +58,7 @@ def _day_anchor(symbol: str, d: date) -> float:
     return base_price(symbol) * float(np.exp(weekly + daily))
 
 
+@lru_cache(maxsize=2000)
 def generate_day(symbol: str, d: date) -> pd.DataFrame:
     """One full deterministic 390-bar session of 1-minute OHLCV for (symbol, date)."""
     rng = np.random.default_rng(_seed("day", symbol, d))

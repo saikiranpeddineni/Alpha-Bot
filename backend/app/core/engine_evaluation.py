@@ -94,7 +94,7 @@ class TradingEngineEvaluationMixin:
                         if pis_order.stop_price is not None:
                             broker = getattr(self, "broker", None)
                             if broker and hasattr(broker, "update_protection"):
-                                order = await broker.update_protection(symbol, stop_loss=pis_order.stop_price, side=position.side, qty=abs(position.qty))
+                                order = await broker.update_protection(symbol, stop_loss=pis_order.stop_price, side=(OrderSide.BUY if position.qty > 0 else OrderSide.SELL), qty=abs(position.qty))
                                 if order is not None:
                                     self._position_current_stops[symbol] = pis_order.stop_price
                     else:

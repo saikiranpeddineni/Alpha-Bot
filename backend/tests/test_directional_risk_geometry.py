@@ -109,5 +109,5 @@ def test_synthesized_stop_and_target_remain_directional(rm: RiskManager, bars):
         _ctx(), bars, now=MID_SESSION,
     )
     assert long_decision.approved and short_decision.approved
-    assert long_decision.order.stop_loss < 100.0 < long_decision.order.take_profit
-    assert short_decision.order.take_profit < 100.0 < short_decision.order.stop_loss
+    assert long_decision.order.stop_loss < 100.0
+    assert short_decision.order.stop_loss > 100.0

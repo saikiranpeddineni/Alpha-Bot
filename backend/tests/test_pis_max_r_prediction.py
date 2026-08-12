@@ -150,10 +150,13 @@ class TestMaxRPredictionEngine:
         obs1 = _make_obs(price=102.0, entry=100.0, stop=98.0, take_profit=104.0, high=102.2, low=100.0, r_multiple=1.0, minute_offset=1)
         d1 = brain.observe(obs1)
         assert d1.action == ExitAction.PARTIAL_EXIT
+        # In production, the engine sets this after broker confirmation, simulate by passing reduced qty
+        obs1_fill = _make_obs(price=102.0, entry=100.0, stop=98.0, take_profit=104.0, high=102.2, low=100.0, r_multiple=1.0, minute_offset=1, qty=5.0)
+        brain.observe(obs1_fill)
         assert brain.has_scaled_out is True
         
         # Bar 2: Runner breathes and runs to +3.5R
-        obs2 = _make_obs(price=107.0, entry=100.0, stop=98.0, take_profit=104.0, high=107.2, low=106.5, r_multiple=3.5, minute_offset=2)
+        obs2 = _make_obs(price=107.0, entry=100.0, stop=98.0, take_profit=104.0, high=107.2, low=106.5, r_multiple=3.5, minute_offset=2, qty=5.0)
         d2 = brain.observe(obs2)
         assert d2.action in (ExitAction.HOLD, ExitAction.UPDATE_PROTECTION)
         assert d2.target_stop_loss > 100.0  # Stop locked well above breakeven

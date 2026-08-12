@@ -16,6 +16,7 @@ Exit: EMA9/EMA20 cross-reversal while a momentum position is open.
 from __future__ import annotations
 
 import logging
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -180,7 +181,6 @@ class MomentumCross(Strategy):
             return None
 
         # ---- Time and Slippage Guards ----
-        from zoneinfo import ZoneInfo
         now_et = ctx.now.astimezone(ZoneInfo("America/New_York"))
         mins_et = now_et.hour * 60 + now_et.minute
 
