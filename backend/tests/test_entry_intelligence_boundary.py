@@ -6,7 +6,7 @@ from app.core.clock import MarketClock
 from app.core.domain import Regime, Signal, SignalAction, TradeRecord
 from app.config import RiskConfig
 from app.risk.manager import RiskManager
-from app.strategies.entry_intelligence import assess_entry_context
+from app.strategies.entry_intelligence import assess_catalyst_conviction, assess_entry_context
 from app.strategies.pipeline import SignalPipeline
 
 
@@ -55,6 +55,49 @@ def test_context_boundary_does_not_ban_confirmed_mover_continuations():
     assert assessment.allowed is True
 
 
+def test_exceptional_material_catalyst_is_recognized_from_existing_evidence():
+    sig = _signal(SignalAction.ENTER_LONG)
+    sig.mover_bias = "gainer"
+    sig.rs_score = 0.70
+    sig.news_context_available = True
+    sig.news_direction = "bullish"
+    sig.news_confidence = 0.90
+    sig.news_catalyst = "earnings"
+    sig.news_age_seconds = 120
+    exceptional, strength, evidence = assess_catalyst_conviction(sig, _bars())
+    assert exceptional is True
+    assert 0.0 < strength <= 1.0
+    assert evidence["catalyst_material"] is True
+    assert evidence["catalyst_fresh"] is True
+    assert evidence["catalyst_supportive"] is True
+    assert evidence["catalyst_confirmations"] >= 2
+
+
+def test_extreme_move_without_catalyst_is_not_rescued():
+    sig = _signal(SignalAction.ENTER_LONG)
+    sig.mover_bias = "gainer"
+    sig.rs_score = 0.70
+    exceptional, strength, evidence = assess_catalyst_conviction(sig, _bars())
+    assert exceptional is False
+    assert strength == 0.0
+    assert evidence["catalyst_material"] is False
+
+
+def test_adverse_material_catalyst_is_not_treated_as_positive_conviction():
+    sig = _signal(SignalAction.ENTER_LONG)
+    sig.mover_bias = "gainer"
+    sig.rs_score = 0.70
+    sig.news_context_available = True
+    sig.news_direction = "bearish"
+    sig.news_confidence = 0.90
+    sig.news_catalyst = "financing"
+    sig.news_age_seconds = 120
+    exceptional, strength, evidence = assess_catalyst_conviction(sig, _bars())
+    assert exceptional is False
+    assert strength == 0.0
+    assert evidence["catalyst_supportive"] is False
+
+
 def test_safety_decision_market_state_alias_is_canonical():
     from app.core.domain import SafetyDecision
 
@@ -79,8 +122,6 @@ def test_signal_carries_context_evidence_fields():
 
 
 def test_risk_boundary_can_record_failed_thesis_without_fixed_timer():
-    # The runtime boundary is evidence-based; disable the legacy timer for this
-    # unit test so the assertion specifically exercises thesis continuity.
     risk = RiskManager(RiskConfig(symbol_cooldown_minutes=0), MarketClock(always_open=True))
     now = datetime.now(UTC)
     trade = TradeRecord(
