@@ -219,7 +219,7 @@ class PositionBrain:
         trough_r = self._profit_memory.trough_r
 
         # 1. Health evaluation with noise-filtering continuous EMA smoothing (alpha = 0.30 over 3-5 bars)
-        raw_health = self.authority.health_evaluator.evaluate(obs, peak_r, trough_r)
+        raw_health = self.authority.health_evaluator.evaluate(obs, peak_r, trough_r, self._history)
         if self._smoothed_health_score is None:
             self._smoothed_health_score = raw_health.overall
         else:
