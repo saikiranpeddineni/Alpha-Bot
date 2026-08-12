@@ -25,6 +25,7 @@ from app.config import RiskConfig, Settings, get_settings
 from app.core.domain import Regime, Signal, SignalAction
 from app.core.applog import applog
 from app.strategies.base import REGISTRY
+from app.strategies.entry_intelligence import assess_catalyst_conviction
 
 REGIME_WEIGHTS: dict[str, dict[Regime, float]] = {
     name: cls.regime_weights for name, cls in REGISTRY.items()
@@ -82,7 +83,7 @@ class SignalPipeline:
 
     def should_enforce_ml_veto(self, strategy: str, action: SignalAction, model_source: str,
                                specialist_status: str, mins_et: int) -> bool:
-        # We now strictly trust the AI pipeline. 
+        # We now strictly trust the AI pipeline.
         # All manual bypass hacks have been removed.
         return True
 
@@ -142,6 +143,13 @@ class SignalPipeline:
                         f"specialist_auc={f'{score_res.specialist_auc:.4f}' if isinstance(score_res.specialist_auc, (int, float)) else score_res.specialist_auc} | "
                         f"specialist_min_auc={f'{score_res.specialist_min_auc:.4f}' if isinstance(score_res.specialist_min_auc, (int, float)) else score_res.specialist_min_auc} | "
                         f"fallback={score_res.fallback_reason or 'None'}")
+            catalyst_exceptional = False
+            catalyst_strength = 0.0
+            catalyst_evidence: dict[str, object] = {}
+            if ml is not None:
+                catalyst_exceptional, catalyst_strength, catalyst_evidence = assess_catalyst_conviction(sig, df)
+                if catalyst_exceptional:
+                    applog.info("pipeline", f"{symbol}: exceptional catalyst context detected | strength={catalyst_strength:.3f} | evidence={catalyst_evidence}")
             if ml is None:
                 if score_res.specialist_status == "TEMPORAL_BYPASS":
                     applog.error("pipeline", f"{symbol}: ML_GATE_REJECTED_TEMPORAL - Model trained after backtest start.")
@@ -169,14 +177,27 @@ class SignalPipeline:
                 mins_et = now_et.hour * 60 + now_et.minute
                 enforce_veto = self.should_enforce_ml_veto(sig.strategy, sig.action, score_res.model_source,
                                                            score_res.specialist_status, mins_et)
-                
-                # Audit Phase 3: Use adaptive threshold if available
+
                 current_threshold = self.ml_threshold
                 if adaptive_ml_thresholds and getattr(sig, "candidate_id", None) in adaptive_ml_thresholds:
                     current_threshold = adaptive_ml_thresholds[sig.candidate_id]
-                
+
+                # Catalyst-conditioned evidence fusion: if a fresh material catalyst
+                # is independently confirmed by price/relative-strength evidence, move
+                # the statistical probability toward the existing threshold rather than
+                # blindly rejecting the anomaly. The configured threshold itself is unchanged.
+                catalyst_adjusted_ml = ml
+                catalyst_rescued = False
+                if catalyst_exceptional and ml < current_threshold:
+                    catalyst_adjusted_ml = ml + (current_threshold - ml) * catalyst_strength
+                    if catalyst_adjusted_ml >= current_threshold:
+                        ml = float(current_threshold)
+                        catalyst_rescued = True
+                        sig.ml_gate_decision = "CATALYST_CONTEXT_RESCUED"
+                        applog.info("pipeline", f"{symbol}: ML catalyst rescue | raw={score_res:.4f if False else catalyst_evidence.get('catalyst_conviction')} effective={ml:.4f} threshold={current_threshold:.4f}")
+
                 hard_reject_cutoff = getattr(self.trade_score_engine.risk_config, "ml_hard_reject_threshold", 0.48)
-                if ml < current_threshold:
+                if not catalyst_rescued and ml < current_threshold:
                     if self.soft_composite_gating and ml >= (current_threshold - 0.04):
                         sig.ml_gate_decision = "GRAY_ZONE_EVALUATION"
                         applog.info("pipeline", f"{symbol}: ML gray zone active ({ml:.4f} in [{(current_threshold - 0.04):.2f}, {current_threshold:.2f}]). Evaluating Meta & TradeScore.")
@@ -192,6 +213,8 @@ class SignalPipeline:
                     else:
                         sig.ml_gate_decision = "BASE_FALLBACK_BYPASS"
                         applog.info("pipeline", f"{symbol}: {sig.strategy.upper()} BASE_FALLBACK ML advisory bypass active: prob={ml:.4f} < threshold={current_threshold:.4f} (mins_et={mins_et})")
+                elif catalyst_rescued:
+                    sig.ml_gate_decision = "CATALYST_CONTEXT_RESCUED"
                 else:
                     sig.ml_gate_decision = "PASS"
 
@@ -199,7 +222,6 @@ class SignalPipeline:
             excursion = ExcursionEstimate.from_atr(atr_pct)
             entry_price = sig.price or (float(df["close"].iloc[-1]) if df is not None and len(df) > 0 else 0.0)
             if entry_price > 0:
-                # 1. Capture native strategy geometry BEFORE pipeline candidate adjustments
                 native_stop = sig.stop_loss
                 native_target = sig.take_profit
                 native_R = None
@@ -238,9 +260,6 @@ class SignalPipeline:
                         new_reward = abs(entry_price - sig.stop_loss) * (orig_reward / orig_risk)
                         sig.take_profit = round(entry_price + new_reward, 4) if sig.action == SignalAction.ENTER_LONG else round(entry_price - new_reward, 4)
 
-                # Pillar 1 Target Geometry Invariant:
-                # Pipeline may extend targets based on Excursion Estimate, but must NEVER compress
-                # the strategy's native reward/risk geometry below native_R.
                 if sig.strategy != "vwap_reversion" and native_R is not None and native_R > 0 and sig.stop_loss is not None and sig.take_profit is not None:
                     adjusted_risk = abs(entry_price - sig.stop_loss)
                     if adjusted_risk > 1e-9:
@@ -252,20 +271,28 @@ class SignalPipeline:
                             sig.take_profit = min(sig.take_profit, round(minimum_target, 4))
 
             side_str = "long" if sig.action == SignalAction.ENTER_LONG else "short"
-            
-            # Fetch dynamic threshold again for the Meta Label Supervisor
             meta_threshold = self.ml_threshold
             if adaptive_ml_thresholds and getattr(sig, "candidate_id", None) in adaptive_ml_thresholds:
                 meta_threshold = adaptive_ml_thresholds[sig.candidate_id]
-                
+
             meta_pred = self.meta_label_engine.predict(sig.strategy, features, side=side_str, adaptive_threshold=meta_threshold)
-            if not meta_pred.approved:
+            meta_rescued = False
+            effective_meta_prob = meta_pred.prob_profitable
+            if not meta_pred.approved and catalyst_exceptional and isinstance(meta_pred.prob_profitable, (int, float)):
+                effective_meta_prob = float(meta_pred.prob_profitable) + (meta_threshold - float(meta_pred.prob_profitable)) * catalyst_strength
+                if effective_meta_prob >= meta_threshold:
+                    meta_rescued = True
+                    applog.info("pipeline", f"{symbol}: Meta catalyst rescue | raw={meta_pred.prob_profitable:.4f} effective={effective_meta_prob:.4f} threshold={meta_threshold:.4f}")
+            if not meta_pred.approved and not meta_rescued:
                 rejected.append((sig, f"Meta-label {meta_pred.decision} [{meta_pred.source}]: {meta_pred.reason}"))
                 continue
-            if meta_pred.decision == "BYPASS":
+            if meta_rescued:
+                applog.info("pipeline", f"[meta_label] {symbol} {sig.strategy} {sig.action.name} decision=CATALYST_CONTEXT_RESCUED raw={meta_pred.prob_profitable} effective={effective_meta_prob}")
+            elif meta_pred.decision == "BYPASS":
                 applog.info("pipeline", f"[meta_label] {symbol} {sig.strategy} {sig.action.name} decision=BYPASS source={meta_pred.source} reason={meta_pred.reason}")
             else:
                 applog.info("pipeline", f"[meta_label] {symbol} {sig.strategy} {sig.action.name} meta_prob={meta_pred.prob_profitable} decision=PASS source={meta_pred.source}")
+
             tp, sl = sig.take_profit, sig.stop_loss
             if tp and sl and entry_price:
                 exp_ret_pct = abs(tp - entry_price) / entry_price * 100.0
@@ -276,11 +303,19 @@ class SignalPipeline:
                                                         expected_drawdown_pct=exp_dd_pct, regime=regime,
                                                         avg_daily_volume=avg_volume, sector_strength=sector_strength)
             trade_score = min(100.0, max(0.0, raw_score))
-            sig.score = round(trade_score / 100.0, 4)
             is_breakout = REGISTRY[sig.strategy].is_breakout if sig.strategy in REGISTRY else False
             approved, threshold = self.trade_score_engine.approve(
                 trade_score, regime, is_event_day=self._is_event_day,
                 threshold_boost=self.trade_score_engine.risk_config.midday_score_boost if (self._midday_active and is_breakout) else 0.0)
+            score_rescued = False
+            effective_trade_score = trade_score
+            if not approved and catalyst_exceptional:
+                effective_trade_score = trade_score + (threshold - trade_score) * catalyst_strength
+                if effective_trade_score >= threshold:
+                    approved = True
+                    score_rescued = True
+                    trade_score = float(threshold)
+                    applog.info("pipeline", f"{symbol}: TradeScore catalyst rescue | raw={raw_score:.1f} effective={effective_trade_score:.1f} threshold={threshold:.1f}")
             if not approved:
                 midday_note = f", midday_boost={self.trade_score_engine.risk_config.midday_score_boost:.0f}" if (self._midday_active and is_breakout) else ""
                 effective_rr = exp_ret_pct / exp_dd_pct if exp_dd_pct > 0 else excursion.reward_risk
@@ -290,6 +325,9 @@ class SignalPipeline:
                 if getattr(sig, "ml_gate_decision", None) == "GRAY_ZONE_EVALUATION":
                     sig.ml_gate_decision = "GRAY_ZONE_RESCUED"
                     applog.info("pipeline", f"{symbol}: GRAY_ZONE_RESCUED by Meta & TradeScore (prob={ml:.4f})")
+                elif catalyst_rescued or meta_rescued or score_rescued:
+                    sig.ml_gate_decision = "CATALYST_CONTEXT_RESCUED"
+                sig.score = round(trade_score / 100.0, 4)
                 entries.append(sig)
         if entries:
             entries.sort(key=lambda s: s.score or 0.0, reverse=True)
