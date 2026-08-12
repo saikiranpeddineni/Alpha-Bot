@@ -25,10 +25,21 @@ def compare_to_champion(champion: PerformanceSnapshot, candidate: PerformanceSna
     }
 
 
-def promotion_is_non_regressive(champion: PerformanceSnapshot, candidate: PerformanceSnapshot, *, max_drawdown_degradation_r: float = 1.0) -> bool:
+def promotion_is_non_regressive(
+    champion: PerformanceSnapshot,
+    candidate: PerformanceSnapshot,
+    *,
+    max_drawdown_degradation_r: float = 1.0,
+) -> bool:
     """Require no material degradation before a candidate can replace Champion."""
     delta = compare_to_champion(champion, candidate)
-    return bool(delta["net_r_delta"] >= 0 and delta["expectancy_delta"] >= 0 and delta["profit_factor_delta"] >= 0 and delta["drawdown_delta"] <= max_drawdown_degradation_r and delta["profit_capture_delta"] >= 0)
+    return bool(
+        delta["net_r_delta"] >= 0
+        and delta["expectancy_delta"] >= 0
+        and delta["profit_factor_delta"] >= 0
+        and delta["drawdown_delta"] <= max_drawdown_degradation_r
+        and delta["profit_capture_delta"] >= 0
+    )
 
 
 def test_improved_candidate_can_promote():
@@ -55,14 +66,20 @@ def test_profit_capture_is_part_of_the_regression_contract():
     assert not promotion_is_non_regressive(champion, candidate)
 
 
-def test_minimum_profit_is_not_a_universal_exit_rule():
-    """A fixed profit percentage must never override PIS future-value logic."""
-    assert True
+def test_promotion_is_comparative_not_an_absolute_profit_threshold():
+    """A modest absolute result can still promote when every quality metric improves."""
+    champion = PerformanceSnapshot(0.50, .02, 1.05, 1.00, 100, .20)
+    candidate = PerformanceSnapshot(0.60, .03, 1.10, 1.05, 102, .22)
+    assert promotion_is_non_regressive(champion, candidate)
 
 
-MARKET_SCENARIOS = ("trend_up", "trend_down", "range_chop", "high_volatility", "low_volatility", "gap_continuation", "gap_fade", "news_shock", "false_breakout", "reversal", "sector_rotation", "market_stress", "end_of_day")
+MARKET_SCENARIOS = (
+    "trend_up", "trend_down", "range_chop", "high_volatility", "low_volatility",
+    "gap_continuation", "gap_fade", "news_shock", "false_breakout", "reversal",
+    "sector_rotation", "market_stress", "end_of_day",
+)
 
 
 def test_champion_benchmark_requires_each_market_scenario():
     assert len(MARKET_SCENARIOS) == 13
-    assert len(set(MARKET_SCENARIOS)) == len(MARKET_SCENARIOS)
+    assert len(set(MARKET_SCENARIOS)) == 13
