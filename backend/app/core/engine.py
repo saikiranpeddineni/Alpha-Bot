@@ -841,26 +841,38 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
             
             effective_positions = list(positions)
 
+            eval_tasks = []
+            eval_symbols = []
             for symbol in symbols_to_evaluate:
                 # fix(#86): skip new ENTRY signals for symbols with active market-data gaps
                 sym_upper = symbol.upper()
                 if sym_upper in self._data_gap_symbols and sym_upper not in pos_by_symbol:
-                    applog.debug("engine", f"#86: Skipping {sym_upper} entry evaluation \u2014 market-data gap active")
+                    applog.debug("engine", f"#86: Skipping {sym_upper} entry evaluation — market-data gap active")
                     continue
-                entries = await self._evaluate_symbol(symbol, pos_by_symbol.get(symbol), account.equity, now, effective_positions=effective_positions)
-                if self.state == EngineState.RUNNING and allow_entries:
-                    candidates.extend(entries)
-                    for sig, _ in entries:
-                        if sig.action != SignalAction.EXIT:
-                            effective_positions.append(
-                                Position(
-                                    symbol=sig.symbol.upper(),
-                                    qty=1.0,
-                                    avg_entry_price=sig.price or 1.0,
-                                    market_price=sig.price or 1.0,
-                                    strategy=sig.strategy
+                eval_symbols.append(symbol)
+                eval_tasks.append(
+                    self._evaluate_symbol(symbol, pos_by_symbol.get(symbol), account.equity, now, effective_positions=effective_positions)
+                )
+
+            if eval_tasks:
+                eval_results = await asyncio.gather(*eval_tasks, return_exceptions=True)
+                for symbol, res in zip(eval_symbols, eval_results):
+                    if isinstance(res, Exception):
+                        applog.error("engine", f"Error in symbol evaluation for {symbol}: {res}")
+                        continue
+                    if self.state == EngineState.RUNNING and allow_entries:
+                        candidates.extend(res)
+                        for sig, _ in res:
+                            if sig.action != SignalAction.EXIT:
+                                effective_positions.append(
+                                    Position(
+                                        symbol=sig.symbol.upper(),
+                                        qty=1.0,
+                                        avg_entry_price=sig.price or 1.0,
+                                        market_price=sig.price or 1.0,
+                                        strategy=sig.strategy
+                                    )
                                 )
-                            )
 
             if candidates:
                 from app.portfolio.allocator import process_portfolio_allocations
