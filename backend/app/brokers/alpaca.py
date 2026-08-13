@@ -531,7 +531,34 @@ class AlpacaBroker(Broker):
             raise
         except Exception as exc:  # noqa: BLE001
             if self._is_definitive_rejection(exc):
-                err_msg = str(exc).lower()
+                err_str_raw = str(exc).strip()
+                err_msg = err_str_raw.lower()
+                
+                # Auto-adjust tight stop loss rejections
+                if err_str_raw.startswith("{") and "stop_loss.stop_price must be" in err_msg:
+                    try:
+                        import json
+                        err_data = json.loads(err_str_raw)
+                        msg_str = err_data.get("message", "").lower()
+                        base_price = float(err_data.get("base_price", 0))
+                        if base_price > 0:
+                            if "must be > base_price +" in msg_str:
+                                bump_str = msg_str.split("must be > base_price +")[-1].strip()
+                                bump = float(bump_str)
+                                new_stop = base_price + bump + 0.01
+                                applog.warning("broker.alpaca", f"Auto-adjusting short stop loss for {req.symbol} from {req.stop_loss} to {new_stop:.3f} due to tight base_price {base_price}")
+                                req.stop_loss = new_stop
+                                return await self.submit_order(req, qty_override=qty)
+                            elif "must be < base_price -" in msg_str:
+                                bump_str = msg_str.split("must be < base_price -")[-1].strip()
+                                bump = float(bump_str)
+                                new_stop = base_price - bump - 0.01
+                                applog.warning("broker.alpaca", f"Auto-adjusting long stop loss for {req.symbol} from {req.stop_loss} to {new_stop:.3f} due to tight base_price {base_price}")
+                                req.stop_loss = new_stop
+                                return await self.submit_order(req, qty_override=qty)
+                    except Exception as parse_exc:
+                        applog.warning("broker.alpaca", f"Failed to parse and auto-adjust tight stop loss: {parse_exc}")
+
                 short_permission_denied = (
                     "not allowed to short" in err_msg
                     or "shorting is not permitted" in err_msg
