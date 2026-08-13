@@ -12,7 +12,7 @@ from app.db.database import Database
 from app.config import Settings
 
 
-async def main():
+def main():
     parser = argparse.ArgumentParser(description="AlphaBot Replay Worker")
     parser.add_argument("--replay-id", required=True, help="Replay session ID")
     args = parser.parse_args()
@@ -37,7 +37,7 @@ async def main():
         config = session["config"]
         # The runtime handles marking COMPLETED or FAILED appropriately via its own internal catches,
         # but we add a top-level catch just in case it crashes before even starting or unhandled errors escape.
-        await runtime.run_replay(
+        runtime.run_replay(
             start_date=config.get("start_date"),
             end_date=config.get("end_date"),
             symbols=config.get("symbols"),
@@ -64,4 +64,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
