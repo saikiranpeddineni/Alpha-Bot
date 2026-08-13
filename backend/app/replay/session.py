@@ -25,6 +25,14 @@ class ReplaySessionManager:
                 replay_id TEXT PRIMARY KEY, status TEXT NOT NULL, progress_pct REAL NOT NULL,
                 start_date TEXT NOT NULL, end_date TEXT NOT NULL, config_json TEXT NOT NULL,
                 manifest_json TEXT, summary_json TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
+            try:
+                conn.execute("ALTER TABLE replay_sessions ADD COLUMN last_heartbeat_at TEXT")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute("ALTER TABLE replay_sessions ADD COLUMN worker_pid INTEGER")
+            except sqlite3.OperationalError:
+                pass
             conn.commit()
 
     def create_session(self, replay_id: str, start_date: str, end_date: str, config: dict[str, Any]) -> dict[str, Any]:
@@ -40,10 +48,17 @@ class ReplaySessionManager:
             conn.commit()
         return self.get_session(replay_id)
 
+    def update_heartbeat(self, replay_id: str) -> None:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("UPDATE replay_sessions SET last_heartbeat_at = ? WHERE replay_id = ?",
+                         (datetime.now(timezone.utc).isoformat(), replay_id))
+            conn.commit()
+
     def update_session(self, replay_id: str, status: str | None = None, progress_pct: float | None = None,
-                       manifest: dict[str, Any] | None = None, summary: dict[str, Any] | None = None) -> None:
+                       manifest: dict[str, Any] | None = None, summary: dict[str, Any] | None = None,
+                       worker_pid: int | None = None) -> None:
         fields, params = ["updated_at = ?"], [datetime.now(timezone.utc).isoformat()]
-        for name, value in (("status", status), ("progress_pct", progress_pct)):
+        for name, value in (("status", status), ("progress_pct", progress_pct), ("worker_pid", worker_pid)):
             if value is not None:
                 fields.append(f"{name} = ?")
                 params.append(value)
@@ -100,6 +115,8 @@ class ReplaySessionManager:
             "summary": json.loads(row["summary_json"]) if row["summary_json"] else None,
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
+            "last_heartbeat_at": row["last_heartbeat_at"] if "last_heartbeat_at" in row.keys() else None,
+            "worker_pid": row["worker_pid"] if "worker_pid" in row.keys() else None,
         }
 
     def list_sessions(self, limit: int = 50) -> list[dict[str, Any]]:

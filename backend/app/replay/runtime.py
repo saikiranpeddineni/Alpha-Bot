@@ -76,8 +76,14 @@ class ReplayRuntime:
             "risk_context_days": _RISK_CONTEXT_DAYS,
             "verify_parity_pass": verify_parity_pass,
         }
-        self.session_manager.create_session(self.replay_id, start_date, end_date, config)
+        if not self.session_manager.get_session(self.replay_id):
+            self.session_manager.create_session(self.replay_id, start_date, end_date, config)
         self.session_manager.update_session(self.replay_id, status="RUNNING", progress_pct=2.0)
+        
+        # Flush initial skeleton ledger so the UI doesn't return 404 while downloading bars
+        self.session_manager.save_artifact(self.replay_id, "ledger", {"timeline": [], "production_ticks": 0, "candidates": []})
+        self.session_manager.save_artifact(self.replay_id, "timeline", [])
+
         run_snapshot = Path(tempfile.mkdtemp(prefix="alpha_replay_run_snapshot_"))
         try:
             if symbols is not None:
@@ -328,10 +334,11 @@ class ReplayRuntime:
                     if idx % 100 == 0:
                         pct = min(49.0, 5.0 + 44.0 * idx / max(1, len(by_ts))) if pass_name == "A" else min(100.0, 50.0 + 50.0 * idx / max(1, len(by_ts)))
                         self.session_manager.update_session(self.replay_id, progress_pct=pct)
-                        if is_replay_window:
-                            payload = ledger.to_payload()
-                            self.session_manager.save_artifact(self.replay_id, "ledger", payload)
-                            self.session_manager.save_artifact(self.replay_id, "timeline", payload.get("timeline", []))
+                        self.session_manager.update_heartbeat(self.replay_id)
+                        # Always flush artifacts incrementally so the UI sees warmup progression
+                        payload = ledger.to_payload()
+                        self.session_manager.save_artifact(self.replay_id, "ledger", payload)
+                        self.session_manager.save_artifact(self.replay_id, "timeline", payload.get("timeline", []))
             await self._stop_replay_engine(engine)
             self._hydrate_db_ledger(replay_db, ledger)
             return ledger

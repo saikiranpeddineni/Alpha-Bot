@@ -2,7 +2,11 @@
 from __future__ import annotations
 
 from typing import Any
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
+import subprocess
+import sys
+import os
+from datetime import datetime, timezone
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.replay.runtime import ReplayRuntime
@@ -32,24 +36,36 @@ def _persist_result(replay_id: str, result: dict[str, Any]) -> None:
     session_mgr.save_artifact(replay_id, "timeline", ledger.get("timeline", []))
 
 
-def _run_replay_bg(request: Request, replay_id: str, req: ReplayRunRequest) -> None:
-    engine = request.app.state.engine
-    runtime = ReplayRuntime(engine.settings, engine.db, replay_id=replay_id, session_manager=session_mgr)
-    try:
-        result = runtime.run_replay(req.start_date, req.end_date, req.symbols, req.fill_model, req.slippage_bps,
-                                    volume_constrained=req.volume_constrained, max_volume_pct=req.max_volume_pct, warmup_bars=req.warmup_bars)
-        _persist_result(replay_id, result)
-    except Exception:
-        # ReplayRuntime already updates session status to FAILED and logs full diagnostics
-        pass
+# Replay computation is now handled by a persistent external worker (backend/app/replay/worker.py)
+# to avoid silent termination on API server reload.
 
 
 @router.post("/run")
-def run_replay(req: ReplayRunRequest, request: Request, background_tasks: BackgroundTasks) -> dict[str, Any]:
+def run_replay(req: ReplayRunRequest, request: Request) -> dict[str, Any]:
     engine = request.app.state.engine
     runtime = ReplayRuntime(engine.settings, engine.db, session_manager=session_mgr)
+    
     if req.async_mode:
-        background_tasks.add_task(_run_replay_bg, request, runtime.replay_id, req)
+        config = {
+            "start_date": req.start_date,
+            "end_date": req.end_date,
+            "symbols": req.symbols,
+            "fill_model": req.fill_model,
+            "slippage_bps": req.slippage_bps,
+            "volume_constrained": req.volume_constrained,
+            "max_volume_pct": req.max_volume_pct,
+            "warmup_bars_requested": req.warmup_bars,
+            "verify_parity_pass": True,
+        }
+        session_mgr.create_session(runtime.replay_id, req.start_date, req.end_date, config)
+        
+        # Spawn detached persistent worker
+        flags = subprocess.DETACHED_PROCESS if os.name == "nt" else 0
+        subprocess.Popen(
+            [sys.executable, "-m", "app.replay.worker", "--replay-id", runtime.replay_id],
+            creationflags=flags,
+            start_new_session=(os.name != "nt")
+        )
         return {"status": "LAUNCHED", "replay_id": runtime.replay_id}
     try:
         result = runtime.run_replay(req.start_date, req.end_date, req.symbols, req.fill_model, req.slippage_bps,
@@ -71,6 +87,21 @@ def _session_or_404(replay_id: str) -> dict[str, Any]:
     session = session_mgr.get_session(replay_id)
     if not session:
         raise HTTPException(status_code=404, detail=f"Replay session {replay_id} not found")
+        
+    # Check for stale workers
+    if session["status"] == "RUNNING" and session.get("last_heartbeat_at"):
+        try:
+            last_hb = datetime.fromisoformat(session["last_heartbeat_at"])
+            if (datetime.now(timezone.utc) - last_hb).total_seconds() > 60:
+                # Dynamically mark as failed in the DB
+                summary = session.get("summary") or {}
+                summary.update({"error": "Replay worker heartbeat stale", "failure_reason": "ORPHANED_RUN"})
+                session_mgr.update_session(replay_id, status="FAILED", summary=summary)
+                session["status"] = "FAILED"
+                session["summary"] = summary
+        except ValueError:
+            pass
+            
     return session
 
 
