@@ -2991,7 +2991,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
 
         # 6. Strategy/thesis correlation clustering check
         try:
-            open_symbols = list(self.portfolio._lots.keys())
+            open_symbols = sorted(list(self.portfolio._lots.keys()))
             if open_symbols:
                 import pandas as pd
                 cand_df = self.data.frame(symbol, "1Min")

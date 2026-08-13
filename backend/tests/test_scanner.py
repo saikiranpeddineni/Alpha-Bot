@@ -1,5 +1,6 @@
 from app.config import Settings
 import pytest
+from app.config import RiskConfig
 import pandas as pd
 import numpy as np
 from datetime import datetime, UTC
