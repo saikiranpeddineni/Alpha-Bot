@@ -124,8 +124,14 @@ export function ReplayModal({
       const session = await sessionRes.json();
 
       const ledgerRes = await fetch(`/api/replay/${id}/ledger`);
-      if (!ledgerRes.ok) throw new Error("Failed to load ledger data");
-      const ledger = await ledgerRes.json();
+      let ledger;
+      if (ledgerRes.status === 404 && (session.status === "RUNNING" || session.status === "CREATED")) {
+          ledger = { timeline: [], production_ticks: 0 };
+      } else if (!ledgerRes.ok) {
+          throw new Error("Failed to load ledger data");
+      } else {
+          ledger = await ledgerRes.json();
+      }
 
       const manifestRes = await fetch(`/api/replay/${id}/manifest`);
       const manifest = await manifestRes.json().catch(() => ({}));

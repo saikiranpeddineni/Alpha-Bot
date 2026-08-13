@@ -120,7 +120,14 @@ def get_replay_parity(replay_id: str) -> dict[str, Any]:
 
 @router.get("/{replay_id}/ledger")
 def get_replay_ledger(replay_id: str) -> dict[str, Any]:
-    return _artifact_or_404(replay_id, "ledger")
+    session = _session_or_404(replay_id)
+    if session.get("status") == "FAILED":
+        raise HTTPException(status_code=500, detail="Replay failed. Ledger not available.")
+        
+    artifact = session_mgr.get_artifact(replay_id, "ledger")
+    if artifact is None:
+        raise HTTPException(status_code=404, detail="Replay ledger artifact missing or unavailable")
+    return artifact
 
 
 @router.get("/{replay_id}/timeline")

@@ -110,7 +110,19 @@ class ReplayMarketFeed:
         with self.data_path.open("a", encoding="utf-8") as handle:
             for symbol in missing_symbols:
                 applog.info("replay.feed", f"Fetching 1Min bars for {symbol}...")
-                df = await provider.get_bars(symbol, "1Min", start=start_dt, end=end_dt)
+                
+                if symbol in ("VIX", "^VIX"):
+                    from app.data.yahoo import YahooProvider
+                    vix_provider = YahooProvider()
+                    # Yahoo requires ^VIX
+                    fetch_sym = "^VIX" if symbol == "VIX" else symbol
+                    df = await vix_provider.get_bars(fetch_sym, "1Min", start=start_dt, end=end_dt)
+                    if not df.empty and fetch_sym != symbol:
+                        # Ensure the DataFrame has the correct symbol name for Replay
+                        df["symbol"] = symbol
+                else:
+                    df = await provider.get_bars(symbol, "1Min", start=start_dt, end=end_dt)
+                
                 if df.empty:
                     applog.warning("replay.feed", f"No data returned for {symbol}")
                     continue
@@ -163,7 +175,15 @@ class ReplayMarketFeed:
                 if dt.strftime("%Y-%m-%d") > end_date:
                     continue
                 normalized = dict(row, ts_dt=dt, symbol=symbol)
-                normalized["in_replay_window"] = start_date <= dt.strftime("%Y-%m-%d") <= end_date
+                
+                # Strict replay window: requested dates AND strictly market hours (09:30:00 to 16:00:00 ET)
+                from zoneinfo import ZoneInfo
+                from datetime import time
+                et_dt = dt.astimezone(ZoneInfo("America/New_York"))
+                is_requested_date = start_date <= et_dt.strftime("%Y-%m-%d") <= end_date
+                is_market_hours = time(9, 30) <= et_dt.time() <= time(16, 0)
+                normalized["in_replay_window"] = is_requested_date and is_market_hours
+                
                 rows.append(normalized)
                 self.symbols.add(symbol)
 
@@ -202,7 +222,15 @@ class ReplayDataManager:
         grouped: dict[str, list[dict[str, Any]]] = {}
         for bar in bars:
             grouped.setdefault(bar["symbol"].upper(), []).append(bar)
+        
         self._bars = {symbol: sorted(items, key=lambda x: x["ts_dt"]) for symbol, items in grouped.items()}
+        self._dfs: dict[str, pd.DataFrame] = {}
+        self._cursors: dict[str, int] = {}
+        
+        for symbol, items in self._bars.items():
+            self._dfs[symbol] = _bar_frame(items)
+            self._cursors[symbol] = 0
+            
         self._now = min(bar["ts_dt"] for bar in bars)
         self._last_polled_ts: dict[str, datetime] = {}
 
@@ -222,12 +250,17 @@ class ReplayDataManager:
         return symbol
 
     def _visible(self, symbol: str) -> list[dict[str, Any]]:
+        # O(N) allocation of list, used primarily by internal functions
         return [row for row in self._bars.get(self._symbol(symbol), []) if row["ts_dt"] <= self._now]
 
     def frame(self, symbol: str, timeframe: str = "1Min", limit: int | None = None) -> pd.DataFrame:
         """Return the production-compatible rolling frame as of the replay clock."""
         canonical = self._symbol(symbol)
-        df = _bar_frame(self._visible(canonical))
+        full_df = self._dfs.get(canonical)
+        if full_df is None or full_df.empty:
+            df = empty_bars()
+        else:
+            df = full_df.loc[:pd.Timestamp(self._now)]
 
         # VIX is an external market-risk observation in production and can update less
         # frequently than the equity clock. Carry the last known observation forward to
@@ -255,11 +288,22 @@ class ReplayDataManager:
         new_closed: dict[str, pd.DataFrame] = {}
         for requested in extended:
             canonical = self._symbol(requested)
-            rows = self._visible(canonical)
-            if not rows:
+            bars = self._bars.get(canonical)
+            if not bars:
                 continue
+            
+            idx = self._cursors.get(canonical, 0)
+            fresh_rows = []
+            while idx < len(bars) and bars[idx]["ts_dt"] <= self._now:
+                fresh_rows.append(bars[idx])
+                idx += 1
+            self._cursors[canonical] = idx
+            
+            if not fresh_rows:
+                continue
+            
             last_seen = self._last_polled_ts.get(canonical)
-            fresh_rows = [row for row in rows if last_seen is None or row["ts_dt"] > last_seen]
+            fresh_rows = [row for row in fresh_rows if last_seen is None or row["ts_dt"] > last_seen]
             if not fresh_rows:
                 continue
             fresh = _bar_frame(fresh_rows)

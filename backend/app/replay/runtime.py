@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 from app.ai.model import SignalModel
 from app.config import MODELS_DIR, Settings
@@ -131,14 +132,37 @@ class ReplayRuntime:
             if not replay_bars:
                 raise RuntimeError("No bars in requested replay window")
 
-            model_asof = replay_bars[0]["ts_dt"]
+            first_active_bar = replay_bars[0]["ts_dt"]
+            model_asof = first_active_bar
+            
+            ET = ZoneInfo("America/New_York")
+            
+            market_open = first_active_bar.astimezone(ET).replace(hour=9, minute=30, second=0, microsecond=0)
+            market_close = first_active_bar.astimezone(ET).replace(hour=16, minute=0, second=0, microsecond=0)
+            
+            # Hard assertions for Model-as-of and Replay window
+            if first_active_bar != market_open:
+                raise RuntimeError(f"first_active_bar {first_active_bar} != market open {market_open}")
+            if model_asof != first_active_bar:
+                raise RuntimeError(f"model_asof {model_asof} != first_active_bar {first_active_bar}")
+            if model_asof < market_open:
+                raise RuntimeError(f"model_asof {model_asof} is pre-market")
+            
+            applog.info("replay.runtime", f"Diagnostic Clock Bounds: requested_start={start_date}")
+            applog.info("replay.runtime", f"Diagnostic Clock Bounds: requested_end={end_date}")
+            applog.info("replay.runtime", f"Diagnostic Clock Bounds: market_open_et={market_open.isoformat()}")
+            applog.info("replay.runtime", f"Diagnostic Clock Bounds: market_close_et={market_close.isoformat()}")
+            applog.info("replay.runtime", f"Diagnostic Clock Bounds: first_warmup_timestamp={bars[0]['ts_dt'].isoformat()}")
+            applog.info("replay.runtime", f"Diagnostic Clock Bounds: first_active_timestamp={first_active_bar.isoformat()}")
+            applog.info("replay.runtime", f"Diagnostic Clock Bounds: model_asof={model_asof.isoformat()}")
+            applog.info("replay.runtime", f"Diagnostic Clock Bounds: last_active_timestamp={replay_bars[-1]['ts_dt'].isoformat()}")
+            
             snapshot_db = run_snapshot / "source.db"
             self._snapshot_source_database(snapshot_db)
             snapshot_models = run_snapshot / "models"
             archived_loaded = False
             if model_asof:
                 asof_dt = model_asof if model_asof.tzinfo else model_asof.replace(tzinfo=timezone.utc)
-                from zoneinfo import ZoneInfo
                 ET = ZoneInfo("America/New_York")
                 archive_dir = MODELS_DIR / "archive" / asof_dt.astimezone(ET).strftime("%Y-%m-%d")
                 if archive_dir.exists():
@@ -219,6 +243,12 @@ class ReplayRuntime:
         end_date_str = replay_bars[-1]["ts_dt"].strftime("%Y-%m-%d")
         ledger = ReplayLedger(f"{self.replay_id}:{pass_name}", start_date=start_date_str, end_date=end_date_str)
         broker.attach_ledger(ledger)
+        
+        # Write real initial skeleton ledger incrementally
+        payload = ledger.to_payload()
+        self.session_manager.save_artifact(self.replay_id, "ledger", payload)
+        self.session_manager.save_artifact(self.replay_id, "timeline", payload.get("timeline", []))
+        
         tmp_path = Path(tempfile.mkdtemp(prefix="alpha_replay_"))
         replay_db: Database | None = None
         engine: TradingEngine | None = None
@@ -296,7 +326,12 @@ class ReplayRuntime:
                         acct, positions = await broker.account(), await broker.positions()
                         ledger.record_equity(ts, acct.equity, acct.cash, acct.buying_power, len(positions))
                     if idx % 100 == 0:
-                        self.session_manager.update_session(self.replay_id, progress_pct=min(49.0, 5.0 + 44.0 * idx / max(1, len(by_ts))))
+                        pct = min(49.0, 5.0 + 44.0 * idx / max(1, len(by_ts))) if pass_name == "A" else min(100.0, 50.0 + 50.0 * idx / max(1, len(by_ts)))
+                        self.session_manager.update_session(self.replay_id, progress_pct=pct)
+                        if is_replay_window:
+                            payload = ledger.to_payload()
+                            self.session_manager.save_artifact(self.replay_id, "ledger", payload)
+                            self.session_manager.save_artifact(self.replay_id, "timeline", payload.get("timeline", []))
             await self._stop_replay_engine(engine)
             self._hydrate_db_ledger(replay_db, ledger)
             return ledger
