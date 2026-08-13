@@ -30,7 +30,6 @@ async def main():
 
     settings = Settings()
     db = Database(settings.resolved_db_path)
-    db.connect()
 
     runtime = ReplayRuntime(settings, db, replay_id=replay_id, session_manager=session_mgr)
     
@@ -62,8 +61,6 @@ async def main():
         })
         session_mgr.update_session(replay_id, status="FAILED", progress_pct=100.0, summary=summary)
         sys.exit(1)
-    finally:
-        db.disconnect()
 
 
 if __name__ == "__main__":
