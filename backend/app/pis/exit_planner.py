@@ -42,6 +42,7 @@ class ExitPlanner:
         has_scaled_out: bool = False,
         predicted_max_r: float = 2.0,
         runner_probability: float = 0.0,
+        exit_planner_mode: str = "STRICT",
     ) -> PISDecision:
         """Synthesize final PISDecision.
 
@@ -114,7 +115,11 @@ class ExitPlanner:
             ceiling_harvested = True
 
         # Check Early Thesis Invalidation Scratch Exit (Quadrant 2)
-        early_invalidation_breach = thesis.early_invalidation_detected
+        # In PATIENT mode, we ignore early invalidations for proven trades with intact theses
+        if exit_planner_mode == "STRICT":
+            early_invalidation_breach = thesis.early_invalidation_detected
+        else:
+            early_invalidation_breach = False
 
         # Check Extended Stagnation / Time-Decay Profit Harvesting
         # Requires true structural stall over substantial duration (>= 25 bars) without progress

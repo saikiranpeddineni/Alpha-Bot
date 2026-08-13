@@ -349,8 +349,9 @@ class PositionBrain:
         runner_score, is_runner = self.authority.runner_intelligence.evaluate_runner_score(
             obs, peak_r, health, regime=regime
         )
-        if is_runner:
+        if runner_prob >= 0.60 and peak_r >= 0.50:
             self._runner_qualified = True
+            is_runner = True
 
         # 5. State transition rules with persistence confirmation (Priority 3)
         self._update_lifecycle(health, thesis, peak_r)
@@ -367,6 +368,10 @@ class PositionBrain:
         )
         self._current_stop_floor = target_stop
 
+        # Proven Trade Exit Planner Mode
+        proven_trade = peak_r >= 0.50
+        exit_planner_mode = "PATIENT" if (proven_trade and thesis.is_intact) else "STRICT"
+
         # 7. Exit planner synthesis with early scratch exits and dynamic ceiling harvesting (Quadrant 2 & 3)
         decision = self.authority.exit_planner.synthesize_decision(
             obs=obs,
@@ -382,6 +387,7 @@ class PositionBrain:
             has_scaled_out=self._has_scaled_out,
             predicted_max_r=predicted_max_r,
             runner_probability=runner_prob,
+            exit_planner_mode=exit_planner_mode,
         )
 
         # A PARTIAL_EXIT is an execution intent. Do not mark scale-out state until

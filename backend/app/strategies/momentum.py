@@ -22,6 +22,8 @@ import pandas as pd
 
 from app.core.domain import Regime, Signal, SignalAction
 from app.strategies.base import Strategy, StrategyContext, register
+from app.strategies.entry_quality import evaluate_entry_quality
+from app.strategies.opportunity_state import classify_opportunity, OpportunityState
 
 logger = logging.getLogger("alphadesk")
 
@@ -58,6 +60,13 @@ class MomentumCross(Strategy):
         "trailing_stop_atr_mult": 1.5,
         "htf_trend_filter": False,
         "min_minutes_since_open": 5,
+        "max_vwap_extension_pct": 1.75,
+        "hard_vwap_extension_pct": 3.00,
+        "max_atr_extension": 1.25,
+        "hard_atr_extension": 1.80,
+        "min_entry_quality_score": 70.0,
+        "min_structure_score": 60.0,
+        "allow_price_discovery_entries": False,
     }
 
     # ------------------------------------------------------------------
@@ -233,6 +242,37 @@ class MomentumCross(Strategy):
         if macd_inflected_down:
             self._set_event(ctx, symbol, "short", current_time)
 
+        # Trend score approximation based on EMAs and HTF
+        trend_score = 75.0 if crossed_up or crossed_down else 50.0
+
+        # Mover and news contexts
+        is_news = getattr(ctx, "news_direction", None) is not None
+        catalyst_score = 100.0 if is_news else 50.0
+
+        # Calculate opportunity state
+        extension_atr = abs(close - float(last["vwap"])) / max(atr, 1e-9)
+        atr_pct = (atr / close) * 100.0
+        
+        opportunity_state = classify_opportunity(
+            atr_pct=atr_pct,
+            gap_pct=0.0,  # gap tracking handled in engine_evaluation
+            news_catalyst=is_news,
+            volume_z=vol_z,
+            extension_atr=extension_atr,
+            trend_score=trend_score,
+        )
+
+        if opportunity_state == OpportunityState.PRICE_DISCOVERY:
+            if not p.get("allow_price_discovery_entries", False):
+                self._debug(ctx, f"[momentum] PRICE_DISCOVERY_BLOCKED sym={symbol}")
+                return None
+                
+        # Required thresholds
+        if opportunity_state == OpportunityState.EVENT:
+            required_entry_quality = 78.0
+        else:
+            required_entry_quality = p.get("min_entry_quality_score", 70.0)
+
         # ---- Long candidate ----
         if (
             allow_long
@@ -241,20 +281,54 @@ class MomentumCross(Strategy):
             and p["rsi_min"] <= rsi <= p["rsi_max"]
             and self._valid_event(ctx, symbol, "long", current_bar_idx, df)
         ):
+            entry_quality = evaluate_entry_quality(
+                side="long",
+                close=close,
+                vwap=float(last["vwap"]),
+                atr=atr,
+                df=df,
+                vol_z=vol_z,
+                catalyst_score=catalyst_score,
+                trend_score=trend_score,
+            )
+            
+            if entry_quality.score < required_entry_quality or not entry_quality.approved:
+                self._debug(
+                    ctx,
+                    f"[momentum] ENTRY_REJECTED sym={symbol} "
+                    f"score={entry_quality.score:.1f} (req={required_entry_quality}) "
+                    f"reasons={entry_quality.reasons}"
+                )
+                # Keep event alive if it's just a poor location, but consume if structural failure?
+                # The user mandate just says return None.
+                return None
+                
             # Dynamic Stop Tightening: 1.0 * ATR if explosive volume and expanding MACD
             dynamic_mult = 1.0 if (vol_z > 2.0 and hist_now > hist_prev) else p["atr_stop_mult"]
             stop = close - dynamic_mult * atr
             self._consume_event(ctx, symbol, "long", current_time)
             mover_tag = f" [top_gainer +{ctx.mover_change_pct:.1f}%]" if bias == "gainer" else ""
+            
             return Signal(
                 symbol=symbol,
                 action=SignalAction.ENTER_LONG,
                 confidence=confidence,
                 strategy=self.name,
-                reason=f"EMA9>EMA20 above VWAP, MACD event confirmed, RSI {rsi:.0f}{mover_tag}",
+                reason=f"EMA9>EMA20 above VWAP, MACD event, RSI {rsi:.0f}{mover_tag}, EQ={entry_quality.score:.1f}",
                 price=close,
                 stop_loss=stop,
                 take_profit=None,
+                strategy_params={
+                    "entry_quality_score": entry_quality.score,
+                    "entry_quality": entry_quality.quality.value,
+                    "location_score": entry_quality.location_score,
+                    "extension_score": entry_quality.extension_score,
+                    "structure_score": entry_quality.structure_score,
+                    "opportunity_state": opportunity_state.value,
+                    "opportunity_score": trend_score,
+                    "vwap_distance_pct": abs(close - float(last["vwap"])) / float(last["vwap"]) * 100.0,
+                    "atr_extension": extension_atr,
+                }
             )
 
         # ---- Short candidate ----
@@ -265,20 +339,52 @@ class MomentumCross(Strategy):
             and (100.0 - p["rsi_max"]) <= rsi <= (100.0 - p["rsi_min"])
             and self._valid_event(ctx, symbol, "short", current_bar_idx, df)
         ):
+            entry_quality = evaluate_entry_quality(
+                side="short",
+                close=close,
+                vwap=float(last["vwap"]),
+                atr=atr,
+                df=df,
+                vol_z=vol_z,
+                catalyst_score=catalyst_score,
+                trend_score=trend_score,
+            )
+            
+            if entry_quality.score < required_entry_quality or not entry_quality.approved:
+                self._debug(
+                    ctx,
+                    f"[momentum] ENTRY_REJECTED sym={symbol} "
+                    f"score={entry_quality.score:.1f} (req={required_entry_quality}) "
+                    f"reasons={entry_quality.reasons}"
+                )
+                return None
+                
             # Dynamic Stop Tightening: 1.0 * ATR if explosive volume and expanding MACD
             dynamic_mult = 1.0 if (vol_z > 2.0 and hist_now < hist_prev) else p["atr_stop_mult"]
             stop = close + dynamic_mult * atr
             self._consume_event(ctx, symbol, "short", current_time)
             mover_tag = f" [top_loser {ctx.mover_change_pct:.1f}%]" if bias == "loser" else ""
+            
             return Signal(
                 symbol=symbol,
                 action=SignalAction.ENTER_SHORT,
                 confidence=confidence,
                 strategy=self.name,
-                reason=f"EMA9<EMA20 below VWAP, MACD event confirmed, RSI {rsi:.0f}{mover_tag}",
+                reason=f"EMA9<EMA20 below VWAP, MACD event, RSI {rsi:.0f}{mover_tag}, EQ={entry_quality.score:.1f}",
                 price=close,
                 stop_loss=stop,
                 take_profit=None,
+                strategy_params={
+                    "entry_quality_score": entry_quality.score,
+                    "entry_quality": entry_quality.quality.value,
+                    "location_score": entry_quality.location_score,
+                    "extension_score": entry_quality.extension_score,
+                    "structure_score": entry_quality.structure_score,
+                    "opportunity_state": opportunity_state.value,
+                    "opportunity_score": trend_score,
+                    "vwap_distance_pct": abs(close - float(last["vwap"])) / float(last["vwap"]) * 100.0,
+                    "atr_extension": extension_atr,
+                }
             )
 
         return None

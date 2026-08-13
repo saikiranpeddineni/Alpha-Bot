@@ -47,7 +47,7 @@ def test_healthy_trade_can_keep_breathing_room_before_runner_activation():
         peak_r=1.0,
         health=health(.90),
     )
-    assert floor <= 100.05
+    assert floor == 100.3  # Profit protection ladder locks 0.3R at 1.0R peak
 
 
 def test_scaled_out_winner_cannot_drop_below_locked_profit_floor():

@@ -108,6 +108,20 @@ class Signal(BaseModel):
     def trade_score(self) -> float | None:
         return float(self.score) * 100.0 if self.score is not None else None
 
+    @model_validator(mode="after")
+    def validate_strategy_params(self) -> Signal:
+        if self.strategy_params is not None:
+            # Ensure these keys can be stored / passed through for telemetry
+            if "entry_quality_score" in self.strategy_params:
+                try:
+                    float(self.strategy_params["entry_quality_score"])
+                except (ValueError, TypeError):
+                    raise ValueError("entry_quality_score must be a float")
+            if "opportunity_state" in self.strategy_params:
+                if not isinstance(self.strategy_params["opportunity_state"], str):
+                    raise ValueError("opportunity_state must be a string")
+        return self
+
 class OrderRequest(BaseModel):
     """A risk-approved instruction handed to a broker."""
     symbol: str

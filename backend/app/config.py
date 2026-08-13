@@ -61,6 +61,13 @@ class RiskConfig(BaseModel):
     score_threshold_range: float = Field(70.0, ge=0.0, le=100.0)
     score_threshold_volatile: float = Field(65.0, ge=0.0, le=100.0)
     score_threshold_event: float = Field(75.0, ge=0.0, le=100.0)
+    event_entry_quality_threshold: float = Field(78.0, ge=0.0, le=100.0)
+    price_discovery_entry_quality_threshold: float = Field(85.0, ge=0.0, le=100.0)
+    normal_entry_quality_threshold: float = Field(70.0, ge=0.0, le=100.0)
+    max_entry_vwap_extension_pct: float = Field(1.75, ge=0.0)
+    hard_entry_vwap_extension_pct: float = Field(3.0, ge=0.0)
+    max_entry_atr_extension: float = Field(1.25, ge=0.0)
+    hard_entry_atr_extension: float = Field(1.80, ge=0.0)
     kelly_fraction_cap: float = Field(0.20, ge=0.01, le=0.50)
     max_positions_per_sector: int = Field(3, ge=1, le=10)
     max_correlation_penalty: float = Field(0.5, ge=0.0, le=1.0)
@@ -142,6 +149,13 @@ class Settings(BaseSettings):
     score_threshold_range: float = Field(70.0, validation_alias="SCORE_THRESHOLD_RANGE")
     score_threshold_volatile: float = Field(65.0, validation_alias="SCORE_THRESHOLD_VOLATILE")
     score_threshold_event: float = Field(75.0, validation_alias="SCORE_THRESHOLD_EVENT")
+    event_entry_quality_threshold: float = Field(78.0, validation_alias="EVENT_ENTRY_QUALITY_THRESHOLD")
+    price_discovery_entry_quality_threshold: float = Field(85.0, validation_alias="PRICE_DISCOVERY_ENTRY_QUALITY_THRESHOLD")
+    normal_entry_quality_threshold: float = Field(70.0, validation_alias="NORMAL_ENTRY_QUALITY_THRESHOLD")
+    max_entry_vwap_extension_pct: float = Field(1.75, validation_alias="MAX_ENTRY_VWAP_EXTENSION_PCT")
+    hard_entry_vwap_extension_pct: float = Field(3.0, validation_alias="HARD_ENTRY_VWAP_EXTENSION_PCT")
+    max_entry_atr_extension: float = Field(1.25, validation_alias="MAX_ENTRY_ATR_EXTENSION")
+    hard_entry_atr_extension: float = Field(1.80, validation_alias="HARD_ENTRY_ATR_EXTENSION")
     midday_score_boost: float = Field(15.0, validation_alias="MIDDAY_SCORE_BOOST")
     midday_start_et: int = Field(690, validation_alias="MIDDAY_START_ET")
     midday_end_et: int = Field(795, validation_alias="MIDDAY_END_ET")
@@ -226,6 +240,13 @@ class Settings(BaseSettings):
             score_threshold_range=self.score_threshold_range,
             score_threshold_volatile=self.score_threshold_volatile,
             score_threshold_event=self.score_threshold_event,
+            event_entry_quality_threshold=self.event_entry_quality_threshold,
+            price_discovery_entry_quality_threshold=self.price_discovery_entry_quality_threshold,
+            normal_entry_quality_threshold=self.normal_entry_quality_threshold,
+            max_entry_vwap_extension_pct=self.max_entry_vwap_extension_pct,
+            hard_entry_vwap_extension_pct=self.hard_entry_vwap_extension_pct,
+            max_entry_atr_extension=self.max_entry_atr_extension,
+            hard_entry_atr_extension=self.hard_entry_atr_extension,
             midday_score_boost=self.midday_score_boost,
             midday_start_et=self.midday_start_et,
             midday_end_et=self.midday_end_et,

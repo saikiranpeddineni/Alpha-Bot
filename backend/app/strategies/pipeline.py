@@ -25,6 +25,7 @@ from app.config import RiskConfig, Settings, get_settings
 from app.core.domain import Regime, Signal, SignalAction
 from app.core.applog import applog
 from app.strategies.base import REGISTRY
+from app.strategies.thesis_memory import ThesisMemory
 
 REGIME_WEIGHTS: dict[str, dict[Regime, float]] = {
     name: cls.regime_weights for name, cls in REGISTRY.items()
@@ -59,6 +60,7 @@ class SignalPipeline:
         # authoritative ML/Meta/TradeScore behavior; research consumers live behind ShadowResearchRuntime.
         if not hasattr(model, "_meta_label_engine") or model._meta_label_engine is None:
             model._meta_label_engine = self.meta_label_engine
+        self.thesis_memory = ThesisMemory(memory_window_minutes=45)
         self._is_event_day: bool = False
         self._midday_active: bool = False
 
@@ -112,6 +114,18 @@ class SignalPipeline:
                 continue
             if features is None:
                 rejected.append((sig, "feature row unavailable (warmup)"))
+                continue
+                
+            # Phase 3: Thesis Memory Check
+            price = sig.price or (float(df["close"].iloc[-1]) if df is not None and len(df) > 0 else 0.0)
+            vwap = float(df["vwap"].iloc[-1]) if df is not None and "vwap" in df.columns and len(df) > 0 else 0.0
+            is_valid, reason = self.thesis_memory.is_valid_new_thesis(
+                symbol=symbol,
+                action=sig.action,
+                price=price
+            )
+            if not is_valid:
+                rejected.append((sig, reason))
                 continue
 
             use_detailed = False
@@ -294,6 +308,19 @@ class SignalPipeline:
         if entries:
             entries.sort(key=lambda s: s.score or 0.0, reverse=True)
             winner = entries[0]
+            
+            # Record the winning attempt in thesis memory
+            price = winner.price or (float(df["close"].iloc[-1]) if df is not None and len(df) > 0 else 0.0)
+            vwap = float(df["vwap"].iloc[-1]) if df is not None and "vwap" in df.columns and len(df) > 0 else 0.0
+            atr = float(df["atr14"].iloc[-1]) if df is not None and "atr14" in df.columns and len(df) > 0 else 0.0
+            self.thesis_memory.record_attempt(
+                symbol=symbol,
+                action=winner.action,
+                price=price,
+                vwap=vwap,
+                atr=atr
+            )
+            
             accepted.append(winner)
             for loser in entries[1:]:
                 rejected.append((loser, f"lost conflict to {winner.strategy} (score {winner.score:.4f})"))

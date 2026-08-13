@@ -196,6 +196,24 @@ class AdaptiveProtectionPlanner:
 
             candidate_floor = desired_floor
 
+        # Profit Protection Ladder (Explicit minimums based on Peak R)
+        ladder_locked_r = -1.0
+        if peak_r >= 2.0:
+            ladder_locked_r = 1.0
+        elif peak_r >= 1.5:
+            ladder_locked_r = 0.5
+        elif peak_r >= 1.0:
+            ladder_locked_r = 0.3
+        elif peak_r >= 0.5:
+            ladder_locked_r = 0.1
+            
+        if ladder_locked_r > -1.0:
+            ladder_floor = entry + (side * ladder_locked_r * risk)
+            if side > 0:
+                candidate_floor = max(candidate_floor, ladder_floor)
+            else:
+                candidate_floor = min(candidate_floor, ladder_floor)
+
         # 4. Enforce strict monotonicity unless the caller explicitly permits relaxation.
         if previous_floor is not None:
             if side > 0:  # Long
