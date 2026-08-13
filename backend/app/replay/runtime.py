@@ -343,9 +343,9 @@ class ReplayRuntime:
                         raise RuntimeError("Replay cancelled")
 
                     # Task 1: stage boundary logging (every tick during first 10 in-window ticks;
-                    # then every 50 ticks so logs stay usable at scale).
+                    # then every 500 ticks so logs stay usable at scale).
                     _is_replay_tick = any(b.get("in_replay_window", True) for b in by_ts[ts])
-                    _verbose_diag = (ledger.production_ticks < 10) or (idx % 50 == 0)
+                    _verbose_diag = (_is_replay_tick and ledger.production_ticks < 10) or (idx % 500 == 0)
 
                     if _verbose_diag:
                         applog.info("replay.runtime", (
