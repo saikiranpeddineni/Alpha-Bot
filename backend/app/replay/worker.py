@@ -29,7 +29,7 @@ async def main():
     session_mgr.update_session(replay_id, worker_pid=os.getpid())
 
     settings = Settings()
-    db = Database(settings)
+    db = Database(settings.resolved_db_path)
     db.connect()
 
     runtime = ReplayRuntime(settings, db, replay_id=replay_id, session_manager=session_mgr)
