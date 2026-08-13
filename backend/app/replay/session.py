@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,6 +28,9 @@ class ReplaySessionManager:
             conn.commit()
 
     def create_session(self, replay_id: str, start_date: str, end_date: str, config: dict[str, Any]) -> dict[str, Any]:
+        # A replay_id may be intentionally reused after a cancelled/failed run.
+        # Cancellation is process-local, so stale ids must not poison a new session.
+        self._active_cancels.discard(replay_id)
         now = datetime.now(timezone.utc).isoformat()
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("""INSERT OR REPLACE INTO replay_sessions
@@ -41,14 +45,18 @@ class ReplaySessionManager:
         fields, params = ["updated_at = ?"], [datetime.now(timezone.utc).isoformat()]
         for name, value in (("status", status), ("progress_pct", progress_pct)):
             if value is not None:
-                fields.append(f"{name} = ?"); params.append(value)
+                fields.append(f"{name} = ?")
+                params.append(value)
         if manifest is not None:
-            fields.append("manifest_json = ?"); params.append(json.dumps(manifest, default=str))
+            fields.append("manifest_json = ?")
+            params.append(json.dumps(manifest, default=str))
         if summary is not None:
-            fields.append("summary_json = ?"); params.append(json.dumps(summary, default=str))
+            fields.append("summary_json = ?")
+            params.append(json.dumps(summary, default=str))
         params.append(replay_id)
         with sqlite3.connect(self.db_path) as conn:
-            conn.execute(f"UPDATE replay_sessions SET {', '.join(fields)} WHERE replay_id = ?", params); conn.commit()
+            conn.execute(f"UPDATE replay_sessions SET {', '.join(fields)} WHERE replay_id = ?", params)
+            conn.commit()
 
     def save_artifact(self, replay_id: str, name: str, payload: Any) -> Path:
         if name not in {"ledger", "timeline", "parity", "manifest"}:
@@ -68,7 +76,9 @@ class ReplaySessionManager:
         return json.loads(path.read_text(encoding="utf-8"))
 
     def request_cancel(self, replay_id: str) -> bool:
-        self._active_cancels.add(replay_id); self.update_session(replay_id, status="CANCELLED"); return True
+        self._active_cancels.add(replay_id)
+        self.update_session(replay_id, status="CANCELLED")
+        return True
 
     def is_cancelled(self, replay_id: str) -> bool:
         return replay_id in self._active_cancels
@@ -77,13 +87,20 @@ class ReplaySessionManager:
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             row = conn.execute("SELECT * FROM replay_sessions WHERE replay_id = ?", (replay_id,)).fetchone()
-        if not row: return None
-        return {"replay_id": row["replay_id"], "status": row["status"], "progress_pct": row["progress_pct"],
-                "start_date": row["start_date"], "end_date": row["end_date"],
-                "config": json.loads(row["config_json"]) if row["config_json"] else {},
-                "manifest": json.loads(row["manifest_json"]) if row["manifest_json"] else None,
-                "summary": json.loads(row["summary_json"]) if row["summary_json"] else None,
-                "created_at": row["created_at"], "updated_at": row["updated_at"]}
+        if not row:
+            return None
+        return {
+            "replay_id": row["replay_id"],
+            "status": row["status"],
+            "progress_pct": row["progress_pct"],
+            "start_date": row["start_date"],
+            "end_date": row["end_date"],
+            "config": json.loads(row["config_json"]) if row["config_json"] else {},
+            "manifest": json.loads(row["manifest_json"]) if row["manifest_json"] else None,
+            "summary": json.loads(row["summary_json"]) if row["summary_json"] else None,
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
 
     def list_sessions(self, limit: int = 50) -> list[dict[str, Any]]:
         with sqlite3.connect(self.db_path) as conn:
@@ -92,7 +109,7 @@ class ReplaySessionManager:
         return [s for replay_id in ids if (s := self.get_session(replay_id)) is not None]
 
     def delete_session(self, replay_id: str) -> bool:
-        import shutil
+        self._active_cancels.discard(replay_id)
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("DELETE FROM replay_sessions WHERE replay_id = ?", (replay_id,))
             conn.commit()
