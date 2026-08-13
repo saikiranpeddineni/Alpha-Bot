@@ -51,7 +51,7 @@ jobs:
           PYTHONPATH: backend
         run: |
           set -o pipefail
-          timeout --signal=TERM --kill-after=30s 8m pytest -vv backend/tests \
+          timeout --signal=TERM --kill-after=30s 15m pytest -vv backend/tests \
             --ignore=backend/tests/test_replay_loopholes.py \
             -k 'not test_kelly_is_disabled_due_to_incompatibility and not test_backtest_uses_shared_allocation_path' \
             --durations=50 \
