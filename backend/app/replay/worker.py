@@ -5,7 +5,7 @@ import sys
 import traceback
 from datetime import datetime, timezone
 
-from app.core.logger import applog
+from app.core.applog import applog
 from app.replay.runtime import ReplayRuntime
 from app.replay.session import ReplaySessionManager
 from app.db.database import Database
