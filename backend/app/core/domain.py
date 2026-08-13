@@ -92,6 +92,7 @@ class Signal(BaseModel):
     context_conflict_count: int = 0
     context_conflict_reasons: list[str] = Field(default_factory=list)
     thesis_continuity_blocked: bool = False
+    thesis_fingerprint: str | None = None
 
     @property
     def side(self) -> str:
@@ -124,6 +125,7 @@ class OrderRequest(BaseModel):
     time_in_force: str = "day"
     signal_timestamp_utc: datetime | None = None
     decision_bar_timestamp_utc: datetime | None = None
+    thesis_fingerprint: str | None = None
     @model_validator(mode="after")
     def validate_execution_prices(self) -> OrderRequest:
         if self.qty <= 0:
@@ -172,6 +174,7 @@ class Order(BaseModel):
     filled_at: datetime | None = None
     signal_timestamp_utc: datetime | None = None
     decision_bar_timestamp_utc: datetime | None = None
+    thesis_fingerprint: str | None = None
     @property
     def remaining_qty(self) -> float:
         return max(0.0, float(self.qty) - float(self.filled_qty or 0.0))
@@ -211,6 +214,7 @@ class Position(BaseModel):
     take_profit: float | None = None
     strategy: str = "manual"
     opened_at: datetime | None = None
+    thesis_fingerprint: str | None = None
     telemetry: ExecutionTelemetry = Field(default_factory=ExecutionTelemetry)
     @property
     def side(self) -> str:
@@ -248,6 +252,7 @@ class TradeRecord(BaseModel):
     candidate_id: str | None = None
     initial_stop: float | None = None
     initial_risk: float | None = None
+    thesis_fingerprint: str | None = None
     
     # Latency Timestamps
     signal_timestamp_utc: datetime | None = None

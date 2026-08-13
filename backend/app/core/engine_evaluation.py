@@ -185,6 +185,9 @@ class TradingEngineEvaluationMixin:
             if sig is not None:
                 sig.strategy_params = getattr(strat, "params", {})
                 sig.regime = sig.regime or regime
+                sig.mover_bias = sctx.mover_bias
+                sig.mover_change_pct = sctx.mover_change_pct
+                sig.rs_score = sctx.rs_score
                 if news_context is not None:
                     sig.news_sentiment = float(getattr(news_context, "sentiment", 0.0) or 0.0)
                     sig.news_direction = str(getattr(news_context, "direction", "neutral") or "neutral")

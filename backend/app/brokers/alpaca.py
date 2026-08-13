@@ -579,6 +579,7 @@ class AlpacaBroker(Broker):
                     status=OrderStatus.REJECTED,
                     strategy=req.strategy,
                     reason=f"{req.reason} | rejected: {exc}",
+                    thesis_fingerprint=req.thesis_fingerprint,
                 )
             else:
                 msg = f"Ambiguous submission result for {req.symbol} ({req.client_order_id}): {exc}"
@@ -590,6 +591,7 @@ class AlpacaBroker(Broker):
         order = self._to_order(raw)
         order.stop_loss = req.stop_loss
         order.take_profit = req.take_profit
+        order.thesis_fingerprint = req.thesis_fingerprint
         applog.trade("broker.alpaca", f"Submitted {req.side.upper()} {qty} {req.symbol} ({req.strategy})")
         return order
 

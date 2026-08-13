@@ -1618,6 +1618,14 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                     # Fill processing already established the same economic lot. Keep
                     # its original/current stop, initial R, strategy and entry timestamp.
                     p.strategy = existing_lot.strategy
+                    if hasattr(existing_lot, "thesis_fingerprint"):
+                        p.thesis_fingerprint = existing_lot.thesis_fingerprint
+                    if hasattr(existing_lot, "telemetry"):
+                        p.telemetry = existing_lot.telemetry
+                    if hasattr(existing_lot, "pis_exit_decision"):
+                        p.pis_exit_decision = existing_lot.pis_exit_decision
+                    if hasattr(existing_lot, "pis_exit_reason"):
+                        p.pis_exit_reason = existing_lot.pis_exit_reason
                     continue
 
             strat = "manual"
@@ -1639,11 +1647,14 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
             if not isinstance(fallback_payload, dict):
                 fallback_payload = None
             order_payload = entry_payload or fallback_payload
-            if entry_payload and entry_payload.get("strategy"):
-                strat = str(entry_payload["strategy"])
-                p.strategy = strat
-                if hasattr(self.broker, "_symbol_strategies"):
-                    self.broker._symbol_strategies[p.symbol] = strat
+            if order_payload:
+                if order_payload.get("strategy"):
+                    strat = str(order_payload["strategy"])
+                    p.strategy = strat
+                    if hasattr(self.broker, "_symbol_strategies"):
+                        self.broker._symbol_strategies[p.symbol] = strat
+                if order_payload.get("thesis_fingerprint"):
+                    setattr(p, "thesis_fingerprint", str(order_payload["thesis_fingerprint"]))
             stop_loss = None
             take_profit = None
             initial_risk = None

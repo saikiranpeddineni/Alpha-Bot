@@ -79,6 +79,11 @@ class PISEngineAdapter:
             low_px = float(latest["low"])
             vol_px = float(latest.get("volume", 0.0))
             atr_px = float(latest.get("atr14", latest.get("atr", latest.get("atr_14", close_px * 0.02))))
+            market_timestamp = latest.name if hasattr(latest, "name") and isinstance(latest.name, datetime) else latest.get("timestamp", None)
+            if market_timestamp and isinstance(market_timestamp, str):
+                market_timestamp = datetime.fromisoformat(market_timestamp.replace('Z', '+00:00'))
+            bid_px = float(latest.get("bid", getattr(position, "bid", None) or close_px))
+            ask_px = float(latest.get("ask", getattr(position, "ask", None) or close_px))
         except Exception as e:
             logger.warning(f"PIS bar extraction fallback for {symbol}: {e}")
             close_px = float(position.current_price or position.avg_entry_price)
@@ -86,6 +91,9 @@ class PISEngineAdapter:
             low_px = close_px
             vol_px = 0.0
             atr_px = close_px * 0.02
+            market_timestamp = None
+            bid_px = None
+            ask_px = None
 
         # Sanitize ATR and prices
         if math.isnan(atr_px) or math.isinf(atr_px) or atr_px <= 0:
@@ -157,6 +165,11 @@ class PISEngineAdapter:
             bar_low_r=bar_low_r,
             bar_mae_r=bar_mae_r,
             live_r=live_r,
+            market_timestamp=market_timestamp or eval_ts,
+            decision_timestamp=eval_ts,
+            bid=bid_px,
+            ask=ask_px,
+            price_source="bar_close" if cur_px == close_px else "broker_position"
         )
 
         from app.db.database import Database

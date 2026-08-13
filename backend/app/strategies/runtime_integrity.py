@@ -17,7 +17,6 @@ def install_runtime_integrity() -> None:
     """Install idempotent compatibility bridges used by the live execution path."""
     _install_champion_threshold_boundary()
     _install_dynamic_mover_context_bridge()
-    _install_risk_state_persistence()
 
 
 def get_dynamic_mover_context(symbol: str) -> dict[str, Any]:
@@ -120,105 +119,4 @@ def _install_dynamic_mover_context_bridge() -> None:
     _wrap_strategy(MomentumCross)
 
 
-def _rebuild_strategy_cooldown_state(risk_manager, trades, now: datetime) -> None:
-    """Reconstruct active strategy loss state from durable trade history."""
-    cfg = risk_manager.config
-    by_strategy: dict[str, list[Any]] = {}
-    for trade in trades:
-        if getattr(trade, "exit_at", None) is None:
-            continue
-        strategy = getattr(trade, "strategy", None) or "manual"
-        by_strategy.setdefault(strategy, []).append(trade)
 
-    for strategy, history in by_strategy.items():
-        history.sort(key=lambda t: getattr(t, "exit_at"), reverse=True)
-        streak = 0
-        latest_loss_at = None
-        for trade in history:
-            if float(getattr(trade, "pnl", 0.0) or 0.0) <= 0:
-                streak += 1
-                if latest_loss_at is None:
-                    latest_loss_at = getattr(trade, "exit_at")
-            else:
-                break
-        if streak:
-            risk_manager.strategy_consecutive_losses[strategy] = streak
-            if (
-                streak >= cfg.strategy_consecutive_loss_limit
-                and latest_loss_at is not None
-                and cfg.strategy_cooldown_minutes > 0
-            ):
-                cooldown_end = latest_loss_at + timedelta(minutes=cfg.strategy_cooldown_minutes)
-                if cooldown_end > now:
-                    risk_manager.strategy_cooldowns[strategy] = cooldown_end
-
-    risk_manager.consecutive_losses = max(risk_manager.strategy_consecutive_losses.values(), default=0)
-    active = [
-        ts
-        for ts in list(risk_manager.strategy_cooldowns.values()) + list(risk_manager.symbol_cooldowns.values())
-        if ts > now
-    ]
-    risk_manager.cooldown_until = max(active) if active else None
-
-
-def _install_risk_state_persistence() -> None:
-    """Preserve valid restored cooldowns without changing risk policy."""
-    from app.risk.manager import RiskManager
-
-    if getattr(RiskManager.reconstruct_cooldowns, "_runtime_state_installed", False):
-        return
-    original_reconstruct = RiskManager.reconstruct_cooldowns
-    original_roll = RiskManager.roll_session
-
-    @wraps(original_reconstruct)
-    def reconstruct_with_state(self, trades, now=None):
-        # The legacy method contains a stale state mutation that can erase the
-        # daily-halt date during startup reconstruction. Preserve safety state
-        # around that compatibility call while rebuilding cooldowns.
-        saved_daily_halted = self.daily_halted
-        saved_daily_halt_date = self.daily_halt_date
-        result = original_reconstruct(self, trades, now)
-        self.daily_halted = saved_daily_halted
-        self.daily_halt_date = saved_daily_halt_date
-        now_dt = now or datetime.now(UTC)
-        _rebuild_strategy_cooldown_state(self, trades, now_dt)
-        return result
-
-    @wraps(original_roll)
-    def roll_session_with_persistence(self, session_date):
-        now = datetime.now(UTC)
-        previous_session = getattr(self, "_runtime_integrity_session_date", None)
-
-        # First call after startup is initialization, not a new market session.
-        # Preserve restored safety state and only prune genuinely expired entries.
-        if previous_session is None:
-            self._runtime_integrity_session_date = session_date
-            self.symbol_cooldowns = {k: v for k, v in self.symbol_cooldowns.items() if v > now}
-            self.strategy_cooldowns = {k: v for k, v in self.strategy_cooldowns.items() if v > now}
-            active = list(self.symbol_cooldowns.values()) + list(self.strategy_cooldowns.values())
-            self.cooldown_until = max(active) if active else None
-            if self.daily_halted and self.daily_halt_date is not None and session_date > self.daily_halt_date:
-                self.daily_halted = False
-                self.daily_halt_date = None
-            return None
-
-        if session_date <= previous_session:
-            return None
-
-        self._runtime_integrity_session_date = session_date
-        # Real forward session: reset loss-streak accounting, while preserving any
-        # still-live cooldown whose expiry legitimately crosses the boundary.
-        self.consecutive_losses = 0
-        self.strategy_consecutive_losses.clear()
-        self.symbol_cooldowns = {k: v for k, v in self.symbol_cooldowns.items() if v > now}
-        self.strategy_cooldowns = {k: v for k, v in self.strategy_cooldowns.items() if v > now}
-        active = list(self.symbol_cooldowns.values()) + list(self.strategy_cooldowns.values())
-        self.cooldown_until = max(active) if active else None
-        if self.daily_halted and self.daily_halt_date is not None and session_date > self.daily_halt_date:
-            self.daily_halted = False
-            self.daily_halt_date = None
-        return None
-
-    reconstruct_with_state._runtime_state_installed = True
-    RiskManager.reconstruct_cooldowns = reconstruct_with_state
-    RiskManager.roll_session = roll_session_with_persistence

@@ -59,6 +59,12 @@ class ThesisDriftEvaluator:
         severe_adverse_override_triggered = False
         adverse_velocity = False
         adverse_momentum = False
+        early_candidate = False
+        structural_confirmation = False
+        persistence_confirmed = False
+        lack_of_traction = False
+        wick_ratio = 0.0
+        worst_r = 0.0
         
         if getattr(self.config, "enable_early_invalidation", True):
             max_early_bars = getattr(self.config, "early_invalidation_max_bars", 5)
@@ -66,15 +72,25 @@ class ThesisDriftEvaluator:
             
             worst_r = min(obs.r_multiple, getattr(obs, "bar_mae_r", obs.r_multiple))
             
+            # Early Candidate: short-term evidence is concerning
             if (
                 history_len <= max_early_bars
                 and worst_r <= r_threshold
                 and peak_r <= getattr(self.config, "early_invalidation_peak_r", 0.25)
             ):
+                early_candidate = True
+                lack_of_traction = True
+                
                 # Check for volume/wick confirmation of aggressive rejection
-                bar_range = obs.high - obs.low
-                adverse_wick = (obs.high - obs.close) if obs.side > 0 else (obs.close - obs.low)
-                wick_ratio = adverse_wick / max(1e-6, bar_range)
+                bar_range = max(1e-9, obs.high - obs.low)
+                if obs.side > 0:
+                    # LONG: lower wick is adverse.
+                    adverse_wick = max(0.0, obs.close - obs.low)
+                else:
+                    # SHORT: upper wick is adverse.
+                    adverse_wick = max(0.0, obs.high - obs.close)
+                    
+                wick_ratio = adverse_wick / bar_range
                 
                 has_wick = (wick_ratio >= getattr(self.config, "early_invalidation_wick_ratio", 0.50))
                 severe_adverse = (worst_r <= getattr(self.config, "early_invalidation_severe_r", -0.60))
@@ -84,12 +100,14 @@ class ThesisDriftEvaluator:
                 # Adverse momentum: closing near the worst excursion
                 adverse_momentum = (obs.r_multiple <= -0.50)
                 
-                lack_of_traction = (peak_r <= 0.10)
-                
                 if severe_adverse and (adverse_velocity or adverse_momentum) and lack_of_traction:
                     severe_adverse_override_triggered = True
                     
-                if has_wick or severe_adverse_override_triggered:
+                # Structural confirmation requires sustained adverse behavior or severe override
+                persistence_confirmed = (stagnation_bars >= 1 or history_len >= 2)
+                structural_confirmation = persistence_confirmed and (adverse_momentum or adverse_velocity or has_wick or severe_adverse_override_triggered)
+                    
+                if early_candidate and (has_wick or severe_adverse_override_triggered):
                     early_invalidation = True
 
         # Structural invalidation:
@@ -113,8 +131,14 @@ class ThesisDriftEvaluator:
             adverse_excursion_r=adverse_r,
             stagnation_bars=stagnation_bars,
             is_degraded=is_degraded,
+            early_candidate=early_candidate,
+            structural_confirmation=structural_confirmation,
+            persistence_confirmed=persistence_confirmed,
+            lack_of_traction=lack_of_traction,
             early_invalidation_detected=early_invalidation,
             adverse_velocity=adverse_velocity,
             adverse_momentum=adverse_momentum,
             severe_adverse_override_triggered=severe_adverse_override_triggered,
+            adverse_wick_ratio=wick_ratio,
+            worst_r=worst_r,
         )

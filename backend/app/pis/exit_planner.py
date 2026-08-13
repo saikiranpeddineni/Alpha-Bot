@@ -140,11 +140,16 @@ class ExitPlanner:
             is_runner = True
 
         # Determine exit action
-        if early_invalidation_breach:
-            # Asymmetric Loss Reduction (Quadrant 2): Cut immediately at -0.25R to -0.35R
+        if protection_breached:
             action = ExitAction.FULL_EXIT
             exit_ratio = 1.0
-        elif protection_breached or lifecycle == LifecycleState.EXIT_CANDIDATE:
+        elif thesis.severe_adverse_override_triggered:
+            action = ExitAction.FULL_EXIT
+            exit_ratio = 1.0
+        elif early_invalidation_breach:
+            action = ExitAction.FULL_EXIT
+            exit_ratio = 1.0
+        elif lifecycle == LifecycleState.EXIT_CANDIDATE:
             action = ExitAction.FULL_EXIT
             exit_ratio = 1.0
         elif ceiling_harvested and has_scaled_out:
@@ -171,10 +176,12 @@ class ExitPlanner:
             lifecycle, health, thesis, protection_updated, is_runner
         )
 
-        if early_invalidation_breach:
-            reasons.append(ReasonCode.EARLY_THESIS_INVALIDATED)
-        elif protection_breached:
+        if protection_breached:
             reasons.append(ReasonCode.PROTECTION_BREACH)
+        elif thesis.severe_adverse_override_triggered:
+            reasons.append(ReasonCode.EMERGENCY_STOP)
+        elif early_invalidation_breach:
+            reasons.append(ReasonCode.EARLY_THESIS_INVALIDATED)
         elif ceiling_harvested:
             reasons.append(ReasonCode.MAX_R_CEILING_REACHED)
         elif scale_out_triggered:

@@ -41,7 +41,8 @@ class ReplayBroker(Broker):
         order = Order(id=oid, client_order_id=oid, symbol=req.symbol.upper(), side=req.side, qty=float(req.qty), order_type=req.order_type,
                       limit_price=req.limit_price, stop_price=req.stop_price, stop_loss=req.stop_loss, take_profit=req.take_profit,
                       status=OrderStatus.SUBMITTED, submitted_at=self._now, strategy=req.strategy, reason=req.reason,
-                      signal_timestamp_utc=req.signal_timestamp_utc, decision_bar_timestamp_utc=req.decision_bar_timestamp_utc)
+                      signal_timestamp_utc=req.signal_timestamp_utc, decision_bar_timestamp_utc=req.decision_bar_timestamp_utc,
+                      thesis_fingerprint=req.thesis_fingerprint)
         self._orders[oid]=order
         if self._ledger: self._ledger.record_event("ORDER_SUBMITTED", self._now, order.symbol, order.model_dump(mode="json"))
         if self.fill_model=="immediate" or req.order_type==OrderType.MARKET:

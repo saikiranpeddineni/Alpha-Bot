@@ -91,6 +91,7 @@ class RiskManager:
         self.symbol_cooldowns: dict[str, datetime] = {}
         self._pdt_warned = False
         self.core_watchlist: list[str] | None = None
+        self.closed_theses: dict[str, datetime] = {}
 
     def get_risk_state(self) -> dict:
         """Return serializable snapshot of safety-critical risk state for atomic persistence."""
@@ -104,6 +105,7 @@ class RiskManager:
             "hard_halt_reason": self.hard_halt_reason,
             "daily_halted": self.daily_halted,
             "daily_halt_date": self.daily_halt_date.isoformat() if self.daily_halt_date else None,
+            "closed_theses": {tf: ts.isoformat() for tf, ts in self.closed_theses.items()},
         }
 
     def restore_risk_state(self, data: dict) -> None:
@@ -137,6 +139,12 @@ class RiskManager:
         self.hard_halted = bool(data.get("hard_halted", False))
         self.hard_halt_reason = str(data.get("hard_halt_reason", ""))
         self.daily_halted = bool(data.get("daily_halted", False))
+        if data.get("closed_theses"):
+            for tf, ts_str in data["closed_theses"].items():
+                try:
+                    self.closed_theses[tf] = datetime.fromisoformat(ts_str)
+                except Exception:
+                    pass
 
     def reconstruct_cooldowns(self, trades: list[TradeRecord], now: datetime | None = None) -> None:
         """Dynamically reconstruct active cooldowns from the immutable trade history."""
@@ -149,8 +157,37 @@ class RiskManager:
         # We only care about losing trades for cooldown purposes
         losing_trades = [t for t in trades if t.pnl <= 0 and t.exit_at]
         
+        by_strategy: dict[str, list[TradeRecord]] = {}
+        for trade in trades:
+            if not getattr(trade, "exit_at", None):
+                continue
+            strategy = getattr(trade, "strategy", None) or "manual"
+            by_strategy.setdefault(strategy, []).append(trade)
+
+        for strategy, history in by_strategy.items():
+            history.sort(key=lambda t: t.exit_at, reverse=True)
+            streak = 0
+            latest_loss_at = None
+            for trade in history:
+                if trade.pnl <= 0:
+                    streak += 1
+                    if latest_loss_at is None:
+                        latest_loss_at = trade.exit_at
+                else:
+                    break
+            
+            if streak:
+                self.strategy_consecutive_losses[strategy] = streak
+                if (
+                    streak >= cfg.strategy_consecutive_loss_limit
+                    and latest_loss_at is not None
+                    and cfg.strategy_cooldown_minutes > 0
+                ):
+                    cooldown_end = latest_loss_at + timedelta(minutes=cfg.strategy_cooldown_minutes)
+                    if cooldown_end > now:
+                        self.strategy_cooldowns[strategy] = cooldown_end
+
         for trade in losing_trades:
-            # Reconstruct Symbol Cooldowns
             if cfg.symbol_cooldown_minutes > 0:
                 cooldown_end = trade.exit_at + timedelta(minutes=cfg.symbol_cooldown_minutes)
                 if cooldown_end > now:
@@ -158,15 +195,14 @@ class RiskManager:
                     if not current_cooldown or cooldown_end > current_cooldown:
                         self.symbol_cooldowns[trade.symbol] = cooldown_end
                         applog.info("risk", f"Reconstructed active symbol cooldown for {trade.symbol} until {cooldown_end.isoformat()}")
-                        
-            # Reconstruct Strategy Cooldowns
-            if cfg.strategy_cooldown_minutes > 0 and trade.strategy:
-                # We do not fully rebuild the strategy consecutive streak here as it requires
-                # a perfect sequential history of winners and losers. We just restore the explicit 
-                # time-based cooldown if the last trade happened to trigger one that is still active.
-                # A full streak reconstruction would be more complex and usually checkpointing handles it.
-                pass
-                self.daily_halt_date = None
+
+        self.consecutive_losses = max(self.strategy_consecutive_losses.values(), default=0)
+        active = [
+            ts
+            for ts in list(self.strategy_cooldowns.values()) + list(self.symbol_cooldowns.values())
+            if ts > now
+        ]
+        self.cooldown_until = max(active) if active else None
 
     # ---- lifecycle hooks ----
 
@@ -180,6 +216,12 @@ class RiskManager:
                 "risk",
                 f"Loss on {symbol} -- cooling down this ticker for {self.config.symbol_cooldown_minutes} minutes"
             )
+
+            # Block same-thesis reentry
+            fingerprint = getattr(trade, "thesis_fingerprint", None)
+            if fingerprint:
+                self.closed_theses[fingerprint] = now_dt
+                applog.info("risk", f"Registered losing thesis fingerprint {fingerprint} to block reentries")
 
             current_losses = self.strategy_consecutive_losses.get(strategy, 0) + 1
             self.strategy_consecutive_losses[strategy] = current_losses
@@ -204,17 +246,40 @@ class RiskManager:
             self.cooldown_until = max(active_cooldowns) if active_cooldowns else None
 
     def roll_session(self, session_date) -> None:  # noqa: ANN001
-        # A daily halt may clear only on a verified forward session transition.
-        # Same-session, stale, backward, or missing halt dates must never fail open.
+        from datetime import timezone
+        now = datetime.now(timezone.utc)
+        previous_session = getattr(self, "_manager_session_date", None)
+        
+        # Initialize on first call, don't clear restored cooldowns
+        if previous_session is None:
+            self._manager_session_date = session_date
+            self.symbol_cooldowns = {k: v for k, v in self.symbol_cooldowns.items() if v > now}
+            self.strategy_cooldowns = {k: v for k, v in self.strategy_cooldowns.items() if v > now}
+            active = list(self.symbol_cooldowns.values()) + list(self.strategy_cooldowns.values())
+            self.cooldown_until = max(active) if active else None
+            if self.daily_halted and self.daily_halt_date is not None and session_date > self.daily_halt_date:
+                self.daily_halted = False
+                self.daily_halt_date = None
+                applog.info("risk", "New session -- daily loss halt cleared")
+            return
+
+        if session_date <= previous_session:
+            return
+
+        self._manager_session_date = session_date
+        # Real forward session: reset loss-streak accounting, preserve active cooldowns
         if self.daily_halted and self.daily_halt_date is not None and session_date > self.daily_halt_date:
             self.daily_halted = False
             self.daily_halt_date = None
             applog.info("risk", "New session -- daily loss halt cleared")
-        self.cooldown_until = None
+            
         self.consecutive_losses = 0
         self.strategy_consecutive_losses.clear()
-        self.strategy_cooldowns.clear()
-        self.symbol_cooldowns.clear()
+        self.symbol_cooldowns = {k: v for k, v in self.symbol_cooldowns.items() if v > now}
+        self.strategy_cooldowns = {k: v for k, v in self.strategy_cooldowns.items() if v > now}
+        active = list(self.symbol_cooldowns.values()) + list(self.strategy_cooldowns.values())
+        self.cooldown_until = max(active) if active else None
+        self.closed_theses.clear()
 
     def reset_hard_halt(self) -> None:
         self.hard_halted = False
@@ -278,6 +343,10 @@ class RiskManager:
             return RiskDecision(False, f"ticker-specific cooldown active for {symbol}")
         if not self.clock.in_entry_window(cfg.no_entry_minutes_before_close, now):
             return RiskDecision(False, "outside entry window (market closed or too near close)")
+        
+        fingerprint = getattr(signal, "thesis_fingerprint", None)
+        if fingerprint and fingerprint in self.closed_theses:
+            return RiskDecision(False, f"same-thesis reentry blocked for fingerprint {fingerprint}")
         
         return RiskDecision(True, "permitted")
 
@@ -492,6 +561,7 @@ class RiskManager:
             take_profit=executable_target,
             strategy=signal.strategy,
             reason=signal.reason,
+            thesis_fingerprint=getattr(signal, "thesis_fingerprint", None),
         )
         risk_str = f"${risk_amount:,.0f}" if isinstance(risk_amount, (int, float)) else str(risk_amount)
         return RiskDecision(

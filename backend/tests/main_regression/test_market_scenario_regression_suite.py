@@ -27,7 +27,8 @@ def _signal(side: str = "long", **overrides):
 def _bars(closes, *, atr=1.0, ema9=None, ema20=None, volume=None):
     closes = list(map(float, closes)); n = len(closes)
     ema9 = closes[-1] if ema9 is None else ema9; ema20 = closes[-1] if ema20 is None else ema20
-    return pd.DataFrame({"close": closes, "high": [x + .20 for x in closes], "low": [x - .20 for x in closes], "atr14": [float(atr)] * n, "ema9": [float(ema9)] * n, "ema20": [float(ema20)] * n, "volume": volume if volume is not None else [100_000] * n})
+    vwap = [c * 0.98 if c > closes[0] else c * 1.02 for c in closes]
+    return pd.DataFrame({"open": closes, "close": closes, "high": [x + .20 for x in closes], "low": [x - .20 for x in closes], "vwap": vwap, "atr14": [float(atr)] * n, "ema9": [float(ema9)] * n, "ema20": [float(ema20)] * n, "volume": volume if volume is not None else [100_000] * n})
 
 
 def _assert_allowed(result): assert result.allowed is True, result.reasons
@@ -81,7 +82,7 @@ def test_breakout_test_is_not_called_exhaustion():
 
 
 def test_genuine_extension_without_mover_confirmation_is_flagged():
-    result = assess_entry_context(_signal("long", mover_bias="neutral", rs_score=.50), _bars([100+i*.05 for i in range(20)]+[102]), Regime.TREND_UP)
+    result = assess_entry_context(_signal("long", mover_bias="neutral", rs_score=.50), _bars([100+i*.05 for i in range(20)]+[103]), Regime.TREND_UP)
     assert any("entry_location_conflict" in r for r in result.reasons)
 
 

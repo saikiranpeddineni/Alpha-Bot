@@ -71,33 +71,35 @@ def _market_direction_conflict(sig: Signal, df: pd.DataFrame, regime: Regime | s
     slope_r = _normalized_short_term_move(df)
     reversal = _reversal_confirmed(sig, df)
     conflict_weight = 0.0
+    strategy = getattr(sig, "strategy", "")
+    is_gap_fade = strategy == "gap_and_go" and ((sig.side == "short" and mover == "gainer") or (sig.side == "long" and mover == "loser"))
 
     if sig.side == "long":
-        direction_ok = mover == "gainer" or (rs is not None and rs >= 0.55) or (slope_r is not None and slope_r >= SHORT_TERM_SLOPE_R)
-        if mover == "loser":
+        direction_ok = mover == "gainer" or (rs is not None and rs >= 0.55) or (slope_r is not None and slope_r >= SHORT_TERM_SLOPE_R) or is_gap_fade
+        if mover == "loser" and not is_gap_fade:
             conflict_weight += 0.25
             reasons.append("directional_context_conflict: loser_mover")
-        if rs is not None and rs < 0.45:
+        if rs is not None and rs < 0.45 and not is_gap_fade:
             conflict_weight += 0.20
             reasons.append("directional_context_conflict: weak_relative_strength")
-        if regime_name == Regime.TREND_DOWN.value and not reversal:
+        if regime_name == Regime.TREND_DOWN.value and not reversal and not is_gap_fade:
             conflict_weight += 0.25
             reasons.append("regime_conflict: long_against_trend_down")
-        if slope_r is not None and slope_r <= -SHORT_TERM_SLOPE_R and not reversal:
+        if slope_r is not None and slope_r <= -SHORT_TERM_SLOPE_R and not reversal and not is_gap_fade:
             conflict_weight += 0.18
             reasons.append("microstructure_conflict: short_term_downside_confirmation")
     else:
-        direction_ok = mover == "loser" or (rs is not None and rs <= 0.45) or (slope_r is not None and slope_r <= -SHORT_TERM_SLOPE_R)
-        if mover == "gainer":
+        direction_ok = mover == "loser" or (rs is not None and rs <= 0.45) or (slope_r is not None and slope_r <= -SHORT_TERM_SLOPE_R) or is_gap_fade
+        if mover == "gainer" and not is_gap_fade:
             conflict_weight += 0.25
             reasons.append("directional_context_conflict: gainer_mover")
-        if rs is not None and rs > 0.55:
+        if rs is not None and rs > 0.55 and not is_gap_fade:
             conflict_weight += 0.20
             reasons.append("directional_context_conflict: strong_relative_strength")
-        if regime_name == Regime.TREND_UP.value and not reversal:
+        if regime_name == Regime.TREND_UP.value and not reversal and not is_gap_fade:
             conflict_weight += 0.25
             reasons.append("regime_conflict: short_against_trend_up")
-        if slope_r is not None and slope_r >= SHORT_TERM_SLOPE_R and not reversal:
+        if slope_r is not None and slope_r >= SHORT_TERM_SLOPE_R and not reversal and not is_gap_fade:
             conflict_weight += 0.18
             reasons.append("microstructure_conflict: short_term_upside_confirmation")
 
@@ -292,8 +294,10 @@ def assess_thesis_continuity(db, sig: Signal, now: datetime) -> EntryContextAsse
     if fresh_material and ((sig.side == "long" and current_news_direction == "bullish") or (sig.side == "short" and current_news_direction == "bearish")):
         evidence["reentry_policy"] = "fresh_supportive_catalyst_resets_thesis"; reasons.append("thesis_history_observation: fresh_supportive_catalyst_resets_reentry_penalty"); return EntryContextAssessment(True, tuple(reasons), evidence)
     
-    # 7. Directional-thesis cooldown: strict block if repeated losses in same direction, regardless of context
-    if len(recent_losses) >= REENTRY_LOSS_BLOCK_COUNT:
+    # 7. Directional-thesis cooldown: strict block if repeated losses in same direction with same context
+    if len(same_context_losses) >= REENTRY_LOSS_BLOCK_COUNT:
+        reasons.append("thesis_continuity_conflict: repeated_same_context_losses"); evidence["reentry_policy"] = "hard_block"; return EntryContextAssessment(False, tuple(reasons), evidence)
+    elif len(recent_losses) >= REENTRY_HARD_BLOCK_COUNT:
         reasons.append("thesis_continuity_conflict: repeated_directional_losses"); evidence["reentry_policy"] = "hard_block"; return EntryContextAssessment(False, tuple(reasons), evidence)
 
     evidence["reentry_policy"] = "observation_only"

@@ -84,6 +84,7 @@ class PositionBrain:
             self._has_scaled_out: bool = False
             self._smoothed_health_score: Optional[float] = None
             self._history_len: int = 1
+            self._completed_bars_since_entry: int = 0
 
             # Hydrate state if provided
             if restored_state is not None:
@@ -99,6 +100,10 @@ class PositionBrain:
             self._last_decision: Optional[PISDecision] = None
             self._is_closed: bool = False
 
+            # Inject completed_bars_since_entry before evaluation
+            import dataclasses
+            initial_observation = dataclasses.replace(initial_observation, completed_bars_since_entry=self._completed_bars_since_entry)
+            
             # Initial evaluation
             self._evaluate_internal(initial_observation)
 
@@ -119,7 +124,9 @@ class PositionBrain:
         with self._lock:
             lifecycle_str = self.state_machine.current_state.value
             return {
+                "symbol": self.symbol,
                 "history_len": self._history_len,
+                "completed_bars_since_entry": self._completed_bars_since_entry,
                 "smoothed_health_score": self._smoothed_health_score,
                 "degradation_counter": self._degradation_counter,
                 "stagnation_counter": self._stagnation_counter,
@@ -127,6 +134,10 @@ class PositionBrain:
                 "runner_qualified": self._runner_qualified,
                 "has_scaled_out": self._has_scaled_out,
                 "current_stop_floor": self._current_stop_floor,
+                "config_version": getattr(self.config, "CONFIG_VERSION", "PIS-006"),
+                "config_hash": self.config.fingerprint() if hasattr(self.config, "fingerprint") else "",
+                "is_closed": self._is_closed,
+                "last_timestamp": self._last_timestamp.isoformat(),
                 "profit_memory": {
                     "peak_r": self._profit_memory.peak_r,
                     "trough_r": self._profit_memory.trough_r,
@@ -148,6 +159,7 @@ class PositionBrain:
         self._profit_memory = ProfitMemoryTracker.update(self._profit_memory, initial_observation)
         
         self._history_len = payload.get("history_len", 1)
+        self._completed_bars_since_entry = payload.get("completed_bars_since_entry", 0)
         self._smoothed_health_score = payload.get("smoothed_health_score")
         self._degradation_counter = payload.get("degradation_counter", 0)
         self._stagnation_counter = payload.get("stagnation_counter", 0)
@@ -262,6 +274,14 @@ class PositionBrain:
                 raise ValueError(
                     f"Time travel rejected: observation timestamp {obs.timestamp} < last timestamp {self._last_timestamp}"
                 )
+            
+            if obs.timestamp == self._last_timestamp:
+                # Idempotent/no-op on duplicate timestamp. Return the last decision if exists,
+                # else proceed without incrementing completed_bars.
+                if self._last_decision:
+                    return self._last_decision
+            else:
+                self._completed_bars_since_entry += 1
 
             observed_qty = abs(float(obs.qty))
             # Scale-out state is confirmed by an observed position reduction, not by the
@@ -280,6 +300,8 @@ class PositionBrain:
                 self._stagnation_counter = 0
 
             # 5. Append to history deque (Priority 2 - Bounded memory growth)
+            import dataclasses
+            obs = dataclasses.replace(obs, completed_bars_since_entry=self._completed_bars_since_entry)
             self._history.append(obs)
             self._history_len += 1
             self._last_observation = obs
@@ -404,6 +426,8 @@ class PositionBrain:
             runner_probability=runner_prob,
             market_regime=regime,
             brainstorm_narrative=narrative,
+            config_version=getattr(self.config, "CONFIG_VERSION", "PIS-006"),
+            config_hash=self.config.fingerprint() if hasattr(self.config, "fingerprint") else "",
             metadata={
                 **decision.metadata,
                 "market_regime": regime.value,
@@ -412,6 +436,7 @@ class PositionBrain:
                 "adverse_velocity": decision.thesis.adverse_velocity,
                 "adverse_momentum": decision.thesis.adverse_momentum,
                 "severe_adverse_override_triggered": decision.thesis.severe_adverse_override_triggered,
+                "completed_bars_since_entry": self._completed_bars_since_entry,
             },
         )
 
@@ -499,18 +524,4 @@ class PositionBrain:
             self._history.clear()
             self._is_closed = True
 
-    def serialize_state(self) -> Dict[str, Any]:
-        """Serialize state for recovery (Priority 15)."""
-        with self._lock:
-            return {
-                "symbol": self.symbol,
-                "lifecycle": self.lifecycle.value,
-                "peak_r": self.peak_r,
-                "trough_r": self.trough_r,
-                "current_stop_floor": self._current_stop_floor,
-                "runner_qualified": self._runner_qualified,
-                "stagnation_counter": self._stagnation_counter,
-                "degradation_counter": self._degradation_counter,
-                "is_closed": self._is_closed,
-                "last_timestamp": self._last_timestamp.isoformat(),
-            }
+

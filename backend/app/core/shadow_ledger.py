@@ -332,8 +332,8 @@ class ShadowLedger:
             proposed_stop_loss = stop_loss
         elif strategy_params and isinstance(strategy_params, dict):
             sl_pct = strategy_params.get("stop_loss_pct") or strategy_params.get("sl_pct")
-            if sl_pct and signal_price > 0:
-                proposed_stop_loss = signal_price * (1.0 - float(sl_pct) / 100.0 if direction == "long" else 1.0 + float(sl_pct) / 100.0)
+            if sl_pct and entry_price > 0:
+                proposed_stop_loss = entry_price * (1.0 - float(sl_pct) / 100.0 if direction == "long" else 1.0 + float(sl_pct) / 100.0)
 
         # Calculate outcomes
         outcomes = {}

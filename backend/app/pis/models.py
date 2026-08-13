@@ -109,6 +109,12 @@ class PositionObservation:
     bar_low_r: float = 0.0
     bar_mae_r: float = 0.0
     live_r: float = 0.0
+    market_timestamp: Optional[datetime] = None
+    decision_timestamp: Optional[datetime] = None
+    bid: Optional[float] = None
+    ask: Optional[float] = None
+    completed_bars_since_entry: int = 0
+    price_source: Optional[str] = None
 
     def __post_init__(self) -> None:
         """Validate observation invariants fast."""
@@ -185,10 +191,16 @@ class ThesisDrift:
     adverse_excursion_r: float
     stagnation_bars: int
     is_degraded: bool
+    early_candidate: bool = False
+    structural_confirmation: bool = False
+    persistence_confirmed: bool = False
+    lack_of_traction: bool = False
     early_invalidation_detected: bool = False
     adverse_velocity: bool = False
     adverse_momentum: bool = False
     severe_adverse_override_triggered: bool = False
+    adverse_wick_ratio: float = 0.0
+    worst_r: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -223,6 +235,8 @@ class PISDecision:
     runner_probability: float = 0.0
     market_regime: MarketRegime = MarketRegime.TREND_RUNNER
     brainstorm_narrative: str = ""
+    config_version: str = "PIS-006"
+    config_hash: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -245,6 +259,8 @@ class PISConfig:
 
     All fields undergo strict startup validation.
     """
+
+    CONFIG_VERSION = "PIS-006"
 
     history_max_len: int = 500
     activation_mfe_r: float = 1.5
@@ -307,3 +323,20 @@ class PISConfig:
         if self.runner_wide_atr_mult <= 0.0:
             raise ValueError(f"runner_wide_atr_mult must be > 0, got {self.runner_wide_atr_mult}")
 
+    def to_dict(self) -> dict:
+        import dataclasses
+        return {
+            f.name: getattr(self, f.name)
+            for f in dataclasses.fields(self)
+        }
+
+    def fingerprint(self) -> str:
+        import json
+        import hashlib
+        payload = json.dumps(
+            self.to_dict(),
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        return hashlib.sha256(payload.encode()).hexdigest()
