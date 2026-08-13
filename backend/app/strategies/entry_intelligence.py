@@ -135,18 +135,87 @@ def _news_assessment(sig: Signal, df: pd.DataFrame) -> tuple[float, list[str], d
 
 
 def _entry_location_assessment(sig: Signal, df: pd.DataFrame) -> tuple[float, list[str], dict[str, Any]]:
-    if len(df) < 21 or not {"close", "high", "low", "atr14"}.issubset(df.columns):
+    if len(df) < 21 or not {"close", "high", "low", "open", "volume", "atr14", "vwap"}.issubset(df.columns):
         return 0.0, [], {}
-    close = float(df["close"].iloc[-1]); atr = float(df["atr14"].iloc[-1])
+        
+    close = float(df["close"].iloc[-1])
+    atr = float(df["atr14"].iloc[-1])
     if atr <= 0 or close <= 0:
         return 0.0, [], {}
-    prior = df.iloc[-21:-1]; high20 = float(prior["high"].max()); low20 = float(prior["low"].min()); mover = getattr(sig, "mover_bias", None)
-    reasons: list[str] = []; extension = 0.0
-    if sig.side == "long" and close > high20 + EXTENSION_R * atr and mover != "gainer":
-        extension = 0.15; reasons.append("entry_location_conflict: long_extended_without_mover_confirmation")
-    elif sig.side == "short" and close < low20 - EXTENSION_R * atr and mover != "loser":
-        extension = 0.15; reasons.append("entry_location_conflict: short_extended_without_mover_confirmation")
-    return extension, reasons, {"high20": high20, "low20": low20, "close": close, "atr": atr}
+        
+    prior = df.iloc[-21:-1]
+    high20 = float(prior["high"].max())
+    low20 = float(prior["low"].min())
+    mover = getattr(sig, "mover_bias", None)
+    
+    # Current bar stats
+    high = float(df["high"].iloc[-1])
+    low = float(df["low"].iloc[-1])
+    open_px = float(df["open"].iloc[-1])
+    volume = float(df["volume"].iloc[-1])
+    vwap = float(df["vwap"].iloc[-1])
+    
+    # Previous bar stats for volume/pullback comparison
+    prev_vol = float(df["volume"].iloc[-2])
+    prev_close = float(df["close"].iloc[-2])
+    
+    reasons: list[str] = []
+    extension = 0.0
+    
+    # Breakout Quality Assessment
+    if sig.side == "long":
+        dist_from_vwap = (close - vwap) / atr
+        dist_from_base = (close - high20) / atr
+        wick_size = (high - max(open_px, close)) / atr
+        
+        # 1. Exhaustion Penalty
+        if dist_from_base >= 1.5 and dist_from_vwap >= 1.25:
+            # Extreme extension
+            if volume > prev_vol * 1.5 and wick_size > 0.5:
+                # Volume climax with upper wick
+                extension = 0.35
+                reasons.append("entry_location_conflict: exhaustion_climax (extreme extension, vol spike, adverse wick)")
+            elif mover != "gainer":
+                # Blind extension without mover confirmation
+                extension = 0.20
+                reasons.append("entry_location_conflict: long_extended_without_mover_confirmation")
+                
+        # 2. Continuation Bonus (Reclaim/Retest)
+        elif dist_from_base > 0 and dist_from_vwap > 0:
+            if close > prev_close and volume > prev_vol and df["close"].iloc[-2] < df["close"].iloc[-3]:
+                # Reclaiming after a short pullback on expanding volume
+                extension = -0.10
+                reasons.append("entry_location_support: high_quality_pullback_reclaim")
+                
+    elif sig.side == "short":
+        dist_from_vwap = (vwap - close) / atr
+        dist_from_base = (low20 - close) / atr
+        wick_size = (min(open_px, close) - low) / atr
+        
+        if dist_from_base >= 1.5 and dist_from_vwap >= 1.25:
+            if volume > prev_vol * 1.5 and wick_size > 0.5:
+                extension = 0.35
+                reasons.append("entry_location_conflict: exhaustion_climax (extreme extension, vol spike, adverse wick)")
+            elif mover != "loser":
+                extension = 0.20
+                reasons.append("entry_location_conflict: short_extended_without_mover_confirmation")
+                
+        elif dist_from_base > 0 and dist_from_vwap > 0:
+            if close < prev_close and volume > prev_vol and df["close"].iloc[-2] > df["close"].iloc[-3]:
+                extension = -0.10
+                reasons.append("entry_location_support: high_quality_pullback_reclaim")
+
+    evidence = {
+        "high20": high20, 
+        "low20": low20, 
+        "close": close, 
+        "atr": atr,
+        "dist_from_base": dist_from_base if sig.side in ("long", "short") else 0.0,
+        "dist_from_vwap": dist_from_vwap if sig.side in ("long", "short") else 0.0,
+        "wick_size": wick_size if sig.side in ("long", "short") else 0.0,
+        "volume_ratio": volume / max(prev_vol, 1e-9)
+    }
+    return extension, reasons, evidence
 
 
 def assess_entry_context(sig: Signal, df: pd.DataFrame, regime: Regime | str | None) -> EntryContextAssessment:
@@ -222,9 +291,10 @@ def assess_thesis_continuity(db, sig: Signal, now: datetime) -> EntryContextAsse
     evidence = {"prior_same_day_losses": len(losses_today), "recent_same_direction_losses": len(recent_losses), "recent_same_context_losses": len(same_context_losses), "current_regime": current_regime, "current_mover_bias": current_mover, "fresh_material_catalyst": fresh_material, "current_news_direction": current_news_direction}
     if fresh_material and ((sig.side == "long" and current_news_direction == "bullish") or (sig.side == "short" and current_news_direction == "bearish")):
         evidence["reentry_policy"] = "fresh_supportive_catalyst_resets_thesis"; reasons.append("thesis_history_observation: fresh_supportive_catalyst_resets_reentry_penalty"); return EntryContextAssessment(True, tuple(reasons), evidence)
-    if len(same_context_losses) >= REENTRY_HARD_BLOCK_COUNT:
-        reasons.append("thesis_continuity_conflict: repeated_same_context_losses"); evidence["reentry_policy"] = "hard_block"; return EntryContextAssessment(False, tuple(reasons), evidence)
-    if len(same_context_losses) >= REENTRY_LOSS_BLOCK_COUNT:
-        reasons.append("thesis_continuity_conflict: repeated_same_context_losses"); evidence["reentry_policy"] = "adaptive_block"; return EntryContextAssessment(False, tuple(reasons), evidence)
+    
+    # 7. Directional-thesis cooldown: strict block if repeated losses in same direction, regardless of context
+    if len(recent_losses) >= REENTRY_LOSS_BLOCK_COUNT:
+        reasons.append("thesis_continuity_conflict: repeated_directional_losses"); evidence["reentry_policy"] = "hard_block"; return EntryContextAssessment(False, tuple(reasons), evidence)
+
     evidence["reentry_policy"] = "observation_only"
     return EntryContextAssessment(True, tuple(reasons), evidence)

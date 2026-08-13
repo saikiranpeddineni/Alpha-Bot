@@ -18,7 +18,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from app.core.domain import OrderRequest, Position
 from app.pis.execution import PISExecutionAdapter
-from app.pis.models import PISConfig, PISDecision, PositionObservation
+from app.pis.models import PISConfig, PISDecision, PositionObservation, ExitAction
 from app.pis.service import PISService
 
 logger = logging.getLogger(__name__)
@@ -122,6 +122,18 @@ class PISEngineAdapter:
         vol_px = max(0.0, _clean_px(vol_px, 0.0))
         atr_px = max(0.01, _clean_px(atr_px, 1.0))
 
+        # Intra-bar excursion metrics
+        def _calc_r(px: float) -> float:
+            r = (px - entry_px) / risk_per_share * side
+            if math.isnan(r) or math.isinf(r):
+                return 0.0
+            return r
+
+        bar_high_r = _calc_r(high_px)
+        bar_low_r = _calc_r(low_px)
+        bar_mae_r = bar_low_r if side > 0 else bar_high_r
+        live_r = _calc_r(cur_px)
+
         # Build clean observation
         obs = PositionObservation(
             timestamp=eval_ts,
@@ -141,6 +153,10 @@ class PISEngineAdapter:
             take_profit=take_profit,
             r_multiple=r_multiple,
             news_sentiment_score=news_sentiment,
+            bar_high_r=bar_high_r,
+            bar_low_r=bar_low_r,
+            bar_mae_r=bar_mae_r,
+            live_r=live_r,
         )
 
         from app.db.database import Database
@@ -148,25 +164,17 @@ class PISEngineAdapter:
         
         db = Database.active()
         
-        restored_memory = None
+        restored_state = None
         mode = self.mode
         
         if db and self.service.get_brain(symbol) is None:
-            # We are about to create a new brain, try to restore memory
+            # We are about to create a new brain, try to restore full state
             mem_dict = await asyncio.to_thread(db.get_pis_profit_memory, mode=mode, symbol=symbol)
             if mem_dict:
-                try:
-                    restored_memory = ProfitMemoryState(
-                        peak_r=mem_dict.get("peak_r", 0.0),
-                        trough_r=mem_dict.get("trough_r", 0.0),
-                        mfe_price=mem_dict.get("mfe_price", cur_px),
-                        mae_price=mem_dict.get("mae_price", cur_px)
-                    )
-                except Exception:
-                    pass
+                restored_state = mem_dict
 
         # Dispatch through service
-        decision = self.service.observe(obs, restored_memory=restored_memory)
+        decision = self.service.observe(obs, restored_state=restored_state)
 
         if db:
             brain = self.service.get_brain(symbol)
@@ -175,16 +183,22 @@ class PISEngineAdapter:
                     db.save_pis_profit_memory,
                     mode=mode,
                     symbol=symbol,
-                    payload={
-                        "peak_r": brain.peak_r,
-                        "trough_r": brain.trough_r,
-                        "mfe_price": brain._profit_memory.mfe_price,
-                        "mae_price": brain._profit_memory.mae_price,
-                    }
+                    payload=brain.serialize_state()
                 )
 
         # Convert to order request if exit triggered
         order_req = PISExecutionAdapter.build_order_request(decision, obs)
+
+        # Inject PIS tracking metrics into position
+        metrics = getattr(position, "metrics", {})
+        if decision.action in (ExitAction.FULL_EXIT, ExitAction.PARTIAL_EXIT):
+            metrics["pis_exit_decision"] = decision.action.value
+            metrics["pis_exit_reason"] = ",".join(r.value for r in decision.reason_codes)
+        
+        if "adverse_velocity" in decision.metadata:
+            metrics["adverse_velocity"] = decision.metadata["adverse_velocity"]
+            metrics["adverse_momentum"] = decision.metadata["adverse_momentum"]
+            metrics["severe_adverse_override_triggered"] = decision.metadata["severe_adverse_override_triggered"]
 
         return order_req, decision
 

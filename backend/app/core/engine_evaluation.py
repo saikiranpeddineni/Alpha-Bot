@@ -80,11 +80,11 @@ class TradingEngineEvaluationMixin:
                 trough = self._position_troughs.get(symbol, position.avg_entry_price)
                 atr = float(df["atr14"].iloc[-1]) if "atr14" in df.columns else (close * 0.02)
                 if position.qty > 0 and close < peak - (3.0 * atr):
-                    applog.critical("engine.exit", f"Dumb Fallback triggered for {symbol}: -3.0 ATR trailing stop breached while PIS was offline.")
+                    applog.error("engine.exit", f"Dumb Fallback triggered for {symbol}: -3.0 ATR trailing stop breached while PIS was offline.")
                     await self._close_position_guarded(symbol, reason="CRITICAL: PIS Offline - Fallback Trailing Stop", qty=abs(position.qty))
                     return []
                 elif position.qty < 0 and close > trough + (3.0 * atr):
-                    applog.critical("engine.exit", f"Dumb Fallback triggered for {symbol}: +3.0 ATR trailing stop breached while PIS was offline.")
+                    applog.error("engine.exit", f"Dumb Fallback triggered for {symbol}: +3.0 ATR trailing stop breached while PIS was offline.")
                     await self._close_position_guarded(symbol, reason="CRITICAL: PIS Offline - Fallback Trailing Stop", qty=abs(position.qty))
                     return []
 

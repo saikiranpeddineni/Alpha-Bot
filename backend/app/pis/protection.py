@@ -94,7 +94,7 @@ class AdaptiveProtectionPlanner:
             # Intermediate Deterioration Protection
             # If a trade establishes early profitability but structurally deteriorates
             # before reaching formal runner activation (1.50R), protect accumulated value dynamically.
-            intermediate_peak_threshold = getattr(self.config, "intermediate_protection_min_r", 0.20)
+            intermediate_peak_threshold = getattr(self.config, "intermediate_protection_min_r", 0.25)
             
             if peak_r >= intermediate_peak_threshold:
                 # Assess structural/health deterioration
@@ -149,11 +149,11 @@ class AdaptiveProtectionPlanner:
                     giveback_pct = max(0.10, base * 0.70)  # Lock 90% of peak gain on exhaustion!
                 elif health.volatility_score <= 0.2 and peak_r > 1.5:
                     giveback_pct = min(base, 0.12)
-                # 2. Healthy Trend (Breathe)
-                elif health.overall >= 0.8:
-                    giveback_pct = min(0.35, max(base, 0.25))
-                # 3. Exhaustion Top / Rejection (Choke)
-                elif health.overall <= 0.4:
+                # 2. Healthy Trend or Pullback (Breathe)
+                elif health.overall >= 0.8 or getattr(health, "structure_classification", "") == "HEALTHY_PULLBACK":
+                    giveback_pct = min(0.45, max(base * 1.2, 0.30))
+                # 3. Exhaustion Top / Rejection / Breakdown (Choke)
+                elif health.overall <= 0.4 or getattr(health, "structure_classification", "") == "STRUCTURAL_BREAKDOWN":
                     giveback_pct = min(base, 0.15)
                 # 4. Smooth Interpolation with Volume-Weighted Elasticity
                 else:
@@ -174,7 +174,9 @@ class AdaptiveProtectionPlanner:
             dynamic_min_breathing = self.config.min_breathing_room_r
             dynamic_atr_buffer = atr_r_buffer
 
-            if health.overall < 0.50 or (peak_r >= 1.50 and health.overall < 0.65):
+            if getattr(health, "structure_classification", "") == "HEALTHY_PULLBACK":
+                pass # Maintain wide buffers
+            elif health.overall < 0.50 or (peak_r >= 1.50 and health.overall < 0.65) or getattr(health, "structure_classification", "") == "STRUCTURAL_BREAKDOWN":
                 # Scale down the mandatory buffers so we can choke
                 health_factor = max(0.2, health.overall)
                 dynamic_min_breathing *= health_factor

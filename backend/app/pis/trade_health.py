@@ -39,10 +39,10 @@ class TradeHealthEvaluator:
         # ---- CONTEXTUAL PERSISTENCE & STRUCTURAL DETERIORATION ----
         persistence_penalty = 1.0
         is_structurally_adverse = False
+        adverse_score = 0.0
         
         if history and len(history) >= 2:
             recent = tuple(history)[-4:]
-            adverse_score = 0.0
             
             for i in range(1, len(recent)):
                 prev = recent[i-1]
@@ -134,7 +134,11 @@ class TradeHealthEvaluator:
             + volume_score * 0.15
             + volatility_score * 0.15
         )
-        overall = max(0.0, min(1.0, overall + sentiment_boost))
+        structure_classification = "NORMAL"
+        if is_structurally_adverse:
+            structure_classification = "STRUCTURAL_BREAKDOWN"
+        elif adverse_score > 0:
+            structure_classification = "HEALTHY_PULLBACK"
 
         return TradeHealth(
             overall=overall,
@@ -143,4 +147,5 @@ class TradeHealthEvaluator:
             volatility_score=volatility_score,
             volume_score=volume_score,
             news_sentiment=obs.news_sentiment_score,
+            structure_classification=structure_classification,
         )

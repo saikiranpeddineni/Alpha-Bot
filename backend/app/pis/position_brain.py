@@ -47,7 +47,7 @@ class PositionBrain:
         symbol: str,
         initial_observation: PositionObservation,
         config: Optional[PISConfig] = None,
-        restored_memory: Optional[Any] = None,
+        restored_state: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Initialize PositionBrain for a symbol with initial observation.
 
@@ -55,7 +55,7 @@ class PositionBrain:
             symbol: Standardized symbol string.
             initial_observation: PositionObservation snapshot.
             config: Optional PISConfig instance.
-            restored_memory: Optional restored ProfitMemoryState.
+            restored_state: Optional restored full state from db.
         """
         self._lock = threading.RLock()
         self.config = config or PISConfig()
@@ -77,25 +77,27 @@ class PositionBrain:
             self._history: deque[PositionObservation] = deque(maxlen=self.config.history_max_len)
             self._history.append(initial_observation)
 
-            # Profit memory state (Priority 2, Priority 7)
-            if restored_memory is not None:
-                self._profit_memory = restored_memory
-                # We need to make sure the state is updated with the initial observation to keep it fresh
-                self._profit_memory = ProfitMemoryTracker.update(self._profit_memory, initial_observation)
+            # Initialize default state counters/flags
+            self._stagnation_counter: int = 0
+            self._degradation_counter: int = 0
+            self._runner_qualified: bool = False
+            self._has_scaled_out: bool = False
+            self._smoothed_health_score: Optional[float] = None
+            self._history_len: int = 1
+
+            # Hydrate state if provided
+            if restored_state is not None:
+                self.hydrate_state(restored_state, initial_observation)
             else:
                 self._profit_memory = ProfitMemoryTracker.initial_state(initial_observation)
 
             self._last_observation: PositionObservation = initial_observation
             self._last_timestamp: datetime = initial_observation.timestamp
             self._last_observed_qty: float = abs(float(initial_observation.qty))
-            self._current_stop_floor: float = initial_observation.initial_stop
+            if restored_state is None:
+                self._current_stop_floor: float = initial_observation.initial_stop
             self._last_decision: Optional[PISDecision] = None
             self._is_closed: bool = False
-            self._stagnation_counter: int = 0
-            self._degradation_counter: int = 0
-            self._runner_qualified: bool = False
-            self._has_scaled_out: bool = False
-            self._smoothed_health_score: Optional[float] = None
 
             # Initial evaluation
             self._evaluate_internal(initial_observation)
@@ -111,6 +113,79 @@ class PositionBrain:
         """Check if position has executed first-stage scale-out."""
         with self._lock:
             return self._has_scaled_out
+
+    def serialize_state(self) -> Dict[str, Any]:
+        """Serialize the current internal state for cross-session hydration."""
+        with self._lock:
+            lifecycle_str = self.state_machine.current_state.value
+            return {
+                "history_len": self._history_len,
+                "smoothed_health_score": self._smoothed_health_score,
+                "degradation_counter": self._degradation_counter,
+                "stagnation_counter": self._stagnation_counter,
+                "lifecycle": lifecycle_str,
+                "runner_qualified": self._runner_qualified,
+                "has_scaled_out": self._has_scaled_out,
+                "current_stop_floor": self._current_stop_floor,
+                "profit_memory": {
+                    "peak_r": self._profit_memory.peak_r,
+                    "trough_r": self._profit_memory.trough_r,
+                    "mfe_price": getattr(self._profit_memory, "mfe_price", 0.0),
+                    "mae_price": getattr(self._profit_memory, "mae_price", 0.0),
+                }
+            }
+
+    def hydrate_state(self, payload: Dict[str, Any], initial_observation: PositionObservation) -> None:
+        """Hydrate internal state from a serialized payload."""
+        from app.pis.profit_memory import ProfitMemoryState
+        pm_dict = payload.get("profit_memory", {})
+        self._profit_memory = ProfitMemoryState(
+            peak_r=pm_dict.get("peak_r", 0.0),
+            trough_r=pm_dict.get("trough_r", 0.0),
+            mfe_price=pm_dict.get("mfe_price", initial_observation.current_price),
+            mae_price=pm_dict.get("mae_price", initial_observation.current_price),
+        )
+        self._profit_memory = ProfitMemoryTracker.update(self._profit_memory, initial_observation)
+        
+        self._history_len = payload.get("history_len", 1)
+        self._smoothed_health_score = payload.get("smoothed_health_score")
+        self._degradation_counter = payload.get("degradation_counter", 0)
+        self._stagnation_counter = payload.get("stagnation_counter", 0)
+        self._runner_qualified = payload.get("runner_qualified", False)
+        self._has_scaled_out = payload.get("has_scaled_out", False)
+        self._current_stop_floor = payload.get("current_stop_floor", initial_observation.initial_stop)
+        
+        lifecycle_str = payload.get("lifecycle")
+        if lifecycle_str:
+            try:
+                self.state_machine = PositionLifecycleStateMachine(LifecycleState(lifecycle_str))
+            except ValueError:
+                self.state_machine = PositionLifecycleStateMachine(LifecycleState.NEW)
+        
+        # If history_len > 1, push a dummy observation to satisfy len(history) >= 2 in downstream components.
+        # This prevents the system amnesia bug where older positions are treated as new.
+        if self._history_len > 1:
+            dummy_obs = PositionObservation(
+                timestamp=initial_observation.timestamp,
+                symbol=initial_observation.symbol,
+                side=initial_observation.side,
+                qty=initial_observation.qty,
+                entry_price=initial_observation.entry_price,
+                current_price=initial_observation.current_price,
+                high=initial_observation.high,
+                low=initial_observation.low,
+                close=initial_observation.close,
+                volume=initial_observation.volume,
+                atr=initial_observation.atr,
+                initial_stop=initial_observation.initial_stop,
+                risk_per_share=initial_observation.risk_per_share,
+                current_stop=initial_observation.current_stop,
+                take_profit=initial_observation.take_profit,
+                r_multiple=initial_observation.r_multiple,
+                news_sentiment_score=initial_observation.news_sentiment_score,
+            )
+            self._history.append(dummy_obs)
+
 
 
     @property
@@ -151,9 +226,9 @@ class PositionBrain:
 
     @property
     def history_length(self) -> int:
-        """Get current history item count."""
+        """Get current history item count, including logical history length from previous sessions."""
         with self._lock:
-            return len(self._history)
+            return max(len(self._history), self._history_len)
 
     def observe(self, obs: PositionObservation) -> PISDecision:
         """Process a new point-in-time observation. Thread-safe evaluation (Priority 1).
@@ -206,6 +281,7 @@ class PositionBrain:
 
             # 5. Append to history deque (Priority 2 - Bounded memory growth)
             self._history.append(obs)
+            self._history_len += 1
             self._last_observation = obs
             self._last_timestamp = obs.timestamp
             self._last_observed_qty = observed_qty
@@ -241,7 +317,7 @@ class PositionBrain:
 
         # 3. Thesis drift evaluation with Asymmetric Early Invalidation (Quadrant 2)
         thesis = self.authority.thesis_evaluator.evaluate(
-            obs, trough_r, self._stagnation_counter, peak_r, history_len=len(self._history)
+            obs, trough_r, self._stagnation_counter, peak_r, history_len=self.history_length
         )
 
         # 4. Runner intelligence & Regime-Aware Max R capacity prediction (Quadrant 3)
@@ -333,6 +409,9 @@ class PositionBrain:
                 "market_regime": regime.value,
                 "regime_summary": regime_summary,
                 "brainstorm_narrative": narrative,
+                "adverse_velocity": decision.thesis.adverse_velocity,
+                "adverse_momentum": decision.thesis.adverse_momentum,
+                "severe_adverse_override_triggered": decision.thesis.severe_adverse_override_triggered,
             },
         )
 

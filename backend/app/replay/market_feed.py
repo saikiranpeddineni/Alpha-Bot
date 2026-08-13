@@ -92,6 +92,7 @@ class ReplayMarketFeed:
         if not missing_symbols:
             return
 
+        print(f"Downloading missing historical data for {len(missing_symbols)} symbols: {missing_symbols}")
         applog.info("replay.feed", f"Downloading missing historical data for {len(missing_symbols)} symbols: {start_date} to {end_date}")
         
         if settings is None:

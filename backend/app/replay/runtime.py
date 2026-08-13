@@ -83,9 +83,12 @@ class ReplayRuntime:
         self.session_manager.update_session(self.replay_id, status="RUNNING", progress_pct=2.0)
         
         # Flush initial skeleton ledger so the UI doesn't return 404 while downloading bars
+        print("Saving initial ledger skeleton...")
         self.session_manager.save_artifact(self.replay_id, "ledger", {"timeline": [], "production_ticks": 0, "candidates": []})
+        print("Saving initial timeline skeleton...")
         self.session_manager.save_artifact(self.replay_id, "timeline", [])
 
+        print("Creating run snapshot temp directory...")
         run_snapshot = Path(tempfile.mkdtemp(prefix="alpha_replay_run_snapshot_"))
         try:
             if symbols is not None:
@@ -118,10 +121,14 @@ class ReplayRuntime:
             start_dt = datetime.strptime(start_date, "%Y-%m-%d")
             general_context_start = (start_dt - timedelta(days=_GENERAL_CONTEXT_DAYS)).strftime("%Y-%m-%d")
             risk_context_start = (start_dt - timedelta(days=_RISK_CONTEXT_DAYS)).strftime("%Y-%m-%d")
+            print("Ensuring general context data...")
             await self.feed.ensure_data(general_context_start, end_date, target_symbols, settings=self.settings)
+            print("Ensuring risk context data...")
             await self.feed.ensure_data(risk_context_start, end_date, ["SPY", "QQQ"], settings=self.settings)
 
+            print("Loading bars into memory...")
             bars = self.feed.load_bars(start_date, end_date, target_symbols)
+            print(f"Loaded {len(bars)} raw bars")
             filtered_bars = []
             by_sym = defaultdict(list)
             for b in bars:
