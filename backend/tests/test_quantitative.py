@@ -252,6 +252,7 @@ class TestPipelineTradeScore:
         """EXIT signals must never be blocked by the Trade Score gate."""
         from unittest.mock import MagicMock
         from app.core.domain import Regime, Signal, SignalAction
+        from app.config import RiskConfig, Settings
         from app.strategies.pipeline import SignalPipeline
 
         model = MagicMock()
@@ -268,6 +269,7 @@ class TestPipelineTradeScore:
     def test_low_ml_signal_rejected(self):
         from unittest.mock import MagicMock
         from app.core.domain import Regime, Signal, SignalAction
+        from app.config import RiskConfig, Settings
         from app.strategies.pipeline import SignalPipeline
 
         model = MagicMock()

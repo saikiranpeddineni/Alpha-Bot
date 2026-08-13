@@ -11,6 +11,7 @@ def _sig(side: str, **overrides):
     values = {
         "symbol": "SMCI",
         "action": SignalAction.ENTER_LONG if side == "long" else SignalAction.ENTER_SHORT,
+        "side": side,
         "confidence": 0.8,
         "strategy": "momentum",
         "reason": "regression",

@@ -249,10 +249,6 @@ class ReplayDataManager:
             return "VIX"
         return symbol
 
-    def _visible(self, symbol: str) -> list[dict[str, Any]]:
-        # O(N) allocation of list, used primarily by internal functions
-        return [row for row in self._bars.get(self._symbol(symbol), []) if row["ts_dt"] <= self._now]
-
     def frame(self, symbol: str, timeframe: str = "1Min", limit: int | None = None) -> pd.DataFrame:
         """Return the production-compatible rolling frame as of the replay clock."""
         canonical = self._symbol(symbol)
@@ -342,8 +338,14 @@ class ReplayDataManager:
         return Quote(symbol=symbol, price=price)
 
     async def history(self, symbol: str, timeframe: str, start: datetime, end: datetime, prefer_cache: bool = True, cache_policy: str | None = None) -> pd.DataFrame:
-        rows = [row for row in self._visible(symbol) if start <= row["ts_dt"] <= min(end, self._now)]
-        frame = _bar_frame(rows)
+        canonical = self._symbol(symbol)
+        full_df = self._dfs.get(canonical)
+        if full_df is None or full_df.empty:
+            return empty_bars()
+            
+        end_bound = min(end, self._now)
+        frame = full_df.loc[start:pd.Timestamp(end_bound)]
+        
         if timeframe.lower() not in {"1min", "1m", "1minute"}:
             frame = resample_bars(frame, timeframe)
         return frame.tail(self.max_rows)
