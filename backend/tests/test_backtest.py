@@ -87,7 +87,7 @@ async def test_backtest_ml_gate_off_trades_at_least_as_much(data, model, risk_co
     kwargs = dict(
         symbols=["SPY"],
         start=datetime(2026, 1, 5, tzinfo=UTC),
-        end=datetime(2026, 1, 7, 23, 59, tzinfo=UTC),
+        end=datetime(2026, 1, 5, 23, 59, tzinfo=UTC),
         risk=risk_config,
     )
     from app.config import Settings
