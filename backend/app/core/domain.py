@@ -176,6 +176,32 @@ class Order(BaseModel):
     def remaining_qty(self) -> float:
         return max(0.0, float(self.qty) - float(self.filled_qty or 0.0))
 
+class ExecutionTelemetry(BaseModel):
+    """Structured telemetry for execution quality and early exit validation."""
+    entry_latency_ms: float | None = None
+    exit_latency_ms: float | None = None
+    
+    live_r_15s: float | None = None
+    live_r_30s: float | None = None
+    live_r_45s: float | None = None
+    live_r_60s: float | None = None
+    
+    mfe_1m: float | None = None
+    mfe_5m: float | None = None
+    mfe_15m: float | None = None
+    mae_1m: float | None = None
+    mae_5m: float | None = None
+    mae_15m: float | None = None
+    
+    time_to_adverse_threshold: float | None = None
+    adverse_velocity: bool = False
+    adverse_momentum: bool = False
+    severe_adverse_override: bool = False
+    
+    pis_exit_decision: str | None = None
+    pis_exit_reason: str | None = None
+
+
 class Position(BaseModel):
     symbol: str
     qty: float
@@ -185,6 +211,7 @@ class Position(BaseModel):
     take_profit: float | None = None
     strategy: str = "manual"
     opened_at: datetime | None = None
+    telemetry: ExecutionTelemetry = Field(default_factory=ExecutionTelemetry)
     @property
     def side(self) -> str:
         return "long" if self.qty >= 0 else "short"
@@ -221,12 +248,18 @@ class TradeRecord(BaseModel):
     candidate_id: str | None = None
     initial_stop: float | None = None
     initial_risk: float | None = None
+    
+    # Latency Timestamps
     signal_timestamp_utc: datetime | None = None
     decision_bar_timestamp_utc: datetime | None = None
     order_submitted_timestamp_utc: datetime | None = None
     entry_fill_timestamp_utc: datetime | None = None
     exit_signal_timestamp_utc: datetime | None = None
+    exit_order_submitted_timestamp_utc: datetime | None = None
     exit_fill_timestamp_utc: datetime | None = None
+    entry_latency_ms: float | None = None
+    exit_latency_ms: float | None = None
+
     mfe: float | None = None
     mae: float | None = None
     mfe_pct: float | None = None
@@ -234,6 +267,7 @@ class TradeRecord(BaseModel):
     capture_efficiency: float | None = None
     hold_bars: int = 0
     metadata: dict[str, Any] | None = None
+    telemetry: ExecutionTelemetry | None = None
 
 class AccountSnapshot(BaseModel):
     equity: float

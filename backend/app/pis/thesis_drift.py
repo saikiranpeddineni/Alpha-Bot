@@ -56,19 +56,40 @@ class ThesisDriftEvaluator:
         # Cuts trades that show sustained structural failure and heavy adverse excursion (<= -0.55R)
         # with zero upside traction within the initial entry window, preserving capital before full -1.0R stop.
         early_invalidation = False
+        severe_adverse_override_triggered = False
+        adverse_velocity = False
+        adverse_momentum = False
+        
         if getattr(self.config, "enable_early_invalidation", True):
             max_early_bars = getattr(self.config, "early_invalidation_max_bars", 5)
             r_threshold = getattr(self.config, "early_invalidation_r_threshold", -0.55)
+            
+            worst_r = min(obs.r_multiple, getattr(obs, "bar_mae_r", obs.r_multiple))
+            
             if (
                 history_len <= max_early_bars
-                and obs.r_multiple <= r_threshold
-                and peak_r <= 0.05
+                and worst_r <= r_threshold
+                and peak_r <= getattr(self.config, "early_invalidation_peak_r", 0.25)
             ):
                 # Check for volume/wick confirmation of aggressive rejection
                 bar_range = obs.high - obs.low
                 adverse_wick = (obs.high - obs.close) if obs.side > 0 else (obs.close - obs.low)
                 wick_ratio = adverse_wick / max(1e-6, bar_range)
-                if wick_ratio >= 0.60 or obs.r_multiple <= -0.65:
+                
+                has_wick = (wick_ratio >= getattr(self.config, "early_invalidation_wick_ratio", 0.50))
+                severe_adverse = (worst_r <= getattr(self.config, "early_invalidation_severe_r", -0.60))
+                
+                # Adverse velocity: large bar range showing fast movement
+                adverse_velocity = (abs(getattr(obs, "bar_high_r", 0.0) - getattr(obs, "bar_low_r", 0.0)) >= 0.30)
+                # Adverse momentum: closing near the worst excursion
+                adverse_momentum = (obs.r_multiple <= -0.50)
+                
+                lack_of_traction = (peak_r <= 0.10)
+                
+                if severe_adverse and (adverse_velocity or adverse_momentum) and lack_of_traction:
+                    severe_adverse_override_triggered = True
+                    
+                if has_wick or severe_adverse_override_triggered:
                     early_invalidation = True
 
         # Structural invalidation:
@@ -93,4 +114,7 @@ class ThesisDriftEvaluator:
             stagnation_bars=stagnation_bars,
             is_degraded=is_degraded,
             early_invalidation_detected=early_invalidation,
+            adverse_velocity=adverse_velocity,
+            adverse_momentum=adverse_momentum,
+            severe_adverse_override_triggered=severe_adverse_override_triggered,
         )

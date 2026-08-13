@@ -122,6 +122,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         self._position_peaks: dict[str, float] = {}
         self._position_troughs: dict[str, float] = {}
         self._position_initial_stops: dict[str, float | None] = {}
+        self._position_metrics: dict[str, dict] = {}
         self._position_current_stops: dict[str, float | None] = {}
         # Original strategy target survives broker protection repair/reconciliation.
         self._position_take_profits: dict[str, float] = {}
@@ -818,7 +819,25 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
             and not in_flatten_window
             and (self.clock.is_open(now) or self.mode == "demo")
         )
-        if is_active_session and new_closed:
+        
+        symbols_to_evaluate = list(new_closed.keys()) if new_closed else []
+        
+        # Fast adverse-move guard: force evaluation for positions bleeding mid-bar
+        if is_active_session:
+            for p in positions:
+                if p.symbol not in symbols_to_evaluate and p.symbol in self._position_initial_stops:
+                    stop = self._position_initial_stops[p.symbol]
+                    if stop and stop > 0:
+                        risk = abs(p.avg_entry_price - stop)
+                        if risk > 0:
+                            cur_px = float(getattr(p, "current_price", None) or getattr(p, "market_price", None) or p.avg_entry_price)
+                            side = 1.0 if p.qty > 0 else -1.0
+                            live_r = (cur_px - p.avg_entry_price) / risk * side
+                            if live_r <= -0.50:
+                                symbols_to_evaluate.append(p.symbol)
+                                applog.warning("engine.risk", f"Fast adverse-move guard triggered for {p.symbol} at {live_r:.2f}R")
+
+        if is_active_session and symbols_to_evaluate:
             pos_by_symbol = {p.symbol: p for p in positions}
             candidates = []
 
@@ -830,8 +849,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
             heartbeat_allows_entries = decision.allow_new_entries if decision is not None else True
             allow_entries = bool(heartbeat_allows_entries and self.allow_new_entries)
 
-            symbols_to_evaluate = list(new_closed.keys())
-            self._last_closed_bar_symbol_count = len(symbols_to_evaluate)
+            self._last_closed_bar_symbol_count = len(new_closed) if new_closed else 0
             if self.state != EngineState.RUNNING or not allow_entries:
                 symbols_to_evaluate = [sym for sym in symbols_to_evaluate if sym in pos_by_symbol]
 
@@ -1364,6 +1382,46 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         })
         self.publish("quotes", self.quotes_payload())
         self.publish("positions", [p.to_payload() for p in positions])
+
+        # Track execution metrics for the first 60 seconds
+        for p in positions:
+            symbol = p.symbol
+            lot = getattr(self.portfolio, "_lots", {}).get(symbol)
+            if lot and p.opened_at:
+                elapsed = (now - p.opened_at).total_seconds()
+                t = getattr(lot, "telemetry", None)
+                if not t: continue
+                
+                # We need initial_risk to calculate live_r. Fallback to 1% of entry if missing.
+                risk = lot.initial_risk_per_share if getattr(lot, "initial_risk_per_share", None) else p.avg_entry_price * 0.01
+                if risk <= 0: risk = p.avg_entry_price * 0.01
+                side = 1.0 if p.qty > 0 else -1.0
+                cur_r = (p.market_price - p.avg_entry_price) / risk * side
+
+                if elapsed >= 15 and t.live_r_15s is None:
+                    t.live_r_15s = cur_r
+                if elapsed >= 30 and t.live_r_30s is None:
+                    t.live_r_30s = cur_r
+                if elapsed >= 45 and t.live_r_45s is None:
+                    t.live_r_45s = cur_r
+                if elapsed >= 60 and t.live_r_60s is None:
+                    t.live_r_60s = cur_r
+
+                # Track MFE/MAE windows
+                if elapsed <= 60:
+                    t.mfe_1m = max(t.mfe_1m if t.mfe_1m is not None else cur_r, cur_r)
+                    t.mae_1m = min(t.mae_1m if t.mae_1m is not None else cur_r, cur_r)
+                if elapsed <= 300:
+                    t.mfe_5m = max(t.mfe_5m if t.mfe_5m is not None else cur_r, cur_r)
+                    t.mae_5m = min(t.mae_5m if t.mae_5m is not None else cur_r, cur_r)
+                if elapsed <= 900:
+                    t.mfe_15m = max(t.mfe_15m if t.mfe_15m is not None else cur_r, cur_r)
+                    t.mae_15m = min(t.mae_15m if t.mae_15m is not None else cur_r, cur_r)
+                    
+                # Track adverse velocity/momentum time-to-threshold
+                if cur_r <= -0.55 and t.time_to_adverse_threshold is None:
+                    t.time_to_adverse_threshold = elapsed
+
         if new_closed:
             self._subsystem_timestamps["last_bar"] = datetime.now(timezone.utc).isoformat()
         for symbol, bars in new_closed.items():

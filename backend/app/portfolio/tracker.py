@@ -14,7 +14,7 @@ from datetime import UTC, date, datetime
 from typing import Any, NamedTuple
 
 from app.brokers.base import Fill
-from app.core.domain import OrderSide, TradeRecord
+from app.core.domain import OrderSide, TradeRecord, ExecutionTelemetry
 from app.core.applog import applog
 
 
@@ -71,6 +71,7 @@ class _OpenLot:
     initial_risk_dollars: float = 0.0
     commission_basis: float = 0.0
     closing_qty: float = 0.0
+    telemetry: ExecutionTelemetry = field(default_factory=ExecutionTelemetry)
     closing_notional: float = 0.0
     realized_pnl_accum: float = 0.0
 
@@ -242,6 +243,7 @@ class PortfolioTracker:
                     "avg_price": lot.avg_price,
                     "entry_ts": lot.entry_ts.isoformat(),
                     "strategy": lot.strategy,
+                    "telemetry": lot.telemetry.model_dump(),
                     "stop_loss": lot.stop_loss,
                     "initial_stop_loss": lot.initial_stop_loss,
                     "initial_risk_per_share": lot.initial_risk_per_share,
@@ -310,6 +312,7 @@ class PortfolioTracker:
                 closing_qty=float(raw.get("closing_qty", 0.0)),
                 closing_notional=float(raw.get("closing_notional", 0.0)),
                 realized_pnl_accum=float(raw.get("realized_pnl_accum", 0.0)),
+                telemetry=ExecutionTelemetry(**raw.get("telemetry", {}))
             )
 
     def on_fill(self, fill: Fill, peak_price: float | None = None, trough_price: float | None = None,
@@ -423,7 +426,7 @@ class PortfolioTracker:
         mae_pct = (mae_val / lot.avg_price * 100.0) if lot.avg_price > 0 else 0.0
         mfe_r = (mfe_val / init_risk) if init_risk and init_risk > 0 else 0.0
         winner_cap = (r_multiple / mfe_r) if r_multiple is not None and mfe_r > 0 else 0.0
-        trade = TradeRecord(symbol=symbol, side="long" if original_direction > 0 else "short", qty=lot.closing_qty, entry_price=round(lot.avg_price, 4), exit_price=round(avg_exit, 4), entry_at=lot.entry_ts, exit_at=fill.ts, pnl=round(pnl, 2), pnl_pct=round(pnl / basis * 100.0, 3) if basis else 0.0, r_multiple=r_multiple, candidate_id=getattr(fill, "client_order_id", getattr(fill, "order_id", None)), initial_stop=round(lot.initial_stop_loss, 4) if lot.initial_stop_loss is not None else None, initial_risk=round(init_risk, 4) if init_risk is not None else None, strategy=lot.strategy, exit_reason=fill.reason or "exit", mfe=round(mfe_val, 4), mae=round(mae_val, 4), mfe_pct=round(mfe_pct, 4), mae_pct=round(mae_pct, 4), capture_efficiency=round(winner_cap, 4))
+        trade = TradeRecord(symbol=symbol, side="long" if original_direction > 0 else "short", qty=lot.closing_qty, entry_price=round(lot.avg_price, 4), exit_price=round(avg_exit, 4), entry_at=lot.entry_ts, exit_at=fill.ts, pnl=round(pnl, 2), pnl_pct=round(pnl / basis * 100.0, 3) if basis else 0.0, r_multiple=r_multiple, candidate_id=getattr(fill, "client_order_id", getattr(fill, "order_id", None)), initial_stop=round(lot.initial_stop_loss, 4) if lot.initial_stop_loss is not None else None, initial_risk=round(init_risk, 4) if init_risk is not None else None, strategy=lot.strategy, exit_reason=fill.reason or "exit", mfe=round(mfe_val, 4), mae=round(mae_val, 4), mfe_pct=round(mfe_pct, 4), mae_pct=round(mae_pct, 4), capture_efficiency=round(winner_cap, 4), telemetry=lot.telemetry)
         del self._lots[symbol]
         self.trades.append(trade)
         if trade.entry_at.date() == trade.exit_at.date():

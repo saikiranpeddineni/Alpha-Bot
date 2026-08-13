@@ -105,6 +105,10 @@ class PositionObservation:
     take_profit: Optional[float] = None
     r_multiple: float = 0.0
     news_sentiment_score: float = 0.0
+    bar_high_r: float = 0.0
+    bar_low_r: float = 0.0
+    bar_mae_r: float = 0.0
+    live_r: float = 0.0
 
     def __post_init__(self) -> None:
         """Validate observation invariants fast."""
@@ -154,6 +158,11 @@ class PositionObservation:
         if math.isnan(obs.r_multiple) or math.isinf(obs.r_multiple):
             raise ValueError(f"Observation r_multiple must be finite, got {obs.r_multiple}")
 
+        for metric_name in ("bar_high_r", "bar_low_r", "bar_mae_r", "live_r"):
+            metric_val = getattr(obs, metric_name)
+            if math.isnan(metric_val) or math.isinf(metric_val):
+                raise ValueError(f"Observation {metric_name} must be finite, got {metric_val}")
+
 
 @dataclass(frozen=True)
 class TradeHealth:
@@ -165,6 +174,7 @@ class TradeHealth:
     volatility_score: float
     volume_score: float
     news_sentiment: float = 0.0
+    structure_classification: str = "NORMAL"
 
 
 @dataclass(frozen=True)
@@ -176,6 +186,9 @@ class ThesisDrift:
     stagnation_bars: int
     is_degraded: bool
     early_invalidation_detected: bool = False
+    adverse_velocity: bool = False
+    adverse_momentum: bool = False
+    severe_adverse_override_triggered: bool = False
 
 
 @dataclass(frozen=True)
@@ -261,6 +274,10 @@ class PISConfig:
     enable_early_invalidation: bool = True
     early_invalidation_max_bars: int = 5
     early_invalidation_r_threshold: float = -0.55
+    early_invalidation_peak_r: float = 0.25
+    early_invalidation_wick_ratio: float = 0.50
+    early_invalidation_severe_r: float = -0.60
+    intermediate_protection_min_r: float = 0.25
     enable_trade_reasoning_narrative: bool = True
 
     def validate(self) -> None:
