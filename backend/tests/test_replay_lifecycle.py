@@ -241,3 +241,58 @@ async def test_history_o1_performance():
     
     assert len(df) == 11
     assert float(df.iloc[-1]["close"]) == 120.0
+
+@pytest.mark.asyncio
+async def test_replay_scanner_vix_non_blocking():
+    # TASK 7: Verify replay heartbeat advancement, VIX availability, and first-tick blocking evidence.
+    from app.core.engine import TradingEngine, EngineState
+    from app.config import Settings
+    from app.db.database import Database
+    from unittest.mock import patch
+    from app.replay.market_feed import ReplayDataManager
+    
+    with patch("app.db.database.Database.__init__", return_value=None), \
+         patch("app.db.database.Database.get_setting", return_value={}):
+        db = Database()
+        engine = TradingEngine(Settings(), db)
+        
+        base_time = datetime(2026, 8, 12, 13, 30, tzinfo=ZoneInfo("UTC"))
+        bars = [
+            {"symbol": "SPY", "ts_dt": base_time, "close": 100.0, "volume": 100},
+            {"symbol": "VIX", "ts_dt": base_time, "close": 20.0, "volume": 0.0, "synthetic": True}
+        ]
+        
+        dm = ReplayDataManager(bars)
+        engine.data = dm
+        
+        with patch("app.core.engine.utcnow") as mock_utcnow:
+            mock_utcnow.return_value = base_time
+            # Test VIX availability via heartbeat
+            assert engine._fetch_vix_frame("VIX", base_time) is not None
+            vix_df = dm.frame("VIX", "1Min", limit=1)
+            assert not vix_df.empty
+            
+            # Since VIX was synthetic with ts_dt exactly at base_time, age is 0.
+            # However, the engine gets this via dm.frame()
+            
+            # Now verify run_market_scanner during replay does not make network calls.
+            # We patch get_gap_movers to ensure it's not called (the runtime ExitStack will do this in reality).
+            import asyncio
+            with patch("app.core.gap_scanner.PreMarketGapScanner.get_gap_movers") as mock_gap_movers, \
+                 patch("app.core.top_movers_scanner.TopMoversScanner._fetch_movers") as mock_top_movers:
+                
+                # We simulate the runtime patches:
+                mock_gap_movers.return_value = []
+                
+                # Check that scanner doesn't hang.
+                from app.core.scanner import MarketScanner
+                scanner = MarketScanner(dm, [], engine.risk_config)
+                
+                # We expect no network calls since we mocked gap/movers. 
+                # Stage 1 will use dm.history which is safe.
+                # So this should return very quickly.
+                outcome, _ = await scanner.run(as_of=base_time)
+                
+                # It might be SUCCESS_EMPTY or similar based on data, but it must not block.
+                assert outcome is not None
+

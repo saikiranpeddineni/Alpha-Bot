@@ -113,12 +113,51 @@ class ReplayMarketFeed:
                 
                 if symbol in ("VIX", "^VIX"):
                     from app.data.yahoo import YahooProvider
+                    from zoneinfo import ZoneInfo as _ZoneInfo
                     vix_provider = YahooProvider()
-                    # Yahoo requires ^VIX
+                    # Yahoo does NOT provide intraday minute bars for ^VIX historically.
+                    # Try 1Min first; if empty (as expected), fall back to 1Day and
+                    # synthesize a market-open row per session so the engine heartbeat
+                    # receives a non-empty VIX frame with age=0 relative to replay clock.
                     fetch_sym = "^VIX" if symbol == "VIX" else symbol
                     df = await vix_provider.get_bars(fetch_sym, "1Min", start=start_dt, end=end_dt)
+                    if df.empty:
+                        applog.info("replay.feed", f"^VIX 1Min unavailable — falling back to daily bars and synthesizing session rows")
+                        df_daily = await vix_provider.get_bars(fetch_sym, "1Day", start=start_dt, end=end_dt)
+                        if not df_daily.empty:
+                            # Synthesize one bar per calendar day aligned to 09:30 ET (=13:30 UTC)
+                            # and one bar per market-hour minute so carry-forward works at any tick.
+                            ET = _ZoneInfo("America/New_York")
+                            rows_written = 0
+                            for day_ts, row in df_daily.iterrows():
+                                # Align to ET market open on that calendar day
+                                day_dt = day_ts.to_pydatetime() if hasattr(day_ts, "to_pydatetime") else day_ts
+                                day_date = day_dt.date()
+                                session_open_et = datetime(day_date.year, day_date.month, day_date.day, 9, 30, 0, tzinfo=ET)
+                                session_open_utc = session_open_et.astimezone(timezone.utc)
+                                # Write one bar per minute from 09:30 to 16:00 ET using the daily close as the value.
+                                # This ensures the carry-forward index in frame() always has a recent bar.
+                                vix_close = float(row.get("close", row.get("c", 0.0)))
+                                for minute_offset in range(0, 6 * 60 + 31):  # 09:30..16:00 inclusive
+                                    bar_ts = session_open_utc + timedelta(minutes=minute_offset)
+                                    handle.write(json.dumps({
+                                        "symbol": symbol,
+                                        "ts": bar_ts.isoformat(),
+                                        "open": vix_close,
+                                        "high": vix_close,
+                                        "low": vix_close,
+                                        "close": vix_close,
+                                        "volume": 0.0,
+                                        "kind": "bar",
+                                        "synthetic": True,
+                                    }) + "\n")
+                                    rows_written += 1
+                            applog.info("replay.feed", f"Synthesized {rows_written} VIX session bars from {len(df_daily)} daily bars")
+                            continue
+                        else:
+                            applog.warning("replay.feed", f"VIX daily bars also empty — VIX feed will be unavailable for replay")
+                            continue
                     if not df.empty and fetch_sym != symbol:
-                        # Ensure the DataFrame has the correct symbol name for Replay
                         df["symbol"] = symbol
                 else:
                     df = await provider.get_bars(symbol, "1Min", start=start_dt, end=end_dt)

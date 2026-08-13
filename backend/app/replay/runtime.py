@@ -8,6 +8,8 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time as _wall_time
+import traceback
 import uuid
 from collections import defaultdict
 from contextlib import ExitStack
@@ -296,6 +298,20 @@ class ReplayRuntime:
             deterministic_uuid = DeterministicUUIDProxy(
                 f"{self.replay_id.split(':',1)[0]}|{replay_bars[0]['ts_dt'].isoformat()}|{replay_bars[-1]['ts_dt'].isoformat()}"
             )
+            # --- REPLAY DIAGNOSTIC INSTRUMENTATION ---
+            # Task 1: Track the last active stage for watchdog/stall diagnosis.
+            _diag_stage = "pre_loop"
+            _diag_first_tick_done = False
+            _diag_tick_wall_start: float | None = None
+
+            # Task 2: Disable gap/movers scanners during replay — these are live-only
+            # utilities that hit Alpaca's screener/snapshot endpoints and have no
+            # historical replay equivalent.  Disabling them here does NOT affect any
+            # production code path; it only applies inside this ExitStack scope.
+            async def _replay_noop_gap_movers() -> list[str]:
+                applog.info("replay.runtime", f"[diag] replay_id={self.replay_id} stage=gap_movers_skipped (replay-only noop)")
+                return []
+
             with ExitStack() as stack:
                 stack.enter_context(patch("app.core.engine.datetime", ContextAwareDateTime))
                 stack.enter_context(patch("app.core.scanner.datetime", ContextAwareDateTime))
@@ -304,13 +320,49 @@ class ReplayRuntime:
                 stack.enter_context(patch("app.core.domain.uuid", deterministic_uuid))
                 stack.enter_context(patch("app.strategies.refresh_contextual_memory", lambda _db: None))
                 stack.enter_context(patch("app.strategies.memory.refresh_contextual_memory", lambda _db: None))
+                # Task 2: Suppress live-market discovery sources that make network calls.
+                # PreMarketGapScanner.get_gap_movers() hits Alpaca snapshot / screener APIs.
+                # TopMoversScanner._fetch_movers() hits Alpaca screener or downloads bars.
+                # Neither makes sense during a historical replay — the replay data set is
+                # bounded and known; injecting live movers would be lookahead contamination.
+                stack.enter_context(patch(
+                    "app.core.gap_scanner.PreMarketGapScanner.get_gap_movers",
+                    lambda self_: _replay_noop_gap_movers()
+                ))
+                from app.core.top_movers_scanner import TopMoversResult
+                async def _replay_noop_top_movers(_self) -> TopMoversResult:
+                    applog.info("replay.runtime", f"[diag] replay_id={self.replay_id} stage=top_movers_skipped (replay-only noop)")
+                    return TopMoversResult(source="replay_noop")
+                stack.enter_context(patch(
+                    "app.core.top_movers_scanner.TopMoversScanner._fetch_movers",
+                    _replay_noop_top_movers
+                ))
+
                 for idx, ts in enumerate(sorted(by_ts)):
                     if self.session_manager.is_cancelled(self.replay_id):
                         raise RuntimeError("Replay cancelled")
+
+                    # Task 1: stage boundary logging (every tick during first 10 in-window ticks;
+                    # then every 50 ticks so logs stay usable at scale).
+                    _is_replay_tick = any(b.get("in_replay_window", True) for b in by_ts[ts])
+                    _verbose_diag = (ledger.production_ticks < 10) or (idx % 50 == 0)
+
+                    if _verbose_diag:
+                        applog.info("replay.runtime", (
+                            f"[diag] replay_id={self.replay_id} pass={pass_name} "
+                            f"tick={idx} sim_ts={ts.isoformat()} "
+                            f"wall={datetime.now(timezone.utc).isoformat()} "
+                            f"is_replay_window={_is_replay_tick} "
+                            f"production_ticks={ledger.production_ticks}"
+                        ))
+
+                    _diag_stage = "clock_set"
                     clock.set_time(ts)
                     data.set_time(ts)
                     ts_bars = by_ts[ts]
                     is_replay_window = any(b.get("in_replay_window", True) for b in ts_bars)
+
+                    _diag_stage = "broker_ohlc"
                     for bar in sorted(ts_bars, key=lambda b: b["symbol"]):
                         close = float(bar.get("close", bar.get("c")))
                         vol = float(bar.get("volume", bar.get("v", 0.0)))
@@ -323,15 +375,48 @@ class ReplayRuntime:
                     desired_state = EngineState.RUNNING if is_replay_window else EngineState.SAFE_MODE
                     engine.state = desired_state
                     engine.allow_new_entries = is_replay_window
+
+                    # Task 3: Watchdog for first-tick stall.
+                    _diag_stage = "engine_tick"
+                    if is_replay_window and not _diag_first_tick_done:
+                        applog.info("replay.runtime", (
+                            f"[diag] replay_id={self.replay_id} FIRST_PRODUCTION_TICK_START "
+                            f"sim_ts={ts.isoformat()} wall={datetime.now(timezone.utc).isoformat()}"
+                        ))
+                        _diag_tick_wall_start = _wall_time.monotonic()
+
                     await engine._tick()
+
+                    if is_replay_window and not _diag_first_tick_done:
+                        _diag_first_tick_done = True
+                        elapsed = _wall_time.monotonic() - (_diag_tick_wall_start or 0)
+                        applog.info("replay.runtime", (
+                            f"[diag] replay_id={self.replay_id} FIRST_PRODUCTION_TICK_DONE "
+                            f"elapsed_wall={elapsed:.2f}s sim_ts={ts.isoformat()}"
+                        ))
+                        if elapsed > 10.0:
+                            applog.warning("replay.runtime", (
+                                f"[diag] replay_id={self.replay_id} FIRST_TICK_SLOW "
+                                f"elapsed={elapsed:.2f}s — possible stall detected. "
+                                f"Last active stage: {_diag_stage}"
+                            ))
+
+                    _diag_stage = "await_aux_tasks"
                     await self._await_replay_aux_tasks(engine)
+
+                    _diag_stage = "post_tick"
                     if engine.state == EngineState.HALTED:
                         raise RuntimeError(f"Replay engine halted at {ts.isoformat()}: {getattr(engine.risk, 'hard_halt_reason', '')}")
                     if is_replay_window:
                         ledger.production_ticks += 1
                         acct, positions = await broker.account(), await broker.positions()
                         ledger.record_equity(ts, acct.equity, acct.cash, acct.buying_power, len(positions))
-                    if idx % 100 == 0:
+
+                    # Task 4: Heartbeat granularity — every 10 ticks in the first 200,
+                    # then every 100 ticks.  This ensures the first production tick is
+                    # always visible in the session record without the 100-tick blind spot.
+                    _heartbeat_interval = 10 if idx < 200 else 100
+                    if idx % _heartbeat_interval == 0:
                         pct = min(49.0, 5.0 + 44.0 * idx / max(1, len(by_ts))) if pass_name == "A" else min(100.0, 50.0 + 50.0 * idx / max(1, len(by_ts)))
                         self.session_manager.update_session(self.replay_id, progress_pct=pct)
                         self.session_manager.update_heartbeat(self.replay_id)
