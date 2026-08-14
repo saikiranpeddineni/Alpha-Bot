@@ -38,7 +38,6 @@ class DurableTradingEngine(TradingEngine):
             cumulative_qty = float(getattr(fill, "cumulative_qty", 0.0) or 0.0)
             filled_qty = cumulative_qty if cumulative_qty > 0 else float(fill.qty)
             
-            from app.core.domain import OrderRole
             role_val = getattr(fill, "role", "ENTRY")
             if isinstance(role_val, OrderRole):
                 role_val = role_val.value
