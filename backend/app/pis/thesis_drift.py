@@ -6,7 +6,7 @@ Measures thesis degradation, adverse excursion, and trade stagnation.
 from __future__ import annotations
 
 import math
-from typing import Optional
+from typing import Optional, Any
 
 from app.pis.models import PISConfig, PositionObservation, ThesisDrift
 
@@ -24,6 +24,7 @@ class ThesisDriftEvaluator:
         stagnation_bars: int,
         peak_r: float = 0.0,
         history_len: int = 1,
+        history: Any = None,
     ) -> ThesisDrift:
         """Evaluate thesis drift for a position observation.
 
@@ -110,10 +111,11 @@ class ThesisDriftEvaluator:
                 )
                 
                 adverse_close = False
-                if history_len >= 2:
+                if history is not None and history_len >= 2:
                     recent = history[-2:]
                     prev_obs = recent[0]
                     curr_obs = recent[1]
+                    side = obs.side
                     if side > 0:
                         adverse_close = (curr_obs.close < prev_obs.close and curr_obs.low <= prev_obs.low)
                     else:

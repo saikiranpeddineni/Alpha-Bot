@@ -369,9 +369,10 @@ class MomentumCross(Strategy):
                 )
                 return None
                 
-            # Dynamic Stop Tightening: 1.0 * ATR if explosive volume and expanding MACD
-            dynamic_mult = 1.0 if (vol_z > 2.0 and hist_now > hist_prev) else p["atr_stop_mult"]
+            # Strictly use configured ATR multiplier without dynamic tight stop (P0 #6)
+            dynamic_mult = p["atr_stop_mult"]
             stop = close - dynamic_mult * atr
+
 
             mover_tag = f" [top_gainer +{ctx.mover_change_pct:.1f}%]" if bias == "gainer" else ""
             
@@ -452,9 +453,10 @@ class MomentumCross(Strategy):
                 )
                 return None
                 
-            # Dynamic Stop Tightening: 1.0 * ATR if explosive volume and expanding MACD
-            dynamic_mult = 1.0 if (vol_z > 2.0 and hist_now < hist_prev) else p["atr_stop_mult"]
+            # Strictly use configured ATR multiplier without dynamic tight stop (P0 #6)
+            dynamic_mult = p["atr_stop_mult"]
             stop = close + dynamic_mult * atr
+
 
             mover_tag = f" [top_loser {ctx.mover_change_pct:.1f}%]" if bias == "loser" else ""
             

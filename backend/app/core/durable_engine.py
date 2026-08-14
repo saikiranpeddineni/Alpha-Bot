@@ -37,6 +37,14 @@ class DurableTradingEngine(TradingEngine):
             # Preserve the observed execution rather than silently losing it.
             cumulative_qty = float(getattr(fill, "cumulative_qty", 0.0) or 0.0)
             filled_qty = cumulative_qty if cumulative_qty > 0 else float(fill.qty)
+            
+            from app.core.domain import OrderRole
+            role_val = getattr(fill, "role", "ENTRY")
+            if isinstance(role_val, OrderRole):
+                role_val = role_val.value
+            valid_roles = [r.value for r in OrderRole]
+            order_role = OrderRole(role_val) if role_val in valid_roles else (OrderRole.EXIT if role_val == "EXIT" else OrderRole.ENTRY)
+            
             order = Order(
                 id=str(fill.order_id),
                 client_order_id=str(fill.order_id),
@@ -51,7 +59,8 @@ class DurableTradingEngine(TradingEngine):
                 reason=getattr(fill, "reason", "broker fill") or "broker fill",
                 submitted_at=fill.ts,
                 filled_at=fill.ts,
-                leg="exit",
+                leg=order_role.value.lower(),
+                role=order_role,
             )
             self.recent_orders.appendleft(order)
         else:

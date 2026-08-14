@@ -36,7 +36,7 @@ class Fill:
     commission: float = 0.0
     strategy: str = "manual"
     reason: str = ""
-    ts: datetime = field(default_factory=lambda: datetime.now(UTC))
+    ts: datetime | None = None
     signal_timestamp_utc: datetime | None = None
     decision_bar_timestamp_utc: datetime | None = None
     broker_fill_key: str | None = None

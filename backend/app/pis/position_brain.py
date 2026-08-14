@@ -348,7 +348,7 @@ class PositionBrain:
 
         # 3. Thesis drift evaluation with Asymmetric Early Invalidation (Quadrant 2)
         thesis = self.authority.thesis_evaluator.evaluate(
-            obs, trough_r, self._stagnation_counter, peak_r, history_len=self.history_length
+            obs, trough_r, self._stagnation_counter, peak_r, history_len=self.history_length, history=self._history
         )
 
         # 4. Runner intelligence & Regime-Aware Max R capacity prediction (Quadrant 3)

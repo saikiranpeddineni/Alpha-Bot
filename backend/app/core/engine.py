@@ -1074,10 +1074,12 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                                             thesis_fingerprint=sig.thesis_fingerprint or ""
                                         )
                                         
-                                    if getattr(self, "pipeline", None) and hasattr(self.pipeline, "strategies"):
-                                        strategy_instance = getattr(self.pipeline, "strategies", {}).get(sig.strategy)
-                                        if strategy_instance and hasattr(strategy_instance, "signal_accepted"):
-                                            strategy_instance.signal_accepted(sig)
+                                    if hasattr(self, "strategies"):
+                                        for strat in getattr(self, "strategies", []):
+                                            if strat.name == sig.strategy:
+                                                if hasattr(strat, "signal_accepted"):
+                                                    strat.signal_accepted(sig)
+                                                break
                                         
                                 await asyncio.to_thread(self.db.set_setting, "pending_reconciliation_orders", self.pending_reconciliation_orders)
                                 self.recent_orders.appendleft(order)
@@ -2132,7 +2134,10 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
             self._pending_close_ttls = {}
             
         if is_entry:
-            if sym_upper in self._pending_close_ttls and now < self._pending_close_ttls[sym_upper]:
+            if sym_upper in self._pending_close_ttls:
+                if now >= self._pending_close_ttls[sym_upper]:
+                    from app.core.applog import applog
+                    applog.error("engine", f"Close lock for {sym_upper} exceeded 30s TTL but is still pending flat confirmation!")
                 raise ValueError(f"Cannot manually open {sym_upper} while a close/cover is in-flight")
             if req.stop_loss is None:
                 raise ValueError(f"Cannot manually open {sym_upper}: missing required stop_loss parameter")
@@ -2161,7 +2166,10 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         if not hasattr(self, "_pending_close_ttls"):
             self._pending_close_ttls = {}
         
-        if sym_upper in self._pending_close_ttls and now < self._pending_close_ttls[sym_upper]:
+        if sym_upper in self._pending_close_ttls:
+            if now >= self._pending_close_ttls[sym_upper]:
+                from app.core.applog import applog
+                applog.error("engine", f"Close lock for {sym_upper} exceeded 30s TTL but is still pending flat confirmation!")
             raise ValueError(f"Cannot manually close {sym_upper} while a close is already in-flight")
             
         self._pending_close_ttls[sym_upper] = now + 30.0

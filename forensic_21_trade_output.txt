@@ -1,0 +1,40 @@
+﻿ # Symbol Side   Strategy                ML    Meta  MetaP    ClockPh     Regime       PnL       R Classification
+----------------------------------------------------------------------------------------------------------------------------------
+ 1 SKHY   short  orb                 0.8054  0.5507      Y    morning    CAUTION    136.90    0.76 1-CLEAN_META_PASS
+ 2 BE     short  momentum            0.8164  0.5347      N   open_0_5     NORMAL   1017.94    2.82 2-ADAPTIVE_OR_HARVEST (metaΓëÑ0.48) ΓåÆ WINNER
+ 3 META   short  momentum            0.7444  0.4530      N    morning    CAUTION    -96.56   -0.96 3-ONLY_HARVEST_POSSIBLE (0.45Γëñmeta<0.48) ΓåÆ LOSER
+ 4 COHR   long   momentum            0.8954  0.5568      Y    morning     NORMAL    423.09    1.59 1-CLEAN_META_PASS
+ 5 SNDK   short  momentum            0.8090  0.5183      N    morning    CAUTION   -200.43   -1.97 2-ADAPTIVE_OR_HARVEST (metaΓëÑ0.48) ΓåÆ LOSER
+ 6 BABA   long   momentum            0.7796  0.5570      Y    morning    CAUTION    -58.04   -0.57 1-CLEAN_META_PASS
+ 7 AMD    short  momentum            0.8726  0.5129      N    morning    CAUTION   -102.48   -1.02 2-ADAPTIVE_OR_HARVEST (metaΓëÑ0.48) ΓåÆ LOSER
+ 8 META   long   momentum            0.7564  0.5120      N    morning     NORMAL     95.03    0.94 2-ADAPTIVE_OR_HARVEST (metaΓëÑ0.48) ΓåÆ WINNER
+ 9 SNDK   long   rsi2_reversion      0.8609  0.7491      Y    morning     NORMAL    242.88    2.29 1-CLEAN_META_PASS
+10 META   long   momentum            0.7210  0.5492      N    morning     NORMAL    -47.26   -0.46 2-ADAPTIVE_OR_HARVEST (metaΓëÑ0.48) ΓåÆ LOSER
+11 AMZN   long   momentum            0.7300  0.5139      N    morning     NORMAL    101.74    1.01 2-ADAPTIVE_OR_HARVEST (metaΓëÑ0.48) ΓåÆ WINNER
+12 GLD    long   momentum            0.5637  0.4088      N    morning     NORMAL    -41.50   -0.41 5-IMPOSSIBLE_OVERRIDE (meta<0.45) ΓåÆ LOSER
+13 NBIS   short  momentum            0.7820  0.5437      N     midday    CAUTION   -108.90   -1.02 2-ADAPTIVE_OR_HARVEST (metaΓëÑ0.48) ΓåÆ LOSER
+14 SKHY   long   momentum            0.8232  0.5243      N     midday     NORMAL   -102.90   -1.01 2-ADAPTIVE_OR_HARVEST (metaΓëÑ0.48) ΓåÆ LOSER
+15 NBIS   long   momentum            0.8620  0.5331      N     midday     NORMAL   -105.84   -1.04 2-ADAPTIVE_OR_HARVEST (metaΓëÑ0.48) ΓåÆ LOSER
+16 BE     short  orb                 0.8079  0.4023      N     midday     NORMAL    240.24    2.37 5-IMPOSSIBLE_OVERRIDE (meta<0.45) ΓåÆ WINNER
+17 BE     short  orb                 0.8281  0.6006      Y     midday  DEFENSIVE    147.58    1.46 1-CLEAN_META_PASS
+18 AMD    short  orb                 0.7431  0.5381      N  afternoon  DEFENSIVE    -58.59   -0.58 2-ADAPTIVE_OR_HARVEST (metaΓëÑ0.48) ΓåÆ LOSER
+19 SNDK   short  momentum            0.8330  0.4955      N power_hour    CAUTION    155.84    1.59 2-ADAPTIVE_OR_HARVEST (metaΓëÑ0.48) ΓåÆ WINNER
+20 AMD    short  momentum            0.7539  0.4691      N power_hour    CAUTION    -60.48   -0.60 3-ONLY_HARVEST_POSSIBLE (0.45Γëñmeta<0.48) ΓåÆ LOSER
+21 SPY    long   rsi2_reversion      0.5678  0.5618      Y    morning    CAUTION     20.67    0.21 1-CLEAN_META_PASS
+
+==================================================================================================================================
+LEGEND:
+  1-CLEAN_META_PASS        : Meta prob ΓëÑ base threshold (0.55). No override needed.
+  2-ADAPTIVE_OR_HARVEST    : Meta prob Γêê [0.48, 0.55). Could be adaptive (shrunk_exp>0.8ΓåÆ0.48) OR HARVEST (vol_z>3ΓåÆ0.45).
+  3-ONLY_HARVEST_POSSIBLE  : Meta prob Γêê [0.45, 0.48). Only HARVEST BYPASS (vol_z>3ΓåÆ0.45) could lower threshold enough.
+  4-UNKNOWN_BYPASS         : Meta prob is None.
+  5-IMPOSSIBLE_OVERRIDE    : Meta prob < 0.45. Neither mechanism can rescue (both bottom at 0.45).
+
+
+SUMMARY BY CLASSIFICATION:
+Classification                  Trades          PnL    Total R
+-----------------------------------------------------------------
+1-CLEAN_META_PASS                    6       913.08       5.74
+2-ADAPTIVE_OR_HARVEST               11       644.15      -0.74
+3-ONLY_HARVEST                       2      -157.04      -1.56
+5-IMPOSSIBLE                         2       198.74       1.95

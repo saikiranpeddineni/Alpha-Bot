@@ -26,6 +26,7 @@ from app.core.domain import (
     OrderSide,
     OrderStatus,
     OrderType,
+    OrderRole,
     Position,
 )
 from app.core.applog import applog
@@ -471,7 +472,7 @@ class AlpacaBroker(Broker):
             role=role or OrderRole.ENTRY,
             strategy=strategy,
             reason=reason,
-            submitted_at=getattr(o, "submitted_at", None) or datetime.now(UTC),
+            submitted_at=getattr(o, "submitted_at", None),
             filled_at=getattr(o, "filled_at", None),
         )
 
@@ -528,6 +529,15 @@ class AlpacaBroker(Broker):
         else:
             raise ValueError(f"Unsupported Alpaca order type: {req.order_type}")
 
+        # Directional entry stop validation (P0 #5)
+        if getattr(req, "role", OrderRole.ENTRY) == OrderRole.ENTRY and req.stop_loss is not None:
+            # We use limit_price as the best intended entry reference. For market orders, we skip this strict check.
+            if req.limit_price is not None:
+                if req.side == OrderSide.BUY and req.stop_loss >= req.limit_price:
+                    raise ValueError(f"Invalid LONG entry stop geometry: stop {req.stop_loss} >= limit {req.limit_price}")
+                if req.side == OrderSide.SELL and req.stop_loss <= req.limit_price:
+                    raise ValueError(f"Invalid SHORT entry stop geometry: stop {req.stop_loss} <= limit {req.limit_price}")
+
         try:
             raw = await _call(self._client.submit_order, request, label=f"submit_order/{req.symbol}")
         except BrokerTimeoutError:
@@ -538,30 +548,7 @@ class AlpacaBroker(Broker):
                 err_str_raw = str(exc).strip()
                 err_msg = err_str_raw.lower()
                 
-                # Auto-adjust tight stop loss rejections
-                if err_str_raw.startswith("{") and "stop_loss.stop_price must be" in err_msg:
-                    try:
-                        import json
-                        err_data = json.loads(err_str_raw)
-                        msg_str = err_data.get("message", "").lower()
-                        base_price = float(err_data.get("base_price", 0))
-                        if base_price > 0:
-                            if "must be > base_price +" in msg_str:
-                                bump_str = msg_str.split("must be > base_price +")[-1].strip()
-                                bump = float(bump_str)
-                                new_stop = base_price + bump + 0.01
-                                applog.warning("broker.alpaca", f"Auto-adjusting short stop loss for {req.symbol} from {req.stop_loss} to {new_stop:.3f} due to tight base_price {base_price}")
-                                req.stop_loss = new_stop
-                                return await self.submit_order(req, qty_override=qty)
-                            elif "must be < base_price -" in msg_str:
-                                bump_str = msg_str.split("must be < base_price -")[-1].strip()
-                                bump = float(bump_str)
-                                new_stop = base_price - bump - 0.01
-                                applog.warning("broker.alpaca", f"Auto-adjusting long stop loss for {req.symbol} from {req.stop_loss} to {new_stop:.3f} due to tight base_price {base_price}")
-                                req.stop_loss = new_stop
-                                return await self.submit_order(req, qty_override=qty)
-                    except Exception as parse_exc:
-                        applog.warning("broker.alpaca", f"Failed to parse and auto-adjust tight stop loss: {parse_exc}")
+                # Removed auto-adjust tight stop loss per P0 requirement
 
                 short_permission_denied = (
                     "not allowed to short" in err_msg
@@ -751,11 +738,12 @@ class AlpacaBroker(Broker):
                     price=delta_price,
                     strategy=strategy,
                     reason=reason,
-                    ts=o.filled_at or o.updated_at or datetime.now(UTC),
+                    ts=o.filled_at or o.updated_at,
                     broker_fill_key=oid,
                     cumulative_qty=cumulative,
                     broker_mode=self._broker_mode,
                     broker_account_id=self.account_id,
+                    role=role.value if isinstance(role, OrderRole) else str(role),
                 )
             )
             # Reserve the cumulative snapshot as in-flight before returning it to

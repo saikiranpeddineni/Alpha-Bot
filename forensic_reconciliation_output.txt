@@ -1,0 +1,448 @@
+﻿
+================================================================================
+  AMD ΓÇö 5 candidates
+================================================================================
+
+--- Candidate 1: AMD_MOMENTUM_20260807_145100_2E3846 ---
+  Strategy:             momentum
+  Direction:            short
+  Final Decision:       accepted
+  Rejection Stage:      none
+  Rejection Reason:     
+
+  [PARALLEL EVALUATOR ΓÇö gate_evidence_json]
+  ML Probability:       0.8726196306427686
+  ML Passed:            True
+  Meta Probability:     0.5129
+  Meta Passed:          False
+  Meta Threshold (from gate_evidence rejection msg): 0.55
+  Trade Score:          84.02
+  Score Threshold:      70.0
+  Score Passed:         True
+
+  [PIPELINE ΓÇö rejection_reason field]
+  Pipeline Rejection:   
+  Pipeline Meta Threshold (from pipeline rejection msg): NOT IN DATA
+
+  [CANDIDATE RECORD]
+  ml_confidence:        0.8726
+  signal_price:         479.79
+
+  [MATCHED TRADE ΓÇö EXECUTED]
+  Entry:                479.79 at 2026-08-07T14:51:00Z
+  Exit:                 482.23 at 2026-08-07T15:05:00Z
+  Exit Reason:          PIS Exit Reason: THESIS_DEGRADED,PROTECTION_BREACH
+  MAE:                  2.44 (0.5086%)
+  MFE:                  -2.44 (-0.5086%)
+  PnL:                  $-102.48
+  Realized R:           -1.0167
+
+--- Candidate 2: AMD_RSI2_REVERSION_20260807_161300_85560B ---
+  Strategy:             rsi2_reversion
+  Direction:            long
+  Final Decision:       rejected
+  Rejection Stage:      meta_label_gate
+  Rejection Reason:     Meta-label REJECT [REAL_MODEL]: prob_0.3551_below_threshold_0.40
+
+  [PARALLEL EVALUATOR ΓÇö gate_evidence_json]
+  ML Probability:       0.7211909832243281
+  ML Passed:            True
+  Meta Probability:     0.3551
+  Meta Passed:          False
+  Meta Threshold (from gate_evidence rejection msg): 0.52
+  Trade Score:          79.9
+  Score Threshold:      55.0
+  Score Passed:         True
+
+  [PIPELINE ΓÇö rejection_reason field]
+  Pipeline Rejection:   Meta-label REJECT [REAL_MODEL]: prob_0.3551_below_threshold_0.40
+  Pipeline Meta Threshold (from pipeline rejection msg): 0.40
+
+  [CANDIDATE RECORD]
+  ml_confidence:        0.7212
+  signal_price:         483.37
+
+  [NO TRADE ΓÇö correctly rejected by pipeline]
+
+--- Candidate 3: AMD_ORB_20260807_163200_F90A46 ---
+  Strategy:             orb
+  Direction:            short
+  Final Decision:       rejected
+  Rejection Stage:      meta_label_gate
+  Rejection Reason:     Meta-label REJECT [REAL_MODEL]: prob_0.3605_below_threshold_0.52
+
+  [PARALLEL EVALUATOR ΓÇö gate_evidence_json]
+  ML Probability:       0.8428013706920784
+  ML Passed:            True
+  Meta Probability:     0.3605
+  Meta Passed:          False
+  Meta Threshold (from gate_evidence rejection msg): 0.55
+  Trade Score:          86.1
+  Score Threshold:      55.0
+  Score Passed:         True
+
+  [PIPELINE ΓÇö rejection_reason field]
+  Pipeline Rejection:   Meta-label REJECT [REAL_MODEL]: prob_0.3605_below_threshold_0.52
+  Pipeline Meta Threshold (from pipeline rejection msg): 0.52
+
+  [CANDIDATE RECORD]
+  ml_confidence:        0.8428
+  signal_price:         477.74
+
+  [NO TRADE ΓÇö correctly rejected by pipeline]
+
+--- Candidate 4: AMD_ORB_20260807_183100_830F10 ---
+  Strategy:             orb
+  Direction:            short
+  Final Decision:       accepted
+  Rejection Stage:      none
+  Rejection Reason:     
+
+  [PARALLEL EVALUATOR ΓÇö gate_evidence_json]
+  ML Probability:       0.7430948579482309
+  ML Passed:            True
+  Meta Probability:     0.5381
+  Meta Passed:          False
+  Meta Threshold (from gate_evidence rejection msg): 0.55
+  Trade Score:          74.27
+  Score Threshold:      55.0
+  Score Passed:         True
+
+  [PIPELINE ΓÇö rejection_reason field]
+  Pipeline Rejection:   
+  Pipeline Meta Threshold (from pipeline rejection msg): NOT IN DATA
+
+  [CANDIDATE RECORD]
+  ml_confidence:        0.7431
+  signal_price:         480.075
+
+  [MATCHED TRADE ΓÇö EXECUTED]
+  Entry:                480.075 at 2026-08-07T18:31:00Z
+  Exit:                 481.47 at 2026-08-07T19:08:00Z
+  Exit Reason:          PIS Exit Reason: THESIS_DEGRADED
+  MAE:                  1.395 (0.2906%)
+  MFE:                  -1.395 (-0.2906%)
+  PnL:                  $-58.59
+  Realized R:           -0.58
+
+--- Candidate 5: AMD_MOMENTUM_20260807_193000_1DCA35 ---
+  Strategy:             momentum
+  Direction:            short
+  Final Decision:       accepted
+  Rejection Stage:      none
+  Rejection Reason:     
+
+  [PARALLEL EVALUATOR ΓÇö gate_evidence_json]
+  ML Probability:       0.7539342305299309
+  ML Passed:            True
+  Meta Probability:     0.4691
+  Meta Passed:          False
+  Meta Threshold (from gate_evidence rejection msg): 0.55
+  Trade Score:          77.45
+  Score Threshold:      70.0
+  Score Passed:         True
+
+  [PIPELINE ΓÇö rejection_reason field]
+  Pipeline Rejection:   
+  Pipeline Meta Threshold (from pipeline rejection msg): NOT IN DATA
+
+  [CANDIDATE RECORD]
+  ml_confidence:        0.7539
+  signal_price:         479.87
+
+  [MATCHED TRADE ΓÇö EXECUTED]
+  Entry:                479.87 at 2026-08-07T19:30:00Z
+  Exit:                 481.31 at 2026-08-07T19:55:00Z
+  Exit Reason:          end of day
+  MAE:                  2.25 (0.4689%)
+  MFE:                  1.81 (0.3772%)
+  PnL:                  $-60.48
+  Realized R:           -0.6
+
+================================================================================
+  NBIS ΓÇö 10 candidates
+================================================================================
+
+--- Candidate 1: NBIS_MOMENTUM_20260807_140100_96AC5A ---
+  Strategy:             momentum
+  Direction:            short
+  Final Decision:       rejected
+  Rejection Stage:      behavioral_safety_gate
+  Rejection Reason:     behavioral_loop_detector: high correlation (0.79) with open symbol BE
+
+  [PARALLEL EVALUATOR ΓÇö gate_evidence_json]
+  ML Probability:       0.7008394249698111
+  ML Passed:            True
+  Meta Probability:     0.5087
+  Meta Passed:          False
+  Meta Threshold (from gate_evidence rejection msg): 0.55
+  Trade Score:          80.36
+  Score Threshold:      65.0
+  Score Passed:         True
+
+  [PIPELINE ΓÇö rejection_reason field]
+  Pipeline Rejection:   behavioral_loop_detector: high correlation (0.79) with open symbol BE
+  Pipeline Meta Threshold (from pipeline rejection msg): NOT IN DATA
+
+  [CANDIDATE RECORD]
+  ml_confidence:        0.7008
+  signal_price:         184.5
+
+  [NO TRADE ΓÇö correctly rejected by pipeline]
+
+--- Candidate 2: NBIS_GAP_AND_GO_20260807_140200_0E24B2 ---
+  Strategy:             gap_and_go
+  Direction:            short
+  Final Decision:       rejected
+  Rejection Stage:      meta_label_gate
+  Rejection Reason:     Meta-label REJECT [NO_MODEL]: META_MODEL_UNAVAILABLE (mandatory strategy)
+
+  [PARALLEL EVALUATOR ΓÇö gate_evidence_json]
+  ML Probability:       0.672639850214405
+  ML Passed:            True
+  Meta Probability:     None
+  Meta Passed:          False
+  Meta Threshold (from gate_evidence rejection msg): NOT IN DATA
+  Trade Score:          79.51
+  Score Threshold:      65.0
+  Score Passed:         True
+
+  [PIPELINE ΓÇö rejection_reason field]
+  Pipeline Rejection:   Meta-label REJECT [NO_MODEL]: META_MODEL_UNAVAILABLE (mandatory strategy)
+  Pipeline Meta Threshold (from pipeline rejection msg): NOT IN DATA
+
+  [CANDIDATE RECORD]
+  ml_confidence:        0.6726
+  signal_price:         184.38
+
+  [NO TRADE ΓÇö correctly rejected by pipeline]
+
+--- Candidate 3: NBIS_MOMENTUM_20260807_140700_5AEC6D ---
+  Strategy:             momentum
+  Direction:            short
+  Final Decision:       rejected
+  Rejection Stage:      behavioral_safety_gate
+  Rejection Reason:     behavioral_loop_detector: high correlation (0.79) with open symbol BE
+
+  [PARALLEL EVALUATOR ΓÇö gate_evidence_json]
+  ML Probability:       0.7489142322309466
+  ML Passed:            True
+  Meta Probability:     0.4993
+  Meta Passed:          False
+  Meta Threshold (from gate_evidence rejection msg): 0.55
+  Trade Score:          81.75
+  Score Threshold:      65.0
+  Score Passed:         True
+
+  [PIPELINE ΓÇö rejection_reason field]
+  Pipeline Rejection:   behavioral_loop_detector: high correlation (0.79) with open symbol BE
+  Pipeline Meta Threshold (from pipeline rejection msg): NOT IN DATA
+
+  [CANDIDATE RECORD]
+  ml_confidence:        0.7489
+  signal_price:         182.79
+
+  [NO TRADE ΓÇö correctly rejected by pipeline]
+
+--- Candidate 4: NBIS_GAP_AND_GO_20260807_140900_D17910 ---
+  Strategy:             gap_and_go
+  Direction:            short
+  Final Decision:       rejected
+  Rejection Stage:      meta_label_gate
+  Rejection Reason:     Meta-label REJECT [NO_MODEL]: META_MODEL_UNAVAILABLE (mandatory strategy)
+
+  [PARALLEL EVALUATOR ΓÇö gate_evidence_json]
+  ML Probability:       0.7208994253370763
+  ML Passed:            True
+  Meta Probability:     None
+  Meta Passed:          False
+  Meta Threshold (from gate_evidence rejection msg): NOT IN DATA
+  Trade Score:          80.91
+  Score Threshold:      65.0
+  Score Passed:         True
+
+  [PIPELINE ΓÇö rejection_reason field]
+  Pipeline Rejection:   Meta-label REJECT [NO_MODEL]: META_MODEL_UNAVAILABLE (mandatory strategy)
+  Pipeline Meta Threshold (from pipeline rejection msg): NOT IN DATA
+
+  [CANDIDATE RECORD]
+  ml_confidence:        0.7209
+  signal_price:         182.04
+
+  [NO TRADE ΓÇö correctly rejected by pipeline]
+
+--- Candidate 5: NBIS_MOMENTUM_20260807_155300_422141 ---
+  Strategy:             momentum
+  Direction:            short
+  Final Decision:       rejected
+  Rejection Stage:      trade_score_gate
+  Rejection Reason:     Trade Score 69.0 < 70.0 (raw=69.0) [regime=range, ml=0.79, rr=0.90]
+
+  [PARALLEL EVALUATOR ΓÇö gate_evidence_json]
+  ML Probability:       0.7915240020455839
+  ML Passed:            True
+  Meta Probability:     0.5136
+  Meta Passed:          False
+  Meta Threshold (from gate_evidence rejection msg): 0.55
+  Trade Score:          73.38
+  Score Threshold:      70.0
+  Score Passed:         True
+
+  [PIPELINE ΓÇö rejection_reason field]
+  Pipeline Rejection:   Trade Score 69.0 < 70.0 (raw=69.0) [regime=range, ml=0.79, rr=0.90]
+  Pipeline Meta Threshold (from pipeline rejection msg): NOT IN DATA
+
+  [CANDIDATE RECORD]
+  ml_confidence:        0.7915
+  signal_price:         184.81
+
+  [NO TRADE ΓÇö correctly rejected by pipeline]
+
+--- Candidate 6: NBIS_MOMENTUM_20260807_155600_A53595 ---
+  Strategy:             momentum
+  Direction:            short
+  Final Decision:       accepted
+  Rejection Stage:      none
+  Rejection Reason:     
+
+  [PARALLEL EVALUATOR ΓÇö gate_evidence_json]
+  ML Probability:       0.7820074460333085
+  ML Passed:            True
+  Meta Probability:     0.5437
+  Meta Passed:          False
+  Meta Threshold (from gate_evidence rejection msg): 0.55
+  Trade Score:          76.94
+  Score Threshold:      55.0
+  Score Passed:         True
+
+  [PIPELINE ΓÇö rejection_reason field]
+  Pipeline Rejection:   
+  Pipeline Meta Threshold (from pipeline rejection msg): NOT IN DATA
+
+  [CANDIDATE RECORD]
+  ml_confidence:        0.782
+  signal_price:         184.98
+
+  [MATCHED TRADE ΓÇö EXECUTED]
+  Entry:                184.98 at 2026-08-07T15:56:00Z
+  Exit:                 185.97 at 2026-08-07T16:03:00Z
+  Exit Reason:          PIS Exit Reason: THESIS_DEGRADED,PROTECTION_BREACH
+  MAE:                  0.99 (0.5352%)
+  MFE:                  -0.99 (-0.5352%)
+  PnL:                  $-108.9
+  Realized R:           -1.0206
+
+--- Candidate 7: NBIS_MOMENTUM_20260807_161700_27245B ---
+  Strategy:             momentum
+  Direction:            long
+  Final Decision:       accepted
+  Rejection Stage:      none
+  Rejection Reason:     
+
+  [PARALLEL EVALUATOR ΓÇö gate_evidence_json]
+  ML Probability:       0.8620343787874981
+  ML Passed:            True
+  Meta Probability:     0.5331
+  Meta Passed:          False
+  Meta Threshold (from gate_evidence rejection msg): 0.55
+  Trade Score:          81.28
+  Score Threshold:      55.0
+  Score Passed:         True
+
+  [PIPELINE ΓÇö rejection_reason field]
+  Pipeline Rejection:   
+  Pipeline Meta Threshold (from pipeline rejection msg): NOT IN DATA
+
+  [CANDIDATE RECORD]
+  ml_confidence:        0.862
+  signal_price:         187.28
+
+  [MATCHED TRADE ΓÇö EXECUTED]
+  Entry:                187.28 at 2026-08-07T16:17:00Z
+  Exit:                 186.3 at 2026-08-07T16:24:00Z
+  Exit Reason:          PIS Exit Reason: THESIS_DEGRADED,PROTECTION_BREACH
+  MAE:                  0.98 (0.5233%)
+  MFE:                  -0.98 (-0.5233%)
+  PnL:                  $-105.84
+  Realized R:           -1.0426
+
+--- Candidate 8: NBIS_VWAP_REVERSION_20260807_163100_6EDE74 ---
+  Strategy:             vwap_reversion
+  Direction:            long
+  Final Decision:       rejected
+  Rejection Stage:      meta_label_gate
+  Rejection Reason:     Meta-label REJECT [NO_MODEL]: META_MODEL_UNAVAILABLE (mandatory strategy)
+
+  [PARALLEL EVALUATOR ΓÇö gate_evidence_json]
+  ML Probability:       0.88414864849247
+  ML Passed:            True
+  Meta Probability:     None
+  Meta Passed:          False
+  Meta Threshold (from gate_evidence rejection msg): NOT IN DATA
+  Trade Score:          77.56
+  Score Threshold:      70.0
+  Score Passed:         True
+
+  [PIPELINE ΓÇö rejection_reason field]
+  Pipeline Rejection:   Meta-label REJECT [NO_MODEL]: META_MODEL_UNAVAILABLE (mandatory strategy)
+  Pipeline Meta Threshold (from pipeline rejection msg): NOT IN DATA
+
+  [CANDIDATE RECORD]
+  ml_confidence:        0.8841
+  signal_price:         184.4
+
+  [NO TRADE ΓÇö correctly rejected by pipeline]
+
+--- Candidate 9: NBIS_MOMENTUM_20260807_190600_C508A6 ---
+  Strategy:             momentum
+  Direction:            long
+  Final Decision:       rejected
+  Rejection Stage:      behavioral_safety_gate
+  Rejection Reason:     behavioral_loop_detector: 3 consecutive losses on symbol NBIS (momentum/long) in past 7 days
+
+  [PARALLEL EVALUATOR ΓÇö gate_evidence_json]
+  ML Probability:       0.8593385745168222
+  ML Passed:            True
+  Meta Probability:     0.519
+  Meta Passed:          False
+  Meta Threshold (from gate_evidence rejection msg): 0.55
+  Trade Score:          75.88
+  Score Threshold:      70.0
+  Score Passed:         True
+
+  [PIPELINE ΓÇö rejection_reason field]
+  Pipeline Rejection:   behavioral_loop_detector: 3 consecutive losses on symbol NBIS (momentum/long) in past 7 days
+  Pipeline Meta Threshold (from pipeline rejection msg): NOT IN DATA
+
+  [CANDIDATE RECORD]
+  ml_confidence:        0.8593
+  signal_price:         188.78
+
+  [NO TRADE ΓÇö correctly rejected by pipeline]
+
+--- Candidate 10: NBIS_MOMENTUM_20260807_192000_D7674A ---
+  Strategy:             momentum
+  Direction:            long
+  Final Decision:       rejected
+  Rejection Stage:      behavioral_safety_gate
+  Rejection Reason:     behavioral_loop_detector: 3 consecutive losses on symbol NBIS (momentum/long) in past 7 days
+
+  [PARALLEL EVALUATOR ΓÇö gate_evidence_json]
+  ML Probability:       0.8244431867151157
+  ML Passed:            True
+  Meta Probability:     0.5234
+  Meta Passed:          False
+  Meta Threshold (from gate_evidence rejection msg): 0.55
+  Trade Score:          77.31
+  Score Threshold:      70.0
+  Score Passed:         True
+
+  [PIPELINE ΓÇö rejection_reason field]
+  Pipeline Rejection:   behavioral_loop_detector: 3 consecutive losses on symbol NBIS (momentum/long) in past 7 days
+  Pipeline Meta Threshold (from pipeline rejection msg): NOT IN DATA
+
+  [CANDIDATE RECORD]
+  ml_confidence:        0.8244
+  signal_price:         189.15
+
+  [NO TRADE ΓÇö correctly rejected by pipeline]

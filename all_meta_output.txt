@@ -1,0 +1,23 @@
+﻿Symbol Side   Strategy            ML Prob  Meta Prob  Meta Thresh(Eval)  Meta Passed(Eval)  Pipeline Decision   Pipeline Meta Thresh        PnL       R
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+SKHY   short  orb                  0.8054     0.5507  Γëñmeta_prob (PASS)               True           accepted  Γëñmeta_prob (ACCEPTED)     136.90    0.76
+BE     short  momentum             0.8164     0.5347               0.55              False           accepted  Γëñmeta_prob (ACCEPTED)    1017.94    2.82
+META   short  momentum             0.7444     0.4530               0.55              False           accepted  Γëñmeta_prob (ACCEPTED)     -96.56   -0.96
+COHR   long   momentum             0.8954     0.5568  Γëñmeta_prob (PASS)               True           accepted  Γëñmeta_prob (ACCEPTED)     423.09    1.59
+SNDK   short  momentum             0.8090     0.5183               0.55              False           accepted  Γëñmeta_prob (ACCEPTED)    -200.43   -1.97
+BABA   long   momentum             0.7796     0.5570  Γëñmeta_prob (PASS)               True           accepted  Γëñmeta_prob (ACCEPTED)     -58.04   -0.57
+AMD    short  momentum             0.8726     0.5129               0.55              False           accepted  Γëñmeta_prob (ACCEPTED)    -102.48   -1.02
+META   long   momentum             0.7564     0.5120               0.55              False           accepted  Γëñmeta_prob (ACCEPTED)      95.03    0.94
+SNDK   long   rsi2_reversion       0.8609     0.7491  Γëñmeta_prob (PASS)               True           accepted  Γëñmeta_prob (ACCEPTED)     242.88    2.29
+META   long   momentum             0.7210     0.5492               0.55              False           accepted  Γëñmeta_prob (ACCEPTED)     -47.26   -0.46
+AMZN   long   momentum             0.7300     0.5139               0.55              False           accepted  Γëñmeta_prob (ACCEPTED)     101.74    1.01
+GLD    long   momentum             0.5637     0.4088               0.55              False           accepted  Γëñmeta_prob (ACCEPTED)     -41.50   -0.41
+NBIS   short  momentum             0.7820     0.5437               0.55              False           accepted  Γëñmeta_prob (ACCEPTED)    -108.90   -1.02
+SKHY   long   momentum             0.8232     0.5243               0.55              False           accepted  Γëñmeta_prob (ACCEPTED)    -102.90   -1.01
+NBIS   long   momentum             0.8620     0.5331               0.55              False           accepted  Γëñmeta_prob (ACCEPTED)    -105.84   -1.04
+BE     short  orb                  0.8079     0.4023               0.55              False           accepted  Γëñmeta_prob (ACCEPTED)     240.24    2.37
+BE     short  orb                  0.8281     0.6006  Γëñmeta_prob (PASS)               True           accepted  Γëñmeta_prob (ACCEPTED)     147.58    1.46
+AMD    short  orb                  0.7431     0.5381               0.55              False           accepted  Γëñmeta_prob (ACCEPTED)     -58.59   -0.58
+SNDK   short  momentum             0.8330     0.4955               0.55              False           accepted  Γëñmeta_prob (ACCEPTED)     155.84    1.59
+AMD    short  momentum             0.7539     0.4691               0.55              False           accepted  Γëñmeta_prob (ACCEPTED)     -60.48   -0.60
+SPY    long   rsi2_reversion       0.5678     0.5618  Γëñmeta_prob (PASS)               True           accepted  Γëñmeta_prob (ACCEPTED)      20.67    0.21
