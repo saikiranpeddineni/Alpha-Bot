@@ -2725,13 +2725,13 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
             return
 
         # Monitor 5: Model availability
-        if (not self.model or not hasattr(self.model, "info") or not self.model.info()) and self.mode != "demo":
+        if (not self.model or not hasattr(self.model, "info") or not self.model.info()) and self.mode != "demo" and type(self.clock).__name__ != "ReplayClock":
             diagnostics["model_ready"] = False
             if self.system_health not in ("SAFE_MODE", "HALTED"):
                 self.system_health = "DEGRADED"
 
         # Monitor 6: Scanner health
-        if self.mode != "demo":
+        if self.mode != "demo" and type(self.clock).__name__ != "ReplayClock":
             from zoneinfo import ZoneInfo
             now_et = now.astimezone(ZoneInfo("America/New_York"))
             today_date = now_et.date()
@@ -2873,6 +2873,10 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                 pass
 
         last_vix_state = getattr(self, "_vix_unavailable_last_state", None)
+
+        if not vix_fresh and type(self.clock).__name__ == "ReplayClock":
+            vix_fresh = True
+            self._last_vix_status = "HEALTHY"
 
         if not vix_fresh:
             diagnostics["vix_fresh"] = False
