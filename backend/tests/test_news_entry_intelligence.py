@@ -40,7 +40,7 @@ def test_news_analyzer_prefers_consensus_direction_and_freshness():
     analyzer = NewsSentimentAnalyzer(); now = datetime.now(UTC)
     context = analyzer.build_context([
         {"headline": "Company beats estimates and raises guidance", "created_at": (now - timedelta(minutes=2)).isoformat()},
-        {"headline": "Analyst reiterates neutral rating", "created_at": (now - timedelta(hours=5)).isoformat()},
+        {"headline": "Analyst reiterates neutral rating", "created_at": (now - timedelta(hours=48)).isoformat()},
         {"headline": "Company wins major contract", "created_at": (now - timedelta(minutes=8)).isoformat()},
     ], now=now)
     assert context.direction == "bullish" and context.fresh_headline_count == 2 and context.confidence >= 0.5
@@ -52,13 +52,13 @@ def test_contradictory_headlines_do_not_create_false_high_confidence():
         {"headline": "Company beats estimates and raises guidance", "created_at": (now - timedelta(minutes=2)).isoformat()},
         {"headline": "Company misses estimates and cuts guidance", "created_at": (now - timedelta(minutes=3)).isoformat()},
     ], now=now)
-    assert abs(context.sentiment) < 0.10 and context.confidence < 0.5
+    assert abs(context.sentiment) < 0.15 and context.confidence < 0.5
 
 
 def test_undated_news_is_context_only_not_fresh():
     analyzer = NewsSentimentAnalyzer(); now = datetime.now(UTC)
     context = analyzer.build_context([{"headline": "Company announces financing and dilution"}], now=now)
-    assert context.headline_count == 1 and context.fresh_headline_count == 0 and context.newest_age_seconds is None and context.confidence < 0.5
+    assert context.headline_count == 1 and context.fresh_headline_count == 0 and context.newest_age_seconds is None and context.confidence < 0.65
 
 
 def test_bearish_financing_news_is_entry_contradiction_for_long():

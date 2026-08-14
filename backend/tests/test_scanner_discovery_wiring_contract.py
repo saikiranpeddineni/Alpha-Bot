@@ -13,7 +13,7 @@ from app.risk.market_regime import MarketRiskState
 @pytest.mark.asyncio
 async def test_live_stage1_prefilter_receives_keyword_discovery_contract(monkeypatch):
     provider = SimpleNamespace(name="alpaca", supports_asset_discovery=True)
-    scanner = MarketScanner(SimpleNamespace(provider=provider, risk_config=RiskConfig()), [])
+    scanner = MarketScanner(SimpleNamespace(provider=provider, risk_config=RiskConfig()), [], risk_config=RiskConfig())
     scanner._discovery = SimpleNamespace(
         acquire=AsyncMock(return_value=SimpleNamespace(shortlist=("NEW2", "NEW1")))
     )
@@ -32,7 +32,7 @@ async def test_live_stage1_prefilter_receives_keyword_discovery_contract(monkeyp
 async def test_replay_stage1_prefilter_receives_keyword_static_contract(monkeypatch):
     historical_t = datetime(2026, 7, 14, 14, 0, tzinfo=UTC)
     provider = SimpleNamespace(name="alpaca", supports_asset_discovery=True)
-    scanner = MarketScanner(SimpleNamespace(provider=provider, risk_config=RiskConfig()), [])
+    scanner = MarketScanner(SimpleNamespace(provider=provider, risk_config=RiskConfig()), [], risk_config=RiskConfig())
     scanner._assess_market_risk = AsyncMock(return_value=(MarketRiskState.NORMAL, 0.85, []))
     stage1 = AsyncMock(return_value=[])
     monkeypatch.setattr(scanner, "_stage1_prefilter_parallel", stage1)

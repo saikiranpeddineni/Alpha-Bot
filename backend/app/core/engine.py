@@ -1052,6 +1052,33 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                                 else:
                                     self.pending_reconciliation_orders[client_order_id]["submission_state"] = "broker_acknowledged"
                                     self.pending_reconciliation_orders[client_order_id]["broker_order_id"] = getattr(order, "id", None)
+                                    
+                                    # Record attempt in thesis memory
+                                    if getattr(self, "pipeline", None) and hasattr(self.pipeline, "thesis_memory"):
+                                        price = sig.price or (float(df["close"].iloc[-1]) if df is not None and len(df) > 0 else 0.0)
+                                        vwap = sig.strategy_params.get("vwap", 0.0) if sig.strategy_params else 0.0
+                                        atr = sig.strategy_params.get("atr", 0.0) if sig.strategy_params else 0.0
+                                        if not vwap and df is not None and len(df) > 0 and "vwap" in df.columns:
+                                            vwap = float(df["vwap"].iloc[-1])
+                                        if not atr and df is not None and len(df) > 0 and "atr14" in df.columns:
+                                            atr = float(df["atr14"].iloc[-1])
+                                            
+                                        self.pipeline.thesis_memory.record_attempt(
+                                            symbol=sig.symbol,
+                                            action=sig.action,
+                                            price=price,
+                                            vwap=vwap,
+                                            atr=atr,
+                                            strategy=sig.strategy,
+                                            candidate_id=sig.candidate_id or "",
+                                            thesis_fingerprint=sig.thesis_fingerprint or ""
+                                        )
+                                        
+                                    if getattr(self, "pipeline", None) and hasattr(self.pipeline, "strategies"):
+                                        strategy_instance = getattr(self.pipeline, "strategies", {}).get(sig.strategy)
+                                        if strategy_instance and hasattr(strategy_instance, "signal_accepted"):
+                                            strategy_instance.signal_accepted(sig)
+                                        
                                 await asyncio.to_thread(self.db.set_setting, "pending_reconciliation_orders", self.pending_reconciliation_orders)
                                 self.recent_orders.appendleft(order)
                                 await asyncio.to_thread(self.db.save_order, order, self.mode)
@@ -1235,6 +1262,15 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                 self.perf_tracker.update(trade, now=now)
                 await asyncio.to_thread(self.db.save_trade, trade, self.mode)
                 self.publish("trade", trade.model_dump(mode="json"))
+
+                if getattr(self, "pipeline", None) and hasattr(self.pipeline, "thesis_memory"):
+                    self.pipeline.thesis_memory.update_attempt_outcome(
+                        symbol=trade.symbol,
+                        candidate_id=trade.candidate_id or "",
+                        status="WIN" if trade.pnl > 0 else "LOSS",
+                        pnl=trade.pnl,
+                        r_multiple=trade.r_multiple or 0.0
+                    )
 
 
                 # Exit-policy research is intentionally NOT replayed at the instant the

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+from typing import Any
 
 class ProtectionRecreationError(Exception):
     """Raised when broker protection cannot be safely recreated after advanced-order cancellation."""
@@ -38,21 +39,21 @@ def install_profit_execution_hooks(broker) -> None:
         original_close = broker.close_position
 
         @functools.wraps(original_close)
-        async def close_position_profit_safe(symbol: str, reason: str = "manual", qty: float | None = None):
+        async def close_position_profit_safe(symbol: str, reason: str = "manual", qty: float | None = None, strategy: str | None = None, role: Any | None = None):
             if qty is None or qty <= 0:
-                return await original_close(symbol, reason=reason, qty=qty)
+                return await original_close(symbol, reason=reason, qty=qty, strategy=strategy, role=role)
 
             try:
                 from alpaca.trading.requests import ClosePositionRequest, ReplaceOrderRequest
                 from app.brokers import alpaca as legacy
                 from app.brokers.alpaca_hardening import normalize_stock_price, normalized_qty
                 from app.brokers.base import BrokerTimeoutError
-                from app.core.domain import OrderSide, OrderStatus, OrderType
+                from app.core.domain import OrderSide, OrderStatus, OrderType, OrderRole
 
                 positions = await broker.positions()
                 position = next((p for p in positions if p.symbol.upper() == symbol.upper()), None)
                 if position is None:
-                    return await original_close(symbol, reason=reason, qty=qty)
+                    return await original_close(symbol, reason=reason, qty=qty, strategy=strategy, role=role)
 
                 current_qty = abs(float(position.qty))
                 close_qty = min(float(qty), current_qty)
@@ -142,7 +143,11 @@ def install_profit_execution_hooks(broker) -> None:
                     ),
                     label=f"close_position_partial_safe/{symbol}",
                 )
-                broker._meta[str(raw_close.id)] = ("engine", reason)
+                broker._meta[str(raw_close.id)] = {
+                    "strategy": strategy or "engine",
+                    "reason": reason,
+                    "role": role or OrderRole.EXIT if hasattr(OrderRole, "EXIT") else "EXIT"
+                }
                 return broker._to_order(raw_close)
             except BrokerTimeoutError:
                 raise

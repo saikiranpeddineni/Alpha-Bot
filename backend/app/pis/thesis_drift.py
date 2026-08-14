@@ -104,11 +104,28 @@ class ThesisDriftEvaluator:
                     severe_adverse_override_triggered = True
                     
                 # Structural confirmation requires sustained adverse behavior or severe override
-                persistence_confirmed = (stagnation_bars >= 1 or history_len >= 2)
-                structural_confirmation = persistence_confirmed and (adverse_momentum or adverse_velocity or has_wick or severe_adverse_override_triggered)
+                persistence_confirmed = (
+                    history_len >= getattr(self.config, "early_confirmation_bars", 2)
+                    and stagnation_bars >= 1
+                )
+                
+                adverse_close = False
+                if history_len >= 2:
+                    recent = history[-2:]
+                    prev_obs = recent[0]
+                    curr_obs = recent[1]
+                    if side > 0:
+                        adverse_close = (curr_obs.close < prev_obs.close and curr_obs.low <= prev_obs.low)
+                    else:
+                        adverse_close = (curr_obs.close > prev_obs.close and curr_obs.high >= prev_obs.high)
+
+                structural_confirmation = (
+                    persistence_confirmed 
+                    and (adverse_momentum or adverse_velocity)
+                    and (has_wick or severe_adverse_override_triggered or adverse_close)
+                )
                     
-                if early_candidate and (has_wick or severe_adverse_override_triggered):
-                    early_invalidation = True
+                early_invalidation = early_candidate and structural_confirmation
 
         # Structural invalidation:
         # 1. Early thesis failure within entry window (Quadrant 2)
@@ -116,7 +133,12 @@ class ThesisDriftEvaluator:
         # 3. Severe adverse excursion approaching hard risk boundary (>= 0.90R)
         # 4. Complete momentum stagnation (>= max_bars)
         # 5. Composite drift score exceeding critical structural threshold (>= 0.70)
-        time_decay_bleed = (history_len >= 15 and obs.r_multiple <= -0.40)
+        time_decay_bleed = (
+            history_len >= 15 
+            and obs.r_multiple <= -0.40
+            and peak_r < 0.25
+            and stagnation_bars >= 5
+        )
 
         is_degraded = (
             early_invalidation

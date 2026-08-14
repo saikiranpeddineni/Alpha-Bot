@@ -133,7 +133,8 @@ class TradeHealthEvaluator:
             + momentum_score * 0.25
             + volume_score * 0.15
             + volatility_score * 0.15
-        )
+        ) + sentiment_boost
+        overall = max(0.0, min(1.0, overall))
         structure_classification = "NORMAL"
         if is_structurally_adverse:
             structure_classification = "STRUCTURAL_BREAKDOWN"

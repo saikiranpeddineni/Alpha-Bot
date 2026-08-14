@@ -35,6 +35,7 @@ async def test_stage1_diagnostics_make_zero_extra_provider_calls():
     scanner = MarketScanner(
         SimpleNamespace(provider=provider, history=history_mock, original_history=history_mock, risk_config=RiskConfig()),
         ["SPY"],
+        risk_config=RiskConfig()
     )
 
     candidates = await scanner._stage1_prefilter_parallel(as_of=as_of, symbols=["AAPL"])

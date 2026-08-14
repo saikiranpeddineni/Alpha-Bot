@@ -27,6 +27,15 @@ class ExitPlanner:
     def __init__(self, config: Optional[PISConfig] = None) -> None:
         self.config = config or PISConfig()
 
+    def allowed_giveback_r(self, peak_r: float) -> float:
+        if peak_r < 0.50:
+            return 999.0
+        if peak_r < 1.00:
+            return getattr(self.config, "giveback_r_1", 0.40)
+        if peak_r < 2.00:
+            return getattr(self.config, "giveback_r_2", 0.60)
+        return getattr(self.config, "giveback_r_3", 0.80)
+
     def synthesize_decision(
         self,
         obs: PositionObservation,
@@ -95,24 +104,40 @@ class ExitPlanner:
             elif side < 0 and (obs.low <= obs.take_profit or (peak_r >= 1.50 and target_dist <= target_tolerance)):
                 target_hit = True
 
+        if target_hit and peak_r >= getattr(self.config, "runner_activation_r", 1.0) and runner_probability >= 0.60:
+            target_hit = False
+
         # Check Climax Reversal Exhaustion (On extreme extension >= 1.50R with wide-range blowoff wick)
         bar_range = obs.high - obs.low
         exhaustion_climax = False
         if peak_r >= 1.50 and bar_range >= 2.0 * obs.atr:
-            adverse_wick = (obs.high - obs.close) if side > 0 else (obs.close - obs.low)
-            wick_ratio = adverse_wick / max(1e-6, bar_range)
+            if side > 0:
+                adverse_wick = max(0.0, obs.close - obs.low)
+            else:
+                adverse_wick = max(0.0, obs.high - obs.close)
+            wick_ratio = adverse_wick / max(1e-9, bar_range)
             if wick_ratio >= 0.60:
                 exhaustion_climax = True
 
         # Check Predicted Max-R Ceiling Exhaustion Harvesting
         # Triggered when position reaches its predicted max R ceiling with signs of momentum exhaustion
-        ceiling_harvested = False
-        if (
+        max_r_reached = (
             predicted_max_r > 0
             and peak_r >= (predicted_max_r * 0.95)
-            and (health.overall <= 0.60 or health.momentum_score <= 0.35 or exhaustion_climax)
-        ):
-            ceiling_harvested = True
+        )
+        
+        if peak_r < 1.0:
+            max_r_harvest = False
+        elif peak_r < 2.0:
+            max_r_harvest = (
+                max_r_reached
+                and health.overall < 0.45
+            )
+        else:
+            max_r_harvest = (
+                max_r_reached
+                and (health.overall < 0.40 or exhaustion_climax)
+            )
 
         # Check Early Thesis Invalidation Scratch Exit (Quadrant 2)
         # In PATIENT mode, we ignore early invalidations for proven trades with intact theses
@@ -144,11 +169,27 @@ class ExitPlanner:
         if scale_out_triggered and not is_runner:
             is_runner = True
 
+        # R Giveback Analysis
+        current_r = obs.r_multiple
+        giveback = max(0.0, peak_r - current_r)
+        giveback_breach = (
+            peak_r >= getattr(self.config, "proven_trade_r", 0.50)
+            and giveback > self.allowed_giveback_r(peak_r)
+        )
+        
+        strong_thesis = (
+            health.overall >= 0.55
+            and not thesis.severe_adverse_override_triggered
+        )
+
         # Determine exit action
         if protection_breached:
             action = ExitAction.FULL_EXIT
             exit_ratio = 1.0
         elif thesis.severe_adverse_override_triggered:
+            action = ExitAction.FULL_EXIT
+            exit_ratio = 1.0
+        elif giveback_breach:
             action = ExitAction.FULL_EXIT
             exit_ratio = 1.0
         elif early_invalidation_breach:
@@ -157,7 +198,7 @@ class ExitPlanner:
         elif lifecycle == LifecycleState.EXIT_CANDIDATE:
             action = ExitAction.FULL_EXIT
             exit_ratio = 1.0
-        elif ceiling_harvested and has_scaled_out:
+        elif max_r_harvest and has_scaled_out:
             # Full harvest of runner at predicted max R ceiling
             action = ExitAction.FULL_EXIT
             exit_ratio = 1.0
@@ -175,6 +216,11 @@ class ExitPlanner:
             action = ExitAction.HOLD
             exit_ratio = 0.0
 
+        if strong_thesis and not giveback_breach:
+            if action == ExitAction.FULL_EXIT and not protection_breached and not thesis.severe_adverse_override_triggered:
+                action = ExitAction.PARTIAL_EXIT if scale_out_triggered else ExitAction.HOLD
+                exit_ratio = getattr(self.config, "scale_out_ratio", 0.50) if scale_out_triggered else 0.0
+
         # Build evidence coverage and reason codes
         coverage = EvidenceEvaluator.compute_coverage(history_len, health, thesis)
         reasons = EvidenceEvaluator.build_reason_codes(
@@ -185,9 +231,11 @@ class ExitPlanner:
             reasons.append(ReasonCode.PROTECTION_BREACH)
         elif thesis.severe_adverse_override_triggered:
             reasons.append(ReasonCode.EMERGENCY_STOP)
+        elif giveback_breach:
+            reasons.append(ReasonCode.HEALTH_EXHAUSTION)
         elif early_invalidation_breach:
             reasons.append(ReasonCode.EARLY_THESIS_INVALIDATED)
-        elif ceiling_harvested:
+        elif max_r_harvest:
             reasons.append(ReasonCode.MAX_R_CEILING_REACHED)
         elif scale_out_triggered:
             reasons.append(ReasonCode.SCALE_OUT_TARGET)

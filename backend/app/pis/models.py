@@ -58,6 +58,7 @@ class ReasonCode(str, Enum):
     EARLY_THESIS_INVALIDATED = "EARLY_THESIS_INVALIDATED"
     HEALTH_EXHAUSTION = "HEALTH_EXHAUSTION"
     MAX_R_CEILING_REACHED = "MAX_R_CEILING_REACHED"
+    TIME_DECAY_STALL = "TIME_DECAY_STALL"
     DISTRIBUTION_DETECTED = "DISTRIBUTION_DETECTED"
     PROTECTION_BREACH = "PROTECTION_BREACH"
     MANUAL_OVERRIDE = "MANUAL_OVERRIDE"
@@ -261,6 +262,18 @@ class PISConfig:
     """
 
     CONFIG_VERSION = "PIS-006"
+
+    # MATURITY defaults
+    proven_trade_r: float = 0.50
+    runner_activation_r: float = 1.00
+    extended_runner_r: float = 2.00
+    exceptional_runner_r: float = 3.00
+    giveback_r_1: float = 0.40
+    giveback_r_2: float = 0.60
+    giveback_r_3: float = 0.80
+    early_confirmation_bars: int = 2
+    max_proven_hold_minutes: int = 120
+    max_runner_hold_minutes: int = 240
 
     history_max_len: int = 500
     activation_mfe_r: float = 1.5

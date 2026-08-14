@@ -15,7 +15,7 @@ HISTORICAL_T = datetime(2026, 7, 14, 14, 0, tzinfo=UTC)
 @pytest.mark.asyncio
 async def test_scanner_replay_stage1_symbols_never_call_current_discovery():
     provider = SimpleNamespace(name="alpaca", supports_asset_discovery=True)
-    scanner = MarketScanner(SimpleNamespace(provider=provider, risk_config=RiskConfig()), [])
+    scanner = MarketScanner(SimpleNamespace(provider=provider, risk_config=RiskConfig()), [], risk_config=RiskConfig())
     scanner._discovery = SimpleNamespace(
         acquire=AsyncMock(side_effect=AssertionError("current discovery reached replay"))
     )
@@ -27,7 +27,7 @@ async def test_scanner_replay_stage1_symbols_never_call_current_discovery():
 @pytest.mark.asyncio
 async def test_run_passes_live_discovery_shortlist_only_to_stage1(monkeypatch):
     provider = SimpleNamespace(name="alpaca", supports_asset_discovery=True)
-    scanner = MarketScanner(SimpleNamespace(provider=provider, risk_config=RiskConfig()), [])
+    scanner = MarketScanner(SimpleNamespace(provider=provider, risk_config=RiskConfig()), [], risk_config=RiskConfig())
     scanner._discovery = SimpleNamespace(
         acquire=AsyncMock(return_value=SimpleNamespace(shortlist=("NEW2", "NEW1")))
     )
@@ -43,7 +43,7 @@ async def test_run_passes_live_discovery_shortlist_only_to_stage1(monkeypatch):
 @pytest.mark.asyncio
 async def test_run_passes_full_static_pool_to_stage1_for_historical_as_of(monkeypatch):
     provider = SimpleNamespace(name="alpaca", supports_asset_discovery=True)
-    scanner = MarketScanner(SimpleNamespace(provider=provider, risk_config=RiskConfig()), [])
+    scanner = MarketScanner(SimpleNamespace(provider=provider, risk_config=RiskConfig()), [], risk_config=RiskConfig())
     scanner._assess_market_risk = AsyncMock(return_value=(MarketRiskState.NORMAL, 0.85, []))
     stage1 = AsyncMock(return_value=[])
     monkeypatch.setattr(scanner, "_stage1_prefilter_parallel", stage1)

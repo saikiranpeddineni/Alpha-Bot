@@ -1,6 +1,20 @@
+
+
+
 """Regression tests verifying quantitative audit defect fixes and parity checks."""
 
 from __future__ import annotations
+
+def _mock_settings():
+    from unittest.mock import MagicMock
+    s = MagicMock()
+    s.walk_forward_train_days = 15
+    s.walk_forward_val_days = 5
+    s.walk_forward_min_windows = 2
+    r = MagicMock()
+    r.min_specialist_auc = 0.50
+    s.risk_config.return_value = r
+    return s
 from app.config import RiskConfig
 from app.config import Settings
 
@@ -106,7 +120,7 @@ def test_trainer_temporal_split_and_purge(tmp_path):
     mock_model.meta = {"validation_auc": 0.55, "validation_auc_long": 0.55, "validation_auc_short": 0.55}
     mock_model.models_dir = tmp_path
     
-    trainer = ContinuousTrainer(MagicMock(), mock_model, MagicMock())
+    trainer = ContinuousTrainer(MagicMock(), mock_model, MagicMock(), settings=_mock_settings())
     
     # Capture the train/val splits by patching WalkForwardValidator.run
     captured_train_long = []
@@ -180,7 +194,7 @@ def test_model_promotion_decoupling(tmp_path):
         "validation_auc_short": 0.60,
         "validation_auc": 0.60
     }
-    trainer = ContinuousTrainer(MagicMock(), mock_model, MagicMock())
+    trainer = ContinuousTrainer(MagicMock(), mock_model, MagicMock(), settings=_mock_settings())
     
     dates = []
     for d in range(5):

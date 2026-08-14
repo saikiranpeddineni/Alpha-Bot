@@ -14,6 +14,12 @@ class ThesisAttempt:
     price: float
     vwap: float
     atr: float
+    strategy: str = ""
+    candidate_id: str = ""
+    thesis_fingerprint: str = ""
+    status: str = "OPEN"
+    pnl: float = 0.0
+    r_multiple: float = 0.0
 
 
 @dataclass
@@ -46,6 +52,9 @@ class ThesisMemory:
         price: float,
         vwap: float,
         atr: float,
+        strategy: str = "",
+        candidate_id: str = "",
+        thesis_fingerprint: str = "",
         now: datetime | None = None,
     ) -> None:
         now = now or datetime.now(UTC)
@@ -57,20 +66,42 @@ class ThesisMemory:
                 price=price,
                 vwap=vwap,
                 atr=atr,
+                strategy=strategy,
+                candidate_id=candidate_id,
+                thesis_fingerprint=thesis_fingerprint,
+                status="OPEN"
             )
         )
         self._clean_old_attempts(symbol, now)
+        
+    def update_attempt_outcome(
+        self,
+        symbol: str,
+        candidate_id: str,
+        status: str,
+        pnl: float,
+        r_multiple: float
+    ) -> None:
+        state = self._state.get(symbol)
+        if not state:
+            return
+        for attempt in reversed(state.attempts):
+            if attempt.candidate_id == candidate_id or (not candidate_id and attempt.status == "OPEN"):
+                attempt.status = status
+                attempt.pnl = pnl
+                attempt.r_multiple = r_multiple
+                break
 
     def is_valid_new_thesis(
         self,
         symbol: str,
         action: SignalAction,
         price: float,
+        reversal_confirmations: int = 0,
         now: datetime | None = None,
     ) -> tuple[bool, str]:
         """
         Check if we are allowed to enter a new trade for this symbol/direction.
-        Returns (is_valid, reason_if_invalid).
         """
         now = now or datetime.now(UTC)
         self._clean_old_attempts(symbol, now)
@@ -79,25 +110,28 @@ class ThesisMemory:
         if not state or not state.attempts:
             return True, ""
             
-        # Get the most recent attempt for this symbol
         last_attempt = state.attempts[-1]
+        age_minutes = (now - last_attempt.timestamp).total_seconds() / 60.0
         
-        # Rule 1: Direction lock. Don't flip direction within the memory window 
-        # unless price has moved significantly. (A simple implementation just blocks flips).
+        # Rule 1: Direction change
         if last_attempt.action != action:
-            return False, f"Direction lock active: prior {last_attempt.action.value} attempt at {last_attempt.timestamp.isoformat()}"
+            if last_attempt.status == "LOSS":
+                if reversal_confirmations < 2:
+                    return False, f"Direction change blocked: prior LOSS requires >=2 reversal confirmations (got {reversal_confirmations})"
+            else:
+                if reversal_confirmations < 1:
+                    return False, f"Direction change blocked: reversal evidence is weak (got {reversal_confirmations})"
+            return True, ""
             
-        # Rule 2: Re-entry barrier. Only re-enter if price is better (lower for longs, higher for shorts)
-        # OR if price has moved at least 0.75 ATR away from the previous attempt.
-        price_diff = abs(price - last_attempt.price)
-        required_movement = 0.75 * max(last_attempt.atr, 1e-9)
+        # Rule 2: Same direction re-entry
+        if last_attempt.status == "LOSS":
+            price_distance = abs(price - last_attempt.price)
+            if price_distance < 0.75 * max(last_attempt.atr, 1e-9):
+                return False, f"Re-entry blocked: price {price} didn't move 0.75 ATR from prior LOSS {last_attempt.price}"
         
-        if action == SignalAction.ENTER_LONG:
-            is_better_price = price < last_attempt.price
-        else:
-            is_better_price = price > last_attempt.price
-            
-        if not is_better_price and price_diff < required_movement:
-            return False, f"Re-entry blocked: price {price} not better and didn't move 0.75 ATR ({required_movement:.2f}) from prior {last_attempt.price}"
+        # Cooldown
+        configured_symbol_reentry_cooldown = 15
+        if age_minutes < configured_symbol_reentry_cooldown:
+            return False, f"Re-entry blocked: cooldown active ({age_minutes:.1f}m < {configured_symbol_reentry_cooldown}m)"
             
         return True, ""

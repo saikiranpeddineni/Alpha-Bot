@@ -61,6 +61,10 @@ class Strategy(ABC):
     def on_bar(self, ctx: StrategyContext, symbol: str, df: pd.DataFrame) -> Signal | None:
         """Called once per newly closed bar with the enriched frame (oldest->newest)."""
 
+    def signal_accepted(self, sig: Signal) -> None:
+        """Called when a signal emitted by this strategy is accepted by risk and submitted to the broker."""
+        pass
+
     def reset(self) -> None:
         """Clear per-session state (fresh backtest / engine restart)."""
 

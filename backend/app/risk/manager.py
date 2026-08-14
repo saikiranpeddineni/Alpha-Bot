@@ -497,6 +497,19 @@ class RiskManager:
             kelly_used = effective_risk_pct / 100.0
             risk_amount = ctx.equity * kelly_used
             qty = int(risk_amount / stop_distance)
+            
+        current_heat_amount = 0.0
+        for p in ctx.positions:
+            if p.stop_loss is not None:
+                current_heat_amount += abs(p.avg_entry_price - p.stop_loss) * abs(p.qty)
+            else:
+                current_heat_amount += abs(p.market_value) * 0.02
+                
+        new_heat_pct = (current_heat_amount + risk_amount) / max(ctx.equity, 1.0)
+        max_heat = 0.05
+        
+        if new_heat_pct > max_heat:
+            return RiskDecision(False, f"Max portfolio heat exceeded ({new_heat_pct*100:.1f}% > {max_heat*100:.1f}%)")
 
         qty_unconstrained = qty
         max_notional = ctx.equity * cfg.max_position_pct / 100.0

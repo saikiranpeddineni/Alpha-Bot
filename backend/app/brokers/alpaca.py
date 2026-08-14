@@ -163,7 +163,7 @@ class AlpacaBroker(Broker):
         # being emitted twice while the previous Fill awaits durable processing.
         self._emitted_fill_qty: dict[str, float] = {}
         self._emitted_fill_notional: dict[str, float] = {}
-        self._meta: dict[str, tuple[str, str]] = {}  # order id -> (strategy, reason)
+        self._meta: dict[str, dict] = {}  # order id -> dict of metadata
 
         self._symbol_strategies: dict[str, str] = {}
         self._shortable_cache: dict[str, bool] = {}
@@ -311,12 +311,13 @@ class AlpacaBroker(Broker):
             parent_id = str(getattr(raw_order, "id", ""))
             if parent_id and parent_id not in seen_ids:
                 seen_ids.add(parent_id)
+                if parent_id and parent_id != "None":
+                    parent_meta = self._meta.get(str(parent_id), {})
+                    parent_strategy = parent_meta.get("strategy", "alpaca")
+                    parent_reason = parent_meta.get("reason", "")
+                else:
+                    parent_strategy, parent_reason = "alpaca", ""
                 normalized.append(parent)
-
-            parent_strategy, parent_reason = self._meta.get(
-                parent_id,
-                (parent.strategy, parent.reason),
-            )
 
             # Collect child orders from both legs and related_orders
             children = []
@@ -342,9 +343,10 @@ class AlpacaBroker(Broker):
             for child in children:
                 child_id = str(getattr(child, "id", ""))
                 if child_id and child_id not in seen_ids:
+                    if child_id and child_id != "None":
+                        if child_id not in self._meta:
+                            self._meta[child_id] = {"strategy": parent_strategy, "reason": parent_reason}
                     seen_ids.add(child_id)
-                    if child_id not in self._meta:
-                        self._meta[child_id] = (parent_strategy, parent_reason)
                     if parent_id and not getattr(child, "parent_id", None) and not getattr(child, "parent_order_id", None):
                         try:
                             setattr(child, "parent_id", parent_id)
@@ -389,10 +391,11 @@ class AlpacaBroker(Broker):
 
         symbol_key = str(getattr(o, "symbol", "") or "").upper()
         symbol_strategies = getattr(self, "_symbol_strategies", {})
-        strategy, reason = self._meta.get(
-            str(o.id),
-            (symbol_strategies.get(symbol_key, "alpaca"), ""),
-        )
+        meta = self._meta.get(str(o.id), {})
+        strategy = meta.get("strategy", symbol_strategies.get(symbol_key, "alpaca"))
+        reason = meta.get("reason", "")
+        role = meta.get("role")
+
         stop_price = (
             float(o.stop_price)
             if getattr(o, "stop_price", None) is not None
@@ -464,7 +467,8 @@ class AlpacaBroker(Broker):
                 if getattr(o, "parent_order_id", None)
                 else (str(o.parent_id) if getattr(o, "parent_id", None) else None)
             ),
-            leg=leg,
+            leg=role.value.lower() if role else leg,
+            role=role or OrderRole.ENTRY,
             strategy=strategy,
             reason=reason,
             submitted_at=getattr(o, "submitted_at", None) or datetime.now(UTC),
@@ -585,7 +589,11 @@ class AlpacaBroker(Broker):
                 msg = f"Ambiguous submission result for {req.symbol} ({req.client_order_id}): {exc}"
                 applog.error("broker.alpaca", msg)
                 raise BrokerTimeoutError(msg) from exc
-        self._meta[str(raw.id)] = (req.strategy, req.reason)
+        self._meta[str(raw.id)] = {
+            "strategy": req.strategy,
+            "reason": req.reason,
+            "role": req.role
+        }
         if req.strategy != "emergency_protection":
             self._symbol_strategies[req.symbol.upper()] = req.strategy
         order = self._to_order(raw)
@@ -705,7 +713,10 @@ class AlpacaBroker(Broker):
             delta = cumulative - processed
             if delta <= 1e-9:
                 continue
-            strategy, reason = self._meta.get(oid, ("alpaca", ""))
+            meta = self._meta.get(oid, {})
+            strategy = meta.get("strategy", "alpaca")
+            reason = meta.get("reason", "")
+            role = meta.get("role", "ENTRY")
 
             # fix(#44): incremental execution pricing from change in cumulative notional
             cum_avg_price = float(o.filled_avg_price or 0.0)
@@ -820,7 +831,7 @@ class AlpacaBroker(Broker):
         except Exception as exc:  # noqa: BLE001
             applog.warning("broker.alpaca", f"cancel_all failed: {exc}")
 
-    async def close_position(self, symbol: str, reason: str = "manual", qty: float | None = None) -> Order | None:
+    async def close_position(self, symbol: str, reason: str = "manual", qty: float | None = None, strategy: str | None = None, role: OrderRole | None = None) -> Order | None:
         try:
             # First, fetch and cancel any outstanding open orders for this symbol to release held quantities
             try:
@@ -854,7 +865,11 @@ class AlpacaBroker(Broker):
                 )
             else:
                 raw = await _call(self._client.close_position, symbol.upper(), label=f"close_position/{symbol}")
-            self._meta[str(raw.id)] = ("engine", reason)
+            self._meta[str(raw.id)] = {
+                "strategy": strategy or "engine",
+                "reason": reason,
+                "role": role or OrderRole.EXIT
+            }
             applog.trade("broker.alpaca", f"Closing {symbol} ({reason}{f', qty={qty}' if qty else ''})")
             return self._to_order(raw)
         except BrokerTimeoutError:
@@ -900,7 +915,11 @@ class AlpacaBroker(Broker):
                     stop_price=round(stop_loss, 2)
                 )
                 raw = await _call(self._client.submit_order, req, label=f"update_protection/{symbol}")
-                self._meta[str(raw.id)] = ("PIS", "update_protection")
+                self._meta[str(raw.id)] = {
+                    "strategy": "PIS",
+                    "reason": "update_protection",
+                    "role": OrderRole.PROTECTION
+                }
                 applog.info("broker.alpaca", f"Updated protection for {symbol}: new stop {stop_loss}")
                 return self._to_order(raw)
             return None

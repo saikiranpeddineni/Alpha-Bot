@@ -45,6 +45,11 @@ class ProtectionState(StrEnum):
     PROTECTED = "protected"
     RECOVERY_REJECTED = "recovery_rejected"
     AMBIGUOUS = "ambiguous"
+class OrderRole(StrEnum):
+    ENTRY = "ENTRY"
+    PROTECTION = "PROTECTION"
+    EXIT = "EXIT"
+    TAKE_PROFIT = "TAKE_PROFIT"
 class SignalAction(StrEnum):
     ENTER_LONG = "enter_long"
     ENTER_SHORT = "enter_short"
@@ -93,6 +98,26 @@ class Signal(BaseModel):
     context_conflict_reasons: list[str] = Field(default_factory=list)
     thesis_continuity_blocked: bool = False
     thesis_fingerprint: str | None = None
+    signal_generated_timestamp_utc: datetime | None = None
+    decision_completed_timestamp_utc: datetime | None = None
+    entry_quality_score: float | None = None
+    entry_quality: str | None = None
+    opportunity_state: str | None = None
+    opportunity_score: float | None = None
+    vwap_distance_pct: float | None = None
+    atr_extension: float | None = None
+    pre_entry_impulse_pct: float | None = None
+    event_risk: str = "normal"
+    event_type: str | None = None
+    event_age_minutes: float | None = None
+    price_discovery: bool = False
+    reentry_attempt: int = 0
+    same_thesis_blocked: bool = False
+    trend_score: float | None = None
+    location_score: float | None = None
+    extension_score: float | None = None
+    structure_score: float | None = None
+
 
     @property
     def side(self) -> str:
@@ -135,11 +160,32 @@ class OrderRequest(BaseModel):
     client_order_id: str = Field(default_factory=new_id)
     strategy: str = "manual"
     reason: str = ""
-    role: str = "entry"
+    role: OrderRole = OrderRole.ENTRY
+    metadata: dict[str, Any] = Field(default_factory=dict)
     time_in_force: str = "day"
     signal_timestamp_utc: datetime | None = None
     decision_bar_timestamp_utc: datetime | None = None
     thesis_fingerprint: str | None = None
+    signal_generated_timestamp_utc: datetime | None = None
+    decision_completed_timestamp_utc: datetime | None = None
+    entry_quality_score: float | None = None
+    entry_quality: str | None = None
+    opportunity_state: str | None = None
+    opportunity_score: float | None = None
+    vwap_distance_pct: float | None = None
+    atr_extension: float | None = None
+    pre_entry_impulse_pct: float | None = None
+    event_risk: str = "normal"
+    event_type: str | None = None
+    event_age_minutes: float | None = None
+    price_discovery: bool = False
+    reentry_attempt: int = 0
+    same_thesis_blocked: bool = False
+    trend_score: float | None = None
+    location_score: float | None = None
+    extension_score: float | None = None
+    structure_score: float | None = None
+
     @model_validator(mode="after")
     def validate_execution_prices(self) -> OrderRequest:
         if self.qty <= 0:
@@ -184,11 +230,33 @@ class Order(BaseModel):
     leg: str = "entry"
     strategy: str = "manual"
     reason: str = ""
+    role: OrderRole = OrderRole.ENTRY
+    metadata: dict[str, Any] = Field(default_factory=dict)
     submitted_at: datetime | None = Field(default_factory=utcnow)
     filled_at: datetime | None = None
     signal_timestamp_utc: datetime | None = None
     decision_bar_timestamp_utc: datetime | None = None
     thesis_fingerprint: str | None = None
+    signal_generated_timestamp_utc: datetime | None = None
+    decision_completed_timestamp_utc: datetime | None = None
+    entry_quality_score: float | None = None
+    entry_quality: str | None = None
+    opportunity_state: str | None = None
+    opportunity_score: float | None = None
+    vwap_distance_pct: float | None = None
+    atr_extension: float | None = None
+    pre_entry_impulse_pct: float | None = None
+    event_risk: str = "normal"
+    event_type: str | None = None
+    event_age_minutes: float | None = None
+    price_discovery: bool = False
+    reentry_attempt: int = 0
+    same_thesis_blocked: bool = False
+    trend_score: float | None = None
+    location_score: float | None = None
+    extension_score: float | None = None
+    structure_score: float | None = None
+
     @property
     def remaining_qty(self) -> float:
         return max(0.0, float(self.qty) - float(self.filled_qty or 0.0))
@@ -217,6 +285,33 @@ class ExecutionTelemetry(BaseModel):
     
     pis_exit_decision: str | None = None
     pis_exit_reason: str | None = None
+    signal_to_decision_ms: float | None = None
+    decision_to_risk_ms: float | None = None
+    risk_to_submit_ms: float | None = None
+    submit_to_ack_ms: float | None = None
+    ack_to_fill_ms: float | None = None
+    fill_to_processed_ms: float | None = None
+    signal_to_fill_ms: float | None = None
+    entry_quality_score: float | None = None
+    entry_quality: str | None = None
+    opportunity_state: str | None = None
+    opportunity_score: float | None = None
+    vwap_distance_pct: float | None = None
+    atr_extension: float | None = None
+    pre_entry_impulse_pct: float | None = None
+    thesis_score_at_entry: float | None = None
+    thesis_score_at_exit: float | None = None
+    same_thesis_attempt: int = 0
+    same_thesis_blocked: bool = False
+    peak_r_at_exit: float | None = None
+    realized_r_at_exit: float | None = None
+    profit_capture_ratio: float | None = None
+    maturity_state: str | None = None
+    runner_time_budget_minutes: int | None = None
+    allowed_giveback_r: float | None = None
+    r_velocity: float | None = None
+    r_acceleration: float | None = None
+    predicted_remaining_r: float | None = None
 
 
 class Position(BaseModel):
@@ -229,7 +324,43 @@ class Position(BaseModel):
     strategy: str = "manual"
     opened_at: datetime | None = None
     thesis_fingerprint: str | None = None
+    signal_generated_timestamp_utc: datetime | None = None
+    decision_completed_timestamp_utc: datetime | None = None
+    entry_quality_score: float | None = None
+    entry_quality: str | None = None
+    opportunity_state: str | None = None
+    opportunity_score: float | None = None
+    vwap_distance_pct: float | None = None
+    atr_extension: float | None = None
+    pre_entry_impulse_pct: float | None = None
+    event_risk: str = "normal"
+    event_type: str | None = None
+    event_age_minutes: float | None = None
+    price_discovery: bool = False
+    reentry_attempt: int = 0
+    same_thesis_blocked: bool = False
+    trend_score: float | None = None
+    location_score: float | None = None
+    extension_score: float | None = None
+    structure_score: float | None = None
+
     telemetry: ExecutionTelemetry = Field(default_factory=ExecutionTelemetry)
+    opportunity_state: str | None = None
+    entry_quality_score: float | None = None
+    maturity_state: str | None = None
+    runner_started_at: datetime | None = None
+    runner_time_budget_minutes: int | None = None
+    peak_r: float | None = None
+    trough_r: float | None = None
+    current_r: float | None = None
+    current_r_velocity: float | None = None
+    r_acceleration: float | None = None
+    allowed_giveback_r: float | None = None
+    predicted_max_r: float | None = None
+    predicted_remaining_r: float | None = None
+    code_commit_sha: str | None = None
+    risk_config_hash: str | None = None
+    pis_config_hash: str | None = None
     @property
     def side(self) -> str:
         return "long" if self.qty >= 0 else "short"
@@ -267,6 +398,26 @@ class TradeRecord(BaseModel):
     initial_stop: float | None = None
     initial_risk: float | None = None
     thesis_fingerprint: str | None = None
+    signal_generated_timestamp_utc: datetime | None = None
+    decision_completed_timestamp_utc: datetime | None = None
+    entry_quality_score: float | None = None
+    entry_quality: str | None = None
+    opportunity_state: str | None = None
+    opportunity_score: float | None = None
+    vwap_distance_pct: float | None = None
+    atr_extension: float | None = None
+    pre_entry_impulse_pct: float | None = None
+    event_risk: str = "normal"
+    event_type: str | None = None
+    event_age_minutes: float | None = None
+    price_discovery: bool = False
+    reentry_attempt: int = 0
+    same_thesis_blocked: bool = False
+    trend_score: float | None = None
+    location_score: float | None = None
+    extension_score: float | None = None
+    structure_score: float | None = None
+
     
     # Latency Timestamps
     signal_timestamp_utc: datetime | None = None
@@ -287,6 +438,28 @@ class TradeRecord(BaseModel):
     hold_bars: int = 0
     metadata: dict[str, Any] | None = None
     telemetry: ExecutionTelemetry | None = None
+    decision_completed_timestamp_utc: datetime | None = None
+    risk_approved_timestamp_utc: datetime | None = None
+    intent_persisted_timestamp_utc: datetime | None = None
+    broker_ack_timestamp_utc: datetime | None = None
+    fill_processed_timestamp_utc: datetime | None = None
+    exit_decision_completed_timestamp_utc: datetime | None = None
+    exit_intent_persisted_timestamp_utc: datetime | None = None
+    exit_broker_ack_timestamp_utc: datetime | None = None
+    exit_fill_processed_timestamp_utc: datetime | None = None
+    entry_quality_score: float | None = None
+    entry_quality: str | None = None
+    opportunity_state: str | None = None
+    opportunity_score: float | None = None
+    maturity_state: str | None = None
+    peak_r: float | None = None
+    realized_r: float | None = None
+    profit_capture_ratio: float | None = None
+    same_thesis_attempt: int = 0
+    same_thesis_blocked: bool = False
+    code_commit_sha: str | None = None
+    risk_config_hash: str | None = None
+    pis_config_hash: str | None = None
 
 class AccountSnapshot(BaseModel):
     equity: float

@@ -96,7 +96,7 @@ async def test_engine_manual_flow(engine: TradingEngine):
     for _ in range(3):
         await engine._tick()
 
-    order = await engine.manual_order(OrderRequest(symbol="SPY", side=OrderSide.BUY, qty=3))
+    order = await engine.manual_order(OrderRequest(symbol="SPY", side=OrderSide.BUY, qty=3, stop_loss=90.0))
     assert order.status == "filled"
     positions = await engine.broker.positions()
     assert positions and positions[0].symbol == "SPY"

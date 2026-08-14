@@ -1,4 +1,18 @@
+
+
+
 from __future__ import annotations
+
+def _mock_settings():
+    from unittest.mock import MagicMock
+    s = MagicMock()
+    s.walk_forward_train_days = 15
+    s.walk_forward_val_days = 5
+    s.walk_forward_min_windows = 2
+    r = MagicMock()
+    r.min_specialist_auc = 0.50
+    s.risk_config.return_value = r
+    return s
 
 import asyncio
 from pathlib import Path
@@ -38,7 +52,7 @@ class _AtomicModel(_Model):
 def test_continuous_trigger_claims_shared_slot_before_scheduling(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     async def scenario() -> None:
         coordinator = TrainingCoordinator()
-        trainer = ContinuousTrainer(_Data(), _Model(tmp_path), tmp_path, training_coordinator=coordinator)
+        trainer = ContinuousTrainer(_Data(), _Model(tmp_path), tmp_path, training_coordinator=coordinator, settings=_mock_settings())
         entered = asyncio.Event()
         release = asyncio.Event()
         runs = 0
@@ -65,7 +79,7 @@ def test_continuous_trigger_claims_shared_slot_before_scheduling(tmp_path: Path,
 def test_continuous_trigger_rejects_when_manual_writer_owns_shared_slot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     async def scenario() -> None:
         coordinator = TrainingCoordinator()
-        trainer = ContinuousTrainer(_Data(), _Model(tmp_path), tmp_path, training_coordinator=coordinator)
+        trainer = ContinuousTrainer(_Data(), _Model(tmp_path), tmp_path, training_coordinator=coordinator, settings=_mock_settings())
         scheduled = False
 
         async def forbidden_cycle(*args, **kwargs):
@@ -87,7 +101,7 @@ def test_continuous_trigger_rejects_when_manual_writer_owns_shared_slot(tmp_path
 
 def test_continuous_global_promotion_commits_one_complete_generation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     model = _AtomicModel(tmp_path)
-    trainer = ContinuousTrainer(_Data(), model, tmp_path)
+    trainer = ContinuousTrainer(_Data(), model, tmp_path, settings=_mock_settings())
 
     def legacy_fit(self, dfs):
         self.model._model_long = _Marker("g1")
@@ -106,7 +120,7 @@ def test_continuous_global_promotion_commits_one_complete_generation(tmp_path: P
 
 def test_cancelled_continuous_global_fit_restores_incumbent_generation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     model = _AtomicModel(tmp_path)
-    trainer = ContinuousTrainer(_Data(), model, tmp_path)
+    trainer = ContinuousTrainer(_Data(), model, tmp_path, settings=_mock_settings())
     incumbent = model._generation_store.current
 
     def failing_fit(self, dfs):

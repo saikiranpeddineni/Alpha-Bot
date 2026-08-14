@@ -65,12 +65,27 @@ class SignalPipeline:
         self._midday_active: bool = False
 
     def compute_composite_score(self, ml_prob: float, meta_prob: float, trade_score: float,
-                                portfolio_alignment: float = 1.0, risk_factor: float = 1.0) -> float:
-        ml_pts = min(100.0, max(0.0, ml_prob * 100.0)) * 0.30
-        meta_pts = min(100.0, max(0.0, meta_prob * 100.0)) * 0.25
-        score_pts = min(100.0, max(0.0, trade_score)) * 0.20
-        port_pts = min(100.0, max(0.0, portfolio_alignment * 100.0)) * 0.15
-        risk_pts = min(100.0, max(0.0, risk_factor * 100.0)) * 0.10
+                                portfolio_alignment: float = 1.0, risk_factor: float = 1.0,
+                                regime: Regime | None = None) -> float:
+        ml_base = min(100.0, max(0.0, ml_prob * 100.0))
+        meta_base = min(100.0, max(0.0, meta_prob * 100.0))
+        score_base = min(100.0, max(0.0, trade_score))
+        port_base = min(100.0, max(0.0, portfolio_alignment * 100.0))
+        risk_base = min(100.0, max(0.0, risk_factor * 100.0))
+
+        if regime in (Regime.TREND_UP, Regime.TREND_DOWN):
+            ml_pts = ml_base * 0.40
+            meta_pts = meta_base * 0.30
+            score_pts = score_base * 0.20
+            port_pts = port_base * 0.10
+            risk_pts = 0.0  # Risk handled elsewhere or assumed 0 in this branch based on instructions
+        else:
+            ml_pts = ml_base * 0.25
+            meta_pts = meta_base * 0.20
+            score_pts = score_base * 0.35
+            port_pts = port_base * 0.20
+            risk_pts = 0.0
+
         return round(ml_pts + meta_pts + score_pts + port_pts + risk_pts, 2)
 
     def set_event_day(self, is_event: bool) -> None:
@@ -82,10 +97,17 @@ class SignalPipeline:
     def regime_weight(self, strategy: str, regime: Regime) -> float:
         return self.regime_weights.get(strategy, {}).get(regime, 1.0)
 
-    def should_enforce_ml_veto(self, strategy: str, action: SignalAction, model_source: str,
+    def should_enforce_ml_veto(self, sig: Signal, model_source: str,
                                specialist_status: str, mins_et: int) -> bool:
-        # We now strictly trust the AI pipeline. 
-        # All manual bypass hacks have been removed.
+        # Bypass ML veto for high entry quality (>=85) or momentum with news
+        eq = sig.strategy_params.get("entry_quality_score", 0.0) if hasattr(sig, "strategy_params") and sig.strategy_params else 0.0
+        if eq >= 85.0:
+            return False
+            
+        # Bypass for Momentum + News catalyst
+        if sig.strategy == "momentum" and "news" in str(sig.reason).lower():
+            return False
+
         return True
 
     def process(self, symbol: str, df: pd.DataFrame, signals: list[Signal], regime: Regime,
@@ -119,10 +141,43 @@ class SignalPipeline:
             # Phase 3: Thesis Memory Check
             price = sig.price or (float(df["close"].iloc[-1]) if df is not None and len(df) > 0 else 0.0)
             vwap = float(df["vwap"].iloc[-1]) if df is not None and "vwap" in df.columns and len(df) > 0 else 0.0
+            
+            reversal_confirmations = 0
+            if df is not None and len(df) > 1:
+                last_row = df.iloc[-1]
+                prev_row = df.iloc[-2]
+                
+                if sig.action == SignalAction.ENTER_LONG and last_row.get("ema9", 0) > last_row.get("ema20", 0):
+                    reversal_confirmations += 1
+                elif sig.action == SignalAction.ENTER_SHORT and last_row.get("ema9", 0) < last_row.get("ema20", 0):
+                    reversal_confirmations += 1
+                    
+                close_price = last_row.get("close", 0)
+                vwap_val = last_row.get("vwap", 0)
+                if sig.action == SignalAction.ENTER_LONG and close_price > vwap_val:
+                    reversal_confirmations += 1
+                elif sig.action == SignalAction.ENTER_SHORT and close_price < vwap_val:
+                    reversal_confirmations += 1
+                    
+                macd = last_row.get("macd_hist", 0)
+                prev_macd = prev_row.get("macd_hist", 0)
+                if sig.action == SignalAction.ENTER_LONG and macd > prev_macd:
+                    reversal_confirmations += 1
+                elif sig.action == SignalAction.ENTER_SHORT and macd < prev_macd:
+                    reversal_confirmations += 1
+                    
+                rs = sig.strategy_params.get("rs_score") if hasattr(sig, "strategy_params") and sig.strategy_params else None
+                if rs is not None:
+                    if sig.action == SignalAction.ENTER_LONG and float(rs) > 0.6:
+                        reversal_confirmations += 1
+                    elif sig.action == SignalAction.ENTER_SHORT and float(rs) < 0.4:
+                        reversal_confirmations += 1
+
             is_valid, reason = self.thesis_memory.is_valid_new_thesis(
                 symbol=symbol,
                 action=sig.action,
-                price=price
+                price=price,
+                reversal_confirmations=reversal_confirmations
             )
             if not is_valid:
                 rejected.append((sig, reason))
@@ -181,7 +236,7 @@ class SignalPipeline:
                 else:
                     now_et = datetime.now(et_tz)
                 mins_et = now_et.hour * 60 + now_et.minute
-                enforce_veto = self.should_enforce_ml_veto(sig.strategy, sig.action, score_res.model_source,
+                enforce_veto = self.should_enforce_ml_veto(sig, score_res.model_source,
                                                            score_res.specialist_status, mins_et)
                 
                 # Audit Phase 3: Use adaptive threshold if available
@@ -308,18 +363,6 @@ class SignalPipeline:
         if entries:
             entries.sort(key=lambda s: s.score or 0.0, reverse=True)
             winner = entries[0]
-            
-            # Record the winning attempt in thesis memory
-            price = winner.price or (float(df["close"].iloc[-1]) if df is not None and len(df) > 0 else 0.0)
-            vwap = float(df["vwap"].iloc[-1]) if df is not None and "vwap" in df.columns and len(df) > 0 else 0.0
-            atr = float(df["atr14"].iloc[-1]) if df is not None and "atr14" in df.columns and len(df) > 0 else 0.0
-            self.thesis_memory.record_attempt(
-                symbol=symbol,
-                action=winner.action,
-                price=price,
-                vwap=vwap,
-                atr=atr
-            )
             
             accepted.append(winner)
             for loser in entries[1:]:

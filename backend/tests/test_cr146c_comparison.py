@@ -91,7 +91,9 @@ def test_portfolio_comparison_and_reflection(client):
 
     # 2. Run EOD reflection report generation
     now = datetime(2026, 1, 6, 17, 0, 0, tzinfo=UTC)
-    report_text = generate_eod_reflection_report(db, now=now)
+    from app.config import Settings
+    settings = Settings()
+    report_text = generate_eod_reflection_report(db, now=now, settings=settings)
 
     # Verify that the report contains the portfolio simulation header and comparison table
     assert "## Portfolio-Level Virtual Simulation Comparison" in report_text

@@ -213,7 +213,11 @@ class AlpacaBroker(legacy.AlpacaBroker):
                 thesis_fingerprint=req.thesis_fingerprint,
             )
 
-        self._meta[str(raw.id)] = (req.strategy, req.reason)
+        self._meta[str(raw.id)] = {
+            "strategy": req.strategy,
+            "reason": req.reason,
+            "role": req.role
+        }
         self._symbol_strategies[req.symbol.upper()] = req.strategy
         order = self._to_order(raw)
         order.stop_loss = req.stop_loss

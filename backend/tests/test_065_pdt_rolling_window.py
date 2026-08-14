@@ -92,6 +92,7 @@ def _signal(price: float = 100.0) -> MagicMock:
     sig.scanner_score = None
     sig.scanner_auc = None
     sig.score = None
+    sig.risk_multiplier = 1.0
     return sig
 
 

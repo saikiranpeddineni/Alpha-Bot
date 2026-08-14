@@ -8,7 +8,7 @@ from functools import partial
 from datetime import datetime, timedelta, timezone, UTC
 from typing import Any
 import pandas as pd
-from app.core.domain import Signal, SignalAction, Position, OrderRequest, OrderSide, OrderType, Order
+from app.core.domain import Signal, SignalAction, Position, OrderRequest, OrderSide, OrderType, Order, OrderRole
 from app.core.applog import applog
 from app.core.shadow_ledger import ShadowLedger
 from app.indicators.ta import enrich, compute_relative_strength
@@ -81,11 +81,11 @@ class TradingEngineEvaluationMixin:
                 atr = float(df["atr14"].iloc[-1]) if "atr14" in df.columns else (close * 0.02)
                 if position.qty > 0 and close < peak - (3.0 * atr):
                     applog.error("engine.exit", f"Dumb Fallback triggered for {symbol}: -3.0 ATR trailing stop breached while PIS was offline.")
-                    await self._close_position_guarded(symbol, reason="CRITICAL: PIS Offline - Fallback Trailing Stop", qty=abs(position.qty))
+                    await self._close_position_guarded(symbol, reason="CRITICAL: PIS Offline - Fallback Trailing Stop", qty=abs(position.qty), strategy=position.strategy, role=OrderRole.EXIT)
                     return []
                 elif position.qty < 0 and close > trough + (3.0 * atr):
                     applog.error("engine.exit", f"Dumb Fallback triggered for {symbol}: +3.0 ATR trailing stop breached while PIS was offline.")
-                    await self._close_position_guarded(symbol, reason="CRITICAL: PIS Offline - Fallback Trailing Stop", qty=abs(position.qty))
+                    await self._close_position_guarded(symbol, reason="CRITICAL: PIS Offline - Fallback Trailing Stop", qty=abs(position.qty), strategy=position.strategy, role=OrderRole.EXIT)
                     return []
 
             if pis_order is not None:
@@ -99,7 +99,9 @@ class TradingEngineEvaluationMixin:
                                     self._position_current_stops[symbol] = pis_order.stop_price
                     else:
                         applog.info("engine", f"{symbol}: PIS Unified Exit triggered: {pis_order.reason} (qty={pis_order.qty})")
-                        await self._close_position_guarded(symbol, reason=pis_order.reason, qty=pis_order.qty)
+                        order = await self._close_position_guarded(symbol, reason=pis_order.reason, qty=pis_order.qty, strategy=position.strategy, role=OrderRole.EXIT)
+                        if order and getattr(pis_order, "metadata", None):
+                            order.metadata.update(pis_order.metadata)
                         if (
                             pis_decision is not None
                             and getattr(pis_decision, "action", None) != "FULL_EXIT"
@@ -121,7 +123,7 @@ class TradingEngineEvaluationMixin:
                             self._degraded_symbols = set()
                         self._degraded_symbols.add(symbol)
                         try:
-                            await self.broker.close_position(symbol, reason="CRITICAL: PROTECTION_DEGRADED (Full Flatten)")
+                            await self.broker.close_position(symbol, reason="CRITICAL: PROTECTION_DEGRADED (Full Flatten)", strategy=position.strategy, role=OrderRole.EXIT)
                         except Exception as flatten_e:
                             applog.error("engine.exit", f"Failed to fully flatten degraded position {symbol}: {flatten_e}")
                     applog.error("engine.exit", f"Execution failed for PIS action on {symbol}: {e}")

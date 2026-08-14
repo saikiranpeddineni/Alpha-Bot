@@ -19,17 +19,21 @@ def classify_opportunity(
     volume_z: float,
     extension_atr: float,
     trend_score: float,
+    news_confidence: float = 0.0,
+    event_age_minutes: float | None = None,
 ) -> OpportunityState:
     
-    # Event + massive volatility and expansion -> PRICE_DISCOVERY
-    if news_catalyst and atr_pct >= 4.0 and volume_z >= 2.0:
+    if news_catalyst and volume_z >= 2.0 and atr_pct >= 6.0:
         return OpportunityState.PRICE_DISCOVERY
 
-    if news_catalyst:
-        return OpportunityState.EVENT
+    if abs(gap_pct) >= 8.0 and extension_atr >= 1.25:
+        return OpportunityState.PRICE_DISCOVERY
 
-    if extension_atr >= 1.8:
+    if extension_atr >= 1.80:
         return OpportunityState.EXTENDED
+
+    if news_catalyst and (event_age_minutes is None or event_age_minutes <= 180):
+        return OpportunityState.EVENT
 
     if trend_score >= 75:
         return OpportunityState.TREND

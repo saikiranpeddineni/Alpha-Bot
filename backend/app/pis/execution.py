@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from app.core.domain import OrderRequest, OrderSide, OrderType
+from app.core.domain import OrderRequest, OrderSide, OrderType, OrderRole
 from app.pis.models import ExitAction, PISDecision, PositionObservation
 
 
@@ -41,15 +41,27 @@ class PISExecutionAdapter:
             target_stop = decision.target_stop_loss
             if target_stop is None:
                 return None
+                
+            # Directional sanity checks (P0 #5): stop MUST be strictly behind current price
+            if obs.side > 0 and target_stop >= obs.close:
+                from app.core.applog import applog
+                applog.error("pis", f"{obs.symbol}: Protection update rejected. LONG stop ({target_stop}) must be < current ({obs.close}).")
+                return None
+            elif obs.side < 0 and target_stop <= obs.close:
+                from app.core.applog import applog
+                applog.error("pis", f"{obs.symbol}: Protection update rejected. SHORT stop ({target_stop}) must be > current ({obs.close}).")
+                return None
+
             return OrderRequest(
                 symbol=obs.symbol,
                 side=order_side,
                 order_type=OrderType.STOP,
                 qty=abs(obs.qty),
                 stop_price=target_stop,
-                strategy=f"PISProtection[{decision.lifecycle_state.value}]",
+                strategy=obs.strategy,
                 reason=f"PIS Protection Update: {reason_str}",
-                role="exit",
+                role=OrderRole.PROTECTION,
+                metadata={"executor": "PIS", "pis_state": decision.lifecycle_state.value},
             )
 
         if decision.action not in (ExitAction.PARTIAL_EXIT, ExitAction.FULL_EXIT):
@@ -73,7 +85,8 @@ class PISExecutionAdapter:
             side=order_side,
             order_type=OrderType.MARKET,
             qty=qty_to_close,
-            strategy=f"PISDiscretionaryExit[{decision.lifecycle_state.value}]",
+            strategy=obs.strategy,
             reason=f"PIS Exit Reason: {reason_str}",
-            role="exit",
+            role=OrderRole.EXIT,
+            metadata={"executor": "PIS", "pis_state": decision.lifecycle_state.value},
         )

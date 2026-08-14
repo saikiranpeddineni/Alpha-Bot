@@ -93,6 +93,7 @@ class PositionBrain:
                 self._profit_memory = ProfitMemoryTracker.initial_state(initial_observation)
 
             self._last_observation: PositionObservation = initial_observation
+            self._entry_timestamp: datetime = initial_observation.timestamp
             self._last_timestamp: datetime = initial_observation.timestamp
             self._last_observed_qty: float = abs(float(initial_observation.qty))
             if restored_state is None:
@@ -137,6 +138,7 @@ class PositionBrain:
                 "config_version": getattr(self.config, "CONFIG_VERSION", "PIS-006"),
                 "config_hash": self.config.fingerprint() if hasattr(self.config, "fingerprint") else "",
                 "is_closed": self._is_closed,
+                "entry_timestamp": self._entry_timestamp.isoformat(),
                 "last_timestamp": self._last_timestamp.isoformat(),
                 "profit_memory": {
                     "peak_r": self._profit_memory.peak_r,
@@ -167,6 +169,13 @@ class PositionBrain:
         self._has_scaled_out = payload.get("has_scaled_out", False)
         self._current_stop_floor = payload.get("current_stop_floor", initial_observation.initial_stop)
         
+        # Hydrate entry_timestamp, fallback to initial observation
+        entry_ts_str = payload.get("entry_timestamp")
+        if entry_ts_str:
+            self._entry_timestamp = datetime.fromisoformat(entry_ts_str)
+        else:
+            self._entry_timestamp = initial_observation.timestamp
+            
         lifecycle_str = payload.get("lifecycle")
         if lifecycle_str:
             try:
@@ -349,13 +358,61 @@ class PositionBrain:
         runner_score, is_runner = self.authority.runner_intelligence.evaluate_runner_score(
             obs, peak_r, health, regime=regime
         )
-        if runner_prob >= 0.60 and peak_r >= 0.50:
-            self._runner_qualified = True
-            is_runner = True
+        # (Runner qualifications moved down to maturity calculations)
 
         # 5. State transition rules with persistence confirmation (Priority 3)
         self._update_lifecycle(health, thesis, peak_r)
 
+        # (Protection floor calculation moved down to use maturity variables)
+
+        # Proven Trade Exit Planner Mode
+        proven_trade = (
+            peak_r >= self.config.proven_trade_r
+            and health.overall >= 0.60
+            and not thesis.severe_adverse_override_triggered
+            and not thesis.structural_confirmation
+        )
+        
+        runner_active = (
+            peak_r >= self.config.runner_activation_r
+            and runner_prob >= 0.60
+            and health.overall >= 0.60
+        )
+        
+        extended_runner = (
+            peak_r >= self.config.extended_runner_r
+            and runner_prob >= 0.55
+            and health.overall >= 0.55
+        )
+        
+        exceptional_runner = (
+            peak_r >= self.config.exceptional_runner_r
+            and health.overall >= 0.50
+        )
+        
+        if runner_active or extended_runner or exceptional_runner:
+            self._runner_qualified = True
+            
+        maturity_state = "EXCEPTIONAL" if exceptional_runner else ("EXTENDED" if extended_runner else ("RUNNER" if runner_active else ("PROVEN" if proven_trade else "UNPROVEN")))
+        
+        exit_planner_mode = "PATIENT" if proven_trade else "STRICT"
+
+        # Compute Giveback Breach
+        current_r = obs.r_multiple
+        giveback = max(0.0, peak_r - current_r)
+        allowed_giveback = 999.0
+        if peak_r >= 0.50 and peak_r < 1.00:
+            allowed_giveback = getattr(self.config, "giveback_r_1", 0.40)
+        elif peak_r >= 1.00 and peak_r < 2.00:
+            allowed_giveback = getattr(self.config, "giveback_r_2", 0.60)
+        elif peak_r >= 2.00:
+            allowed_giveback = getattr(self.config, "giveback_r_3", 0.80)
+
+        giveback_breach = (
+            proven_trade
+            and giveback > allowed_giveback
+        )
+        
         # 6. Protection floor calculation with dynamic ceiling proximity (Priority 4)
         target_stop = self.authority.protection_planner.compute_protection_floor(
             obs=obs,
@@ -365,13 +422,13 @@ class PositionBrain:
             allow_relaxation=False,
             has_scaled_out=self._has_scaled_out,
             predicted_max_r=predicted_max_r,
+            is_runner=self._runner_qualified,
+            proven_trade=proven_trade,
+            giveback_breach=giveback_breach,
+            maturity_state=maturity_state,
         )
         self._current_stop_floor = target_stop
-
-        # Proven Trade Exit Planner Mode
-        proven_trade = peak_r >= 0.50
-        exit_planner_mode = "PATIENT" if (proven_trade and thesis.is_intact) else "STRICT"
-
+        
         # 7. Exit planner synthesis with early scratch exits and dynamic ceiling harvesting (Quadrant 2 & 3)
         decision = self.authority.exit_planner.synthesize_decision(
             obs=obs,
@@ -389,6 +446,37 @@ class PositionBrain:
             runner_probability=runner_prob,
             exit_planner_mode=exit_planner_mode,
         )
+
+        # Time Management Review
+        age_minutes = (obs.timestamp - self._entry_timestamp).total_seconds() / 60.0
+        
+        if peak_r < 0.25:
+            review_after = 8
+        elif peak_r < 0.50:
+            review_after = 15
+        elif peak_r < 1.00:
+            review_after = 60
+        elif peak_r < 2.00:
+            review_after = 120
+        else:
+            review_after = 240
+            
+        if age_minutes > review_after and decision.action == ExitAction.HOLD:
+            # Maturity re-evaluation
+            if (
+                health.overall < 0.40
+                or health.momentum_score < 0.35
+                or thesis.stagnation_bars > 5
+                or thesis.early_invalidation_detected
+                or giveback_breach
+            ):
+                import dataclasses
+                from app.pis.models import ReasonCode
+                reasons = list(decision.reason_codes)
+                if ReasonCode.TIME_DECAY_STALL not in reasons:
+                    reasons.append(ReasonCode.TIME_DECAY_STALL)
+                decision = dataclasses.replace(decision, action=ExitAction.FULL_EXIT, exit_ratio=1.0, reason_codes=tuple(reasons))
+
 
         # A PARTIAL_EXIT is an execution intent. Do not mark scale-out state until
         # the canonical broker/reconciliation path observes the reduced quantity.
@@ -443,6 +531,7 @@ class PositionBrain:
                 "adverse_momentum": decision.thesis.adverse_momentum,
                 "severe_adverse_override_triggered": decision.thesis.severe_adverse_override_triggered,
                 "completed_bars_since_entry": self._completed_bars_since_entry,
+                "maturity_state": maturity_state,
             },
         )
 

@@ -15,7 +15,7 @@ if TYPE_CHECKING:
         Position,
     )
 
-from app.core.domain import OrderSide
+from app.core.domain import OrderSide, OrderRole
 
 
 class BrokerTimeoutError(RuntimeError):
@@ -43,6 +43,7 @@ class Fill:
     cumulative_qty: float | None = None
     broker_mode: str | None = None
     broker_account_id: str | None = None
+    role: str = "ENTRY"
 
 
 class Broker:
@@ -80,7 +81,7 @@ class Broker:
     async def cancel_all(self) -> None:  # pragma: no cover
         pass
 
-    async def close_position(self, symbol: str, reason: str = "manual", qty: float | None = None) -> Order | None:  # pragma: no cover
+    async def close_position(self, symbol: str, reason: str = "manual", qty: float | None = None, strategy: str | None = None, role: OrderRole | None = None) -> Order | None:  # pragma: no cover
         return None
 
     async def update_protection(self, symbol: str, stop_loss: float, side: OrderSide, qty: float) -> Order | None:  # pragma: no cover

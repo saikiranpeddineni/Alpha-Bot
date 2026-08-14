@@ -362,7 +362,11 @@ class PortfolioTracker:
             # P0-0 Invariant: A missing local lot must never be sufficient evidence to create a new position.
             # Local position state is built solely by authoritative periodic reconciliation (engine_portfolio.py),
             # and entries should only be processed if they arrive as part of the normal lifecycle.
-            # If the strategy was an exit/flatten, do NOT create a phantom long/short.
+            # If the strategy was an exit/flatten, or the role is EXIT/TAKE_PROFIT/PROTECTION, do NOT create a phantom long/short.
+            role_upper = getattr(fill, "role", "ENTRY").upper()
+            if role_upper in ("EXIT", "TAKE_PROFIT", "PROTECTION"):
+                applog.error("portfolio", f"[{fill.ts}] REJECTED phantom position creation: fill claims to exit/protect {symbol} (role={fill.role}) but no local lot exists.")
+                return FillApplicationResult()
             if fill.reason and ("close" in fill.reason.lower() or "exit" in fill.reason.lower() or "flatten" in fill.reason.lower()):
                 applog.error("portfolio", f"[{fill.ts}] REJECTED phantom position creation: fill claims to close/exit {symbol} but no local lot exists.")
                 return FillApplicationResult()

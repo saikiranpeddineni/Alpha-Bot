@@ -37,53 +37,36 @@ class RunnerIntelligence:
         """
         if not getattr(self.config, "enable_dynamic_max_r", True):
             return 2.0, 0.0
-
-        # 1. Base Target R from trade setup or default baseline (2.0R)
         risk = obs.risk_per_share
+        native_target_r = 0.0
         if obs.take_profit is not None and obs.take_profit > 0 and risk > 1e-6:
             native_target_r = abs(obs.take_profit - obs.entry_price) / risk
-            r_base = max(2.0, native_target_r)
-        else:
-            r_base = 2.0
+        r_base = max(1.5, native_target_r)
 
-        # 2. Extract multi-dimensional health and order-flow signals
-        trend_factor = max(0.0, min(1.0, health.trend_score))
-        mom_factor = max(0.0, min(1.0, health.momentum_score))
-        vol_factor = max(0.0, min(1.0, health.volume_score))
+        health_factor = (
+            0.40 * health.overall
+            + 0.25 * health.trend_score
+            + 0.20 * health.momentum_score
+            + 0.15 * health.volume_score
+        )
+        health_factor = max(0.0, min(1.0, health_factor))
+        runner_prob = health_factor
 
-        # 3. Composite Runner Probability P_runner in [0.0, 1.0]
-        runner_prob = (0.40 * trend_factor) + (0.35 * mom_factor) + (0.25 * vol_factor)
-
-        # 4. Regime-Aware Dynamic Expansion Multiplier
-        if regime == MarketRegime.RANGE_BOUND:
-            # Range-bound regime: Cap ceiling to prevent giving back gains to mean reversion
-            predicted_max_r = min(1.50, r_base)
-            runner_prob = min(0.40, runner_prob * 0.50)
-        elif regime == MarketRegime.CHOPPY_DEFENSIVE:
-            # Choppy defensive regime: Conservative target
-            predicted_max_r = min(1.20, r_base)
-            runner_prob = min(0.30, runner_prob * 0.40)
+        if regime == MarketRegime.TREND_RUNNER:
+            predicted_max_r = r_base * (1.0 + 1.5 * runner_prob)
         elif regime == MarketRegime.VOLATILITY_EXPANSION:
-            # Volatility expansion: Moderate extension
-            expansion = 1.0 + (runner_prob * 0.75)
-            predicted_max_r = r_base * expansion
+            predicted_max_r = r_base * (1.0 + 1.0 * runner_prob)
+        elif regime == MarketRegime.RANGE_BOUND:
+            predicted_max_r = min(r_base, 1.5)
+        elif regime == MarketRegime.CHOPPY_DEFENSIVE:
+            predicted_max_r = min(r_base, 1.25)
         else:
-            # Trend Runner: Full exponential upside expansion
-            if health.overall >= 0.70 and runner_prob >= 0.60:
-                expansion = 1.0 + (runner_prob * 1.50)  # Up to 2.5x expansion of baseline target
-                predicted_max_r = r_base * expansion
-            elif health.overall >= 0.55:
-                expansion = 1.0 + (runner_prob * 0.50)
-                predicted_max_r = r_base * expansion
-            else:
-                predicted_max_r = r_base
+            predicted_max_r = r_base
 
-        # 5. Peak R Ratchet: If the stock is already running strong, extend ceiling ahead of peak
-        if health.overall >= 0.75 and peak_r >= (predicted_max_r * 0.80) and regime == MarketRegime.TREND_RUNNER:
-            predicted_max_r = max(predicted_max_r, peak_r + 1.00)
-
-        max_cap = getattr(self.config, "max_r_cap", 20.0)  # Uncapped from 8.0R to allow extreme trend runners
-        predicted_max_r = min(max_cap, round(predicted_max_r, 2))
+        if predicted_max_r < peak_r:
+            predicted_max_r = max(peak_r * 1.5, predicted_max_r)
+        
+        predicted_max_r = round(predicted_max_r, 2)
 
         return predicted_max_r, round(runner_prob, 3)
 
@@ -107,15 +90,26 @@ class RunnerIntelligence:
         """
         predicted_max_r, runner_prob = self.predict_max_r(obs, peak_r, health, regime=regime)
 
-        target_r = self.config.runner_qualification_r
+        target_r = getattr(self.config, "runner_activation_r", 1.0)
         if target_r <= 0.0 or math.isnan(target_r):
-            target_r = 3.0
+            target_r = 1.0
 
         r_progress = max(0.0, min(1.0, peak_r / target_r)) if peak_r > 0 else 0.0
         health_contrib = health.overall
 
         runner_score = max(0.0, min(1.0, (r_progress * 0.50) + (health_contrib * 0.25) + (runner_prob * 0.25)))
 
-        is_runner = (peak_r >= target_r or (peak_r >= 1.5 and runner_prob >= 0.75)) and health.overall >= self.config.health_weakening_threshold
+        runner_active = (
+            peak_r >= getattr(self.config, "runner_activation_r", 1.0)
+            and runner_prob >= 0.60
+            and health.overall >= 0.60
+        )
+
+        extended_runner = (
+            peak_r >= getattr(self.config, "extended_runner_r", 2.0)
+            and health.overall >= 0.55
+        )
+
+        is_runner = runner_active or extended_runner
 
         return runner_score, is_runner

@@ -37,6 +37,10 @@ class AdaptiveProtectionPlanner:
         allow_relaxation: bool = False,
         has_scaled_out: bool = False,
         predicted_max_r: float = 2.0,
+        is_runner: bool = False,
+        proven_trade: bool = False,
+        giveback_breach: bool = False,
+        maturity_state: str = "UNPROVEN",
     ) -> float:
         """Compute the updated protection floor for a position.
 
@@ -183,6 +187,16 @@ class AdaptiveProtectionPlanner:
                 dynamic_atr_buffer *= health_factor
 
             giveback_allowance_r = max(dynamic_min_breathing, dynamic_atr_buffer, peak_r * giveback_pct)
+            
+            if maturity_state == "PROVEN":
+                giveback_allowance_r = max(giveback_allowance_r, peak_r * 0.30)
+            elif maturity_state == "RUNNER":
+                giveback_allowance_r = max(giveback_allowance_r, getattr(self.config, "giveback_r_1", 0.40))
+            elif maturity_state == "EXTENDED":
+                giveback_allowance_r = max(giveback_allowance_r, getattr(self.config, "giveback_r_2", 0.60))
+            elif maturity_state == "EXCEPTIONAL":
+                giveback_allowance_r = max(giveback_allowance_r, getattr(self.config, "giveback_r_3", 0.80))
+                
             locked_r = max(self.config.min_locked_r, peak_r - giveback_allowance_r)
 
             # Raw desired floor from R-multiple locking

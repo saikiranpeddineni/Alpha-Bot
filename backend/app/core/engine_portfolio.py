@@ -6,14 +6,14 @@ import json
 from datetime import datetime, timedelta, timezone, UTC
 from typing import Any
 import pandas as pd
-from app.core.domain import Signal, SignalAction, Position, OrderRequest, OrderSide, OrderType, Order
+from app.core.domain import Signal, SignalAction, Position, OrderRequest, OrderSide, OrderType, Order, OrderRole
 from app.core.applog import applog
 from app.indicators.ta import enrich
 from app.ai.regime import detect_regime
 from app.strategies import SignalPipeline, StrategyContext
 
 class TradingEnginePortfolioMixin:
-    async def _close_position_guarded(self, symbol: str, reason: str, qty: float | None = None) -> None:
+    async def _close_position_guarded(self, symbol: str, reason: str, qty: float | None = None, strategy: str | None = None, role: OrderRole | None = None) -> Order | None:
         """Close a position, skipping if a close order is already in-flight for this symbol."""
         import time
         if not hasattr(self, "_pending_close_ttls"):
@@ -28,19 +28,19 @@ class TradingEnginePortfolioMixin:
 
         self._flattening_symbols.add(symbol)
         self._pending_close_ttls[symbol] = now + 30.0  # Lock out retries for 30 seconds
-
+        order = None
         try:
             if qty is not None:
                 try:
-                    order = await self.broker.close_position(symbol, reason=reason, qty=qty)
+                    order = await self.broker.close_position(symbol, reason=reason, qty=qty, strategy=strategy, role=role)
                 except TypeError:
-                    order = await self.broker.close_position(symbol, reason=reason)
+                    order = await self.broker.close_position(symbol, reason=reason, strategy=strategy, role=role)
             else:
-                order = await self.broker.close_position(symbol, reason=reason)
+                order = await self.broker.close_position(symbol, reason=reason, strategy=strategy, role=role)
 
-            # If close failed cleanly (e.g. rejected by broker quickly), release the guard so retries work.
             # Ambiguous timeouts are intentionally covered by the TTL because the broker may have accepted
             # the order even though the client did not receive a definitive response.
+            return order
         finally:
             self._flattening_symbols.discard(symbol)
 

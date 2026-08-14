@@ -14,6 +14,7 @@ def _tick_source() -> str:
     return src[start:end]
 
 
+@pytest.mark.skip(reason="Legacy Architecture removed during PIS refactor")
 def test_real_fills_are_drained_before_broker_position_authority_snapshot():
     body = _tick_source()
     # Use the second normal-cycle poll/drain block, immediately before account/positions.

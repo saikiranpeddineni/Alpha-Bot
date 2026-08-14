@@ -272,10 +272,11 @@ class TestIssue45DuplicateFlattenGuard:
         """#45: Second _close_position_guarded call for same symbol in same tick is skipped."""
         from app.core.engine import TradingEngine
 
+        import time
         engine = MagicMock()
         engine._pending_close_symbols = set()
-        engine._flattening_symbols = {"AAPL"}  # already in-flight
-        engine._pending_close_symbols.add("AAPL")
+        engine._flattening_symbols = set()
+        engine._pending_close_ttls = {"AAPL": time.time() + 30.0}
         engine.broker = MagicMock()
         engine.broker.close_position = AsyncMock(return_value=MagicMock())
 
@@ -642,6 +643,7 @@ class TestEdgeCases:
         mock_broker.drain_fills.return_value = [f_b1, f_a2, f_a1]
 
         mock_portfolio = MagicMock()
+        mock_portfolio.on_fill.return_value = None
         engine = MagicMock()
         engine.broker = mock_broker
         engine.portfolio = mock_portfolio

@@ -7,8 +7,8 @@ execution history after a process restart.
 from __future__ import annotations
 
 from datetime import datetime
-
-from app.core.domain import Order, OrderStatus, OrderType
+from typing import Any
+from app.core.domain import Order, OrderStatus, OrderType, OrderRole
 from app.core.engine import TradingEngine
 from app.core.applog import applog
 
@@ -100,7 +100,7 @@ class DurableTradingEngine(TradingEngine):
                     f"Failed to persist terminal order state for {fill.order_id}: {exc}",
                 )
 
-    async def _close_position_guarded(self, symbol: str, reason: str, qty: float | None = None) -> None:
+    async def _close_position_guarded(self, symbol: str, reason: str, qty: float | None = None, strategy: str | None = None, role: Any | None = None) -> Order | None:
         """Canonical duplicate-close guard plus immediate close-order persistence."""
         import time
         if not hasattr(self, "_pending_close_ttls"):
@@ -114,11 +114,12 @@ class DurableTradingEngine(TradingEngine):
         self._flattening_symbols.add(symbol)
         self._pending_close_ttls[symbol] = now + 30.0
         try:
-            order = await self.broker.close_position(symbol, reason=reason, qty=qty)
+            order = await self.broker.close_position(symbol, reason=reason, qty=qty, strategy=strategy, role=role)
             if order is None:
                 return
             self.recent_orders.appendleft(order)
             self.db.save_order(order, self.mode)
             self.publish("orders", self.orders_payload())
+            return order
         finally:
             self._flattening_symbols.discard(symbol)

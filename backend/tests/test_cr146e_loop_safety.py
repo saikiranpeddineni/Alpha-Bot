@@ -158,7 +158,7 @@ def test_reflection_nominations_cooling_off(client):
     
     try:
         # 1. Run reflection -> Nominee is created!
-        report = generate_eod_reflection_report(db)
+        report = generate_eod_reflection_report(db, Settings())
         print("REPORT TEXT:\n", report)
         pending = db.get_pending_nominee_for_policy("strategy_b")
         assert pending is not None
@@ -169,7 +169,7 @@ def test_reflection_nominations_cooling_off(client):
         assert r.status_code == 200
         
         # 3. Run reflection again -> nominee must NOT be regenerated because of 7-day cooling-off!
-        report2 = generate_eod_reflection_report(db)
+        report2 = generate_eod_reflection_report(db, Settings())
         pending2 = db.get_pending_nominee_for_policy("strategy_b")
         assert pending2 is None
         

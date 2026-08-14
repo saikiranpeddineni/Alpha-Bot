@@ -1,5 +1,19 @@
+
+
+
 """Tests for specialist promotion safety: min_specialist_auc floor and side-preservation."""
 from __future__ import annotations
+
+def _mock_settings():
+    from unittest.mock import MagicMock
+    s = MagicMock()
+    s.walk_forward_train_days = 15
+    s.walk_forward_val_days = 5
+    s.walk_forward_min_windows = 2
+    r = MagicMock()
+    r.min_specialist_auc = 0.50
+    s.risk_config.return_value = r
+    return s
 
 import hashlib
 from pathlib import Path
@@ -38,7 +52,7 @@ def test_specialist_sub_floor_not_promoted(tmp_path: Path):
 
     model = MagicMock()
     model._specialists = {}
-    trainer = _LegacyContinuousTrainer(MagicMock(), model, models_dir)
+    trainer = _LegacyContinuousTrainer(MagicMock(), model, models_dir, settings=_mock_settings())
 
     dates = pd.date_range("2026-01-01", periods=400, freq="1min", tz="UTC")
     df_fake = pd.DataFrame({
@@ -84,7 +98,7 @@ def test_specialist_side_preservation_on_promotion(tmp_path: Path):
 
     model = MagicMock()
     model._specialists = {"BABA": incumbent_artifact}
-    trainer = _LegacyContinuousTrainer(MagicMock(), model, models_dir)
+    trainer = _LegacyContinuousTrainer(MagicMock(), model, models_dir, settings=_mock_settings())
 
     dates = pd.date_range("2026-01-01", periods=400, freq="1min", tz="UTC")
     df_fake = pd.DataFrame({
