@@ -1,4 +1,4 @@
-"""Minimal strategy framework for AlphaDesk 007."""
+"""Minimal production strategy framework for AlphaDesk 007."""
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -20,10 +20,6 @@ class StrategyContext:
     debug_mode: bool = False
     mover_bias: str | None = None
     mover_change_pct: float = 0.0
-    rs_score: float | None = None
-    news_direction: str = "neutral"
-    news_confidence: float = 0.0
-    event_state: str | None = None
 
 
 class Strategy(ABC):
@@ -69,7 +65,7 @@ def register(cls: type[Strategy]) -> type[Strategy]:
     return cls
 
 
-# These are the only strategies allowed to generate production entries.
+# Only these strategies can generate production entries.
 PRODUCTION_STRATEGIES = {
     "momentum",
     "orb",
@@ -80,12 +76,6 @@ PRODUCTION_STRATEGIES = {
 
 
 def create_strategies(overrides: dict[str, dict] | None = None) -> list[Strategy]:
-    """Create exactly the 007 production strategies.
-
-    Research strategies may exist elsewhere in the repository, but they are
-    not imported/registered by the production strategy package and therefore
-    cannot accidentally trade.
-    """
     overrides = overrides or {}
     out: list[Strategy] = []
     for name, cls in REGISTRY.items():
@@ -95,6 +85,5 @@ def create_strategies(overrides: dict[str, dict] | None = None) -> list[Strategy
         params = cfg.get("params") if isinstance(cfg.get("params"), dict) else None
         enabled = bool(cfg.get("enabled", True))
         out.append(cls(params=params, enabled=enabled))
-    enabled_names = [s.name for s in out if s.enabled]
-    applog.info("strategy", f"007 production strategies: {enabled_names}")
+    applog.info("strategy", f"007 production strategies: {[s.name for s in out if s.enabled]}")
     return out
