@@ -1,12 +1,4 @@
-"""Strategy framework.
-
-A strategy is a pure decision function: given the enriched bar frame and a
-small context (position, regime, equity), emit a Signal or None. Strategies
-never size positions or talk to brokers -- the AI pipeline gates their
-signals and the risk manager sizes them. The same instance code runs live
-and in backtests.
-"""
-
+"""Minimal strategy framework for AlphaDesk 007."""
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -40,33 +32,31 @@ class Strategy(ABC):
     default_params: dict = {}
     max_allocation: float = 50000.0
     is_breakout: bool = False
-    ml_threshold: float = 0.53
+    ml_threshold: float = 0.50
     evaluation_horizons: list[str] = ["15m", "close"]
     regime_weights: dict[Regime, float] = {
-        Regime.TREND_UP: 1.0, Regime.TREND_DOWN: 1.0, Regime.RANGE: 1.0, Regime.VOLATILE: 1.0
+        Regime.TREND_UP: 1.0,
+        Regime.TREND_DOWN: 1.0,
+        Regime.RANGE: 1.0,
+        Regime.VOLATILE: 1.0,
     }
 
     def __init__(self, params: dict | None = None, enabled: bool = True) -> None:
-        self.params: dict = {**self.default_params, **(params or {})}
+        self.params = {**self.default_params, **(params or {})}
         self.enabled = enabled
 
     @abstractmethod
     def on_bar(self, ctx: StrategyContext, symbol: str, df: pd.DataFrame) -> Signal | None:
-        """Called once per newly closed bar with the enriched frame."""
+        """Emit one entry signal or None."""
 
     def signal_accepted(self, sig: Signal) -> None:
-        pass
+        """Called after the broker accepts the entry."""
 
     def reset(self) -> None:
-        pass
+        """Reset strategy-local state."""
 
     def describe(self) -> dict:
-        return {
-            "name": self.name,
-            "description": self.description,
-            "enabled": self.enabled,
-            "params": self.params,
-        }
+        return {"name": self.name, "description": self.description, "enabled": self.enabled, "params": self.params}
 
 
 REGISTRY: dict[str, type[Strategy]] = {}
@@ -79,26 +69,32 @@ def register(cls: type[Strategy]) -> type[Strategy]:
     return cls
 
 
-# AlphaDesk 007 production set. Research/challenger strategies remain registered
-# for backtests and analysis but cannot create production entries.
+# These are the only strategies allowed to generate production entries.
 PRODUCTION_STRATEGIES = {
     "momentum",
-    "rsi2_reversion",
     "orb",
+    "rsi2_reversion",
     "vwap_reversion",
     "trend_pullback",
 }
 
 
 def create_strategies(overrides: dict[str, dict] | None = None) -> list[Strategy]:
-    """Instantiate the compact AlphaDesk 007 production strategy set."""
+    """Create exactly the 007 production strategies.
+
+    Research strategies may exist elsewhere in the repository, but they are
+    not imported/registered by the production strategy package and therefore
+    cannot accidentally trade.
+    """
     overrides = overrides or {}
     out: list[Strategy] = []
     for name, cls in REGISTRY.items():
-        cfg = overrides.get(name, {})
-        explicitly_enabled = bool(cfg.get("enabled", False)) if name in overrides else True
-        enabled = name in PRODUCTION_STRATEGIES and explicitly_enabled
-        if name not in PRODUCTION_STRATEGIES and explicitly_enabled:
-            applog.info("strategy", f"AlphaDesk 007: research strategy {name} kept registered but disabled for production")
-        out.append(cls(params=cfg.get("params"), enabled=enabled))
+        if name not in PRODUCTION_STRATEGIES:
+            continue
+        cfg = overrides.get(name, {}) or {}
+        params = cfg.get("params") if isinstance(cfg.get("params"), dict) else None
+        enabled = bool(cfg.get("enabled", True))
+        out.append(cls(params=params, enabled=enabled))
+    enabled_names = [s.name for s in out if s.enabled]
+    applog.info("strategy", f"007 production strategies: {enabled_names}")
     return out
