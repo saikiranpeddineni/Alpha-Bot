@@ -82,8 +82,6 @@ def _install_risk_guard() -> None:
         _set_lower(config, "min_stop_pct", MIN_STOP_PCT)
         _set_lower(config, "kelly_fraction_cap", 0.10)
         _set_lower(config, "max_positions_per_sector", 2)
-        # Production entry profile: enough quality to retain an edge, without the
-        # stacked 006 thresholds that starved the book of executable trades.
         _set_lower(config, "ml_confidence_threshold", ENTRY_ML_THRESHOLD)
         _set_lower(config, "ml_hard_reject_threshold", ENTRY_HARD_ML_CUTOFF)
         _set_lower(config, "score_threshold_trend", ENTRY_SCORE_TREND)
@@ -122,10 +120,7 @@ def _install_risk_guard() -> None:
             except (TypeError, ValueError):
                 proposed_distance = 0.0
             if proposed_distance < minimum_distance:
-                return RiskDecision(
-                    False,
-                    f"AlphaDesk 007: stop distance {proposed_distance:.4f} < minimum {minimum_distance:.4f}",
-                )
+                return RiskDecision(False, f"AlphaDesk 007: stop distance {proposed_distance:.4f} < minimum {minimum_distance:.4f}")
 
         decision = original_evaluate_entry(self, signal, ctx, bars, now=now, kelly_override=kelly_override)
         if not decision.approved or decision.order is None:
@@ -138,8 +133,6 @@ def _install_risk_guard() -> None:
         if stop_distance < minimum_distance:
             return RiskDecision(False, "AlphaDesk 007: executable stop geometry is too tight")
 
-        # Final sizing authority: all upstream quality/Kelly multipliers are bounded
-        # by one simple economic risk budget.
         target_risk = ctx.equity * TARGET_RISK_PCT / 100.0
         original_risk = abs(float(order.qty)) * stop_distance
         max_qty = int(target_risk / stop_distance)
@@ -161,21 +154,16 @@ def _install_risk_guard() -> None:
 
         effective_fraction = original_risk / max(float(ctx.equity), 1.0)
         decision.kelly_fraction = round(effective_fraction, 6)
-        decision.reason = (
-            f"AlphaDesk 007 sized {int(order.qty)} shares; planned risk=${original_risk:,.2f} "
-            f"({effective_fraction * 100:.3f}% equity); heat={new_heat_pct:.2f}%"
-        )
+        decision.reason = f"AlphaDesk 007 sized {int(order.qty)} shares; planned risk=${original_risk:,.2f} ({effective_fraction * 100:.3f}% equity); heat={new_heat_pct:.2f}%"
         order.metadata = dict(order.metadata or {})
-        order.metadata.update(
-            {
-                "alphadesk_007_guard": True,
-                "planned_risk_pct": round(effective_fraction * 100.0, 4),
-                "stop_distance": round(stop_distance, 6),
-                "min_stop_distance": round(minimum_distance, 6),
-                "portfolio_heat_pct": round(new_heat_pct, 4),
-                "entry_profile": "LOW_FRICTION_PRODUCTION",
-            }
-        )
+        order.metadata.update({
+            "alphadesk_007_guard": True,
+            "planned_risk_pct": round(effective_fraction * 100.0, 4),
+            "stop_distance": round(stop_distance, 6),
+            "min_stop_distance": round(minimum_distance, 6),
+            "portfolio_heat_pct": round(new_heat_pct, 4),
+            "entry_profile": "LOW_FRICTION_PRODUCTION",
+        })
         return decision
 
     @wraps(original_on_trade_closed)
@@ -211,31 +199,17 @@ def _install_pipeline_simplification() -> None:
 
     if getattr(SignalPipeline, "_alphadesk_007_simplified", False):
         return
-
     original_init = SignalPipeline.__init__
     original_process = SignalPipeline.process
 
     @wraps(original_init)
     def guarded_pipeline_init(self, *args, **kwargs):
-        # Let near-threshold candidates reach Meta/TradeScore instead of being
-        # discarded by the first ML veto.
         kwargs["soft_composite_gating"] = True
         original_init(self, *args, **kwargs)
 
     @wraps(original_process)
     def guarded_pipeline_process(self, symbol, df, signals, regime, features=None, sector_strength=None, adaptive_ml_thresholds=None):
-        # Freeze the adaptive threshold layer in production. It remains visible in
-        # telemetry/research, but cannot silently make entry eligibility oscillate.
-        return original_process(
-            self,
-            symbol,
-            df,
-            signals,
-            regime,
-            features=features,
-            sector_strength=sector_strength,
-            adaptive_ml_thresholds=None,
-        )
+        return original_process(self, symbol, df, signals, regime, features=features, sector_strength=sector_strength, adaptive_ml_thresholds=None)
 
     SignalPipeline.__init__ = guarded_pipeline_init
     SignalPipeline.process = guarded_pipeline_process
@@ -244,7 +218,6 @@ def _install_pipeline_simplification() -> None:
 
 def _install_trade_telemetry_guard() -> None:
     from app.portfolio.tracker import PortfolioTracker, FillApplicationResult
-
     original_apply_fill = PortfolioTracker._apply_fill
     if getattr(PortfolioTracker, "_alphadesk_007_telemetry", False):
         return
@@ -259,13 +232,7 @@ def _install_trade_telemetry_guard() -> None:
             hold_seconds = max(0.0, (trade.exit_at - trade.entry_at).total_seconds())
             enriched = trade.model_copy(update={
                 "hold_bars": max(1, int(math.ceil(hold_seconds / 60.0))),
-                "metadata": {
-                    **dict(trade.metadata or {}),
-                    "alphadesk_007_guard": True,
-                    "hold_seconds": round(hold_seconds, 3),
-                    "hold_minutes": round(hold_seconds / 60.0, 3),
-                    "economic_trade_key": f"{trade.symbol}:{trade.entry_at.isoformat()}",
-                },
+                "metadata": {**dict(trade.metadata or {}), "alphadesk_007_guard": True, "hold_seconds": round(hold_seconds, 3), "hold_minutes": round(hold_seconds / 60.0, 3), "economic_trade_key": f"{trade.symbol}:{trade.entry_at.isoformat()}"},
             })
             if self.trades and self.trades[-1].id == trade.id:
                 self.trades[-1] = enriched
