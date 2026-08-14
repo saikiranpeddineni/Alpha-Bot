@@ -27,7 +27,6 @@ PDT_MAX_DAY_TRADES = 3
 
 
 def ensure_thesis_fingerprint(signal: Signal) -> str:
-    """Stable lineage identifier for telemetry only; never a production veto."""
     existing = getattr(signal, "thesis_fingerprint", None)
     if existing:
         return existing
@@ -139,19 +138,16 @@ class RiskManager:
         self.closed_theses.clear()
 
     def reconstruct_cooldowns(self, trades: list[TradeRecord], now: datetime | None = None) -> None:
-        """Compatibility hook. Historical trades are analytics, not entry vetoes."""
         self.historical_loss_context = {}
         for trade in trades:
             if getattr(trade, "pnl", 0.0) < 0:
-                sym = trade.symbol.upper()
-                self.historical_loss_context.setdefault(sym, {"losses": 0})["losses"] += 1
+                self.historical_loss_context.setdefault(trade.symbol.upper(), {"losses": 0})["losses"] += 1
 
     def on_trade_closed(self, trade: TradeRecord, now: datetime | None = None) -> None:
         strategy = trade.strategy or "manual"
         if trade.pnl < 0:
             self.strategy_consecutive_losses[strategy] = self.strategy_consecutive_losses.get(strategy, 0) + 1
-            sym = trade.symbol.upper()
-            self.historical_loss_context.setdefault(sym, {"losses": 0})["losses"] += 1
+            self.historical_loss_context.setdefault(trade.symbol.upper(), {"losses": 0})["losses"] += 1
         else:
             self.strategy_consecutive_losses[strategy] = 0
         self.consecutive_losses = max(self.strategy_consecutive_losses.values(), default=0)
@@ -205,7 +201,6 @@ class RiskManager:
         return RiskDecision(True, "permitted")
 
     def evaluate_entry(self, signal: Signal, ctx: AccountContext, bars: pd.DataFrame, now: datetime | None = None, kelly_override: float | None = None) -> RiskDecision:
-        """Validate execution geometry and size strictly from stop distance."""
         pre = self.is_entry_permitted(signal, now)
         if not pre.approved:
             return pre
@@ -250,7 +245,6 @@ class RiskManager:
         if stop_distance < minimum_stop:
             return RiskDecision(False, f"stop too tight: {stop_distance:.4f} < {minimum_stop:.4f}")
 
-        # One risk formula. Kelly and strategy-specific sizing are ignored.
         risk_pct = min(float(cfg.risk_per_trade_pct), 0.25)
         risk_pct *= max(0.1, min(float(getattr(signal, "risk_multiplier", 1.0)), 1.0))
         risk_amount = max(0.0, ctx.equity * risk_pct / 100.0)
@@ -266,7 +260,7 @@ class RiskManager:
         if target is None and atr is not None and atr > 0:
             target = price + 2.0 * atr if signal.action == SignalAction.ENTER_LONG else price - 2.0 * atr
 
-        side = OrderSide.BUY if signal.action == SignalAction.ENTER_LONG else OrderSide.SELL_SHORT
+        side = OrderSide.BUY if signal.action == SignalAction.ENTER_LONG else OrderSide.SELL
         order_type = OrderType.LIMIT if cfg.entry_order_type == "limit" else OrderType.MARKET
         request = OrderRequest(
             symbol=symbol,
@@ -290,10 +284,8 @@ class RiskManager:
             opportunity_score=getattr(signal, "opportunity_score", None) or (signal.strategy_params or {}).get("opportunity_score"),
             vwap_distance_pct=getattr(signal, "vwap_distance_pct", None) or (signal.strategy_params or {}).get("vwap_distance_pct"),
             atr_extension=getattr(signal, "atr_extension", None) or (signal.strategy_params or {}).get("atr_extension"),
-            trend_score=getattr(signal, "trend_score", None),
-            location_score=getattr(signal, "location_score", None),
-            extension_score=getattr(signal, "extension_score", None),
-            structure_score=getattr(signal, "structure_score", None),
+            pre_entry_impulse_pct=getattr(signal, "pre_entry_impulse_pct", None),
+            event_risk=getattr(signal, "event_risk", "normal"),
             metadata={"candidate_id": getattr(signal, "candidate_id", None), "risk_pct": risk_pct, "risk_amount": risk_amount},
         )
         return RiskDecision(True, f"sized {qty} shares; risk ${risk_amount:,.2f}", order=request, kelly_fraction=0.0)
