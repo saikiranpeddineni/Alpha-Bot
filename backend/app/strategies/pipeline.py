@@ -14,7 +14,6 @@ from app.core.domain import Signal, SignalAction
 
 @dataclass
 class _NoOpThesisMemory:
-    """Compatibility object for old telemetry callers; never gates entries."""
     def record_attempt(self, **kwargs: Any) -> None:
         return None
 
@@ -34,6 +33,10 @@ class SignalPipeline:
         self._is_event_day = False
         self._midday_active = False
         self.thesis_memory = _NoOpThesisMemory()
+        # Startup compatibility for the legacy engine constructor. These are
+        # intentionally absent rather than instantiated research engines.
+        self.meta_label_engine = None
+        self.trade_score_engine = None
 
     def set_event_day(self, is_event: bool) -> None:
         self._is_event_day = bool(is_event)
@@ -42,11 +45,6 @@ class SignalPipeline:
         self._midday_active = bool(is_midday)
 
     def process(self, symbol, df, signals, regime, features=None, sector_strength=None, adaptive_ml_thresholds=None):
-        """Compatibility only: return signals unchanged.
-
-        This method deliberately cannot veto production entries. The engine's
-        single EntryDecision path owns the ML decision.
-        """
         accepted = [s for s in signals if s.action == SignalAction.EXIT]
         accepted.extend(s for s in signals if s.action != SignalAction.EXIT)
         return accepted, []
