@@ -131,6 +131,8 @@ class PortfolioTracker:
     equity_curve: list[tuple[datetime, float]] = field(default_factory=list)
     _lots: dict[str, _OpenLot] = field(default_factory=dict)
     _seen_fill_keys: set = field(default_factory=set)
+    _cumulative_fills: dict[str, float] = field(default_factory=dict)
+    _cumulative_notionals: dict[str, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.restore_mode not in {"live", "paper"}:
@@ -362,11 +364,12 @@ class PortfolioTracker:
             prev_cum = self._cumulative_fills.get(fill.order_id, 0.0)
             if fill.cumulative_qty > prev_cum:
                 effective.qty = fill.cumulative_qty - prev_cum
-                if fill.cumulative_notional is not None:
+                fill_cumulative_notional = getattr(fill, "cumulative_notional", None)
+                if fill_cumulative_notional is not None:
                     prev_notional = self._cumulative_notionals.get(fill.order_id, 0.0)
-                    delta_notional = fill.cumulative_notional - prev_notional
+                    delta_notional = fill_cumulative_notional - prev_notional
                     effective.price = delta_notional / effective.qty if effective.qty > 0 else fill.price
-                    self._cumulative_notionals[fill.order_id] = fill.cumulative_notional
+                    self._cumulative_notionals[fill.order_id] = fill_cumulative_notional
                 self._cumulative_fills[fill.order_id] = fill.cumulative_qty
                 
                 if effective.qty > 1e-9:
