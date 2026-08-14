@@ -22,6 +22,7 @@ from app.core.domain import (
     AccountSnapshot,
     Order,
     OrderRequest,
+    OrderRole,
     OrderSide,
     OrderStatus,
     OrderType,
@@ -321,7 +322,7 @@ class PaperBroker(Broker):
             order_type=OrderType.MARKET,
             strategy=pos.strategy,
             reason=reason,
-            role="exit",
+            role=OrderRole.EXIT,
         )
         # Position exits always fill immediately at the latest price, even in
         # next_open mode: stops/targets/flatten act on the observed bar.
