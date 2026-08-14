@@ -18,21 +18,8 @@ class MomentumSimple(Strategy):
     description = "MACD/EMA/VWAP momentum continuation"
     is_breakout = True
     ml_threshold = 0.50
-    regime_weights = {
-        Regime.TREND_UP: 1.20,
-        Regime.TREND_DOWN: 1.20,
-        Regime.RANGE: 0.80,
-        Regime.VOLATILE: 0.90,
-    }
-    default_params = {
-        "rsi_min": 48.0,
-        "rsi_max": 80.0,
-        "vol_z_min": -0.25,
-        "event_window_bars": EVENT_WINDOW_BARS,
-        "atr_stop_mult": 2.0,
-        "reward_risk": 1.8,
-        "min_minutes_since_open": 5,
-    }
+    regime_weights = {Regime.TREND_UP: 1.20, Regime.TREND_DOWN: 1.20, Regime.RANGE: 0.80, Regime.VOLATILE: 0.90}
+    default_params = {"rsi_min": 48.0, "rsi_max": 80.0, "vol_z_min": -0.25, "event_window_bars": EVENT_WINDOW_BARS, "atr_stop_mult": 2.0, "reward_risk": 1.8, "min_minutes_since_open": 5}
 
     def __init__(self, params: dict | None = None, enabled: bool = True) -> None:
         super().__init__(params, enabled)
@@ -72,22 +59,15 @@ class MomentumSimple(Strategy):
     @staticmethod
     def _quality(side: str, close: float, vwap: float, atr: float, vol_z: float, mover_bias: str | None) -> float:
         score = 55.0
-        if side == "long" and close > vwap:
-            score += 12.0
-        if side == "short" and close < vwap:
-            score += 12.0
-        if vol_z >= 0.5:
-            score += 8.0
-        elif vol_z < -0.5:
-            score -= 8.0
-        if (side == "long" and mover_bias == "gainer") or (side == "short" and mover_bias == "loser"):
-            score += 7.0
+        if side == "long" and close > vwap: score += 12.0
+        if side == "short" and close < vwap: score += 12.0
+        if vol_z >= 0.5: score += 8.0
+        elif vol_z < -0.5: score -= 8.0
+        if (side == "long" and mover_bias == "gainer") or (side == "short" and mover_bias == "loser"): score += 7.0
         if atr > 0:
             extension = abs(close - vwap) / atr
-            if extension <= 1.5:
-                score += 4.0
-            elif extension > 2.5:
-                score -= 8.0
+            if extension <= 1.5: score += 4.0
+            elif extension > 2.5: score -= 8.0
         return max(0.0, min(100.0, score))
 
     def on_bar(self, ctx: StrategyContext, symbol: str, df: pd.DataFrame) -> Signal | None:
@@ -96,38 +76,24 @@ class MomentumSimple(Strategy):
         required = ("ema9", "ema20", "vwap", "macd_hist", "rsi14", "atr14", "vol_z")
         if any(c not in df.columns for c in required):
             return None
-
-        last = df.iloc[-1]
-        prev = df.iloc[-2]
-        prev2 = df.iloc[-3]
+        last, prev, prev2 = df.iloc[-1], df.iloc[-2], df.iloc[-3]
         if any(pd.isna(last[c]) for c in required) or any(pd.isna(prev[c]) for c in ("ema9", "ema20", "macd_hist")) or pd.isna(prev2["macd_hist"]):
             return None
 
-        close = float(last["close"])
-        atr = float(last["atr14"])
-        rsi = float(last["rsi14"])
-        vol_z = float(last["vol_z"])
+        close, atr, rsi, vol_z = float(last["close"]), float(last["atr14"]), float(last["rsi14"]), float(last["vol_z"])
         if close <= 0 or atr <= 0 or vol_z < float(self.params["vol_z_min"]):
             return None
-
-        hist = float(last["macd_hist"])
-        hist_prev = float(prev["macd_hist"])
-        hist_prev2 = float(prev2["macd_hist"])
+        hist, hist_prev, hist_prev2 = float(last["macd_hist"]), float(prev["macd_hist"]), float(prev2["macd_hist"])
         now = df.index[-1]
-        if hist > hist_prev and hist_prev <= hist_prev2:
-            self._arm(symbol, "long", now)
-        if hist < hist_prev and hist_prev >= hist_prev2:
-            self._arm(symbol, "short", now)
+        if hist > hist_prev and hist_prev <= hist_prev2: self._arm(symbol, "long", now)
+        if hist < hist_prev and hist_prev >= hist_prev2: self._arm(symbol, "short", now)
 
         local = ctx.now.astimezone(ET)
-        minutes = local.hour * 60 + local.minute
-        if minutes < 9 * 60 + 30 + int(self.params.get("min_minutes_since_open", 5)):
+        if local.hour * 60 + local.minute < 9 * 60 + 30 + int(self.params.get("min_minutes_since_open", 5)):
             return None
-
         long_aligned = float(last["ema9"]) > float(last["ema20"]) and close > float(last["vwap"])
         short_aligned = float(last["ema9"]) < float(last["ema20"]) and close < float(last["vwap"])
         mover = ctx.mover_bias
-
         long_trigger = self._event_valid(symbol, "long", df) or (mover == "gainer" and long_aligned and vol_z >= 0.5)
         short_trigger = self._event_valid(symbol, "short", df) or (mover == "loser" and short_aligned and vol_z >= 0.5)
 
@@ -137,7 +103,9 @@ class MomentumSimple(Strategy):
             target = close + float(self.params["atr_stop_mult"]) * float(self.params["reward_risk"]) * atr
             return Signal(symbol=symbol, action=SignalAction.ENTER_LONG, confidence=min(0.95, 0.55 + max(0.0, vol_z) * 0.04 + (0.08 if mover == "gainer" else 0.0)), strategy=self.name, reason=f"momentum continuation; quality={quality:.0f}", price=close, stop_loss=stop, take_profit=target, trend_score=quality, strategy_params={"entry_quality_score": quality})
 
-        if short_aligned and short_trigger and (100.0 - float(self.params["rsi_max"])) <= rsi <= (100.0 - float(self.params["rsi_min"]):
+        short_rsi_min = 100.0 - float(self.params["rsi_max"])
+        short_rsi_max = 100.0 - float(self.params["rsi_min"])
+        if short_aligned and short_trigger and short_rsi_min <= rsi <= short_rsi_max:
             quality = self._quality("short", close, float(last["vwap"]), atr, vol_z, mover)
             stop = close + float(self.params["atr_stop_mult"]) * atr
             target = close - float(self.params["atr_stop_mult"]) * float(self.params["reward_risk"]) * atr
