@@ -79,10 +79,10 @@ def register(cls: type[Strategy]) -> type[Strategy]:
     return cls
 
 
-# Production 007 deliberately runs a compact set of strategies with evidence
-# of useful behavior in the current DB. Experimental/challenger strategies stay
-# registered for research/backtests but do not create live entries by default.
+# AlphaDesk 007 production set. Research/challenger strategies remain registered
+# for backtests and analysis but cannot create production entries.
 PRODUCTION_STRATEGIES = {
+    "momentum",
     "rsi2_reversion",
     "orb",
     "vwap_reversion",
@@ -91,7 +91,7 @@ PRODUCTION_STRATEGIES = {
 
 
 def create_strategies(overrides: dict[str, dict] | None = None) -> list[Strategy]:
-    """Instantiate only the compact AlphaDesk 007 production strategy set."""
+    """Instantiate the compact AlphaDesk 007 production strategy set."""
     overrides = overrides or {}
     out: list[Strategy] = []
     for name, cls in REGISTRY.items():
