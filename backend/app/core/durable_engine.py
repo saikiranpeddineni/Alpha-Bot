@@ -156,13 +156,31 @@ class DurableTradingEngine(TradingEngine):
             self._pending_close_ttls = {}
         
         now = time.time()
-        if symbol in self._pending_close_ttls:
-            applog.debug("engine", f"{symbol}: skipping duplicate close — close already in-flight (#45)")
-            return
+        pending_lock = self._pending_close_ttls.get(symbol)
+        if pending_lock is not None:
+            if isinstance(pending_lock, dict):
+                is_partial = pending_lock.get("is_partial", False)
+                ttl = pending_lock.get("ttl", float("inf"))
+            else:
+                is_partial = False
+                ttl = float("inf") # Legacy fallback (indefinite)
+
+            if now < ttl:
+                # If a partial close is locked, a FULL close can still proceed.
+                if is_partial and qty is None:
+                    pass
+                else:
+                    applog.debug("engine", f"{symbol}: skipping duplicate close — close already in-flight (#45)")
+                    return
+            else:
+                self._pending_close_ttls.pop(symbol, None)
 
         self._flattening_symbols.add(symbol)
-        # Lock indefinitely. Watchdog handles ambiguity, but we only release when broker or recon says FLAT.
-        self._pending_close_ttls[symbol] = now
+        # Partial close lock expires after 30s. Full close lock is indefinite (86400s).
+        self._pending_close_ttls[symbol] = {
+            "ttl": now + (30 if qty is not None else 86400),
+            "is_partial": qty is not None,
+        }
         try:
             order = await self.broker.close_position(symbol, reason=reason, qty=qty, strategy=strategy, role=role)
             if order is None:

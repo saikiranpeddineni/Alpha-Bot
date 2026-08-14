@@ -219,7 +219,12 @@ class ExitPlanner:
 
         confirmed_thesis_failure = early_invalidation_breach and thesis.structural_confirmation
         if strong_thesis and not giveback_breach and not confirmed_thesis_failure:
-            if action == ExitAction.FULL_EXIT and not protection_breached and not thesis.severe_adverse_override_triggered:
+            if (
+                action == ExitAction.FULL_EXIT 
+                and not protection_breached 
+                and not thesis.severe_adverse_override_triggered
+                and lifecycle != LifecycleState.EXIT_CANDIDATE
+            ):
                 action = ExitAction.PARTIAL_EXIT if scale_out_triggered else ExitAction.HOLD
                 exit_ratio = getattr(self.config, "scale_out_ratio", 0.50) if scale_out_triggered else 0.0
 

@@ -137,6 +137,35 @@ class TestMaxRPredictionEngine:
         assert decision.action == ExitAction.FULL_EXIT
         assert ReasonCode.MAX_R_CEILING_REACHED in decision.reason_codes
 
+    def test_exit_candidate_cannot_be_downgraded_by_strong_thesis(self):
+        config = PISConfig()
+        exit_planner = ExitPlanner(config)
+        
+        obs = _make_obs(entry=100.0, price=100.5, stop=98.0, take_profit=104.0, high=101.0, low=94.0, r_multiple=0.5)
+        from app.pis.models import LifecycleState, ThesisDrift
+        
+        health = TradeHealth(overall=0.9, trend_score=0.9, momentum_score=0.9, volume_score=0.9, volatility_score=0.9)
+        thesis = ThesisDrift(drift_score=0.9, adverse_excursion_r=1.5, stagnation_bars=10, is_degraded=True)
+        
+        decision = exit_planner.synthesize_decision(
+            obs=obs,
+            lifecycle=LifecycleState.EXIT_CANDIDATE,
+            health=health,
+            thesis=thesis,
+            runner_score=0.1,
+            is_runner=False,
+            target_stop=98.0,
+            peak_r=0.5,
+            trough_r=-1.5,
+            history_len=10,
+            has_scaled_out=False,
+            predicted_max_r=0.5,
+            runner_probability=0.1,
+        )
+        
+        print(f"DEBUG: decision.action = {decision.action}, decision.reason_codes = {decision.reason_codes}")
+        assert decision.action == ExitAction.FULL_EXIT
+
     def test_full_brain_lifecycle_with_max_r_prediction(self):
         """Verify end-to-end PositionBrain lifecycle with dynamic Max R prediction."""
         config = PISConfig(scale_out_target_r=1.0)

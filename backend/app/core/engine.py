@@ -1166,6 +1166,55 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         # Live safety net: when target reached (high_val >= target for long, low_val <= target for short), original strategy take-profit triggered
         # Non-tradable reference/risk symbol excluded from strategy evaluation (e.g. VIX)
         return await super()._evaluate_symbol(symbol, position, equity, now, effective_positions=effective_positions)
+    def _update_thesis_memory_from_trade(self, trade: TradeRecord | None) -> None:
+        """Update ThesisMemory only after a position is actually closed."""
+        if trade is None:
+            return
+
+        thesis_memory = getattr(getattr(self, "pipeline", None), "thesis_memory", None)
+        if thesis_memory is None:
+            return
+
+        candidate_id = getattr(trade, "candidate_id", "") or ""
+
+        # No candidate lineage means there is nothing safe to correlate.
+        if not candidate_id:
+            return
+
+        try:
+            pnl = float(getattr(trade, "pnl", 0.0) or 0.0)
+            r_multiple = float(getattr(trade, "r_multiple", 0.0) or 0.0)
+
+            if pnl > 0:
+                status = "WIN"
+            elif pnl < 0:
+                status = "LOSS"
+            else:
+                status = "FLAT"
+
+            thesis_memory.update_attempt_outcome(
+                symbol=trade.symbol,
+                candidate_id=candidate_id,
+                status=status,
+                pnl=pnl,
+                r_multiple=r_multiple,
+            )
+
+            from app.core.applog import applog
+            applog.info(
+                "thesis",
+                f"{trade.symbol}: thesis outcome updated "
+                f"candidate_id={candidate_id} "
+                f"status={status} pnl={pnl:.2f} R={r_multiple:.3f}",
+            )
+
+        except Exception as exc:
+            # Thesis memory must never break trade accounting.
+            from app.core.applog import applog
+            applog.exception(
+                "thesis",
+                f"{trade.symbol}: failed to update thesis outcome: {exc}",
+            )
 
     async def _drain_fills(self, now: datetime) -> None:
         assert self.broker and self.portfolio and self.risk
@@ -1266,14 +1315,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                 await asyncio.to_thread(self.db.save_trade, trade, self.mode)
                 self.publish("trade", trade.model_dump(mode="json"))
 
-                if getattr(self, "pipeline", None) and hasattr(self.pipeline, "thesis_memory"):
-                    self.pipeline.thesis_memory.update_attempt_outcome(
-                        symbol=trade.symbol,
-                        candidate_id=trade.candidate_id or "",
-                        status="WIN" if trade.pnl > 0 else "LOSS",
-                        pnl=trade.pnl,
-                        r_multiple=trade.r_multiple or 0.0
-                    )
+                self._update_thesis_memory_from_trade(trade)
 
 
                 # Exit-policy research is intentionally NOT replayed at the instant the
