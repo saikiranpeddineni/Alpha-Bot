@@ -3,6 +3,12 @@
 The canonical RiskManager remains the sizing authority. This module only applies
 post-decision invariants that are needed at the execution boundary so scanner
 quality and PIS target metadata cannot be lost when Kelly allocation is active.
+
+Beast Mode principle:
+    A losing trade is evidence about a *setup*, not proof that the symbol is bad.
+    Historical symbol-loss cooldowns therefore remain telemetry/risk memory, but
+    they are not a hard symbol blacklist. The durable same-thesis block remains
+    authoritative, while the existing global post-trade wait prevents churn.
 """
 
 from __future__ import annotations
@@ -14,6 +20,34 @@ from app.risk import manager as _manager
 
 if not getattr(_manager.RiskManager, "_profit_hardening_installed", False):
     _original_evaluate_entry = _manager.RiskManager.evaluate_entry
+    _original_is_entry_permitted = _manager.RiskManager.is_entry_permitted
+
+    def _thesis_aware_is_entry_permitted(self, signal, now=None):
+        """Do not turn historical losses into a permanent symbol blacklist.
+
+        The canonical manager still enforces:
+          - hard/daily halts
+          - strategy loss-streak protection
+          - global Beast Mode wait
+          - same-thesis loss memory
+          - entry-quality / extension gates
+          - session and instrument guards
+
+        Only the generic symbol/behavioral cooldown containers are softened here.
+        They are still reconstructed and persisted for telemetry, but a fresh
+        thesis can compete for a new entry. This preserves opportunity flow while
+        stopping the exact same failed thesis through ``closed_theses``.
+        """
+        saved_symbol = self.symbol_cooldowns
+        saved_behavioral = self.behavioral_loop_cooldowns
+        try:
+            self.symbol_cooldowns = {}
+            self.behavioral_loop_cooldowns = {}
+            decision = _original_is_entry_permitted(self, signal, now=now)
+        finally:
+            self.symbol_cooldowns = saved_symbol
+            self.behavioral_loop_cooldowns = saved_behavioral
+        return decision
 
     def _profit_hardened_evaluate_entry(self, signal, ctx, bars, now=None, kelly_override=None):
         decision = _original_evaluate_entry(
@@ -66,5 +100,6 @@ if not getattr(_manager.RiskManager, "_profit_hardening_installed", False):
 
         return decision
 
+    _manager.RiskManager.is_entry_permitted = _thesis_aware_is_entry_permitted
     _manager.RiskManager.evaluate_entry = _profit_hardened_evaluate_entry
     _manager.RiskManager._profit_hardening_installed = True
