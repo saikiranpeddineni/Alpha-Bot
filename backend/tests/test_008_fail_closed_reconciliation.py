@@ -106,7 +106,7 @@ class _FakeBroker:
         self.submitted_orders.append(order)
         return order
 
-    async def close_position(self, symbol: str, reason: str = "manual", qty: float | None = None) -> Order | None:
+    async def close_position(self, symbol: str, reason: str = "manual", qty: float | None = None, strategy: str | None = None, role: Any | None = None) -> Order | None:
         self.closed_positions.append((symbol, reason))
         return Order(
             id=f"close-{symbol}",

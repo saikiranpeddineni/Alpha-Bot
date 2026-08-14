@@ -357,28 +357,82 @@ class PortfolioTracker:
             role=fill.role,
         )
         if fill.cumulative_qty is not None and getattr(fill, "broker_fill_key", None):
-            seen_key = f"{fill.order_id}_{fill.broker_fill_key}"
+            seen_key = f"{fill.order_id}_{fill.broker_fill_key}_{fill.cumulative_qty}"
             if seen_key in self._seen_fill_keys:
                 return None
+            
+            import copy
+            before = copy.deepcopy(self.__dict__)
+            
             self._seen_fill_keys.add(seen_key)
-            prev_cum = self._cumulative_fills.get(fill.order_id, 0.0)
-            if fill.cumulative_qty > prev_cum:
-                effective.qty = fill.cumulative_qty - prev_cum
-                fill_cumulative_notional = getattr(fill, "cumulative_notional", None)
-                if fill_cumulative_notional is not None:
-                    prev_notional = self._cumulative_notionals.get(fill.order_id, 0.0)
-                    delta_notional = fill_cumulative_notional - prev_notional
-                    effective.price = delta_notional / effective.qty if effective.qty > 0 else fill.price
-                    self._cumulative_notionals[fill.order_id] = fill_cumulative_notional
-                self._cumulative_fills[fill.order_id] = fill.cumulative_qty
+
+            from app.db.database import Database
+            db = Database.active() if getattr(fill, "broker_mode", None) else None
+
+            if db is not None:
+                account_id = fill.broker_account_id or "default_account"
+                processed = db.processed_fill_qty(mode=fill.broker_mode, account_id=account_id, fill_key=fill.broker_fill_key)
+                previous_notional = db.processed_fill_notional(mode=fill.broker_mode, account_id=account_id, fill_key=fill.broker_fill_key)
+                delta = float(fill.cumulative_qty) - processed
+                if delta <= 1e-9:
+                    return None
+                effective.qty = delta
                 
-                if effective.qty > 1e-9:
+                # In-memory tracking parity
+                self._cumulative_fills[fill.order_id] = fill.cumulative_qty
+                if getattr(fill, "cumulative_notional", None) is not None:
+                    self._cumulative_notionals[fill.order_id] = fill.cumulative_notional
+
+                try:
                     res = self._apply_fill(effective, peak_price, trough_price, initial_stop, order)
-                    if isinstance(res, FillApplicationResult) and res.closed_trade:
-                        if risk_manager:
-                            risk_manager.on_trade_closed(res.closed_trade, now=now)
-                        return res.closed_trade
-            return None
+                    trade = res.closed_trade if isinstance(res, FillApplicationResult) else res
+                    
+                    risk_state = None
+                    if trade is not None and risk_manager is not None:
+                        risk_manager.on_trade_closed(trade, now=now)
+                        risk_state = risk_manager.get_risk_state()
+                    elif risk_manager is not None:
+                        risk_state = risk_manager.get_risk_state()
+                        
+                    cumulative_notional = previous_notional + float(effective.qty) * float(effective.price)
+                    db.commit_fill_processing(
+                        fill_key=fill.broker_fill_key, 
+                        cumulative_qty=float(fill.cumulative_qty), 
+                        cumulative_notional=cumulative_notional, 
+                        mode=fill.broker_mode, 
+                        account_id=account_id, 
+                        checkpoint=self.checkpoint(risk_state=risk_state), 
+                        trade=trade
+                    )
+                    return trade
+                except Exception:
+                    self.__dict__.clear()
+                    self.__dict__.update(before)
+                    raise
+            else:
+                prev_cum = self._cumulative_fills.get(fill.order_id, 0.0)
+                if fill.cumulative_qty > prev_cum:
+                    effective.qty = fill.cumulative_qty - prev_cum
+                    fill_cumulative_notional = getattr(fill, "cumulative_notional", None)
+                    if fill_cumulative_notional is not None:
+                        prev_notional = self._cumulative_notionals.get(fill.order_id, 0.0)
+                        delta_notional = fill_cumulative_notional - prev_notional
+                        effective.price = delta_notional / effective.qty if effective.qty > 0 else fill.price
+                        self._cumulative_notionals[fill.order_id] = fill_cumulative_notional
+                    self._cumulative_fills[fill.order_id] = fill.cumulative_qty
+                    
+                    if effective.qty > 1e-9:
+                        try:
+                            res = self._apply_fill(effective, peak_price, trough_price, initial_stop, order)
+                            if isinstance(res, FillApplicationResult) and res.closed_trade:
+                                if risk_manager:
+                                    risk_manager.on_trade_closed(res.closed_trade, now=now)
+                                return res.closed_trade
+                        except Exception:
+                            self.__dict__.clear()
+                            self.__dict__.update(before)
+                            raise
+                return None
 
         res = self._apply_fill(fill, peak_price, trough_price, initial_stop, order)
         trade = res.closed_trade if isinstance(res, FillApplicationResult) else res

@@ -359,6 +359,7 @@ def test_one_event_emits_at_most_one_candidate():
         sig = strat.on_bar(_momentum_ctx(), "SYM", df.iloc[:end])
         if sig is not None and sig.action == SignalAction.ENTER_LONG:
             signals.append(sig)
+            strat.signal_accepted(sig)
 
     assert len(signals) <= 1, f"Expected at most 1 candidate per event, got {len(signals)}"
 
@@ -374,6 +375,7 @@ def test_new_inflection_arms_new_event_after_consume():
     for end in range(30, len(df1) + 1):
         sig1 = strat.on_bar(_momentum_ctx(), "SYM", df1.iloc[:end])
         if sig1 is not None:
+            strat.signal_accepted(sig1)
             break
     assert sig1 is not None and sig1.action == SignalAction.ENTER_LONG
 

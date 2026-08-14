@@ -183,7 +183,7 @@ class _FakePaperSimBroker:
     async def cancel(self, _order_id):
         return True
 
-    async def close_position(self, _symbol, reason="manual"):
+    async def close_position(self, symbol: str, reason: str = "manual", qty: float | None = None, strategy: str | None = None, role: Any | None = None):
         return None
 
     async def flatten_all(self, reason="flatten"):
