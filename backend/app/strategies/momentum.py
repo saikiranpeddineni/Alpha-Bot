@@ -98,16 +98,21 @@ class MomentumCross(Strategy):
             )
 
     def signal_accepted(self, sig: Signal) -> None:
-        direction = "long" if sig.action.value.startswith("ENTER_LONG") else "short"
+        direction = "long" if sig.action == SignalAction.ENTER_LONG else "short"
         evt = self._sym_events(sig.symbol).get(direction, {})
         event_time = evt.get("origin_time")
+        
+        # Ensure the direction key exists in the dict before setting emitted
+        if direction not in self._sym_events(sig.symbol):
+            self._sym_events(sig.symbol)[direction] = {}
+            
         self._sym_events(sig.symbol)[direction]["emitted"] = True
         
         from app.core.applog import applog
         applog.debug(
             "strategy.momentum",
             f"[momentum] MACD_EVENT_CONSUMED sym={sig.symbol} dir={direction} "
-            f"event_ts={event_time} candidate_ts={sig.timestamp}",
+            f"event_ts={event_time} candidate_ts={getattr(sig, 'generated_at', None)}",
         )
 
     def _expire_event(self, ctx: StrategyContext, symbol: str, direction: str, current_time) -> None:

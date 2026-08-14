@@ -180,7 +180,7 @@ def test_reflection_nominations_cooling_off(client):
             s.commit()
             
         # 5. Run reflection a third time -> Nominee should be resurrected/re-nominated!
-        report3 = generate_eod_reflection_report(db)
+        report3 = generate_eod_reflection_report(db, Settings())
         pending3 = db.get_pending_nominee_for_policy("strategy_b")
         assert pending3 is not None
         assert pending3["status"] == "pending"

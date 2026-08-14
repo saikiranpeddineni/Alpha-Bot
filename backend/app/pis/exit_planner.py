@@ -134,9 +134,10 @@ class ExitPlanner:
                 and health.overall < 0.45
             )
         else:
+            momentum_exhausted = health.momentum_score < 0.35 if hasattr(health, "momentum_score") else False
             max_r_harvest = (
                 max_r_reached
-                and (health.overall < 0.40 or exhaustion_climax)
+                and (health.overall < 0.40 or exhaustion_climax or (has_scaled_out and momentum_exhausted))
             )
 
         # Check Early Thesis Invalidation Scratch Exit (Quadrant 2)
@@ -174,7 +175,7 @@ class ExitPlanner:
         giveback = max(0.0, peak_r - current_r)
         giveback_breach = (
             peak_r >= getattr(self.config, "proven_trade_r", 0.50)
-            and giveback > self.allowed_giveback_r(peak_r)
+            and giveback > self.allowed_giveback_r(peak_r) + 1e-9  # fp tolerance
         )
         
         strong_thesis = (
@@ -216,7 +217,8 @@ class ExitPlanner:
             action = ExitAction.HOLD
             exit_ratio = 0.0
 
-        if strong_thesis and not giveback_breach:
+        confirmed_thesis_failure = early_invalidation_breach and thesis.structural_confirmation
+        if strong_thesis and not giveback_breach and not confirmed_thesis_failure:
             if action == ExitAction.FULL_EXIT and not protection_breached and not thesis.severe_adverse_override_triggered:
                 action = ExitAction.PARTIAL_EXIT if scale_out_triggered else ExitAction.HOLD
                 exit_ratio = getattr(self.config, "scale_out_ratio", 0.50) if scale_out_triggered else 0.0
@@ -229,12 +231,13 @@ class ExitPlanner:
 
         if protection_breached:
             reasons.append(ReasonCode.PROTECTION_BREACH)
+        elif early_invalidation_breach:
+            # Early thesis invalidation (includes severe_adverse_override fast-path)
+            reasons.append(ReasonCode.EARLY_THESIS_INVALIDATED)
         elif thesis.severe_adverse_override_triggered:
             reasons.append(ReasonCode.EMERGENCY_STOP)
         elif giveback_breach:
             reasons.append(ReasonCode.HEALTH_EXHAUSTION)
-        elif early_invalidation_breach:
-            reasons.append(ReasonCode.EARLY_THESIS_INVALIDATED)
         elif max_r_harvest:
             reasons.append(ReasonCode.MAX_R_CEILING_REACHED)
         elif scale_out_triggered:

@@ -66,27 +66,31 @@ class SignalPipeline:
 
     def compute_composite_score(self, ml_prob: float, meta_prob: float, trade_score: float,
                                 portfolio_alignment: float = 1.0, risk_factor: float = 1.0,
+                                entry_quality: float = 0.0,
                                 regime: Regime | None = None) -> float:
         ml_base = min(100.0, max(0.0, ml_prob * 100.0))
         meta_base = min(100.0, max(0.0, meta_prob * 100.0))
         score_base = min(100.0, max(0.0, trade_score))
         port_base = min(100.0, max(0.0, portfolio_alignment * 100.0))
         risk_base = min(100.0, max(0.0, risk_factor * 100.0))
+        quality_base = min(100.0, max(0.0, entry_quality))
 
         if regime in (Regime.TREND_UP, Regime.TREND_DOWN):
-            ml_pts = ml_base * 0.40
-            meta_pts = meta_base * 0.30
+            ml_pts = ml_base * 0.35
+            meta_pts = meta_base * 0.25
             score_pts = score_base * 0.20
             port_pts = port_base * 0.10
+            quality_pts = quality_base * 0.10
             risk_pts = 0.0  # Risk handled elsewhere or assumed 0 in this branch based on instructions
         else:
-            ml_pts = ml_base * 0.25
+            ml_pts = ml_base * 0.20
             meta_pts = meta_base * 0.20
-            score_pts = score_base * 0.35
-            port_pts = port_base * 0.20
+            score_pts = score_base * 0.30
+            port_pts = port_base * 0.15
+            quality_pts = quality_base * 0.15
             risk_pts = 0.0
 
-        return round(ml_pts + meta_pts + score_pts + port_pts + risk_pts, 2)
+        return round(ml_pts + meta_pts + score_pts + port_pts + risk_pts + quality_pts, 2)
 
     def set_event_day(self, is_event: bool) -> None:
         self._is_event_day = is_event
@@ -105,7 +109,7 @@ class SignalPipeline:
             return False
             
         # Bypass for Momentum + News catalyst
-        if sig.strategy == "momentum" and "news" in str(sig.reason).lower():
+        if sig.strategy == "momentum" and "news" in str(getattr(sig, "reason", "")).lower():
             return False
 
         return True
@@ -177,7 +181,8 @@ class SignalPipeline:
                 symbol=symbol,
                 action=sig.action,
                 price=price,
-                reversal_confirmations=reversal_confirmations
+                reversal_confirmations=reversal_confirmations,
+                thesis_fingerprint=getattr(sig, "thesis_fingerprint", None) or ""
             )
             if not is_valid:
                 rejected.append((sig, reason))

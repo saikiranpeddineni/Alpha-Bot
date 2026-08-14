@@ -69,7 +69,8 @@ def test_pis_scale_out_at_1r() -> None:
     obs2 = make_obs(price=104.0, entry=100.0, initial_stop=95.0, atr=2.0, qty=100.0, minutes_offset=1)
     dec2 = brain.observe(obs2)
     assert brain.has_scaled_out is False
-    assert dec2.action == ExitAction.HOLD
+    assert dec2.action == ExitAction.UPDATE_PROTECTION
+    assert dec2.target_stop_loss == 100.5  # 100.0 + 0.1 * 5.0 (0.1R locked by ladder > 0.5R)
 
     # 3. Price reaches 105.0 (+1.0R) -> PARTIAL_EXIT 50%
     obs3 = make_obs(price=105.0, entry=100.0, initial_stop=95.0, atr=2.0, qty=100.0, minutes_offset=2)

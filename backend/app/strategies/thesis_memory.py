@@ -99,6 +99,7 @@ class ThesisMemory:
         price: float,
         reversal_confirmations: int = 0,
         now: datetime | None = None,
+        thesis_fingerprint: str = "",
     ) -> tuple[bool, str]:
         """
         Check if we are allowed to enter a new trade for this symbol/direction.
@@ -125,13 +126,27 @@ class ThesisMemory:
             
         # Rule 2: Same direction re-entry
         if last_attempt.status == "LOSS":
+            # Exact fingerprint match means it's the exact same thesis returning for another try.
+            # Block it unconditionally unless it's a new setup.
+            if thesis_fingerprint and thesis_fingerprint == last_attempt.thesis_fingerprint:
+                return False, f"Re-entry blocked: exact same thesis fingerprint ({thesis_fingerprint}) already resulted in LOSS."
+
+            # If the fingerprint is explicitly different, it's a new independent thesis.
+            # We can bypass the price distance and cooldown restrictions.
+            if thesis_fingerprint and last_attempt.thesis_fingerprint and thesis_fingerprint != last_attempt.thesis_fingerprint:
+                return True, ""
+
             price_distance = abs(price - last_attempt.price)
             if price_distance < 0.75 * max(last_attempt.atr, 1e-9):
                 return False, f"Re-entry blocked: price {price} didn't move 0.75 ATR from prior LOSS {last_attempt.price}"
         
         # Cooldown
-        configured_symbol_reentry_cooldown = 15
-        if age_minutes < configured_symbol_reentry_cooldown:
-            return False, f"Re-entry blocked: cooldown active ({age_minutes:.1f}m < {configured_symbol_reentry_cooldown}m)"
+        if thesis_fingerprint and last_attempt.thesis_fingerprint and thesis_fingerprint != last_attempt.thesis_fingerprint:
+            # Independent new thesis bypasses symbol cooldown
+            pass
+        else:
+            configured_symbol_reentry_cooldown = 15
+            if age_minutes < configured_symbol_reentry_cooldown:
+                return False, f"Re-entry blocked: cooldown active ({age_minutes:.1f}m < {configured_symbol_reentry_cooldown}m)"
             
         return True, ""

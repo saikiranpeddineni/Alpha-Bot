@@ -145,7 +145,10 @@ class PositionBrain:
                     "trough_r": self._profit_memory.trough_r,
                     "mfe_price": getattr(self._profit_memory, "mfe_price", 0.0),
                     "mae_price": getattr(self._profit_memory, "mae_price", 0.0),
-                }
+                },
+                # Top-level convenience keys (mirrors profit_memory for direct access)
+                "peak_r": self._profit_memory.peak_r,
+                "trough_r": self._profit_memory.trough_r,
             }
 
     def hydrate_state(self, payload: Dict[str, Any], initial_observation: PositionObservation) -> None:
@@ -247,9 +250,9 @@ class PositionBrain:
 
     @property
     def history_length(self) -> int:
-        """Get current history item count, including logical history length from previous sessions."""
+        """Get current history item count (bounded by history_max_len)."""
         with self._lock:
-            return max(len(self._history), self._history_len)
+            return len(self._history)
 
     def observe(self, obs: PositionObservation) -> PISDecision:
         """Process a new point-in-time observation. Thread-safe evaluation (Priority 1).
@@ -410,7 +413,7 @@ class PositionBrain:
 
         giveback_breach = (
             proven_trade
-            and giveback > allowed_giveback
+            and giveback > allowed_giveback + 1e-9  # fp tolerance
         )
         
         # 6. Protection floor calculation with dynamic ceiling proximity (Priority 4)

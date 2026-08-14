@@ -20,7 +20,7 @@ def _tick_source() -> str:
 def test_tick_drains_fill_deltas_before_authoritative_position_fetch():
     body = _tick_source()
     drain = body.index("await self._drain_fills(now)")
-    positions = body.index("positions = await self.broker.positions()", drain)
+    positions = body.index("positions = await self._cached_broker_positions()", drain)
     assert drain < positions
 
 

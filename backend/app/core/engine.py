@@ -848,6 +848,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
             decision = getattr(self, "last_safety_decision", None)
             heartbeat_allows_entries = decision.allow_new_entries if decision is not None else True
             allow_entries = bool(heartbeat_allows_entries and self.allow_new_entries)
+            print(f"DEBUG engine.py allow_entries: {allow_entries} heartbeat_allows_entries: {heartbeat_allows_entries} self.allow_new_entries: {self.allow_new_entries} decision: {decision}")
 
             self._last_closed_bar_symbol_count = len(new_closed) if new_closed else 0
             if self.state != EngineState.RUNNING or not allow_entries:
@@ -1071,7 +1072,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                                             atr=atr,
                                             strategy=sig.strategy,
                                             candidate_id=sig.candidate_id or "",
-                                            thesis_fingerprint=sig.thesis_fingerprint or ""
+                                            thesis_fingerprint=getattr(sig, "thesis_fingerprint", None) or ""
                                         )
                                         
                                     if hasattr(self, "strategies"):
@@ -1239,7 +1240,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
             try:
                 trade = self.portfolio.on_fill(
                     fill, peak_price=peak, trough_price=trough, initial_stop=init_stop,
-                    risk_manager=self.risk, now=now
+                    risk_manager=self.risk, now=now, order=order
                 )
             except Exception:
                 # The broker reservation is volatile only. If durable portfolio
@@ -1739,6 +1740,27 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                 strategy=strat,
                 stop_loss=stop_loss,
                 initial_risk_per_share=initial_risk,
+                candidate_id=order_payload.get("candidate_id") if order_payload else None,
+                thesis_fingerprint=order_payload.get("thesis_fingerprint") if order_payload else None,
+                signal_generated_timestamp_utc=order_payload.get("signal_generated_timestamp_utc") if order_payload else None,
+                decision_completed_timestamp_utc=order_payload.get("decision_completed_timestamp_utc") if order_payload else None,
+                entry_quality_score=order_payload.get("entry_quality_score") if order_payload else None,
+                entry_quality=order_payload.get("entry_quality") if order_payload else None,
+                opportunity_state=order_payload.get("opportunity_state") if order_payload else None,
+                opportunity_score=order_payload.get("opportunity_score") if order_payload else None,
+                vwap_distance_pct=order_payload.get("vwap_distance_pct") if order_payload else None,
+                atr_extension=order_payload.get("atr_extension") if order_payload else None,
+                pre_entry_impulse_pct=order_payload.get("pre_entry_impulse_pct") if order_payload else None,
+                event_risk=order_payload.get("event_risk", "normal") if order_payload else "normal",
+                event_type=order_payload.get("event_type") if order_payload else None,
+                event_age_minutes=order_payload.get("event_age_minutes") if order_payload else None,
+                price_discovery=order_payload.get("price_discovery", False) if order_payload else False,
+                reentry_attempt=order_payload.get("reentry_attempt", 0) if order_payload else 0,
+                same_thesis_blocked=order_payload.get("same_thesis_blocked", False) if order_payload else False,
+                trend_score=order_payload.get("trend_score") if order_payload else None,
+                location_score=order_payload.get("location_score") if order_payload else None,
+                extension_score=order_payload.get("extension_score") if order_payload else None,
+                structure_score=order_payload.get("structure_score") if order_payload else None,
             )
             # Restore engine tracker state across restarts
             if p.symbol not in self._position_initial_stops:
@@ -2727,6 +2749,13 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                 lots = getattr(self.portfolio, "_lots", {}) if self.portfolio else {}
                 db_syms = {sym: float(lot.qty) for sym, lot in lots.items() if hasattr(lot, "qty") and abs(float(lot.qty)) > 1e-9} if isinstance(lots, dict) else {}
                 position_bad = broker_syms != db_syms
+                
+                # P0: Watchdog release if broker confirms flat
+                if hasattr(self, "_pending_close_ttls"):
+                    for sym in list(self._pending_close_ttls.keys()):
+                        if sym not in broker_syms:
+                            self._pending_close_ttls.pop(sym, None)
+
                 if position_bad:
                     diagnostics["positions_reconciled"] = False
                     self._position_reconciliation_mismatch_streak += 1

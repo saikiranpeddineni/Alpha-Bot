@@ -57,6 +57,8 @@ class TradingEnginePortfolioMixin:
                 self.portfolio._lots.pop(local_symbol, None)
                 self._position_take_profits.pop(local_symbol, None)
                 self._position_peaks.pop(local_symbol, None)
+                if hasattr(self, "_pending_close_ttls"):
+                    self._pending_close_ttls.pop(local_symbol, None)
 
         for p in positions:
             existing_lot = self.portfolio._lots.get(p.symbol)
@@ -83,10 +85,7 @@ class TradingEnginePortfolioMixin:
             entry_payload = self.db.get_latest_entry_order_payload(p.symbol, self.mode)
             if not isinstance(entry_payload, dict):
                 entry_payload = None
-            fallback_payload = self.db.get_latest_order_payload(p.symbol, self.mode)
-            if not isinstance(fallback_payload, dict):
-                fallback_payload = None
-            order_payload = entry_payload or fallback_payload
+            order_payload = entry_payload
             if entry_payload and entry_payload.get("strategy"):
                 strat = str(entry_payload["strategy"])
                 p.strategy = strat
@@ -144,6 +143,27 @@ class TradingEnginePortfolioMixin:
                 strategy=strat,
                 stop_loss=stop_loss,
                 initial_risk_per_share=initial_risk,
+                candidate_id=order_payload.get("candidate_id") if order_payload else None,
+                thesis_fingerprint=order_payload.get("thesis_fingerprint") if order_payload else None,
+                signal_generated_timestamp_utc=order_payload.get("signal_generated_timestamp_utc") if order_payload else None,
+                decision_completed_timestamp_utc=order_payload.get("decision_completed_timestamp_utc") if order_payload else None,
+                entry_quality_score=order_payload.get("entry_quality_score") if order_payload else None,
+                entry_quality=order_payload.get("entry_quality") if order_payload else None,
+                opportunity_state=order_payload.get("opportunity_state") if order_payload else None,
+                opportunity_score=order_payload.get("opportunity_score") if order_payload else None,
+                vwap_distance_pct=order_payload.get("vwap_distance_pct") if order_payload else None,
+                atr_extension=order_payload.get("atr_extension") if order_payload else None,
+                pre_entry_impulse_pct=order_payload.get("pre_entry_impulse_pct") if order_payload else None,
+                event_risk=order_payload.get("event_risk", "normal") if order_payload else "normal",
+                event_type=order_payload.get("event_type") if order_payload else None,
+                event_age_minutes=order_payload.get("event_age_minutes") if order_payload else None,
+                price_discovery=order_payload.get("price_discovery", False) if order_payload else False,
+                reentry_attempt=order_payload.get("reentry_attempt", 0) if order_payload else 0,
+                same_thesis_blocked=order_payload.get("same_thesis_blocked", False) if order_payload else False,
+                trend_score=order_payload.get("trend_score") if order_payload else None,
+                location_score=order_payload.get("location_score") if order_payload else None,
+                extension_score=order_payload.get("extension_score") if order_payload else None,
+                structure_score=order_payload.get("structure_score") if order_payload else None,
             )
             applog.info(
                 "engine",

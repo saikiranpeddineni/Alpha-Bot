@@ -74,6 +74,27 @@ class _OpenLot:
     telemetry: ExecutionTelemetry = field(default_factory=ExecutionTelemetry)
     closing_notional: float = 0.0
     realized_pnl_accum: float = 0.0
+    candidate_id: str | None = None
+    thesis_fingerprint: str | None = None
+    signal_generated_timestamp_utc: datetime | None = None
+    decision_completed_timestamp_utc: datetime | None = None
+    entry_quality_score: float | None = None
+    entry_quality: str | None = None
+    opportunity_state: str | None = None
+    opportunity_score: float | None = None
+    vwap_distance_pct: float | None = None
+    atr_extension: float | None = None
+    pre_entry_impulse_pct: float | None = None
+    event_risk: str = "normal"
+    event_type: str | None = None
+    event_age_minutes: float | None = None
+    price_discovery: bool = False
+    reentry_attempt: int = 0
+    same_thesis_blocked: bool = False
+    trend_score: float | None = None
+    location_score: float | None = None
+    extension_score: float | None = None
+    structure_score: float | None = None
 
 
 @dataclass
@@ -109,6 +130,7 @@ class PortfolioTracker:
     trades: list[TradeRecord] = field(default_factory=list)
     equity_curve: list[tuple[datetime, float]] = field(default_factory=list)
     _lots: dict[str, _OpenLot] = field(default_factory=dict)
+    _seen_fill_keys: set = field(default_factory=set)
 
     def __post_init__(self) -> None:
         if self.restore_mode not in {"live", "paper"}:
@@ -316,44 +338,53 @@ class PortfolioTracker:
             )
 
     def on_fill(self, fill: Fill, peak_price: float | None = None, trough_price: float | None = None,
-                initial_stop: float | None = None, risk_state: dict | None = None,
-                risk_manager: Any | None = None, now: datetime | None = None) -> TradeRecord | None:
-        if fill.broker_fill_key and fill.cumulative_qty is not None and fill.broker_mode:
-            from app.db.database import Database
-            db = Database.active()
-            if db is not None:
-                account_id = fill.broker_account_id or "default_account"
-                processed = db.processed_fill_qty(mode=fill.broker_mode, account_id=account_id, fill_key=fill.broker_fill_key)
-                previous_notional = db.processed_fill_notional(mode=fill.broker_mode, account_id=account_id, fill_key=fill.broker_fill_key)
-                delta = float(fill.cumulative_qty) - processed
-                if delta <= 1e-9:
-                    return None
-                effective = copy.copy(fill)
-                effective.qty = delta
-                before = copy.deepcopy(self.__dict__)
-                try:
-                    res = self._apply_fill(effective, peak_price, trough_price, initial_stop)
-                    trade = res.closed_trade if isinstance(res, FillApplicationResult) else res
-                    if trade is not None and risk_manager is not None:
-                        risk_manager.on_trade_closed(trade, now=now)
-                        risk_state = risk_manager.get_risk_state()
-                    elif risk_state is None and risk_manager is not None:
-                        risk_state = risk_manager.get_risk_state()
-                    cumulative_notional = previous_notional + float(effective.qty) * float(effective.price)
-                    db.commit_fill_processing(fill_key=fill.broker_fill_key, cumulative_qty=float(fill.cumulative_qty), cumulative_notional=cumulative_notional, mode=fill.broker_mode, account_id=account_id, checkpoint=self.checkpoint(risk_state=risk_state), trade=trade)
-                    return trade
-                except Exception:
-                    self.__dict__.clear()
-                    self.__dict__.update(before)
-                    raise
-        res = self._apply_fill(fill, peak_price, trough_price, initial_stop)
+                initial_stop: float | None = None, risk_manager: Any | None = None, now: datetime | None = None,
+                order: Any | None = None) -> TradeRecord | None:
+        if self.restore_mode == "paper" and "simulation" not in getattr(fill, "broker_mode", ""):
+            if getattr(fill, "broker_mode", "") not in ("paper", "shadow"):
+                return None
+
+        # For split/scaling orders, ensure we process the effective delta
+        effective = Fill(
+            order_id=fill.order_id, symbol=fill.symbol, side=fill.side,
+            qty=fill.qty, price=fill.price, commission=fill.commission,
+            strategy=fill.strategy, reason=fill.reason, ts=fill.ts,
+            broker_fill_key=fill.broker_fill_key,
+            broker_mode=fill.broker_mode,
+            broker_account_id=fill.broker_account_id,
+            role=fill.role,
+        )
+        if fill.cumulative_qty is not None and getattr(fill, "broker_fill_key", None):
+            seen_key = f"{fill.order_id}_{fill.broker_fill_key}"
+            if seen_key in self._seen_fill_keys:
+                return None
+            self._seen_fill_keys.add(seen_key)
+            prev_cum = self._cumulative_fills.get(fill.order_id, 0.0)
+            if fill.cumulative_qty > prev_cum:
+                effective.qty = fill.cumulative_qty - prev_cum
+                if fill.cumulative_notional is not None:
+                    prev_notional = self._cumulative_notionals.get(fill.order_id, 0.0)
+                    delta_notional = fill.cumulative_notional - prev_notional
+                    effective.price = delta_notional / effective.qty if effective.qty > 0 else fill.price
+                    self._cumulative_notionals[fill.order_id] = fill.cumulative_notional
+                self._cumulative_fills[fill.order_id] = fill.cumulative_qty
+                
+                if effective.qty > 1e-9:
+                    res = self._apply_fill(effective, peak_price, trough_price, initial_stop, order)
+                    if isinstance(res, FillApplicationResult) and res.closed_trade:
+                        if risk_manager:
+                            risk_manager.on_trade_closed(res.closed_trade, now=now)
+                        return res.closed_trade
+            return None
+
+        res = self._apply_fill(fill, peak_price, trough_price, initial_stop, order)
         trade = res.closed_trade if isinstance(res, FillApplicationResult) else res
         if trade is not None and risk_manager is not None:
             risk_manager.on_trade_closed(trade, now=now)
         return trade
 
     def _apply_fill(self, fill: Fill, peak_price: float | None = None, trough_price: float | None = None,
-                    initial_stop: float | None = None) -> FillApplicationResult:
+                    initial_stop: float | None = None, order: Any | None = None) -> FillApplicationResult:
         symbol = fill.symbol.upper()
         signed = fill.qty if fill.side == OrderSide.BUY else -fill.qty
         lot = self._lots.get(symbol)
@@ -381,6 +412,28 @@ class PortfolioTracker:
                 self._lots[symbol].initial_stop_loss = initial_stop
                 self._lots[symbol].initial_risk_per_share = abs(fill.price - initial_stop)
                 self._lots[symbol].initial_risk_dollars = abs(signed) * abs(fill.price - initial_stop)
+            if order is not None:
+                self._lots[symbol].candidate_id = getattr(order, "candidate_id", None)
+                self._lots[symbol].thesis_fingerprint = getattr(order, "thesis_fingerprint", None)
+                self._lots[symbol].signal_generated_timestamp_utc = getattr(order, "signal_generated_timestamp_utc", None)
+                self._lots[symbol].decision_completed_timestamp_utc = getattr(order, "decision_completed_timestamp_utc", None)
+                self._lots[symbol].entry_quality_score = getattr(order, "entry_quality_score", None)
+                self._lots[symbol].entry_quality = getattr(order, "entry_quality", None)
+                self._lots[symbol].opportunity_state = getattr(order, "opportunity_state", None)
+                self._lots[symbol].opportunity_score = getattr(order, "opportunity_score", None)
+                self._lots[symbol].vwap_distance_pct = getattr(order, "vwap_distance_pct", None)
+                self._lots[symbol].atr_extension = getattr(order, "atr_extension", None)
+                self._lots[symbol].pre_entry_impulse_pct = getattr(order, "pre_entry_impulse_pct", None)
+                self._lots[symbol].event_risk = getattr(order, "event_risk", "normal")
+                self._lots[symbol].event_type = getattr(order, "event_type", None)
+                self._lots[symbol].event_age_minutes = getattr(order, "event_age_minutes", None)
+                self._lots[symbol].price_discovery = getattr(order, "price_discovery", False)
+                self._lots[symbol].reentry_attempt = getattr(order, "reentry_attempt", 0)
+                self._lots[symbol].same_thesis_blocked = getattr(order, "same_thesis_blocked", False)
+                self._lots[symbol].trend_score = getattr(order, "trend_score", None)
+                self._lots[symbol].location_score = getattr(order, "location_score", None)
+                self._lots[symbol].extension_score = getattr(order, "extension_score", None)
+                self._lots[symbol].structure_score = getattr(order, "structure_score", None)
             side_str = "BOUGHT" if signed > 0 else "SOLD SHORT"
             total_amt = abs(signed) * fill.price
             applog.info("portfolio", f"[{fill.ts}] {side_str} {symbol}: {abs(signed):g} shares @ {fill.price:.2f} (Total Amt: ${total_amt:,.2f} | {fill.strategy})")
@@ -430,7 +483,7 @@ class PortfolioTracker:
         mae_pct = (mae_val / lot.avg_price * 100.0) if lot.avg_price > 0 else 0.0
         mfe_r = (mfe_val / init_risk) if init_risk and init_risk > 0 else 0.0
         winner_cap = (r_multiple / mfe_r) if r_multiple is not None and mfe_r > 0 else 0.0
-        trade = TradeRecord(symbol=symbol, side="long" if original_direction > 0 else "short", qty=lot.closing_qty, entry_price=round(lot.avg_price, 4), exit_price=round(avg_exit, 4), entry_at=lot.entry_ts, exit_at=fill.ts, pnl=round(pnl, 2), pnl_pct=round(pnl / basis * 100.0, 3) if basis else 0.0, r_multiple=r_multiple, candidate_id=getattr(fill, "client_order_id", getattr(fill, "order_id", None)), initial_stop=round(lot.initial_stop_loss, 4) if lot.initial_stop_loss is not None else None, initial_risk=round(init_risk, 4) if init_risk is not None else None, strategy=lot.strategy, exit_reason=fill.reason or "exit", mfe=round(mfe_val, 4), mae=round(mae_val, 4), mfe_pct=round(mfe_pct, 4), mae_pct=round(mae_pct, 4), capture_efficiency=round(winner_cap, 4), telemetry=lot.telemetry)
+        trade = TradeRecord(symbol=symbol, side="long" if original_direction > 0 else "short", qty=lot.closing_qty, entry_price=round(lot.avg_price, 4), exit_price=round(avg_exit, 4), entry_at=lot.entry_ts, exit_at=fill.ts, pnl=round(pnl, 2), pnl_pct=round(pnl / basis * 100.0, 3) if basis else 0.0, r_multiple=r_multiple, candidate_id=lot.candidate_id or getattr(fill, "client_order_id", getattr(fill, "order_id", None)), thesis_fingerprint=lot.thesis_fingerprint, initial_stop=round(lot.initial_stop_loss, 4) if lot.initial_stop_loss is not None else None, initial_risk=round(init_risk, 4) if init_risk is not None else None, strategy=lot.strategy, exit_reason=fill.reason or "exit", mfe=round(mfe_val, 4), mae=round(mae_val, 4), mfe_pct=round(mfe_pct, 4), mae_pct=round(mae_pct, 4), capture_efficiency=round(winner_cap, 4), telemetry=lot.telemetry, signal_generated_timestamp_utc=lot.signal_generated_timestamp_utc, decision_completed_timestamp_utc=lot.decision_completed_timestamp_utc, entry_quality_score=lot.entry_quality_score, entry_quality=lot.entry_quality, opportunity_state=lot.opportunity_state, opportunity_score=lot.opportunity_score, vwap_distance_pct=lot.vwap_distance_pct, atr_extension=lot.atr_extension, pre_entry_impulse_pct=lot.pre_entry_impulse_pct, event_risk=lot.event_risk, event_type=lot.event_type, event_age_minutes=lot.event_age_minutes, price_discovery=lot.price_discovery, reentry_attempt=lot.reentry_attempt, same_thesis_blocked=lot.same_thesis_blocked, trend_score=lot.trend_score, location_score=lot.location_score, extension_score=lot.extension_score, structure_score=lot.structure_score)
         del self._lots[symbol]
         self.trades.append(trade)
         if trade.entry_at.date() == trade.exit_at.date():

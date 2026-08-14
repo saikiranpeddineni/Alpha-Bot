@@ -66,6 +66,10 @@ class RunnerIntelligence:
         if predicted_max_r < peak_r:
             predicted_max_r = max(peak_r * 1.5, predicted_max_r)
         
+        # Conservative cap: weak health (overall < 0.50) should not receive bullish ceiling projection
+        if health.overall < 0.50:
+            predicted_max_r = min(predicted_max_r, r_base)
+        
         predicted_max_r = round(predicted_max_r, 2)
 
         return predicted_max_r, round(runner_prob, 3)

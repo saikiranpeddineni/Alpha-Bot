@@ -91,11 +91,14 @@ class DurableTradingEngine(TradingEngine):
         except Exception:
             pass
             
-        if getattr(self, "risk", None) and getattr(self.risk, "config", None):
+        if hasattr(self, "risk") and hasattr(self.risk, "config"):
+            import hashlib
+            import json
             try:
-                order.metadata["risk_config_hash"] = str(hash(frozenset(self.risk.config.model_dump().items())))
-            except Exception:
-                pass
+                risk_dump = self.risk.config.model_dump()
+                order.metadata["risk_config_hash"] = hashlib.sha256(json.dumps(risk_dump, sort_keys=True).encode()).hexdigest()
+            except Exception as e:
+                applog.warning("durable_engine", f"Could not compute risk config hash: {e}")
 
         # P1: Complete thesis lifecycle loop on confirmed entry
         if order.status == OrderStatus.FILLED and getattr(order, "role", OrderRole.ENTRY) == OrderRole.ENTRY:
@@ -153,12 +156,13 @@ class DurableTradingEngine(TradingEngine):
             self._pending_close_ttls = {}
         
         now = time.time()
-        if symbol in self._pending_close_ttls and now < self._pending_close_ttls[symbol]:
+        if symbol in self._pending_close_ttls:
             applog.debug("engine", f"{symbol}: skipping duplicate close — close already in-flight (#45)")
             return
 
         self._flattening_symbols.add(symbol)
-        self._pending_close_ttls[symbol] = now + 30.0
+        # Lock indefinitely. Watchdog handles ambiguity, but we only release when broker or recon says FLAT.
+        self._pending_close_ttls[symbol] = now
         try:
             order = await self.broker.close_position(symbol, reason=reason, qty=qty, strategy=strategy, role=role)
             if order is None:

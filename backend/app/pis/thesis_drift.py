@@ -85,10 +85,10 @@ class ThesisDriftEvaluator:
                 # Check for volume/wick confirmation of aggressive rejection
                 bar_range = max(1e-9, obs.high - obs.low)
                 if obs.side > 0:
-                    # LONG: lower wick is adverse.
+                    # LONG: lower wick (close - low) is adverse — shows how far price DROPPED from the close.
                     adverse_wick = max(0.0, obs.close - obs.low)
                 else:
-                    # SHORT: upper wick is adverse.
+                    # SHORT: upper wick (high - close) is adverse — shows how far price ROSE from the close.
                     adverse_wick = max(0.0, obs.high - obs.close)
                     
                 wick_ratio = adverse_wick / bar_range
@@ -112,7 +112,7 @@ class ThesisDriftEvaluator:
                 
                 adverse_close = False
                 if history is not None and history_len >= 2:
-                    recent = history[-2:]
+                    recent = list(history)[-2:]
                     prev_obs = recent[0]
                     curr_obs = recent[1]
                     side = obs.side
@@ -122,9 +122,14 @@ class ThesisDriftEvaluator:
                         adverse_close = (curr_obs.close > prev_obs.close and curr_obs.high >= prev_obs.high)
 
                 structural_confirmation = (
-                    persistence_confirmed 
-                    and (adverse_momentum or adverse_velocity)
-                    and (has_wick or severe_adverse_override_triggered or adverse_close)
+                    # Fast-path: severe override doesn't need persistence (catastrophic bar)
+                    severe_adverse_override_triggered
+                    or (
+                        # Normal-path: sustained adverse behavior over >= 2 bars with stagnation
+                        persistence_confirmed
+                        and (adverse_momentum or adverse_velocity)
+                        and (has_wick or adverse_close)
+                    )
                 )
                     
                 early_invalidation = early_candidate and structural_confirmation
