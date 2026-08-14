@@ -1,9 +1,4 @@
-"""Lean production momentum strategy for AlphaDesk 007.
-
-Only setup evidence needed for a momentum continuation is evaluated here:
-MACD impulse, EMA trend, VWAP location, RSI, volume and scanner direction.
-No news calls, memory gates, adaptive thresholds or portfolio logic live here.
-"""
+"""Lean production momentum strategy for AlphaDesk 007."""
 from __future__ import annotations
 
 from zoneinfo import ZoneInfo
@@ -75,15 +70,7 @@ class MomentumSimple(Strategy):
         return True
 
     @staticmethod
-    def _quality(
-        side: str,
-        close: float,
-        vwap: float,
-        atr: float,
-        vol_z: float,
-        rs: float | None,
-        mover_bias: str | None,
-    ) -> float:
+    def _quality(side: str, close: float, vwap: float, atr: float, vol_z: float, mover_bias: str | None) -> float:
         score = 55.0
         if side == "long" and close > vwap:
             score += 12.0
@@ -93,11 +80,6 @@ class MomentumSimple(Strategy):
             score += 8.0
         elif vol_z < -0.5:
             score -= 8.0
-        if rs is not None:
-            if side == "long":
-                score += 10.0 if rs >= 0.60 else (-8.0 if rs < 0.40 else 0.0)
-            else:
-                score += 10.0 if rs <= 0.40 else (-8.0 if rs > 0.60 else 0.0)
         if (side == "long" and mover_bias == "gainer") or (side == "short" and mover_bias == "loser"):
             score += 7.0
         if atr > 0:
@@ -150,36 +132,14 @@ class MomentumSimple(Strategy):
         short_trigger = self._event_valid(symbol, "short", df) or (mover == "loser" and short_aligned and vol_z >= 0.5)
 
         if long_aligned and long_trigger and float(self.params["rsi_min"]) <= rsi <= float(self.params["rsi_max"]):
-            quality = self._quality("long", close, float(last["vwap"]), atr, vol_z, ctx.rs_score, mover)
+            quality = self._quality("long", close, float(last["vwap"]), atr, vol_z, mover)
             stop = close - float(self.params["atr_stop_mult"]) * atr
             target = close + float(self.params["atr_stop_mult"]) * float(self.params["reward_risk"]) * atr
-            return Signal(
-                symbol=symbol,
-                action=SignalAction.ENTER_LONG,
-                confidence=min(0.95, 0.55 + max(0.0, vol_z) * 0.04 + (0.08 if mover == "gainer" else 0.0)),
-                strategy=self.name,
-                reason=f"momentum continuation; quality={quality:.0f}",
-                price=close,
-                stop_loss=stop,
-                take_profit=target,
-                trend_score=quality,
-                strategy_params={"entry_quality_score": quality},
-            )
+            return Signal(symbol=symbol, action=SignalAction.ENTER_LONG, confidence=min(0.95, 0.55 + max(0.0, vol_z) * 0.04 + (0.08 if mover == "gainer" else 0.0)), strategy=self.name, reason=f"momentum continuation; quality={quality:.0f}", price=close, stop_loss=stop, take_profit=target, trend_score=quality, strategy_params={"entry_quality_score": quality})
 
-        if short_aligned and short_trigger and (100.0 - float(self.params["rsi_max"])) <= rsi <= (100.0 - float(self.params["rsi_min"])):
-            quality = self._quality("short", close, float(last["vwap"]), atr, vol_z, ctx.rs_score, mover)
+        if short_aligned and short_trigger and (100.0 - float(self.params["rsi_max"])) <= rsi <= (100.0 - float(self.params["rsi_min"]):
+            quality = self._quality("short", close, float(last["vwap"]), atr, vol_z, mover)
             stop = close + float(self.params["atr_stop_mult"]) * atr
             target = close - float(self.params["atr_stop_mult"]) * float(self.params["reward_risk"]) * atr
-            return Signal(
-                symbol=symbol,
-                action=SignalAction.ENTER_SHORT,
-                confidence=min(0.95, 0.55 + max(0.0, vol_z) * 0.04 + (0.08 if mover == "loser" else 0.0)),
-                strategy=self.name,
-                reason=f"momentum continuation; quality={quality:.0f}",
-                price=close,
-                stop_loss=stop,
-                take_profit=target,
-                trend_score=quality,
-                strategy_params={"entry_quality_score": quality},
-            )
+            return Signal(symbol=symbol, action=SignalAction.ENTER_SHORT, confidence=min(0.95, 0.55 + max(0.0, vol_z) * 0.04 + (0.08 if mover == "loser" else 0.0)), strategy=self.name, reason=f"momentum continuation; quality={quality:.0f}", price=close, stop_loss=stop, take_profit=target, trend_score=quality, strategy_params={"entry_quality_score": quality})
         return None
