@@ -5,20 +5,18 @@ small context (position, regime, equity), emit a Signal or None. Strategies
 never size positions or talk to brokers -- the AI pipeline gates their
 signals and the risk manager sizes them. The same instance code runs live
 and in backtests.
-
-Register new strategies with @register; they appear automatically in the
-API, UI and backtester.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 
 import pandas as pd
 
 from app.core.domain import Position, Regime, Signal
+from app.core.applog import applog
 
 
 @dataclass
@@ -28,27 +26,18 @@ class StrategyContext:
     regime: Regime
     now: datetime
     debug_mode: bool = False
-    # Populated by scanner when a symbol is a known top gainer or loser.
-    # Values: "gainer" (long bias) | "loser" (short bias) | None (neutral)
     mover_bias: str | None = None
-    # Raw % change for the mover (positive for gainers, negative for losers)
     mover_change_pct: float = 0.0
-    # Relative strength score vs SPY (0.0 to 1.0)
     rs_score: float | None = None
-    # P1: News propagation
     news_direction: str = "neutral"
     news_confidence: float = 0.0
     event_state: str | None = None
 
 
 class Strategy(ABC):
-    """Subclass and set: name, description, default_params; implement on_bar."""
-
     name: str = "abstract"
     description: str = ""
     default_params: dict = {}
-
-    # --- Dynamic Core Traits ---
     max_allocation: float = 50000.0
     is_breakout: bool = False
     ml_threshold: float = 0.53
@@ -63,14 +52,13 @@ class Strategy(ABC):
 
     @abstractmethod
     def on_bar(self, ctx: StrategyContext, symbol: str, df: pd.DataFrame) -> Signal | None:
-        """Called once per newly closed bar with the enriched frame (oldest->newest)."""
+        """Called once per newly closed bar with the enriched frame."""
 
     def signal_accepted(self, sig: Signal) -> None:
-        """Called when a signal emitted by this strategy is accepted by risk and submitted to the broker."""
         pass
 
     def reset(self) -> None:
-        """Clear per-session state (fresh backtest / engine restart)."""
+        pass
 
     def describe(self) -> dict:
         return {
@@ -91,11 +79,26 @@ def register(cls: type[Strategy]) -> type[Strategy]:
     return cls
 
 
+# Production 007 deliberately runs a compact set of strategies with evidence
+# of useful behavior in the current DB. Experimental/challenger strategies stay
+# registered for research/backtests but do not create live entries by default.
+PRODUCTION_STRATEGIES = {
+    "rsi2_reversion",
+    "orb",
+    "vwap_reversion",
+    "trend_pullback",
+}
+
+
 def create_strategies(overrides: dict[str, dict] | None = None) -> list[Strategy]:
-    """Instantiate every registered strategy, applying {name: {enabled, params}} overrides."""
+    """Instantiate only the compact AlphaDesk 007 production strategy set."""
     overrides = overrides or {}
     out: list[Strategy] = []
     for name, cls in REGISTRY.items():
         cfg = overrides.get(name, {})
-        out.append(cls(params=cfg.get("params"), enabled=cfg.get("enabled", True)))
+        explicitly_enabled = bool(cfg.get("enabled", False)) if name in overrides else True
+        enabled = name in PRODUCTION_STRATEGIES and explicitly_enabled
+        if name not in PRODUCTION_STRATEGIES and explicitly_enabled:
+            applog.info("strategy", f"AlphaDesk 007: research strategy {name} kept registered but disabled for production")
+        out.append(cls(params=cfg.get("params"), enabled=enabled))
     return out
