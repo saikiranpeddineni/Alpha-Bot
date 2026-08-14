@@ -1,16 +1,8 @@
-"""AlphaDesk 007 production stabilization guardrails.
+"""AlphaDesk 007 production guardrails and low-friction entry profile.
 
-This module is intentionally centralized so the live engine, backtester, and
-paper broker cannot accidentally bypass the final risk invariants introduced
-for AlphaDesk 007.
-
-The guard preserves existing interfaces while enforcing:
-- one final planned-risk ceiling;
-- volatility-aware minimum stop distance;
-- lower portfolio heat;
-- strategy loss cooldowns;
-- daily freeze after a catastrophic realized loss;
-- non-zero trade hold telemetry.
+The production path keeps only controls that directly protect capital or improve
+execution. Research/adaptive gates remain available for analysis but do not get
+to silently suppress ordinary production entries.
 """
 from __future__ import annotations
 
@@ -21,34 +13,49 @@ from typing import Any
 
 _INSTALLED = False
 
+# Capital protection stays strict.
 TARGET_RISK_PCT = 0.25
 HARD_RISK_CAP_PCT = 0.40
 MAX_PORTFOLIO_HEAT_PCT = 2.00
 MAX_OPEN_POSITIONS = 5
 MAX_DAILY_LOSS_PCT = 1.50
 MAX_STRATEGY_CONSECUTIVE_LOSSES = 3
-GLOBAL_COOLDOWN_MINUTES = 30
-SAME_THESIS_COOLDOWN_MINUTES = 120
+GLOBAL_COOLDOWN_MINUTES = 10
+SAME_THESIS_COOLDOWN_MINUTES = 60
 MIN_STOP_PCT = 0.10
 MIN_STOP_ABS = 0.02
 MIN_STOP_ATR = 0.50
 CATASTROPHIC_LOSS_R = 1.50
 
+# Entry friction is deliberately lower than AlphaDesk 006 because the DB showed
+# positive forward opportunity being discarded downstream by stacked gates.
+ENTRY_ML_THRESHOLD = 0.50
+ENTRY_HARD_ML_CUTOFF = 0.46
+ENTRY_SCORE_TREND = 50.0
+ENTRY_SCORE_RANGE = 60.0
+ENTRY_SCORE_VOLATILE = 55.0
+ENTRY_SCORE_EVENT = 65.0
+ENTRY_QUALITY_NORMAL = 65.0
+ENTRY_QUALITY_EVENT = 70.0
+ENTRY_QUALITY_DISCOVERY = 78.0
+ENTRY_MAX_VWAP_EXTENSION = 2.25
+ENTRY_HARD_VWAP_EXTENSION = 3.50
+ENTRY_MAX_ATR_EXTENSION = 1.50
+ENTRY_HARD_ATR_EXTENSION = 2.00
 
-def _set_if_lower(config: Any, name: str, value: float | int) -> None:
+
+def _set_lower(config: Any, name: str, value: float | int) -> None:
     try:
         current = getattr(config, name)
-    except AttributeError:
-        return
-    if isinstance(current, bool):
-        return
-    try:
-        current_f = float(current)
-        value_f = float(value)
-        if current_f > value_f:
+        if isinstance(current, bool):
+            return
+        if float(current) > float(value):
             object.__setattr__(config, name, value)
-    except (TypeError, ValueError):
-        object.__setattr__(config, name, value)
+    except (AttributeError, TypeError, ValueError):
+        try:
+            object.__setattr__(config, name, value)
+        except Exception:
+            pass
 
 
 def _minimum_stop_distance(price: float, atr: float | None) -> float:
@@ -69,18 +76,31 @@ def _install_risk_guard() -> None:
     @wraps(original_init)
     def guarded_init(self, config, clock):
         original_init(self, config, clock)
-        # Runtime DB settings remain useful, but never above the 007 safety ceiling.
-        _set_if_lower(config, "risk_per_trade_pct", TARGET_RISK_PCT)
-        _set_if_lower(config, "max_open_positions", MAX_OPEN_POSITIONS)
-        _set_if_lower(config, "max_daily_loss_pct", MAX_DAILY_LOSS_PCT)
-        _set_if_lower(config, "min_stop_pct", MIN_STOP_PCT)
-        _set_if_lower(config, "kelly_fraction_cap", 0.10)
-        _set_if_lower(config, "max_positions_per_sector", 2)
-        self.config = config
-        # These fields already participate in the existing Beast gate.
+        _set_lower(config, "risk_per_trade_pct", TARGET_RISK_PCT)
+        _set_lower(config, "max_open_positions", MAX_OPEN_POSITIONS)
+        _set_lower(config, "max_daily_loss_pct", MAX_DAILY_LOSS_PCT)
+        _set_lower(config, "min_stop_pct", MIN_STOP_PCT)
+        _set_lower(config, "kelly_fraction_cap", 0.10)
+        _set_lower(config, "max_positions_per_sector", 2)
+        # Production entry profile: enough quality to retain an edge, without the
+        # stacked 006 thresholds that starved the book of executable trades.
+        _set_lower(config, "ml_confidence_threshold", ENTRY_ML_THRESHOLD)
+        _set_lower(config, "ml_hard_reject_threshold", ENTRY_HARD_ML_CUTOFF)
+        _set_lower(config, "score_threshold_trend", ENTRY_SCORE_TREND)
+        _set_lower(config, "score_threshold_range", ENTRY_SCORE_RANGE)
+        _set_lower(config, "score_threshold_volatile", ENTRY_SCORE_VOLATILE)
+        _set_lower(config, "score_threshold_event", ENTRY_SCORE_EVENT)
+        _set_lower(config, "normal_entry_quality_threshold", ENTRY_QUALITY_NORMAL)
+        _set_lower(config, "event_entry_quality_threshold", ENTRY_QUALITY_EVENT)
+        _set_lower(config, "price_discovery_entry_quality_threshold", ENTRY_QUALITY_DISCOVERY)
+        _set_lower(config, "max_entry_vwap_extension_pct", ENTRY_MAX_VWAP_EXTENSION)
+        _set_lower(config, "hard_entry_vwap_extension_pct", ENTRY_HARD_VWAP_EXTENSION)
+        _set_lower(config, "max_entry_atr_extension", ENTRY_MAX_ATR_EXTENSION)
+        _set_lower(config, "hard_entry_atr_extension", ENTRY_HARD_ATR_EXTENSION)
         object.__setattr__(config, "beast_global_cooldown_minutes", GLOBAL_COOLDOWN_MINUTES)
         object.__setattr__(config, "beast_same_thesis_cooldown_minutes", SAME_THESIS_COOLDOWN_MINUTES)
-        object.__setattr__(config, "beast_min_entry_quality", max(float(getattr(config, "beast_min_entry_quality", 82.0)), 82.0))
+        object.__setattr__(config, "beast_min_entry_quality", ENTRY_QUALITY_NORMAL)
+        self.config = config
 
     @wraps(original_evaluate_entry)
     def guarded_evaluate_entry(self, signal, ctx, bars, now=None, kelly_override=None):
@@ -88,9 +108,9 @@ def _install_risk_guard() -> None:
         try:
             price = float(signal.price or bars["close"].iloc[-1])
             atr = None
-            if "atr14" in bars.columns and len(bars) and bars["atr14"].iloc[-1] is not None:
-                raw_atr = float(bars["atr14"].iloc[-1])
-                atr = raw_atr if math.isfinite(raw_atr) and raw_atr > 0 else None
+            if "atr14" in bars.columns and len(bars):
+                raw = float(bars["atr14"].iloc[-1])
+                atr = raw if math.isfinite(raw) and raw > 0 else None
         except Exception:
             return RiskDecision(False, "AlphaDesk 007: invalid entry price/ATR")
 
@@ -104,8 +124,7 @@ def _install_risk_guard() -> None:
             if proposed_distance < minimum_distance:
                 return RiskDecision(
                     False,
-                    f"AlphaDesk 007: stop distance {proposed_distance:.4f} < minimum {minimum_distance:.4f} "
-                    f"(price={price:.2f}, atr={atr})",
+                    f"AlphaDesk 007: stop distance {proposed_distance:.4f} < minimum {minimum_distance:.4f}",
                 )
 
         decision = original_evaluate_entry(self, signal, ctx, bars, now=now, kelly_override=kelly_override)
@@ -113,19 +132,17 @@ def _install_risk_guard() -> None:
             return decision
 
         order = decision.order
-        entry_price = float(price)
+        entry_price = price
         stop_price = float(order.stop_loss or proposed_stop or price)
         stop_distance = abs(entry_price - stop_price)
         if stop_distance < minimum_distance:
             return RiskDecision(False, "AlphaDesk 007: executable stop geometry is too tight")
 
-        # Final sizing authority: no strategy score/Kelly multiplier can exceed
-        # the 007 planned-risk ceiling.
-        max_planned_risk_dollars = ctx.equity * HARD_RISK_CAP_PCT / 100.0
-        target_risk_dollars = ctx.equity * TARGET_RISK_PCT / 100.0
+        # Final sizing authority: all upstream quality/Kelly multipliers are bounded
+        # by one simple economic risk budget.
+        target_risk = ctx.equity * TARGET_RISK_PCT / 100.0
         original_risk = abs(float(order.qty)) * stop_distance
-        allowed_risk = min(max_planned_risk_dollars, target_risk_dollars)
-        max_qty = int(allowed_risk / stop_distance)
+        max_qty = int(target_risk / stop_distance)
         if max_qty < 1:
             return RiskDecision(False, "AlphaDesk 007: risk budget supports less than one share")
         if float(order.qty) > max_qty:
@@ -140,10 +157,7 @@ def _install_risk_guard() -> None:
                 current_heat += abs(float(position.market_value)) * 0.01
         new_heat_pct = (current_heat + original_risk) / max(float(ctx.equity), 1.0) * 100.0
         if new_heat_pct > MAX_PORTFOLIO_HEAT_PCT:
-            return RiskDecision(
-                False,
-                f"AlphaDesk 007: portfolio heat {new_heat_pct:.2f}% > {MAX_PORTFOLIO_HEAT_PCT:.2f}%",
-            )
+            return RiskDecision(False, f"AlphaDesk 007: portfolio heat {new_heat_pct:.2f}% > {MAX_PORTFOLIO_HEAT_PCT:.2f}%")
 
         effective_fraction = original_risk / max(float(ctx.equity), 1.0)
         decision.kelly_fraction = round(effective_fraction, 6)
@@ -159,6 +173,7 @@ def _install_risk_guard() -> None:
                 "stop_distance": round(stop_distance, 6),
                 "min_stop_distance": round(minimum_distance, 6),
                 "portfolio_heat_pct": round(new_heat_pct, 4),
+                "entry_profile": "LOW_FRICTION_PRODUCTION",
             }
         )
         return decision
@@ -166,9 +181,8 @@ def _install_risk_guard() -> None:
     @wraps(original_on_trade_closed)
     def guarded_on_trade_closed(self, trade, now=None):
         result = original_on_trade_closed(self, trade, now=now)
-        realized_r = getattr(trade, "r_multiple", None)
         try:
-            catastrophic = realized_r is not None and float(realized_r) <= -CATASTROPHIC_LOSS_R
+            catastrophic = getattr(trade, "r_multiple", None) is not None and float(trade.r_multiple) <= -CATASTROPHIC_LOSS_R
         except (TypeError, ValueError):
             catastrophic = False
         if catastrophic:
@@ -178,10 +192,7 @@ def _install_risk_guard() -> None:
                 self.daily_halt_date = self.clock.session_date(now_dt)
             except Exception:
                 self.daily_halt_date = now_dt.date()
-            self.hard_halt_reason = (
-                f"AlphaDesk 007 catastrophic realized loss: {float(realized_r):.2f}R on "
-                f"{trade.symbol}; trading frozen for session"
-            )
+            self.hard_halt_reason = f"AlphaDesk 007 catastrophic loss: {float(trade.r_multiple):.2f}R on {trade.symbol}; session frozen"
         return result
 
     @wraps(original_is_strategy_in_cooldown)
@@ -195,55 +206,76 @@ def _install_risk_guard() -> None:
     RiskManager.is_strategy_in_cooldown = guarded_is_strategy_in_cooldown
 
 
+def _install_pipeline_simplification() -> None:
+    from app.strategies.pipeline import SignalPipeline
+
+    if getattr(SignalPipeline, "_alphadesk_007_simplified", False):
+        return
+
+    original_init = SignalPipeline.__init__
+    original_process = SignalPipeline.process
+
+    @wraps(original_init)
+    def guarded_pipeline_init(self, *args, **kwargs):
+        # Let near-threshold candidates reach Meta/TradeScore instead of being
+        # discarded by the first ML veto.
+        kwargs["soft_composite_gating"] = True
+        original_init(self, *args, **kwargs)
+
+    @wraps(original_process)
+    def guarded_pipeline_process(self, symbol, df, signals, regime, features=None, sector_strength=None, adaptive_ml_thresholds=None):
+        # Freeze the adaptive threshold layer in production. It remains visible in
+        # telemetry/research, but cannot silently make entry eligibility oscillate.
+        return original_process(
+            self,
+            symbol,
+            df,
+            signals,
+            regime,
+            features=features,
+            sector_strength=sector_strength,
+            adaptive_ml_thresholds=None,
+        )
+
+    SignalPipeline.__init__ = guarded_pipeline_init
+    SignalPipeline.process = guarded_pipeline_process
+    SignalPipeline._alphadesk_007_simplified = True
+
+
 def _install_trade_telemetry_guard() -> None:
     from app.portfolio.tracker import PortfolioTracker, FillApplicationResult
 
     original_apply_fill = PortfolioTracker._apply_fill
+    if getattr(PortfolioTracker, "_alphadesk_007_telemetry", False):
+        return
 
     @wraps(original_apply_fill)
     def guarded_apply_fill(self, fill, peak_price=None, trough_price=None, initial_stop=None, order=None):
-        result = original_apply_fill(
-            self,
-            fill,
-            peak_price=peak_price,
-            trough_price=trough_price,
-            initial_stop=initial_stop,
-            order=order,
-        )
+        result = original_apply_fill(self, fill, peak_price=peak_price, trough_price=trough_price, initial_stop=initial_stop, order=order)
         if not isinstance(result, FillApplicationResult) or result.closed_trade is None:
             return result
-
         trade = result.closed_trade
-        updates: dict[str, Any] = {}
         try:
             hold_seconds = max(0.0, (trade.exit_at - trade.entry_at).total_seconds())
-            updates["hold_bars"] = max(1, int(math.ceil(hold_seconds / 60.0)))
-            metadata = dict(trade.metadata or {})
-            metadata.update(
-                {
+            enriched = trade.model_copy(update={
+                "hold_bars": max(1, int(math.ceil(hold_seconds / 60.0))),
+                "metadata": {
+                    **dict(trade.metadata or {}),
                     "alphadesk_007_guard": True,
                     "hold_seconds": round(hold_seconds, 3),
                     "hold_minutes": round(hold_seconds / 60.0, 3),
                     "economic_trade_key": f"{trade.symbol}:{trade.entry_at.isoformat()}",
-                }
-            )
-            updates["metadata"] = metadata
-            if trade.candidate_id is None:
-                updates["candidate_id"] = f"{trade.symbol}:{trade.entry_at.isoformat()}"
+                },
+            })
+            if self.trades and self.trades[-1].id == trade.id:
+                self.trades[-1] = enriched
+            result.closed_trade = enriched
         except Exception:
             pass
-
-        if updates:
-            try:
-                enriched = trade.model_copy(update=updates)
-                if self.trades and self.trades[-1].id == trade.id:
-                    self.trades[-1] = enriched
-                result.closed_trade = enriched
-            except Exception:
-                pass
         return result
 
     PortfolioTracker._apply_fill = guarded_apply_fill
+    PortfolioTracker._alphadesk_007_telemetry = True
 
 
 def install() -> None:
@@ -251,5 +283,6 @@ def install() -> None:
     if _INSTALLED:
         return
     _install_risk_guard()
+    _install_pipeline_simplification()
     _install_trade_telemetry_guard()
     _INSTALLED = True
