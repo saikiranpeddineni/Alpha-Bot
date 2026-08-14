@@ -166,12 +166,8 @@ class DurableTradingEngine(TradingEngine):
                 ttl = float("inf") # Legacy fallback (indefinite)
 
             if now < ttl:
-                # If a partial close is locked, a FULL close can still proceed.
-                if is_partial and qty is None:
-                    pass
-                else:
-                    applog.debug("engine", f"{symbol}: skipping duplicate close — close already in-flight (#45)")
-                    return
+                applog.debug("engine", f"{symbol}: skipping duplicate close — close already in-flight (#45)")
+                return
             else:
                 self._pending_close_ttls.pop(symbol, None)
 

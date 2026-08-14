@@ -40,6 +40,9 @@ async def test_partial_exit_does_not_block_later_full_exit():
     partial_order.status = OrderStatus.FILLED
     engine.portfolio._lots["AAPL"].qty = 50
     
+    # Fast forward time to expire the partial close lock
+    engine._pending_close_ttls["AAPL"]["ttl"] = 0
+    
     full_order = await engine._close_position_guarded(
         symbol="AAPL",
         reason="confirmed_thesis_failure",
@@ -49,3 +52,43 @@ async def test_partial_exit_does_not_block_later_full_exit():
     )
     
     assert full_order is not None
+
+@pytest.mark.asyncio
+async def test_in_flight_partial_exit_blocks_concurrent_full_exit():
+    engine = DurableTradingEngine(
+        settings=Settings(ALPHADESK_MODE="demo", DATA_PROVIDER="synthetic", ALPHADESK_DB_PATH=":memory:"),
+        db=MagicMock()
+    )
+    engine.broker = AsyncMock()
+    engine.portfolio = MagicMock()
+    engine.risk = MagicMock()
+    engine.insights = MagicMock()
+    
+    engine.broker.close_position = AsyncMock(return_value=Order(
+        symbol="AAPL", side="sell", qty=50, order_type="market", status=OrderStatus.PENDING
+    ))
+    
+    engine.portfolio._lots = {"AAPL": MagicMock(qty=100)}
+    engine._flattening_symbols = set()
+    
+    partial_order = await engine._close_position_guarded(
+        symbol="AAPL",
+        reason="scale_out",
+        qty=50,
+        strategy="momentum",
+        role=OrderRole.TAKE_PROFIT,
+    )
+    
+    assert partial_order is not None
+    
+    # Try to issue a concurrent full exit before the 30s TTL expires
+    full_order = await engine._close_position_guarded(
+        symbol="AAPL",
+        reason="confirmed_thesis_failure",
+        qty=None,
+        strategy="momentum",
+        role=OrderRole.EXIT,
+    )
+    
+    # It must be blocked by the in-flight lock!
+    assert full_order is None
