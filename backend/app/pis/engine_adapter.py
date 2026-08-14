@@ -111,13 +111,15 @@ class PISEngineAdapter:
             risk_per_share = abs(entry_px - initial_stop)
             if risk_per_share <= 1e-8 or math.isnan(risk_per_share):
                 risk_per_share = max(0.01, atr_px)
+                initial_stop = entry_px - (risk_per_share * side)
             r_multiple = (cur_px - entry_px) / risk_per_share * side
         else:
             # Fallback: use ATR as a proxy for risk when initial stop is unknown
             risk_per_share = max(0.01, atr_px)
-            r_multiple = None  # R-multiple undefined without authoritative stop
+            initial_stop = entry_px - (risk_per_share * side)
+            r_multiple = 0.0  # R-multiple defaults to 0.0 without authoritative stop
 
-        if r_multiple is not None and (math.isnan(r_multiple) or math.isinf(r_multiple)):
+        if math.isnan(r_multiple) or math.isinf(r_multiple):
             r_multiple = 0.0
 
         eval_ts = timestamp or datetime.now(timezone.utc)
