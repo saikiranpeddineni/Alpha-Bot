@@ -1,11 +1,4 @@
-"""AlphaDesk application entrypoint.
-
-Run from the repo root:
-    uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000
-
-The FastAPI app serves the REST API, the /ws event stream, and (when built)
-the production frontend from frontend/dist.
-"""
+"""AlphaDesk application entrypoint."""
 from __future__ import annotations
 
 import asyncio
@@ -44,20 +37,13 @@ from app.api.routes import router
 from app.api.replay import router as replay_router
 from app.api.ws import EventHub
 from app.config import FRONTEND_DIST, Settings, get_settings
-from app.core.durable_engine import DurableTradingEngine
+from app.core.engine import TradingEngine
 from app.core.applog import applog, configure_std_logging
 from app.core.alerting import init_alerting, stop_alerting
 from app.db.database import Database
-from app.strategies.runtime_integrity import install_runtime_integrity
-
-# The strategy package installs early compatibility boundaries. Re-run after
-# DurableTradingEngine is imported so the final candidate boundary can safely
-# wrap TradingEngineEvaluationMixin without import-order/circular-import risk.
-install_runtime_integrity()
 
 
 def _json_safe(value):
-    """Normalize non-finite floats at the HTTP JSON boundary."""
     if isinstance(value, float):
         return value if math.isfinite(value) else None
     if isinstance(value, dict):
@@ -78,24 +64,20 @@ JSONResponse.render = _safe_json_response_render
 
 
 class SafeJSONResponse(JSONResponse):
-    """Default response class; JSONResponse itself is normalized above too."""
+    pass
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     configure_std_logging()
     settings = settings or get_settings()
     db = Database(settings.resolved_db_path)
-    engine = DurableTradingEngine(settings, db)
+    engine = TradingEngine(settings, db)
     hub = EventHub()
     engine.publish = hub.publish
 
-    _log_seq = 0
     def _safe_log_publish(entry) -> None:
-        nonlocal _log_seq
-        if entry.level.upper() == "DEBUG":
-            return
-        _log_seq += 1
-        hub.publish("log", entry.model_dump(mode="json"))
+        if entry.level.upper() != "DEBUG":
+            hub.publish("log", entry.model_dump(mode="json"))
 
     applog.subscribe(_safe_log_publish)
 
@@ -109,12 +91,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         await stop_alerting()
         await engine.shutdown()
 
-    app = FastAPI(
-        title="AlphaDesk",
-        version=__version__,
-        lifespan=lifespan,
-        default_response_class=SafeJSONResponse,
-    )
+    app = FastAPI(title="AlphaDesk", version=__version__, lifespan=lifespan, default_response_class=SafeJSONResponse)
     app.state.settings = settings
     app.state.db = db
     app.state.engine = engine
@@ -126,26 +103,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     try:
         hostname = socket.gethostname()
         local_ips.append(hostname)
-        for ip in socket.gethostbyname_ex(hostname)[2]:
-            local_ips.append(ip)
+        local_ips.extend(socket.gethostbyname_ex(hostname)[2])
     except Exception:
         pass
 
     origins = []
     for ip in local_ips:
-        origins.append(f"http://{ip}:5173")
-        origins.append(f"https://{ip}:5173")
-        origins.append(f"http://{ip}:{settings.port}")
-        origins.append(f"https://{ip}:{settings.port}")
-
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=origins,
-        allow_origin_regex=r"https?://.*",
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+        origins.extend((f"http://{ip}:5173", f"https://{ip}:5173", f"http://{ip}:{settings.port}", f"https://{ip}:{settings.port}"))
+    app.add_middleware(CORSMiddleware, allow_origins=origins, allow_origin_regex=r"https?://.*", allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
     app.include_router(dashboard_history_router)
     app.include_router(router)
@@ -154,7 +119,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.websocket("/ws")
     async def ws_endpoint(ws: WebSocket) -> None:
         t0 = time.perf_counter()
-        t_broker_ms = 0.0
         bootstrap = {
             "status": engine.status(),
             "quotes": engine.quotes_payload(),
@@ -178,10 +142,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 }
             except Exception as exc:
                 applog.warning("ws", f"Broker calls during WebSocket bootstrap failed: {exc}")
-            t_broker_ms = round((time.perf_counter() - tb0) * 1000, 2)
-
-        t_total_ms = round((time.perf_counter() - t0) * 1000, 2)
-        applog.debug("ws", f"WebSocket bootstrap built in {t_total_ms}ms (broker: {t_broker_ms}ms)")
+            applog.debug("ws", f"WebSocket broker bootstrap: {(time.perf_counter() - tb0) * 1000:.2f}ms")
+        applog.debug("ws", f"WebSocket bootstrap: {(time.perf_counter() - t0) * 1000:.2f}ms")
         await hub.handle(ws, bootstrap)
 
     if FRONTEND_DIST.exists():
@@ -189,13 +151,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     else:
         @app.get("/")
         async def index_placeholder() -> dict:
-            return {
-                "app": "AlphaDesk API",
-                "version": __version__,
-                "note": "Frontend not built. Run the install script, or use `npm run dev` in frontend/ for development.",
-                "docs": "/docs",
-            }
-
+            return {"app": "AlphaDesk API", "version": __version__, "note": "Frontend not built.", "docs": "/docs"}
     return app
 
 
