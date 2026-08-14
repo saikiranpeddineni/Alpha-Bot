@@ -168,9 +168,18 @@ class TradingEngineEvaluationMixin:
         except Exception:
             rs_score = None
 
+        news_dir = "neutral"
+        news_conf = 0.0
+        news_cat = None
+        if news_context is not None:
+            news_dir = str(getattr(news_context, "direction", "neutral") or "neutral")
+            news_conf = float(getattr(news_context, "confidence", 0.0) or 0.0)
+            news_cat = getattr(news_context, "catalyst", None)
+            
         sctx = StrategyContext(
             position=position, equity=equity, regime=regime, now=now,
-            mover_bias=_mover_bias, mover_change_pct=_mover_chg, rs_score=rs_score
+            mover_bias=_mover_bias, mover_change_pct=_mover_chg, rs_score=rs_score,
+            news_direction=news_dir, news_confidence=news_conf, event_state=news_cat
         )
         signals = []
         for strat in self.strategies:

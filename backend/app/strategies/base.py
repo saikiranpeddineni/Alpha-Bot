@@ -35,6 +35,10 @@ class StrategyContext:
     mover_change_pct: float = 0.0
     # Relative strength score vs SPY (0.0 to 1.0)
     rs_score: float | None = None
+    # P1: News propagation
+    news_direction: str = "neutral"
+    news_confidence: float = 0.0
+    event_state: str | None = None
 
 
 class Strategy(ABC):

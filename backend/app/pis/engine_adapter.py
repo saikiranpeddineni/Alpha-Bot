@@ -169,7 +169,10 @@ class PISEngineAdapter:
             decision_timestamp=eval_ts,
             bid=bid_px,
             ask=ask_px,
-            price_source="bar_close" if cur_px == close_px else "broker_position"
+            price_source="bar_close" if cur_px == close_px else "broker_position",
+            strategy=getattr(position, "strategy", "engine") or "engine",
+            candidate_id=getattr(position, "candidate_id", None),
+            thesis_fingerprint=getattr(position, "thesis_fingerprint", None)
         )
 
         from app.db.database import Database

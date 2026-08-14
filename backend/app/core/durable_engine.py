@@ -77,6 +77,43 @@ class DurableTradingEngine(TradingEngine):
                 
             order.filled_avg_price = float(fill.price)
 
+        if not getattr(order, "metadata", None):
+            order.metadata = {}
+            
+        # P1: Provenance persistence
+        if getattr(order, "thesis_fingerprint", None):
+            order.metadata["thesis_fingerprint"] = order.thesis_fingerprint
+            
+        try:
+            import subprocess
+            sha = subprocess.check_output(["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL).decode("utf-8").strip()
+            order.metadata["code_commit_sha"] = sha
+        except Exception:
+            pass
+            
+        if getattr(self, "risk", None) and getattr(self.risk, "config", None):
+            try:
+                order.metadata["risk_config_hash"] = str(hash(frozenset(self.risk.config.model_dump().items())))
+            except Exception:
+                pass
+
+        # P1: Complete thesis lifecycle loop on confirmed entry
+        if order.status == OrderStatus.FILLED and getattr(order, "role", OrderRole.ENTRY) == OrderRole.ENTRY:
+            if getattr(self, "pipeline", None) and hasattr(self.pipeline, "thesis_memory"):
+                try:
+                    self.pipeline.thesis_memory.record_attempt(
+                        symbol=order.symbol,
+                        action="ENTER_LONG" if str(order.side).lower() == "buy" else "ENTER_SHORT",
+                        price=float(order.filled_avg_price or fill.price),
+                        vwap=float(order.metadata.get("vwap", 0.0)),
+                        atr=float(order.metadata.get("atr", 0.0)),
+                        strategy=getattr(order, "strategy", "engine"),
+                        candidate_id=order.metadata.get("candidate_id", ""),
+                        thesis_fingerprint=getattr(order, "thesis_fingerprint", None) or order.metadata.get("thesis_fingerprint", "")
+                    )
+                except Exception as e:
+                    applog.error("engine.order_ledger", f"Failed to record thesis attempt for {order.symbol}: {e}")
+
         self.db.save_order(order, self.mode)
 
     async def _drain_fills(self, now: datetime) -> None:

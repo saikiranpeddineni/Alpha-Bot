@@ -273,6 +273,30 @@ class MomentumCross(Strategy):
         # Calculate opportunity state
         extension_atr = abs(close - float(last["vwap"])) / max(atr, 1e-9)
         atr_pct = (atr / close) * 100.0
+        # Pre-compute unified trend score for classify_opportunity
+        base_trend = 50.0
+        # Check directional alignment
+        if last["ema9"] > last["ema20"]:
+            base_trend += 15
+            if close > float(last["vwap"]): base_trend += 10
+            if hist_now > hist_prev: base_trend += 10
+        elif last["ema9"] < last["ema20"]:
+            base_trend += 15
+            if close < float(last["vwap"]): base_trend += 10
+            if hist_now < hist_prev: base_trend += 10
+            
+        if vol_z >= 1.0:
+            base_trend += 5
+            
+        if ctx.rs_score is not None:
+            if last["ema9"] > last["ema20"]:
+                if ctx.rs_score >= 0.65: base_trend += 10
+                elif ctx.rs_score <= 0.40: base_trend -= 10
+            elif last["ema9"] < last["ema20"]:
+                if ctx.rs_score <= 0.35: base_trend += 10
+                elif ctx.rs_score >= 0.60: base_trend -= 10
+                
+        base_trend = max(0.0, min(100.0, base_trend))
         
         opportunity_state = classify_opportunity(
             atr_pct=atr_pct,
@@ -280,7 +304,7 @@ class MomentumCross(Strategy):
             news_catalyst=is_news,
             volume_z=vol_z,
             extension_atr=extension_atr,
-            trend_score=75.0 if crossed_up or crossed_down else 50.0,
+            trend_score=base_trend,
             news_confidence=news_confidence,
             event_age_minutes=getattr(ctx, "event_age_minutes", None),
         )
@@ -325,21 +349,7 @@ class MomentumCross(Strategy):
                 or (bias == "gainer" and opportunity_state in (OpportunityState.EXTENDED, OpportunityState.EVENT))
             )
         ):
-            trend_score = 50.0
-            if last["ema9"] > last["ema20"]:
-                trend_score += 15
-            if close > float(last["vwap"]):
-                trend_score += 10
-            if hist_now > hist_prev:
-                trend_score += 10
-            if vol_z >= 1.0:
-                trend_score += 5
-            if ctx.rs_score is not None:
-                if ctx.rs_score >= 0.65:
-                    trend_score += 10
-                elif ctx.rs_score <= 0.40:
-                    trend_score -= 10
-            trend_score = max(0.0, min(100.0, trend_score))
+            trend_score = base_trend
 
             entry_quality = evaluate_entry_quality(
                 side="long",
@@ -385,6 +395,12 @@ class MomentumCross(Strategy):
                 price=close,
                 stop_loss=stop,
                 take_profit=None,
+                trend_score=trend_score,
+                location_score=entry_quality.location_score,
+                extension_score=entry_quality.extension_score,
+                structure_score=entry_quality.structure_score,
+                volume_score=entry_quality.volume_score,
+                catalyst_score=entry_quality.catalyst_score,
                 strategy_params={
                     "entry_quality_score": entry_quality.score,
                     "entry_quality": entry_quality.quality.value,
@@ -409,21 +425,7 @@ class MomentumCross(Strategy):
                 or (bias == "loser" and opportunity_state in (OpportunityState.EXTENDED, OpportunityState.EVENT))
             )
         ):
-            trend_score = 50.0
-            if last["ema9"] < last["ema20"]:
-                trend_score += 15
-            if close < float(last["vwap"]):
-                trend_score += 10
-            if hist_now < hist_prev:
-                trend_score += 10
-            if vol_z >= 1.0:
-                trend_score += 5
-            if ctx.rs_score is not None:
-                if ctx.rs_score <= 0.35:
-                    trend_score += 10
-                elif ctx.rs_score >= 0.60:
-                    trend_score -= 10
-            trend_score = max(0.0, min(100.0, trend_score))
+            trend_score = base_trend
 
             entry_quality = evaluate_entry_quality(
                 side="short",
@@ -469,6 +471,12 @@ class MomentumCross(Strategy):
                 price=close,
                 stop_loss=stop,
                 take_profit=None,
+                trend_score=trend_score,
+                location_score=entry_quality.location_score,
+                extension_score=entry_quality.extension_score,
+                structure_score=entry_quality.structure_score,
+                volume_score=entry_quality.volume_score,
+                catalyst_score=entry_quality.catalyst_score,
                 strategy_params={
                     "entry_quality_score": entry_quality.score,
                     "entry_quality": entry_quality.quality.value,

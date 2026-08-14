@@ -192,7 +192,7 @@ class ExitPlanner:
         elif giveback_breach:
             action = ExitAction.FULL_EXIT
             exit_ratio = 1.0
-        elif early_invalidation_breach:
+        elif early_invalidation_breach and thesis.structural_confirmation:
             action = ExitAction.FULL_EXIT
             exit_ratio = 1.0
         elif lifecycle == LifecycleState.EXIT_CANDIDATE:

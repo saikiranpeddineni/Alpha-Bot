@@ -59,9 +59,10 @@ class PISExecutionAdapter:
                 qty=abs(obs.qty),
                 stop_price=target_stop,
                 strategy=obs.strategy,
+                thesis_fingerprint=obs.thesis_fingerprint,
                 reason=f"PIS Protection Update: {reason_str}",
                 role=OrderRole.PROTECTION,
-                metadata={"executor": "PIS", "pis_state": decision.lifecycle_state.value},
+                metadata={"executor": "PIS", "pis_state": decision.lifecycle_state.value, "candidate_id": obs.candidate_id},
             )
 
         if decision.action not in (ExitAction.PARTIAL_EXIT, ExitAction.FULL_EXIT):
@@ -86,7 +87,8 @@ class PISExecutionAdapter:
             order_type=OrderType.MARKET,
             qty=qty_to_close,
             strategy=obs.strategy,
+            thesis_fingerprint=obs.thesis_fingerprint,
             reason=f"PIS Exit Reason: {reason_str}",
             role=OrderRole.EXIT,
-            metadata={"executor": "PIS", "pis_state": decision.lifecycle_state.value},
+            metadata={"executor": "PIS", "pis_state": decision.lifecycle_state.value, "candidate_id": obs.candidate_id},
         )

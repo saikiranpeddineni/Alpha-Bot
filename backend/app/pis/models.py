@@ -113,6 +113,11 @@ class PositionObservation:
     market_timestamp: Optional[datetime] = None
     decision_timestamp: Optional[datetime] = None
     bid: Optional[float] = None
+    
+    # Lineage & Identity (P0-3)
+    strategy: str = "engine"
+    candidate_id: Optional[str] = None
+    thesis_fingerprint: Optional[str] = None
     ask: Optional[float] = None
     completed_bars_since_entry: int = 0
     price_source: Optional[str] = None

@@ -117,6 +117,8 @@ class Signal(BaseModel):
     location_score: float | None = None
     extension_score: float | None = None
     structure_score: float | None = None
+    volume_score: float | None = None
+    catalyst_score: float | None = None
 
 
     @property
@@ -343,6 +345,8 @@ class Position(BaseModel):
     location_score: float | None = None
     extension_score: float | None = None
     structure_score: float | None = None
+    volume_score: float | None = None
+    catalyst_score: float | None = None
 
     telemetry: ExecutionTelemetry = Field(default_factory=ExecutionTelemetry)
     opportunity_state: str | None = None

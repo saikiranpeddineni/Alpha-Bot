@@ -567,14 +567,14 @@ class PositionBrain:
             # Require persistence (>= 3 consecutive bars) before emergency exit
             if self._degradation_counter >= 3:
                 target = LifecycleState.EXIT_CANDIDATE
-            elif is_degraded_bar or (len(self._history) >= 3 and health.overall <= self.config.health_weakening_threshold):
+            elif is_degraded_bar or thesis.early_candidate or (len(self._history) >= 3 and health.overall <= self.config.health_weakening_threshold):
                 target = LifecycleState.WEAKENING
             elif health.overall >= self.config.health_validated_threshold and peak_r >= 0.75:
                 target = LifecycleState.VALIDATED
         elif current == LifecycleState.VALIDATED:
             if self._degradation_counter >= 3:
                 target = LifecycleState.EXIT_CANDIDATE
-            elif is_degraded_bar or health.overall <= self.config.health_weakening_threshold:
+            elif is_degraded_bar or thesis.early_candidate or health.overall <= self.config.health_weakening_threshold:
                 target = LifecycleState.WEAKENING
             elif health.overall >= self.config.health_accelerating_threshold and peak_r >= self.config.activation_mfe_r:
                 target = LifecycleState.ACCELERATING
