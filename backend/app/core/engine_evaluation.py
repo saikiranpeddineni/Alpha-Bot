@@ -1,10 +1,8 @@
-"""AlphaDesk 007 production evaluation path.
+"""Lean AlphaDesk 007 production evaluation path.
 
-Production deliberately has one entry decision:
-market data -> strategy -> ML confirmation -> candidate.
-
-Portfolio eligibility and sizing remain downstream authorities. PIS is the
-only intelligent exit authority. Research gates cannot veto production.
+Production entry flow is intentionally small:
+market data -> strategy -> one ML confirmation -> candidate.
+Portfolio eligibility, sizing and position management remain downstream.
 """
 from __future__ import annotations
 
@@ -20,7 +18,7 @@ from app.ai.model import _validate_signal_probability
 from app.ai.regime import detect_regime
 from app.core.applog import applog
 from app.core.domain import OrderRole, OrderSide, OrderType, Position, SignalAction, Signal
-from app.indicators.ta import compute_relative_strength, enrich
+from app.indicators.ta import enrich
 from app.strategies import StrategyContext
 
 ENTRY_ML_THRESHOLD = 0.50
@@ -33,7 +31,7 @@ class TradingEngineEvaluationMixin:
     """Small production decision surface used by live/paper execution."""
 
     async def _check_behavioral_safety(self, signal: Signal, now: datetime) -> str | None:
-        """Compatibility hook retained for the legacy engine; never vetoes 007 entries."""
+        """Legacy compatibility hook. Behavioral vetoes are retired in 007."""
         return None
 
     async def _evaluate_symbol(
@@ -49,6 +47,8 @@ class TradingEngineEvaluationMixin:
         if symbol in {s.upper() for s in self._vix_symbols()}:
             return []
 
+        # One market-data read per candidate. Expensive research data is not
+        # fetched here; the production strategy path is price/volume based.
         df = await asyncio.to_thread(enrich, self.data.frame(symbol, "1Min", limit=600))
         if df.empty or len(df) < 30:
             return []
@@ -56,21 +56,16 @@ class TradingEngineEvaluationMixin:
         regime, details = await asyncio.to_thread(detect_regime, df)
         if self._regimes.get(symbol) != regime:
             self._regimes[symbol] = regime
-            self.publish("insight", self.insights.on_regime_change(symbol, regime, details).model_dump(mode="json"))
-
-        news_context = None
-        news_sentiment = 0.0
-        try:
-            if hasattr(self.data, "get_news_context"):
-                news_context = await self.data.get_news_context(symbol)
-                news_sentiment = float(getattr(news_context, "sentiment", 0.0) or 0.0)
-            elif hasattr(self.data, "get_news_sentiment"):
-                news_sentiment = float(await self.data.get_news_sentiment(symbol))
-        except Exception as exc:
-            applog.debug("engine.news", f"{symbol}: news unavailable: {exc}")
+            # Regime is observational only; it is useful to the strategies but
+            # does not invoke external intelligence services.
+            if getattr(self, "insights", None) is not None:
+                try:
+                    self.publish("insight", self.insights.on_regime_change(symbol, regime, details).model_dump(mode="json"))
+                except Exception:
+                    pass
 
         if position is not None:
-            await self._manage_position(symbol, position, df, news_sentiment, now)
+            await self._manage_position(symbol, position, df, 0.0, now)
             return []
 
         if getattr(self, "reconciliation_failed", False):
@@ -82,17 +77,6 @@ class TradingEngineEvaluationMixin:
         mover_bias = mover.get("direction")
         mover_change = float(mover.get("change_pct", 0.0) or 0.0)
 
-        rs_score = None
-        try:
-            spy_df = await asyncio.to_thread(enrich, self.data.frame("SPY", "1Min", limit=600))
-            if spy_df is not None and not spy_df.empty:
-                rs_score = compute_relative_strength(df, spy_df)
-        except Exception:
-            pass
-
-        news_direction = str(getattr(news_context, "direction", "neutral") or "neutral") if news_context else "neutral"
-        news_confidence = float(getattr(news_context, "confidence", 0.0) or 0.0) if news_context else 0.0
-        news_catalyst = getattr(news_context, "catalyst", None) if news_context else None
         ctx = StrategyContext(
             position=None,
             equity=equity,
@@ -100,10 +84,6 @@ class TradingEngineEvaluationMixin:
             now=now,
             mover_bias=mover_bias,
             mover_change_pct=mover_change,
-            rs_score=rs_score,
-            news_direction=news_direction,
-            news_confidence=news_confidence,
-            event_state=news_catalyst,
         )
 
         raw_signals: list[Signal] = []
@@ -124,12 +104,6 @@ class TradingEngineEvaluationMixin:
             sig.regime = sig.regime or regime
             sig.mover_bias = mover_bias
             sig.mover_change_pct = mover_change
-            sig.rs_score = rs_score
-            if news_context is not None:
-                sig.news_sentiment = float(getattr(news_context, "sentiment", 0.0) or 0.0)
-                sig.news_direction = news_direction
-                sig.news_confidence = news_confidence
-                sig.news_catalyst = news_catalyst
             if getattr(sig, "candidate_id", None) is None:
                 sig.candidate_id = f"{symbol}_{sig.strategy}_{now.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}".upper()
             raw_signals.append(sig)
@@ -137,6 +111,7 @@ class TradingEngineEvaluationMixin:
         if not raw_signals:
             return []
 
+        # Exactly one model inference per emitted strategy candidate.
         features = latest_feature_row(df)
         if features is None:
             return []
@@ -154,7 +129,6 @@ class TradingEngineEvaluationMixin:
 
             if probability is None:
                 sig.ml_gate_decision = "REJECT"
-                applog.info("entry", f"{symbol} {sig.strategy}: REJECT ML unavailable")
                 continue
             probability, validation_reason = _validate_signal_probability(probability)
             if validation_reason is not None or probability is None:
@@ -170,6 +144,8 @@ class TradingEngineEvaluationMixin:
                 quality = float(sig.strategy_params.get("entry_quality_score", 0.0) or 0.0)
             except Exception:
                 pass
+            # Momentum keeps a narrow opportunity-capture floor so strong
+            # setups are not destroyed by an overly blunt global threshold.
             momentum_exception = sig.strategy == "momentum" and probability >= ENTRY_ML_HARD_FLOOR and quality >= 80.0
             if probability < ENTRY_ML_THRESHOLD and not momentum_exception:
                 sig.ml_gate_decision = "REJECT"
