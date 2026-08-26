@@ -9,8 +9,7 @@ Classifies the active market microstructure and trend regime for the position:
 
 from __future__ import annotations
 
-import math
-from typing import Deque, Optional, Tuple
+from collections import deque
 
 from app.pis.models import MarketRegime, PISConfig, PositionObservation, TradeHealth
 
@@ -18,15 +17,15 @@ from app.pis.models import MarketRegime, PISConfig, PositionObservation, TradeHe
 class MarketRegimeClassifier:
     """Evaluates position history and market data to classify the active market regime."""
 
-    def __init__(self, config: Optional[PISConfig] = None) -> None:
+    def __init__(self, config: PISConfig | None = None) -> None:
         self.config = config or PISConfig()
 
     def classify_regime(
         self,
         obs: PositionObservation,
-        history: Deque[PositionObservation],
+        history: deque[PositionObservation],
         health: TradeHealth,
-    ) -> Tuple[MarketRegime, float, str]:
+    ) -> tuple[MarketRegime, float, str]:
         """Classify active market regime.
 
         Args:

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable, Iterable
 from datetime import datetime
-from typing import Awaitable, Callable, Iterable, Protocol
+from typing import Protocol
 
 from app.core.universe_discovery import bounded_fallback
 

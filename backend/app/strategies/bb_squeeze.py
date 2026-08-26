@@ -5,8 +5,9 @@ Enters on volume-confirmed breakouts from low-volatility consolidation periods (
 
 from __future__ import annotations
 
-import pandas as pd
 from datetime import datetime
+
+import pandas as pd
 
 from app.core.domain import Regime, Signal, SignalAction
 from app.strategies.base import Strategy, StrategyContext, register
@@ -17,7 +18,7 @@ EVENT_WINDOW_BARS = 3  # short confirmation window
 class BollingerBandSqueeze(Strategy):
     name = "bb_squeeze"
     description = "Volume-confirmed breakout from a Bollinger Band squeeze"
-    
+
     is_breakout = True
     ml_threshold = 0.53
     evaluation_horizons = ["60m", "close"]
@@ -38,35 +39,49 @@ class BollingerBandSqueeze(Strategy):
 
     def __init__(self, params: dict | None = None, enabled: bool = True) -> None:
         super().__init__(params, enabled)
-        # {symbol: {"long": {"time": datetime, "emitted": bool, "bar_idx": int}, "short": ...}}
+        # {symbol: {"long": {"time": datetime, "emitted": bool}, "short": ...}}
         self._events: dict[str, dict[str, dict]] = {}
 
     def reset(self) -> None:
         self._events.clear()
 
-    def _set_event(self, symbol: str, side: str, event_time: datetime, bar_idx: int) -> None:
+    def _set_event(self, symbol: str, side: str, event_time: datetime) -> None:
         if symbol not in self._events:
             self._events[symbol] = {}
-        self._events[symbol][side] = {"time": event_time, "emitted": False, "bar_idx": bar_idx}
+        self._events[symbol][side] = {"time": event_time, "emitted": False}
 
-    def _check_and_consume_event(self, symbol: str, side: str, current_bar_idx: int, window: int) -> bool:
+    def _check_and_consume_event(self, symbol: str, side: str, df: pd.DataFrame, window: int) -> bool:
+        """Timestamp-based confirmation.
+
+        Positional indices (``len(df)``) are constant under fixed-length rolling
+        windows, which permanently froze events at ``bars_elapsed == 0`` — the
+        strategy could never confirm or expire an event. Elapsed bars are now
+        derived from the event timestamp's location inside the current frame.
+        """
         if symbol not in self._events or side not in self._events[symbol]:
             return False
-        
+
         event = self._events[symbol][side]
         if event["emitted"]:
             return False
-            
-        bars_elapsed = current_bar_idx - event["bar_idx"]
+
+        try:
+            event_idx = df.index.get_loc(event["time"])
+        except KeyError:
+            # Event rolled out of the frame without confirming.
+            self._events[symbol].pop(side, None)
+            return False
+
+        bars_elapsed = (len(df) - 1) - event_idx
         # Must be within window, and > 0 (don't fire on the exact bar it was armed, wait for confirmation)
         if 0 < bars_elapsed <= window:
             event["emitted"] = True
             return True
-            
+
         # Expired
         if bars_elapsed > window:
             self._events[symbol].pop(side, None)
-            
+
         return False
 
     def on_bar(self, ctx: StrategyContext, symbol: str, df: pd.DataFrame) -> Signal | None:
@@ -95,8 +110,7 @@ class BollingerBandSqueeze(Strategy):
         atr = float(last["atr14"])
         if atr <= 0:
             return None
-            
-        current_bar_idx = len(df)
+
         window = int(p.get("event_window_bars", EVENT_WINDOW_BARS))
 
         # Check if squeezed within the last 5 bars (consolidation phase)
@@ -116,32 +130,40 @@ class BollingerBandSqueeze(Strategy):
             crossed_up = prev["close"] <= prev["bb_upper"] and close > last["bb_upper"]
             crossed_down = prev["close"] >= prev["bb_lower"] and close < last["bb_lower"]
 
+            # Anchor events to the decision bar's own timestamp so the event can
+            # be located inside future (possibly fixed-length) frames.
+            event_ts = df.index[-1].to_pydatetime()
             if crossed_up and vol_z >= p["vol_z_min"]:
-                self._set_event(symbol, "long", ctx.now, current_bar_idx)
+                self._set_event(symbol, "long", event_ts)
             if crossed_down and vol_z >= p["vol_z_min"]:
-                self._set_event(symbol, "short", ctx.now, current_bar_idx)
+                self._set_event(symbol, "short", event_ts)
 
         # Check for confirmed event
-        confirmed_long = self._check_and_consume_event(symbol, "long", current_bar_idx, window)
-        confirmed_short = self._check_and_consume_event(symbol, "short", current_bar_idx, window)
+        confirmed_long = self._check_and_consume_event(symbol, "long", df, window)
+        confirmed_short = self._check_and_consume_event(symbol, "short", df, window)
 
         if not confirmed_long and not confirmed_short:
             return None
-            
+
         # Ensure the breakout is still valid and hasn't totally collapsed back into the band
         if confirmed_long and close < last["bb_mid"]:
             return None
         if confirmed_short and close > last["bb_mid"]:
             return None
 
-        # Check EMA trend alignment and AI market regime to filter out false breakouts (head-fakes)
+        # Structural VWAP vs EMA20 trend filter (sibling-proven anchor) to
+        # filter out false breakouts (head-fakes). After the first 30 minutes
+        # the EMA20/session-VWAP relationship is reliable; before that, both
+        # are still catching up to the gap, so structural checks are skipped.
         if p.get("use_trend_filter", True):
             ema20 = float(last.get("ema20", 0.0))
-            ema50 = float(last.get("ema50", 0.0))
-            if ema20 > 0 and ema50 > 0:
-                if confirmed_long and ema20 < ema50:
+            vwap_px = float(last.get("vwap", 0.0))
+            if ema20 > 0 and vwap_px > 0 and mins_since_open > 30:
+                structural_uptrend = ema20 > vwap_px
+                structural_downtrend = ema20 < vwap_px
+                if confirmed_long and structural_downtrend:
                     return None
-                if confirmed_short and ema20 > ema50:
+                if confirmed_short and structural_uptrend:
                     return None
 
             from app.core.domain import Regime
@@ -162,7 +184,7 @@ class BollingerBandSqueeze(Strategy):
                 stop_loss=stop,
                 take_profit=close + p["reward_risk"] * (close - stop),
             )
-            
+
         if confirmed_short:
             stop = close + p["atr_stop_mult"] * atr
             return Signal(
@@ -175,5 +197,5 @@ class BollingerBandSqueeze(Strategy):
                 stop_loss=stop,
                 take_profit=close - p["reward_risk"] * (stop - close),
             )
-            
+
         return None

@@ -19,6 +19,7 @@ from datetime import UTC, date, datetime, timedelta
 import pandas as pd
 
 from app.config import RiskConfig
+from app.core.applog import applog
 from app.core.clock import MarketClock
 from app.core.domain import (
     Order,
@@ -30,7 +31,6 @@ from app.core.domain import (
     SignalAction,
     TradeRecord,
 )
-from app.core.applog import applog
 
 PDT_EQUITY_MIN = 25_000.0
 PDT_MAX_DAY_TRADES = 3  # allowed day trades in any rolling 5-business-day window
@@ -146,22 +146,22 @@ class RiskManager:
         now_dt = now or datetime.now(UTC)
         if trade.pnl <= 0:
             symbol = trade.symbol.upper()
-            self.symbol_cooldowns[symbol] = now_dt + timedelta(minutes=self.config.cooldown_minutes)
+            self.symbol_cooldowns[symbol] = now_dt + timedelta(minutes=self.config.symbol_cooldown_minutes)
             applog.warning(
                 "risk",
-                f"Loss on {symbol} -- cooling down this ticker for {self.config.cooldown_minutes} minutes"
+                f"Loss on {symbol} -- cooling down this ticker for {self.config.symbol_cooldown_minutes} minutes"
             )
 
             current_losses = self.strategy_consecutive_losses.get(strategy, 0) + 1
             self.strategy_consecutive_losses[strategy] = current_losses
 
-            if current_losses >= self.config.consecutive_loss_limit:
-                cooldown_time = now_dt + timedelta(minutes=self.config.cooldown_minutes)
+            if current_losses >= self.config.strategy_consecutive_loss_limit:
+                cooldown_time = now_dt + timedelta(minutes=self.config.strategy_cooldown_minutes)
                 self.strategy_cooldowns[strategy] = cooldown_time
                 applog.warning(
                     "risk",
                     f"Strategy '{strategy}' has {current_losses} consecutive losses -- pausing new entries "
-                    f"for this strategy for {self.config.cooldown_minutes} minutes",
+                    f"for this strategy for {self.config.strategy_cooldown_minutes} minutes",
                 )
 
             self.consecutive_losses = max(self.strategy_consecutive_losses.values(), default=0)
@@ -249,7 +249,7 @@ class RiskManager:
             return RiskDecision(False, f"ticker-specific cooldown active for {symbol}")
         if not self.clock.in_entry_window(cfg.no_entry_minutes_before_close, now):
             return RiskDecision(False, "outside entry window (market closed or too near close)")
-        
+
         return RiskDecision(True, "permitted")
 
     def evaluate_entry(
@@ -264,7 +264,7 @@ class RiskManager:
         pre_check = self.is_entry_permitted(signal, now)
         if not pre_check.approved:
             return pre_check
-            
+
         cfg = self.config
         symbol = signal.symbol.upper()
         strategy = signal.strategy or "manual"
@@ -328,7 +328,11 @@ class RiskManager:
 
         risk_mult = getattr(signal, "risk_multiplier", 1.0)
         if kelly_override is not None:
-            kelly_cap = getattr(cfg, "kelly_fraction_cap", 0.15)
+            # Fix #192 (Phase 2): Align Kelly limits with Fixed-Risk limits to prevent blowout on slippage.
+            # Kelly bet fraction should never exceed an absolute hard cap of 2.0x the configured max fixed risk.
+            base_risk_pct_cap = (getattr(cfg, "risk_per_trade_pct", 1.0) * 2.0) / 100.0
+            kelly_cap = min(getattr(cfg, "kelly_fraction_cap", 0.15), base_risk_pct_cap)
+
             effective_kelly = min(kelly_override, kelly_cap) * risk_mult
             risk_amount = ctx.equity * effective_kelly
             qty = int(risk_amount / stop_distance) if stop_distance > 0 else 0
@@ -413,7 +417,7 @@ class RiskManager:
         final_notional = qty * price
         applog.info(
             "risk",
-            f"[sizing] {symbol} allocator_target={'${:,.0f}'.format(risk_amount) if kelly_override is not None else 'n/a (fixed-risk)'} "
+            f"[sizing] {symbol} allocator_target={f'${risk_amount:,.0f}' if kelly_override is not None else 'n/a (fixed-risk)'} "
             f"unconstrained_qty={qty_unconstrained} "
             f"after_notional_cap={qty_after_notional} "
             f"after_cash_cap={qty_after_cash} "
@@ -447,7 +451,8 @@ class RiskManager:
             order_type = OrderType.MARKET
             limit_price = None
 
-        executable_target = round(float(take_profit), 2) if take_profit is not None else None
+        # ALL targets are handled exclusively by PIS. No native broker targets (per Phase 1 invariant).
+        executable_target = None
         order = OrderRequest(
             symbol=symbol,
             side=side,

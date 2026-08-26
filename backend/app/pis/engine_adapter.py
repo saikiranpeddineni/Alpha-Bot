@@ -13,8 +13,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
-from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Tuple
+from datetime import UTC, datetime
+from typing import Any
 
 from app.core.domain import OrderRequest, Position
 from app.pis.execution import PISExecutionAdapter
@@ -29,22 +29,26 @@ class PISEngineAdapter:
 
     def __init__(
         self,
-        service: Optional[PISService] = None,
-        config: Optional[PISConfig] = None,
+        service: PISService | None = None,
+        config: PISConfig | None = None,
     ) -> None:
         self.config = config or PISConfig()
         self.service = service or PISService(self.config)
+        # Replay/backtest harnesses flip this off: excursion memory is
+        # per-run state and persisting it per position-bar dominated runtime.
+        self.persist_profit_memory: bool = True
 
     async def evaluate_position_exit(
         self,
         position: Position,
         bar_df: Any,  # pandas DataFrame with high, low, close, volume, atr
-        initial_stop: Optional[float] = None,
-        take_profit: Optional[float] = None,
-        current_stop: Optional[float] = None,
-        timestamp: Optional[datetime] = None,
+        initial_stop: float | None = None,
+        take_profit: float | None = None,
+        current_stop: float | None = None,
+        timestamp: datetime | None = None,
         news_sentiment: float = 0.0,
-    ) -> Tuple[Optional[OrderRequest], PISDecision]:
+        mode: str | None = None,
+    ) -> tuple[OrderRequest | None, PISDecision]:
         """Evaluate a position for discretionary exit and stop loss updates.
 
         Args:
@@ -54,6 +58,9 @@ class PISEngineAdapter:
             take_profit: Optional target price.
             current_stop: Current broker protective stop.
             timestamp: Evaluation timestamp (defaults to UTC now).
+            mode: Operating mode (demo/paper/live) used to namespace persisted
+                profit memory. Paper and live excursion histories must never
+                contaminate each other.
 
         Returns:
             Tuple of (Optional[OrderRequest], PISDecision).
@@ -101,7 +108,7 @@ class PISEngineAdapter:
         if math.isnan(r_multiple) or math.isinf(r_multiple):
             r_multiple = 0.0
 
-        eval_ts = timestamp or datetime.now(timezone.utc)
+        eval_ts = timestamp or datetime.now(UTC)
 
         # Sanitize prices against nan/inf
         def _clean_px(val: float, fallback: float) -> float:
@@ -139,44 +146,51 @@ class PISEngineAdapter:
 
         from app.db.database import Database
         from app.pis.profit_memory import ProfitMemoryState
-        
+
         db = Database.active()
-        
+
         restored_memory = None
-        mode = "live" # Actually we need the execution mode. If not available, use "unknown"
-        mode = getattr(position, "mode", "live") # Actually, position model doesn't have mode, but it's fine
-        # We can extract mode from somewhere, but engine_adapter doesn't know mode.
-        # Let's just use "live" for now or a property of PISEngineAdapter
-        
-        if db and self.service.get_brain(symbol) is None:
-            # We are about to create a new brain, try to restore memory
-            mem_dict = await asyncio.to_thread(db.get_pis_profit_memory, mode="live", symbol=symbol)
+        # Mode-namespaced profit memory: paper and live excursion histories are
+        # separate worlds. Falls back to "unknown" for standalone/test usage.
+        mem_mode = mode or getattr(self, "mode", None) or "unknown"
+        opened_at = getattr(position, "opened_at", None)
+        entry_date = opened_at.astimezone(UTC).date().isoformat() if opened_at else None
+
+        if db and self.persist_profit_memory and self.service.get_brain(symbol) is None:
+            # About to create a new brain. Restore prior excursion memory ONLY
+            # when it belongs to this same position lifetime (same symbol AND
+            # same entry date). Otherwise a previous day's runner memory would
+            # seed today's fresh trade with phantom peak_r floors.
+            mem_dict = await asyncio.to_thread(db.get_pis_profit_memory, mode=mem_mode, symbol=symbol)
             if mem_dict:
-                try:
-                    restored_memory = ProfitMemoryState(
-                        peak_r=mem_dict.get("peak_r", 0.0),
-                        trough_r=mem_dict.get("trough_r", 0.0),
-                        mfe_price=mem_dict.get("mfe_price", cur_px),
-                        mae_price=mem_dict.get("mae_price", cur_px)
-                    )
-                except Exception:
-                    pass
+                stored_entry_date = mem_dict.get("entry_date")
+                if entry_date is not None and stored_entry_date == entry_date:
+                    try:
+                        restored_memory = ProfitMemoryState(
+                            peak_r=mem_dict.get("peak_r", 0.0),
+                            trough_r=mem_dict.get("trough_r", 0.0),
+                            mfe_price=mem_dict.get("mfe_price", cur_px),
+                            mae_price=mem_dict.get("mae_price", cur_px)
+                        )
+                    except Exception:
+                        restored_memory = None
 
         # Dispatch through service
         decision = self.service.observe(obs, restored_memory=restored_memory)
 
-        if db:
+        if db and self.persist_profit_memory:
             brain = self.service.get_brain(symbol)
             if brain:
                 await asyncio.to_thread(
                     db.save_pis_profit_memory,
-                    mode="live",
+                    mode=mem_mode,
                     symbol=symbol,
                     payload={
                         "peak_r": brain.peak_r,
                         "trough_r": brain.trough_r,
                         "mfe_price": brain._profit_memory.mfe_price,
                         "mae_price": brain._profit_memory.mae_price,
+                        "entry_date": entry_date,
                     }
                 )
 
@@ -189,6 +203,10 @@ class PISEngineAdapter:
         """Handle position close event from engine."""
         self.service.close_brain(symbol.upper())
 
-    def get_telemetry(self) -> Dict[str, Any]:
+    def revert_scale_out(self, symbol: str) -> None:
+        """Undo decision-time scale-out flags after a failed exit execution."""
+        self.service.revert_scale_out(symbol.upper())
+
+    def get_telemetry(self) -> dict[str, Any]:
         """Get service telemetry."""
         return self.service.get_telemetry()

@@ -65,11 +65,14 @@ def test_pis_scale_out_at_1r() -> None:
     assert brain.last_decision.action == ExitAction.HOLD
     assert brain.current_stop_floor == 95.0
 
-    # 2. Price climbs to 104.0 (+0.8R) -> still hold
+    # 2. Price climbs to 104.0 (+0.8R) -> still no scale-out. With atr=2.0 the
+    #    noise unit is 0.4R, so the progressive-lock trigger sits at
+    #    max(0.40, 2.5*0.4) = 1.0R: a sub-noise peak must not move the floor.
     obs2 = make_obs(price=104.0, entry=100.0, initial_stop=95.0, atr=2.0, qty=100.0, minutes_offset=1)
     dec2 = brain.observe(obs2)
     assert brain.has_scaled_out is False
     assert dec2.action == ExitAction.HOLD
+    assert brain.current_stop_floor == 95.0
 
     # 3. Price reaches 105.0 (+1.0R) -> PARTIAL_EXIT 50%
     obs3 = make_obs(price=105.0, entry=100.0, initial_stop=95.0, atr=2.0, qty=100.0, minutes_offset=2)

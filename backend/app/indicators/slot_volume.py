@@ -3,10 +3,11 @@
 
 from __future__ import annotations
 
-from datetime import datetime, date
+from datetime import datetime
 from zoneinfo import ZoneInfo
-import pandas as pd
+
 import numpy as np
+import pandas as pd
 
 ET = ZoneInfo("America/New_York")
 
@@ -20,12 +21,12 @@ class SlotVolumeEngine:
     def __init__(self, df: pd.DataFrame, lookback_sessions: int = 20, min_observations: int = 5) -> None:
         self.lookback_sessions = lookback_sessions
         self.min_observations = min_observations
-        
+
         # Calculate rolling 5m volume for the entire dataset
         # rolling(5) sum of 1Min volume represents the volume of the 5m bar ending at that minute.
         self.rolling_5m = df["volume"].rolling(5, min_periods=5).sum()
         self.df_index = df.index.tz_convert(ET)
-        
+
         # Create a helper structure: maps (date, slot_idx) -> rolling 5m volume
         self.slot_map = {}
         for idx, ts in enumerate(self.df_index):

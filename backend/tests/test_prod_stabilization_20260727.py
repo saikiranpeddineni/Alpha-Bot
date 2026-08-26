@@ -9,12 +9,20 @@ from app.brokers.alpaca import AlpacaBroker
 from app.core.engine import TradingEngine
 
 
-def test_universe_stress_uses_weekend_safe_lookback_source():
-    src = Path(__file__).parents[1] / "app" / "risk" / "market_regime.py"
-    text = src.read_text(encoding="utf-8")
-    block = text[text.index("async def _family_universe_stress"):]
-    assert "timedelta(days=5)" in block
-    assert "timedelta(days=2)" not in block.split("async def ", 1)[0]
+def test_universe_stress_and_breadth_lookbacks_are_consistent():
+    """Both regime families must use the same daily-history horizon so they
+    degrade consistently across weekends/holidays. Current design value: 2 days
+    (a prior 5-day widening was reverted — do not diverge the two families)."""
+    text = (Path(__file__).parents[1] / "app" / "risk" / "market_regime.py").read_text(encoding="utf-8")
+    assert "_BREADTH_LOOKBACK_DAYS = 2" in text
+    start = text.index("async def _family_universe_stress")
+    try:
+        end = text.index("async def ", start + 10)
+    except ValueError:
+        end = len(text)
+    universe_block = text[start:end]
+    assert "timedelta(days=2)" in universe_block
+    assert "timedelta(days=5)" not in universe_block
 
 
 def test_emergency_protection_does_not_replace_symbol_strategy():
@@ -46,9 +54,3 @@ def test_open_orders_expands_broker_child_legs_source():
     assert '("legs", "related_orders")' in block
     assert "normalized.append(self._to_order(child))" in block
 
-
-@pytest.mark.skip(reason="Legacy Architecture removed during PIS refactor")
-def test_recovery_rejection_is_fail_closed_not_tight_retry_source():
-    src = (Path(__file__).parents[1] / "app" / "core" / "engine.py").read_text(encoding="utf-8")
-    assert "ProtectionState.RECOVERY_REJECTED" in src
-    assert "waiting for broker reconciliation" in src

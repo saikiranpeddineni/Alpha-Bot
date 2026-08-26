@@ -5,12 +5,9 @@ Gather evidence metrics and build structured reason codes.
 
 from __future__ import annotations
 
-from typing import Dict, List
-
 from app.pis.models import (
     EvidenceCoverage,
     LifecycleState,
-    PositionObservation,
     ReasonCode,
     ThesisDrift,
     TradeHealth,
@@ -52,9 +49,9 @@ class EvidenceEvaluator:
         thesis: ThesisDrift,
         protection_updated: bool,
         is_runner: bool,
-    ) -> List[ReasonCode]:
+    ) -> list[ReasonCode]:
         """Construct deterministic set of reason codes."""
-        reasons: List[ReasonCode] = []
+        reasons: list[ReasonCode] = []
 
         if lifecycle == LifecycleState.NEW:
             reasons.append(ReasonCode.INITIAL_ENTRY)

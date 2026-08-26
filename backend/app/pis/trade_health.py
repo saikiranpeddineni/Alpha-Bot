@@ -7,7 +7,6 @@ volatility, and volume sub-metrics with strict numerical stability.
 from __future__ import annotations
 
 import math
-from typing import Optional
 
 from app.pis.models import PISConfig, PositionObservation, TradeHealth
 
@@ -15,7 +14,7 @@ from app.pis.models import PISConfig, PositionObservation, TradeHealth
 class TradeHealthEvaluator:
     """Computes health scores clamped to [0.0, 1.0] without numerical hazards."""
 
-    def __init__(self, config: Optional[PISConfig] = None) -> None:
+    def __init__(self, config: PISConfig | None = None) -> None:
         self.config = config or PISConfig()
 
     def evaluate(

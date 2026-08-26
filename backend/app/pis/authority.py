@@ -5,10 +5,8 @@ PIS evaluation authority orchestrating decision generation for position instance
 
 from __future__ import annotations
 
-from typing import Optional
-
 from app.pis.exit_planner import ExitPlanner
-from app.pis.models import PISConfig, PISDecision, PositionObservation
+from app.pis.models import PISConfig
 from app.pis.protection import AdaptiveProtectionPlanner
 from app.pis.reasoning_engine import TradeReasoningEngine
 from app.pis.regime_classifier import MarketRegimeClassifier
@@ -20,7 +18,7 @@ from app.pis.trade_health import TradeHealthEvaluator
 class PISAuthority:
     """Evaluation authority combining all PIS intelligence modules."""
 
-    def __init__(self, config: Optional[PISConfig] = None) -> None:
+    def __init__(self, config: PISConfig | None = None) -> None:
         self.config = config or PISConfig()
         self.regime_classifier = MarketRegimeClassifier(self.config)
         self.health_evaluator = TradeHealthEvaluator(self.config)

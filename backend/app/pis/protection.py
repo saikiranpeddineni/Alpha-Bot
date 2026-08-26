@@ -11,7 +11,6 @@ Monotonic Protection Invariant:
 from __future__ import annotations
 
 import math
-from typing import Optional
 
 from app.pis.models import PISConfig, PositionObservation, TradeHealth
 
@@ -25,7 +24,7 @@ class MonotonicProtectionViolationError(ValueError):
 class AdaptiveProtectionPlanner:
     """Calculates adaptive protection floors satisfying strict monotonicity invariants."""
 
-    def __init__(self, config: Optional[PISConfig] = None) -> None:
+    def __init__(self, config: PISConfig | None = None) -> None:
         self.config = config or PISConfig()
 
     def compute_protection_floor(
@@ -33,7 +32,7 @@ class AdaptiveProtectionPlanner:
         obs: PositionObservation,
         peak_r: float,
         health: TradeHealth,
-        previous_floor: Optional[float] = None,
+        previous_floor: float | None = None,
         allow_relaxation: bool = False,
         has_scaled_out: bool = False,
         predicted_max_r: float = 2.0,
@@ -73,7 +72,7 @@ class AdaptiveProtectionPlanner:
         # 0. Scaled-Out Runner Mode
         if has_scaled_out:
             breakeven_floor = entry + (side * max(self.config.min_locked_r, 0.05) * risk)
-            
+
             # Dynamic trailing multiplier based on predicted ceiling proximity
             if proximity >= 0.85:
                 # In target ceiling zone: tighten trail to 1.0x ATR to harvest peak R
@@ -83,27 +82,56 @@ class AdaptiveProtectionPlanner:
             else:
                 # Early runner phase: allow maximum breathing room (2.0x ATR)
                 trail_mult = getattr(self.config, "runner_wide_atr_mult", 2.0)
-                
+
             wide_trail = obs.close - (side * trail_mult * obs.atr)
             candidate_floor = max(breakeven_floor, wide_trail) if side > 0 else min(breakeven_floor, wide_trail)
         elif peak_r < activation_r:
-            # Below activation threshold: cleanly maintain initial stop loss or previous floor
-            # Preserves initial risk geometry and prevents sub-noise shakeouts
-            candidate_floor = previous_floor if previous_floor is not None else initial_stop
+            # Volatility-scaled trigger: on a name whose ATR is large relative to
+            # its risk unit, 0.40R of profit is inside the noise band. Demand
+            # both the R trigger and a full noise-unit (ATR) of excursion.
+            atr_r = obs.atr / risk if risk > 1e-8 else 0.0
+            effective_trigger = max(
+                self.config.breakeven_trigger_r,
+                getattr(self.config, "breakeven_trigger_atr_mult", 0.0) * atr_r,
+            )
+            if peak_r >= effective_trigger:
+                # Progressive profit lock: once a trade has shown real
+                # excursion, stop risking initial capital. Blend from
+                # breakeven+buffer at the trigger toward locking a fraction of
+                # the peak as it matures toward activation_mfe_r. The floor is
+                # derived from peak_r (excursion memory), never the current
+                # print, so it cannot oscillate with noise.
+                base = max(effective_trigger, 1e-6)
+                progress = min(1.0, max(0.0, (peak_r - effective_trigger) / max(activation_r - base, 1e-6)))
+                lock_frac = (
+                    self.config.progressive_lock_start_frac
+                    + (self.config.progressive_lock_end_frac - self.config.progressive_lock_start_frac) * progress
+                )
+                frac_target = peak_r * lock_frac
+                # Never trail inside the noise band: the locked floor must sit
+                # at least trail_mult * ATR behind the peak. On quiet names this
+                # is slack (frac target binds); on noisy names it forces patience.
+                trail_cap = peak_r - getattr(self.config, "progressive_lock_trail_atr_mult", 1.0) * atr_r
+                locked_r = min(frac_target, max(self.config.min_locked_r, trail_cap))
+                candidate_floor = entry + side * locked_r * risk
+            else:
+                # Below breakeven trigger: cleanly maintain initial stop loss or previous floor
+                # Preserves initial risk geometry and prevents sub-noise shakeouts
+                candidate_floor = previous_floor if previous_floor is not None else initial_stop
         else:
             # 2. Dynamic giveback calculation based on peak R and predicted capacity
             if peak_r >= self.config.runner_qualification_r or proximity >= 0.75:
                 r_excess = peak_r - self.config.runner_qualification_r
-                
+
                 # Health-Aware Decay:
                 # If health is perfect (1.0), health_factor is 0.0 -> no decay (survive pullbacks).
                 # If health is broken (0.0), health_factor is 1.0 -> max decay (lock profit).
                 health_factor = max(0.0, min(1.0, 1.0 - health.overall))
                 decay = r_excess * getattr(self.config, "hyper_runner_decay_rate", 0.05) * health_factor
-                
+
                 base_giveback = self.config.giveback_pct_runner
                 min_giveback = getattr(self.config, "giveback_pct_hyper_runner_min", 0.10)
-                
+
                 # Proximity compression: If approaching predicted ceiling, tighten giveback
                 if proximity >= 0.85:
                     giveback_pct = max(min_giveback, 0.15)
@@ -116,7 +144,7 @@ class AdaptiveProtectionPlanner:
                 # As peak_r expands (>1.0R), progressively reduce giveback allowance to lock high R gains
                 r_scaling = max(0.0, (peak_r - 1.0) * 0.15)
                 base = max(0.12, self.config.giveback_pct_maturing - r_scaling)
-                
+
                 # 1. Parabolic Climax Override (Tighten stop aggressively when extended)
                 if peak_r >= 1.50 and (health.overall < 0.65 or proximity >= 0.85):
                     giveback_pct = max(0.10, base * 0.70)  # Lock 90% of peak gain on exhaustion!
@@ -130,7 +158,7 @@ class AdaptiveProtectionPlanner:
                     giveback_pct = min(base, 0.15)
                 # 4. Smooth Interpolation with Volume-Weighted Elasticity
                 else:
-                    # Elastic Trailing Stop: 
+                    # Elastic Trailing Stop:
                     # High volume_score (healthy absorption) relaxes the stop.
                     # Low volume_score (distribution) chokes the stop.
                     elasticity = max(0.5, min(1.5, health.volume_score / 0.80))
@@ -141,18 +169,18 @@ class AdaptiveProtectionPlanner:
                 atr_r_buffer = 2.0 * (obs.atr / max(1e-6, risk))
             else:
                 atr_r_buffer = 1.5 * (obs.atr / max(1e-6, risk))
-                
-            # If health is degrading or we are exhausted, we must allow the trailing stop to choke tighter 
+
+            # If health is degrading or we are exhausted, we must allow the trailing stop to choke tighter
             # than the min_breathing_room. Otherwise the max() function blinds the PIS exhaustion logic.
             dynamic_min_breathing = self.config.min_breathing_room_r
             dynamic_atr_buffer = atr_r_buffer
-            
+
             if health.overall < 0.50 or (peak_r >= 1.50 and health.overall < 0.65):
                 # Scale down the mandatory buffers so we can choke
                 health_factor = max(0.2, health.overall)
                 dynamic_min_breathing *= health_factor
                 dynamic_atr_buffer *= health_factor
-                
+
             giveback_allowance_r = max(dynamic_min_breathing, dynamic_atr_buffer, peak_r * giveback_pct)
             locked_r = max(self.config.min_locked_r, peak_r - giveback_allowance_r)
 

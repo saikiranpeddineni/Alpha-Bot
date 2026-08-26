@@ -18,8 +18,6 @@ Lifecycle States:
 
 from __future__ import annotations
 
-from typing import Dict, List, Set, Tuple
-
 from app.pis.models import LifecycleState
 
 
@@ -40,7 +38,7 @@ class PositionLifecycleStateMachine:
 
     # Explicit allowed transition matrix
     # State -> Set of allowed target states
-    VALID_TRANSITIONS: Dict[LifecycleState, Set[LifecycleState]] = {
+    VALID_TRANSITIONS: dict[LifecycleState, set[LifecycleState]] = {
         LifecycleState.NEW: {
             LifecycleState.NEW,
             LifecycleState.DISCOVERY,
@@ -112,7 +110,7 @@ class PositionLifecycleStateMachine:
 
     def __init__(self, initial_state: LifecycleState = LifecycleState.NEW) -> None:
         self._current_state = initial_state
-        self._history: List[Tuple[LifecycleState, LifecycleState, str]] = []
+        self._history: list[tuple[LifecycleState, LifecycleState, str]] = []
 
     @property
     def current_state(self) -> LifecycleState:
@@ -120,7 +118,7 @@ class PositionLifecycleStateMachine:
         return self._current_state
 
     @property
-    def history(self) -> List[Tuple[LifecycleState, LifecycleState, str]]:
+    def history(self) -> list[tuple[LifecycleState, LifecycleState, str]]:
         """Get copy of state transition history."""
         return list(self._history)
 

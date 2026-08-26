@@ -6,11 +6,11 @@ execution history after a process restart.
 """
 from __future__ import annotations
 
-from datetime import datetime
+import asyncio
 
+from app.core.applog import applog
 from app.core.domain import Order, OrderStatus, OrderType
 from app.core.engine import TradingEngine
-from app.core.applog import applog
 
 
 class DurableTradingEngine(TradingEngine):
@@ -58,65 +58,39 @@ class DurableTradingEngine(TradingEngine):
             cumulative_qty = float(getattr(fill, "cumulative_qty", 0.0) or 0.0)
             order_qty = max(0.0, float(getattr(order, "qty", 0.0) or 0.0))
             order.filled_qty = cumulative_qty if cumulative_qty > 0 else max(float(order.filled_qty or 0.0), float(fill.qty))
-            
+
             if order_qty > 0 and order.filled_qty + 1e-9 >= order_qty:
                 order.status = OrderStatus.FILLED
                 order.filled_at = fill.ts
             else:
                 order.status = OrderStatus.PARTIALLY_FILLED
                 order.filled_at = None
-                
+
             order.filled_avg_price = float(fill.price)
 
         self.db.save_order(order, self.mode)
 
-    async def _drain_fills(self, now: datetime) -> None:
-        """Run canonical fill processing, then persist the resulting order state."""
-        if self.broker is None:
-            return await super()._drain_fills(now)
+    async def _persist_submitted_close_order(self, order: Order) -> None:
+        """Persist broker-initiated close orders at submission time.
 
-        captured = []
-        original_drain = self.broker.drain_fills
-
-        def capture_drain():
-            fills = original_drain()
-            captured.extend(fills)
-            return fills
-
-        self.broker.drain_fills = capture_drain
+        Close orders bypass the normal submit() persistence path. Persisting
+        them here means the fill-drain loop can resolve the tracked close by id
+        immediately (order terminal-state release path) instead of falling back
+        to fill-truth heuristics after restarts.
+        """
         try:
-            await super()._drain_fills(now)
-        finally:
-            self.broker.drain_fills = original_drain
+            await asyncio.to_thread(self.db.save_order, order, self.mode)
+        except Exception as exc:
+            applog.error("engine.order_ledger", f"Failed to persist submitted close order {order.id}: {exc}")
 
-        for fill in captured:
-            try:
-                self._persist_observed_fill_order(fill)
-            except Exception as exc:
-                # Order-history persistence must never corrupt the canonical fill
-                # path. The trade/fill durability remains authoritative.
-                applog.error(
-                    "engine.order_ledger",
-                    f"Failed to persist terminal order state for {fill.order_id}: {exc}",
-                )
-
-    async def _close_position_guarded(self, symbol: str, reason: str, qty: float | None = None) -> None:
-        """Canonical duplicate-close guard plus immediate close-order persistence."""
-        if not hasattr(self, "_pending_close_symbols"):
-            self._pending_close_symbols = set()
-        if symbol in self._pending_close_symbols or symbol in self._flattening_symbols:
-            applog.debug("engine", f"{symbol}: skipping duplicate close — close already in-flight (#45)")
-            return
-
-        self._flattening_symbols.add(symbol)
-        self._pending_close_symbols.add(symbol)
+    async def _observe_processed_fill(self, fill) -> None:  # noqa: ANN002
+        """Called by the base fill-drain loop after each fill is applied."""
         try:
-            order = await self.broker.close_position(symbol, reason=reason, qty=qty)
-            if order is None:
-                self._pending_close_symbols.discard(symbol)
-                return
-            self.recent_orders.appendleft(order)
-            self.db.save_order(order, self.mode)
-            self.publish("orders", self.orders_payload())
-        finally:
-            self._flattening_symbols.discard(symbol)
+            self._persist_observed_fill_order(fill)
+        except Exception as exc:
+            # Order-history persistence must never corrupt the canonical fill
+            # path. The trade/fill durability remains authoritative.
+            applog.error(
+                "engine.order_ledger",
+                f"Failed to persist terminal order state for {fill.order_id}: {exc}",
+            )

@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from app.core.domain import OrderStatus
 
-
 ALPACA_STATUS_MAP: dict[str, OrderStatus] = {
     "new": OrderStatus.SUBMITTED,
     "accepted": OrderStatus.SUBMITTED,

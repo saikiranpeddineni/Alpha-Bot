@@ -10,9 +10,10 @@ AI feature pipeline. It is idempotent and safe on short frames (NaN warmup).
 
 from __future__ import annotations
 
+from zoneinfo import ZoneInfo
+
 import numpy as np
 import pandas as pd
-from zoneinfo import ZoneInfo
 
 ET = ZoneInfo("America/New_York")
 
@@ -125,27 +126,27 @@ def opening_range_distance(df: pd.DataFrame, range_minutes: int = 15) -> pd.Seri
     """Distance from the first N-minute opening range high/low. Positive means breakout, negative means inside range."""
     if df.empty:
         return pd.Series(dtype=float)
-        
+
     out = pd.Series(index=df.index, dtype=float)
     et_index = df.index.tz_convert(ET) if getattr(df.index, "tz", None) is not None else df.index
-    
+
     # Extract time as minutes since midnight ET
     mins_et = et_index.hour * 60 + et_index.minute
-    
+
     # 9:30 AM is 570 minutes
     is_or_bar = (mins_et >= 570) & (mins_et < 570 + range_minutes)
-    
+
     sessions = et_index.date
     for session in pd.unique(sessions):
         session_mask = (sessions == session)
         or_mask = session_mask & is_or_bar
-        
+
         if not or_mask.any():
             continue
-            
+
         or_high = float(df.loc[or_mask, "high"].max())
         or_low = float(df.loc[or_mask, "low"].min())
-        
+
         # We only calculate distance for bars AFTER the opening range is established
         post_or_mask = session_mask & (mins_et >= 570 + range_minutes)
         if post_or_mask.any():
@@ -153,7 +154,7 @@ def opening_range_distance(df: pd.DataFrame, range_minutes: int = 15) -> pd.Seri
             dist_up = (close - or_high) / or_high
             dist_down = (or_low - close) / or_low
             out.loc[post_or_mask] = pd.concat([dist_up, dist_down], axis=1).max(axis=1) * 100.0
-            
+
     # For bars before OR is established, fill with 0
     return out.fillna(0.0)
 
@@ -162,6 +163,11 @@ def enrich(df: pd.DataFrame) -> pd.DataFrame:
     """Append the standard indicator column set. Returns a new DataFrame."""
     if df is None or len(df) == 0:
         return df.copy() if hasattr(df, 'copy') else df
+    # Idempotency fast-path: pre-enriched frames (replay pre-computes the full
+    # history once) pass through untouched instead of recomputing ~20 rolling
+    # operations per call. Note: a *view* of an enriched frame is enriched.
+    if is_enriched(df):
+        return df
     out = df.copy()
     for col in ("open", "high", "low", "close", "volume"):
         if col in out.columns:
@@ -204,7 +210,7 @@ def is_enriched(df: pd.DataFrame) -> bool:
 def compute_relative_strength(symbol_df: pd.DataFrame, spy_df: pd.DataFrame) -> float | None:
     """Calculate Relative Strength vs SPY — multi-timeframe (40% ret_5 + 60% ret_15)."""
     if (
-        symbol_df.empty or spy_df.empty 
+        symbol_df.empty or spy_df.empty
         or "ret_5" not in symbol_df.columns or "ret_15" not in symbol_df.columns
         or "ret_5" not in spy_df.columns or "ret_15" not in spy_df.columns
     ):

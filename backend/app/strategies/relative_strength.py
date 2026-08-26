@@ -7,9 +7,9 @@ heavy accumulation volume, and makes local highs.
 
 from __future__ import annotations
 
-import pandas as pd
-from datetime import time
 from zoneinfo import ZoneInfo
+
+import pandas as pd
 
 from app.core.domain import Regime, Signal, SignalAction
 from app.strategies.base import Strategy, StrategyContext, register
@@ -21,7 +21,7 @@ ET = ZoneInfo("America/New_York")
 class RelativeStrength(Strategy):
     name = "relative_strength"
     description = "Trades institutional leaders and laggards relative to SPY"
-    
+
     is_breakout = False
     ml_threshold = 0.54
     evaluation_horizons = ["close"]
@@ -73,12 +73,12 @@ class RelativeStrength(Strategy):
             return None
 
         close_px = float(last_row["close"])
-        
+
         # Calculate local 30-minute high/low
         local_df = df.iloc[-30:-1]
         if local_df.empty:
             return None
-            
+
         local_high = float(local_df["high"].max())
         local_low = float(local_df["low"].min())
 

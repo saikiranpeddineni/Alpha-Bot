@@ -14,8 +14,8 @@ from app.brokers.alpaca_hardening import (
     normalized_qty,
 )
 from app.brokers.base import BrokerTimeoutError
-from app.core.domain import Order, OrderRequest, OrderSide, OrderStatus, OrderType
 from app.core.applog import applog
+from app.core.domain import Order, OrderRequest, OrderSide, OrderStatus, OrderType
 
 
 async def _paginate_orders(client: object, request: object, label: str = "get_orders") -> list:
@@ -108,7 +108,8 @@ class AlpacaBroker(legacy.AlpacaBroker):
         return order
 
     async def submit(self, req: OrderRequest) -> Order:
-        from alpaca.trading.enums import OrderClass, OrderSide as ASide, TimeInForce
+        from alpaca.trading.enums import OrderClass, TimeInForce
+        from alpaca.trading.enums import OrderSide as ASide
         from alpaca.trading.requests import (
             LimitOrderRequest,
             MarketOrderRequest,
@@ -122,7 +123,7 @@ class AlpacaBroker(legacy.AlpacaBroker):
         has_stop = req.stop_loss is not None
         has_target = req.take_profit is not None
         has_advanced_legs = has_stop or has_target
-        
+
         qty = normalized_qty(
             req.qty,
             allow_fractional=req.order_type == OrderType.MARKET and not has_advanced_legs,
@@ -134,7 +135,7 @@ class AlpacaBroker(legacy.AlpacaBroker):
             "time_in_force": TimeInForce.DAY,
             "client_order_id": req.client_order_id,
         }
-        
+
         if has_advanced_legs:
             if has_stop and has_target:
                 kwargs["order_class"] = OrderClass.BRACKET

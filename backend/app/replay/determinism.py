@@ -20,7 +20,7 @@ class DeterministicUUIDProxy:
 
     def uuid4(self) -> _uuid.UUID:
         self.sequence += 1
-        digest = hashlib.sha256(f"{self.seed}:{self.sequence}".encode("utf-8")).digest()
+        digest = hashlib.sha256(f"{self.seed}:{self.sequence}".encode()).digest()
         raw = bytearray(digest[:16])
         # Preserve RFC-4122 UUIDv4 version/variant bits so callers that validate
         # UUID shape see exactly the same contract as uuid.uuid4().

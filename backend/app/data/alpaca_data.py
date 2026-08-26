@@ -13,8 +13,8 @@ from datetime import UTC, datetime, timedelta
 
 import pandas as pd
 
-from app.core.domain import Quote
 from app.core.applog import applog
+from app.core.domain import Quote
 from app.core.universe_discovery import DiscoverableAsset
 from app.data.base import DataProvider, empty_bars, normalize_bars
 
@@ -86,9 +86,9 @@ class AlpacaDataProvider(DataProvider):
         if not (api_key and api_secret):
             raise RuntimeError("Alpaca data provider requires ALPACA_API_KEY and ALPACA_API_SECRET")
         try:
+            from alpaca.data import ScreenerClient
             from alpaca.data.historical import StockHistoricalDataClient
             from alpaca.trading.client import TradingClient
-            from alpaca.data import ScreenerClient
         except ImportError as exc:  # pragma: no cover
             raise RuntimeError("alpaca-py is not installed; run the install script") from exc
         self._client = StockHistoricalDataClient(api_key, api_secret)
@@ -106,7 +106,7 @@ class AlpacaDataProvider(DataProvider):
             pass
         self._snapshot_fail_counts: dict[str, int] = {}  # consecutive parse-failure counts per symbol
         self._news_cache: dict[str, tuple[float, datetime]] = {}  # symbol -> (sentiment_score, timestamp)
-        
+
         # Initialize Sentiment Analyzer
         try:
             from app.pis.sentiment import NewsSentimentAnalyzer
@@ -156,7 +156,7 @@ class AlpacaDataProvider(DataProvider):
         out = {}
         if df is None or df.empty:
             return {s: empty_bars() for s in symbols}
-        
+
         # If multiple symbols were returned, Alpaca returns a MultiIndex (symbol, timestamp)
         for s in symbols:
             if isinstance(df.index, pd.MultiIndex):
@@ -276,13 +276,13 @@ class AlpacaDataProvider(DataProvider):
         """Fetches recent news for a symbol and returns a sentiment score, caching for 5 minutes."""
         if not self._sentiment_analyzer:
             return 0.0
-            
+
         now = datetime.now(UTC)
         if symbol in self._news_cache:
             score, cached_time = self._news_cache[symbol]
             if (now - cached_time).total_seconds() < 300:  # 5 minute cache
                 return score
-                
+
         def fetch():
             import requests
             url = f"https://data.alpaca.markets/v1beta1/news?symbols={symbol}&limit=5"
@@ -299,7 +299,7 @@ class AlpacaDataProvider(DataProvider):
             except Exception as e:
                 applog.error("data.alpaca", f"News fetch failed for {symbol}: {e}")
             return []
-            
+
         headlines = await asyncio.to_thread(fetch)
         score = self._sentiment_analyzer.analyze_headlines(headlines)
         self._news_cache[symbol] = (score, now)
@@ -315,7 +315,7 @@ class AlpacaDataProvider(DataProvider):
         if screener is not None:
             try:
                 def fetch_screener() -> list[str]:
-                    from alpaca.data import MostActivesRequest, MarketMoversRequest, MarketType
+                    from alpaca.data import MarketMoversRequest, MarketType, MostActivesRequest
                     from alpaca.data.enums import MostActivesBy
                     symbols = set()
 

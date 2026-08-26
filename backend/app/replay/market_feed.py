@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -44,11 +44,12 @@ class ReplayMarketFeed:
     async def ensure_data(self, start_date: str, end_date: str, symbols: list[str]) -> None:
         """Download missing 1-minute historical data into the replay JSONL cache."""
         import shutil
-        from app.config import get_settings
-        from app.data.alpaca_data import AlpacaDataProvider
-        from app.core.applog import applog
         from datetime import timedelta
-        
+
+        from app.config import get_settings
+        from app.core.applog import applog
+        from app.data.alpaca_data import AlpacaDataProvider
+
         # Check if fallback scratch file should be copied to establish initial cache
         if not self.data_path.exists() and not self._explicit_data_path:
             alt = Path(__file__).resolve().parents[3] / "scratch" / "july24_replay_stream.jsonl"
@@ -94,7 +95,7 @@ class ReplayMarketFeed:
             return
 
         applog.info("replay.feed", f"Downloading missing historical data for {len(missing_symbols)} symbols: {start_date} to {end_date}")
-        
+
         settings = get_settings()
         try:
             provider = AlpacaDataProvider(api_key=settings.alpaca_api_key, api_secret=settings.alpaca_api_secret)
@@ -102,8 +103,8 @@ class ReplayMarketFeed:
             applog.error("replay.feed", "Alpaca API credentials missing. Cannot fetch missing replay data.")
             return
 
-        start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=timezone.utc, hour=23, minute=59, second=59)
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=UTC)
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=UTC, hour=23, minute=59, second=59)
 
         # Open in append mode so we don't corrupt existing cache.
         # load_bars() correctly sorts by timestamp, so appended out-of-order data is completely fine.
@@ -114,7 +115,7 @@ class ReplayMarketFeed:
                 if df.empty:
                     applog.warning("replay.feed", f"No data returned for {symbol}")
                     continue
-                
+
                 rows_written = 0
                 for ts, row in df.iterrows():
                     handle.write(json.dumps({
@@ -139,6 +140,12 @@ class ReplayMarketFeed:
         if not self.data_path.exists():
             raise FileNotFoundError(f"Replay market data not found: {self.data_path}")
 
+        # Honor the requested universe. Market-risk series must survive any
+        # filter or the production-fidelity input guard below would trip.
+        symbol_filter = {s.upper() for s in symbols} if symbols else None
+        if symbol_filter is not None:
+            symbol_filter |= {"SPY", "QQQ", "VIX", "^VIX"}
+
         with self.data_path.open("r", encoding="utf-8") as handle:
             for line_no, line in enumerate(handle, 1):
                 if not line.strip():
@@ -152,6 +159,8 @@ class ReplayMarketFeed:
                 symbol = str(row.get("symbol", "")).upper()
                 if not symbol:
                     continue
+                if symbol_filter is not None and symbol not in symbol_filter:
+                    continue
                 raw_ts = row.get("ts") or row.get("t")
                 if not raw_ts:
                     raise ValueError(f"Replay bar missing timestamp at line {line_no}")
@@ -159,7 +168,7 @@ class ReplayMarketFeed:
                 if not isinstance(dt, datetime):
                     raise ValueError(f"Unsupported timestamp at line {line_no}: {raw_ts!r}")
                 if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
+                    dt = dt.replace(tzinfo=UTC)
                 if dt.strftime("%Y-%m-%d") > end_date:
                     continue
                 normalized = dict(row, ts_dt=dt, symbol=symbol)
@@ -191,8 +200,15 @@ class ReplayMarketFeed:
 
 
 class ReplayDataManager:
-    """DataManager-compatible, immutable, no-lookahead historical view."""
-    def __init__(self, bars: list[dict[str, Any]], max_rows: int = 3000) -> None:
+    """DataManager-compatible, immutable, no-lookahead historical view.
+
+    PERF (Option A): each symbol's full history is converted to an enriched
+    DataFrame ONCE at construction; every later ``frame()`` is a bisect slice
+    returning a zero-copy view. The old implementation rebuilt DataFrames from
+    raw dicts and linear-scanned all bars on EVERY call -- the dominant cost.
+    """
+
+    def __init__(self, bars: list[dict[str, Any]], max_rows: int = 3000, pre_enrich: bool = True) -> None:
         if not bars:
             raise ValueError("ReplayDataManager requires historical bars")
         self.provider = SimpleNamespace(name="replay", supports_asset_discovery=False)
@@ -206,34 +222,61 @@ class ReplayDataManager:
         self._now = min(bar["ts_dt"] for bar in bars)
         self._last_polled_ts: dict[str, datetime] = {}
 
+        # ---- Option A pre-computation ----
+        from app.indicators.ta import enrich
+        from app.ai.features import compute_features
+        self._frames: dict[str, pd.DataFrame] = {}
+        self._ts_index: dict[str, list[datetime]] = {}
+        for symbol, items in self._bars.items():
+            df = _bar_frame(items)
+            if pre_enrich and not df.empty:
+                try:
+                    df = enrich(df)
+                    df = compute_features(df)
+                except Exception:
+                    pass  # fall back to raw frame; enrich() inside prod path will handle it
+            self._frames[symbol] = df
+            self._ts_index[symbol] = [b["ts_dt"] for b in items]
+        # alias map for VIX naming
+        self._alias: dict[str, str] = {}
+        for sym in self._frames:
+            if sym == "^VIX" and "VIX" not in self._frames:
+                self._alias["VIX"] = "^VIX"
+            if sym == "VIX" and "^VIX" not in self._frames:
+                self._alias["^VIX"] = "VIX"
+
     @property
     def is_synthetic(self) -> bool:
         return False
 
+    async def warmup(self, symbols: list[str], lookback_bars: int = 800) -> None:
+        """No-op: all bars are preloaded and enriched at construction."""
+        return None
+
     def set_time(self, ts: datetime) -> None:
         self._now = ts
 
-    def _symbol(self, symbol: str) -> str:
-        symbol = symbol.upper()
-        if symbol == "VIX" and "VIX" not in self._bars and "^VIX" in self._bars:
-            return "^VIX"
-        if symbol == "^VIX" and "^VIX" not in self._bars and "VIX" in self._bars:
-            return "VIX"
-        return symbol
+    def _canonical(self, symbol: str) -> str:
+        s = symbol.upper()
+        return self._alias.get(s, s)
 
-    def _visible(self, symbol: str) -> list[dict[str, Any]]:
-        return [row for row in self._bars.get(self._symbol(symbol), []) if row["ts_dt"] <= self._now]
+    def _cutoff_idx(self, symbol: str) -> int:
+        """Last index with ts_dt <= now via bisect over the ts index."""
+        import bisect
+        idx = self._ts_index.get(symbol)
+        if idx is None:
+            return -1
+        return bisect.bisect_right(idx, self._now) - 1
 
     def frame(self, symbol: str, timeframe: str = "1Min", limit: int | None = None) -> pd.DataFrame:
-        """Return the production-compatible rolling frame as of the replay clock."""
-        canonical = self._symbol(symbol)
-        df = _bar_frame(self._visible(canonical))
+        canonical = self._canonical(symbol.upper())
+        i = self._cutoff_idx(canonical)
+        if i < 0:
+            return empty_bars()
+        lo = 0 if limit is None else max(0, i - int(limit) + 1)
+        df = self._frames[canonical].iloc[lo : i + 1]  # zero-copy view
 
-        # VIX is an external market-risk observation in production and can update less
-        # frequently than the equity clock. Carry the last known observation forward to
-        # replay-now without exposing a future observation. Mark the synthetic minute
-        # with zero volume so it cannot be mistaken for an actual market print.
-        if canonical in ("VIX", "^VIX") and not df.empty:
+        if canonical in ("VIX", "^VIX") and len(df):
             now_ts = pd.Timestamp(self._now)
             if df.index[-1] < now_ts:
                 last = df.iloc[-1].copy()
@@ -243,26 +286,40 @@ class ReplayDataManager:
 
         if timeframe != "1Min":
             df = resample_bars(df, timeframe)
-        if limit:
-            df = df.iloc[-limit:]
+        elif limit is not None:
+            df = df.tail(int(limit))
         return df
 
     async def poll(self, symbols: list[str]) -> dict[str, pd.DataFrame]:
-        """Expose bars newly closed at replay-now without network access or lookahead."""
+        """Bars newly closed at replay-now (bisect deltas, tiny frames).
+
+        Slices the precomputed enriched frames instead of rebuilding raw
+        frames per symbol -- _bar_frame/normalize_bars showed up as a top
+        profile cost when called once per symbol per tick.
+        """
         extended = [s.upper() for s in symbols]
         if "^VIX" not in extended and "VIX" not in extended:
             extended.append("^VIX")
         new_closed: dict[str, pd.DataFrame] = {}
+        import bisect
         for requested in extended:
-            canonical = self._symbol(requested)
-            rows = self._visible(canonical)
-            if not rows:
+            canonical = self._canonical(requested)
+            idx_all = self._ts_index.get(canonical)
+            if not idx_all:
                 continue
             last_seen = self._last_polled_ts.get(canonical)
-            fresh_rows = [row for row in rows if last_seen is None or row["ts_dt"] > last_seen]
+            lo = 0 if last_seen is None else bisect.bisect_right(idx_all, last_seen)
+            hi = self._cutoff_idx(canonical)
+            if lo > hi:
+                continue
+            fresh_rows = self._bars[canonical][lo : hi + 1]
             if not fresh_rows:
                 continue
-            fresh = _bar_frame(fresh_rows)
+            frame_all = self._frames.get(canonical)
+            if frame_all is not None and len(frame_all) == len(idx_all):
+                fresh = frame_all.iloc[lo : hi + 1]
+            else:  # pragma: no cover - fallback for exotic frames
+                fresh = _bar_frame(fresh_rows)
             if fresh.empty:
                 continue
             self._last_polled_ts[canonical] = fresh_rows[-1]["ts_dt"]
@@ -270,10 +327,11 @@ class ReplayDataManager:
         return new_closed
 
     def last_price(self, symbol: str) -> float | None:
-        df = self.frame(symbol, "1Min", limit=1)
-        if df.empty:
+        canonical = self._canonical(symbol.upper())
+        i = self._cutoff_idx(canonical)
+        if i < 0:
             return None
-        return float(df["close"].iloc[-1])
+        return float(self._frames[canonical]["close"].iloc[i])
 
     def last_prices(self, symbols: list[str]) -> dict[str, float]:
         out: dict[str, float] = {}
@@ -286,23 +344,30 @@ class ReplayDataManager:
     async def quotes(self, symbols: list[str]) -> dict[str, Quote]:
         out: dict[str, Quote] = {}
         for symbol in symbols:
-            price = self.last_price(symbol)
-            if price is not None:
-                out[symbol.upper()] = Quote(symbol=symbol.upper(), price=round(price, 2))
+            q = self.latest_quote(symbol)
+            if q is not None:
+                out[symbol.upper()] = q
         return out
 
     def latest_quote(self, symbol: str) -> Quote | None:
         price = self.last_price(symbol)
         if price is None:
             return None
-        return Quote(symbol=symbol, price=price)
+        return Quote(symbol=symbol.upper(), price=price)
 
     async def history(self, symbol: str, timeframe: str, start: datetime, end: datetime, prefer_cache: bool = True, cache_policy: str | None = None) -> pd.DataFrame:
-        rows = [row for row in self._visible(symbol) if start <= row["ts_dt"] <= min(end, self._now)]
-        frame = _bar_frame(rows)
+        canonical = self._canonical(symbol.upper())
+        import bisect
+        idx_all = self._ts_index.get(canonical)
+        if not idx_all:
+            return empty_bars()
+        hi_ts = min(end, self._now)
+        lo = bisect.bisect_left(idx_all, start)
+        hi = bisect.bisect_right(idx_all, hi_ts)
+        df = self._frames[canonical].iloc[lo:hi]
         if timeframe.lower() not in {"1min", "1m", "1minute"}:
-            frame = resample_bars(frame, timeframe)
-        return frame.tail(self.max_rows)
+            df = resample_bars(df, timeframe)
+        return df.tail(self.max_rows)
 
     def fidelity_diagnostics(self) -> dict[str, Any]:
         present = set(self._bars)

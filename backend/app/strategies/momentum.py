@@ -56,6 +56,7 @@ class MomentumCross(Strategy):
         "reward_risk": 1.8,
         "trailing_stop_atr_mult": 1.5,
         "htf_trend_filter": False,
+        "use_structural_vwap_filter": True,
         "min_minutes_since_open": 5,
     }
 
@@ -194,6 +195,41 @@ class MomentumCross(Strategy):
                     return None
                 if crossed_down and ema_15_rising:
                     return None
+
+        # ---- Structural VWAP filter (VWAP-trap guard, param-gated) ----
+        # Don't buy when EMA20 is below session VWAP (bearish structure), don't
+        # short above it. In the first 30 minutes the EMA/VWAP relationship is
+        # unreliable right after the VWAP reset, so use the gap direction
+        # (today's open vs yesterday's close) as the structural bias instead.
+        # Ported from sibling-bot evidence: momentum aligned to structure won;
+        # counter-structure entries were its biggest bleed.
+        if p.get("use_structural_vwap_filter", True) and (crossed_up or crossed_down):
+            vwap_now = float(last.get("vwap", close)) if pd.notna(last.get("vwap")) else None
+            ema20_now = float(last["ema20"]) if pd.notna(last["ema20"]) else None
+            if vwap_now is None or ema20_now is None or vwap_now == 0.0:
+                return None
+            minutes_from_open = mins_et - (9 * 60 + 30)
+            if minutes_from_open > 30:
+                structural_uptrend = ema20_now > vwap_now
+                structural_downtrend = ema20_now < vwap_now
+            else:
+                et_zone = ZoneInfo("America/New_York")
+                et_dates = df.index.tz_convert(et_zone).date
+                today_mask = et_dates == et_dates[-1]
+                prev_days = df[et_dates < et_dates[-1]]
+                if today_mask.any() and not prev_days.empty:
+                    session_open = float(df.loc[today_mask, "open"].iloc[0])
+                    prev_close = float(prev_days["close"].iloc[-1])
+                    structural_uptrend = session_open > prev_close
+                    structural_downtrend = session_open < prev_close
+                else:
+                    structural_uptrend = structural_downtrend = False
+            if crossed_up and structural_downtrend:
+                self._debug(ctx, f"[momentum] STRUCTURE_VETO long {symbol}: EMA20<VWAP (trap)")
+                return None
+            if crossed_down and structural_uptrend:
+                self._debug(ctx, f"[momentum] STRUCTURE_VETO short {symbol}: EMA20>VWAP (trap)")
+                return None
 
         # ---- Volume / ATR guard ----
         if atr <= 0 or vol_z < p["vol_z_min"]:

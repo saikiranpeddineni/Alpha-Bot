@@ -45,12 +45,14 @@ export interface RiskConfig {
   max_open_positions: number;
   max_daily_loss_pct: number;
   max_drawdown_pct: number;
-  consecutive_loss_limit: number;
-  cooldown_minutes: number;
+  symbol_cooldown_minutes: number;
+  strategy_consecutive_loss_limit: number;
+  strategy_cooldown_minutes: number;
   no_entry_minutes_before_close: number;
   flatten_minutes_before_close: number;
   min_price: number;
   min_avg_dollar_volume: number;
+  data_gap_threshold_secs: number;
   ml_confidence_threshold: number;
   min_specialist_auc: number;
   min_stop_pct: number;
@@ -66,6 +68,13 @@ export interface ModelInfo {
   symbols?: string[];
 }
 
+export interface ScannerContextEntry {
+  score: number;
+  auc: number;
+  scanned_at: string;
+  expires_at: string;
+}
+
 export interface Status {
   state: EngineState;
   mode: Mode;
@@ -74,6 +83,7 @@ export interface Status {
   market: MarketStatus;
   watchlist: string[];
   core_watchlist?: string[];
+  scanner_context?: Record<string, ScannerContextEntry>;
   risk: RiskStatus;
   model: ModelInfo;
   trainer?: TrainerStatus;
@@ -299,124 +309,40 @@ export interface Bootstrap {
   account?: Account;
 }
 
-export interface GateAlphaStats {
-  total_vetoes: number;
-  unique_vetoes: number;
-  unique_veto_alpha: number;
-  shared_veto_alpha: number;
-  marginal_alpha: number;
-  avoided_losses: number;
-  missed_profits: number;
+
+
+export interface ShadowEntry {
+  id: number;
+  created_at: string;
+  session_date: string;
+  symbol: string;
+  strategy: string | null;
+  action: string | null;
+  signal_price: number | null;
+  stop_loss: number | null;
+  take_profit: number | null;
+  atr14: number | null;
+  confidence: number | null;
+  ml_probability: number | null;
+  meta_prob: number | null;
+  trade_score: number | null;
+  candidate_id: string | null;
+  gate: string;
+  reason: string | null;
+  resolved: number;
+  px_5m: number | null;
+  px_15m: number | null;
+  px_30m: number | null;
+  px_60m: number | null;
+  fav_pct_60m: number | null;
+  mfe_pct_60m: number | null;
+  mae_pct_60m: number | null;
+  r_fav_60m: number | null;
+  verdict: string | null;
 }
 
-export interface GateCombinationStats {
-  signals: number;
-  avoided_losses: number;
-  avoided_loss_r: number;
-  missed_winners: number;
-  missed_winner_r: number;
-  net_alpha_r: number;
+export interface ShadowLedgerData {
+  entries: ShadowEntry[];
+  summary: Record<string, number>;
+  missed_winners: ShadowEntry[];
 }
-
-export interface GateAlphaResponse {
-  gates: Record<string, GateAlphaStats>;
-  gate_combinations?: Record<string, GateCombinationStats>;
-  evidence_cohort?: {
-    total_signals: number;
-    replayed_signals: number;
-    canonical_r_signals: number;
-  };
-}
-
-export interface AltExitStats {
-  policy_id: string;
-  count: number;
-  common_r_count?: number;
-  common_r_coverage_pct?: number;
-  win_rate_pct: number;
-  avg_simulated_return_pct: number;
-  avg_realized_r: number;
-  avg_common_realized_r?: number | null;
-  avg_initial_risk_pct?: number | null;
-  avg_mfe_r: number;
-  avg_mae_r: number;
-  avg_bars_held: number;
-}
-
-export interface HybridResearchStats {
-  signals: number;
-  eligible_signals?: number;
-  comparable_signals?: number;
-  coverage_pct?: number;
-  activated: number;
-  saved_losses: number;
-  saved_loss_r: number;
-  improved_winners: number;
-  improved_winner_r: number;
-  reduced_winners: number;
-  reduced_winner_r: number;
-  no_effect: number;
-  net_delta_r: number;
-  avg_delta_r: number;
-}
-
-export interface ShadowAnalyticsResponse {
-  summary: {
-    total_signals: number;
-    rejected_signals: number;
-    accepted_signals: number;
-    replayed_signals: number;
-    canonical_rejected_signals?: number;
-    valid_r_count?: number;
-    win_rate_pct: number;
-    avg_simulated_return_pct: number;
-    avg_mfe_r?: number | null;
-    mfe_valid_count?: number;
-    mfe_coverage_pct?: number;
-    avg_mae_r?: number | null;
-    avg_mae_pct?: number | null;
-    avg_winner_capture_ratio: number;
-    avg_give_back_r: number;
-    avg_mfe_before_loss_r: number;
-    avoided_loss_count: number;
-    avoided_loss_r: number;
-    missed_profit_count: number;
-    missed_profit_r: number;
-  };
-
-  evidence_cohort?: {
-    total_signals: number;
-    replayed_signals: number;
-    canonical_r_signals: number;
-  };
-  by_strategy: Record<string, {
-    total_signals: number;
-    rejected_signals: number;
-    accepted_signals: number;
-    replayed_signals: number;
-    win_rate: number;
-    avg_simulated_return: number;
-    avg_mfe: number;
-    avg_mae: number;
-  }>;
-  by_rejection_stage: Record<string, {
-    count: number;
-    replayed_count: number;
-    win_rate: number;
-    avg_simulated_return_if_traded: number;
-    avg_mfe: number;
-    avg_mae: number;
-  }>;
-  alternative_exits_comparison: AltExitStats[];
-  hybrid_stats?: HybridResearchStats;
-  hybrid_cohorts?: Array<{
-    strategy: string;
-    direction: string;
-    market_regime: string;
-    signals: number;
-    production_r: number;
-    hybrid_r: number;
-    delta_r: number;
-  }>;
-}
-

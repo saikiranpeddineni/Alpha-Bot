@@ -18,8 +18,9 @@ from app.strategies.base import Strategy, StrategyContext, register
 class Rsi2Reversion(Strategy):
     name = "rsi2_reversion"
     description = "Buy RSI(2) panic dips inside an intact intraday uptrend"
-    
+
     is_breakout = False
+    is_mean_reversion = True
     ml_threshold = 0.52
     evaluation_horizons = ["15m", "30m", "close"]
     regime_weights = {
@@ -40,12 +41,12 @@ class Rsi2Reversion(Strategy):
         p = self.params
         if len(df) < 70:
             return None
-            
+
         from app.core.domain import Regime
         if ctx.regime != Regime.TREND_UP and not p.get("enable_shorts", False):
             # Only dip-buy in broader uptrends unless shorts are enabled
             return None
-            
+
         last = df.iloc[-1]
         if any(pd.isna(last.get(c)) for c in ("rsi2", "ema50", "atr14")):
             return None

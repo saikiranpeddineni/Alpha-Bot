@@ -15,17 +15,18 @@ from __future__ import annotations
 
 import json
 import math
+import threading
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
 from app.ai.features import FEATURE_COLUMNS, build_training_set
 from app.ai.prediction import WalkForwardValidator
-from app.core.domain import SignalAction
 from app.core.applog import applog
+from app.core.domain import SignalAction
 
 MODEL_FILE = "signal_model.joblib"
 META_FILE = "signal_model.meta.json"
@@ -74,15 +75,15 @@ def predict_proba_safe(clf, x: pd.DataFrame):
                     x_safe[m] = np.nan
             return clf.predict_proba(x_safe[cols])
         return clf.predict_proba(x)
-        
+
     # ==================================================================================================
     # WARNING TO FUTURE AI AGENTS: DO NOT REVERT THIS LEGACY ARTIFACT FALLBACK!
-    # Legacy models on disk were saved without `.feature_names_in_`. If you revert this, 
-    # any live deployments running old nameless models will instantly CRASH with a ValueError 
+    # Legacy models on disk were saved without `.feature_names_in_`. If you revert this,
+    # any live deployments running old nameless models will instantly CRASH with a ValueError
     # (e.g. "X has 19 features, expecting 18") the moment a new feature is added to FEATURE_COLUMNS.
     # This block safely slices or pads DataFrames to perfectly match the nameless model's expected size.
     # ==================================================================================================
-    
+
     # HOLISTIC FALLBACK FOR NAMELESS LEGACY ARTIFACTS
     if hasattr(clf, "n_features_in_"):
         expected_n = clf.n_features_in_
@@ -94,12 +95,122 @@ def predict_proba_safe(clf, x: pd.DataFrame):
             for i in range(len(x.columns), expected_n):
                 x_safe[f"__missing_{i}"] = np.nan
             return clf.predict_proba(x_safe.to_numpy())
-            
+
     return clf.predict_proba(x.to_numpy())
 
 
 def _sigmoid(z: float) -> float:
     return 1.0 / (1.0 + math.exp(-max(-30.0, min(30.0, z))))
+
+
+class _LazySpecialistMap:
+    """Symbol -> specialist-artifact mapping backed by lazy per-file loads.
+
+    Eagerly unpickling every specialist at startup costs ~20s per engine/model
+    construction (100+ artifacts x ~0.4s). Inference touches only a handful of
+    symbols per session, so artifacts are loaded on first access and re-loaded
+    automatically when the on-disk mtime changes (trainer hot-swap contract).
+    """
+
+    def __init__(self, specialists_dir: Path) -> None:
+        self._dir = specialists_dir
+        self._lock = threading.Lock()
+        self._refresh_paths()
+
+    def _refresh_paths(self) -> None:
+        import joblib
+
+        paths: dict[str, Path] = {}
+        if self._dir.exists():
+            for pkl in self._dir.glob("*.pkl"):
+                paths[pkl.stem.upper()] = pkl
+        self._paths = paths
+        self._cache: dict[str, tuple[float, dict]] = {}
+
+    def clear(self) -> None:
+        """Drop all cached artifacts and rescan the directory.
+
+        Used by tests and by callers that need to force a fresh load of every
+        specialist after bulk on-disk changes (same contract as the old dict).
+        """
+        with self._lock:
+            self._refresh_paths()
+
+    @staticmethod
+    def _prepare(artifact: object) -> dict | None:
+        if not isinstance(artifact, dict):
+            return artifact if isinstance(artifact, dict) else None
+        if "auc" in artifact:
+            if "auc_long" not in artifact:
+                artifact["auc_long"] = artifact["auc"]
+            if "auc_short" not in artifact:
+                artifact["auc_short"] = artifact["auc"]
+        return artifact
+
+    def _get(self, key: str) -> dict | None:
+        k = str(key).upper()
+        path = self._paths.get(k)
+        if path is None:
+            return None
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            return None
+        with self._lock:
+            hit = self._cache.get(k)
+            if hit is not None and hit[0] == mtime:
+                return hit[1]
+        try:
+            import joblib
+            artifact = self._prepare(joblib.load(path))
+        except Exception:
+            return None
+        with self._lock:
+            self._cache[k] = (mtime, artifact)
+        return artifact
+
+    # Mapping protocol -------------------------------------------------
+    def __getitem__(self, key: str) -> dict:
+        art = self._get(key)
+        if art is None:
+            raise KeyError(key)
+        return art
+
+    def __contains__(self, key: object) -> bool:
+        return str(key).upper() in self._paths
+
+    def __iter__(self):
+        return iter(self._paths)
+
+    def __len__(self) -> int:
+        return len(self._paths)
+
+    def keys(self):
+        return self._paths.keys()
+
+    def values(self):
+        return (self[k] for k in list(self._paths))
+
+    def items(self):
+        return ((k, self[k]) for k in list(self._paths))
+
+    def get(self, key: str, default=None):  # noqa: ANN001
+        art = self._get(key)
+        return default if art is None else art
+
+    def __delitem__(self, key: str) -> None:
+        with self._lock:
+            self._cache.pop(str(key).upper(), None)
+
+    def pop(self, key: str, default=None):  # noqa: ANN001
+        art = self._get(key)
+        with self._lock:
+            self._cache.pop(str(key).upper(), None)
+        return default if art is None else art
+
+    def __setitem__(self, key: str, value: dict) -> None:
+        with self._lock:
+            self._cache[str(key).upper()] = (float("inf"), value)
 
 
 class _LegacySignalModel:
@@ -115,7 +226,7 @@ class _LegacySignalModel:
         # Keys: "trend_up", "trend_down", "range", "volatile"
         self._regime_adaptive_long: dict[str, object] = {}
         self._regime_adaptive_short: dict[str, object] = {}
-        self._specialists: dict[str, dict] = {}
+        self._specialists: _LazySpecialistMap = _LazySpecialistMap(self.models_dir / "specialists")
         self._auc_warned_symbols: set[str] = set()  # suppress repeated per-session AUC warnings
         # Set only while a historical replay is running.  Live engine scoring
         # must see an explicit None rather than reading a missing attribute.
@@ -178,51 +289,21 @@ class _LegacySignalModel:
             except Exception as exc:
                 applog.debug("ai.model", f"Could not load regime model {regime_key}: {exc}")
 
-        # Load specialist models
-        specialists_dir = self.models_dir / "specialists"
-        self._specialists.clear()
-        if specialists_dir.exists():
-            for pkl in specialists_dir.glob("*.pkl"):
-                try:
-                    import joblib
-                    artifact = joblib.load(pkl)
-                    # Backfill side-specific AUC from combined AUC for backward compatibility
-                    if isinstance(artifact, dict):
-                        if 'auc' in artifact:
-                            if 'auc_long' not in artifact:
-                                artifact['auc_long'] = artifact['auc']
-                            if 'auc_short' not in artifact:
-                                artifact['auc_short'] = artifact['auc']
-                    self._specialists[pkl.stem.upper()] = artifact
-                except Exception as exc:
-                    applog.debug("ai.model", f"Could not load specialist {pkl.name}: {exc}")
+        # Load specialist models lazily (see _LazySpecialistMap): startup only
+        # scans the directory; artifacts unpickle on first per-symbol access.
+        self._specialists = _LazySpecialistMap(self.models_dir / "specialists")
         self._auc_warned_symbols = set()
 
     def reload_specialists(self) -> None:
         """Reload specialist models from disk into the in-memory cache.
 
-        Called before a backtest deepcopy so the backtest always sees the
-        most recently trained specialist artifacts, even if they were trained
-        after this server process started.
+        Builds a fresh lazy map and swaps it in atomically so concurrent
+        inference readers never observe a half-populated cache. Called after
+        training promotions and before backtest deepcopies.
         """
-        import joblib
-        specialists_dir = self.models_dir / "specialists"
-        self._specialists.clear()
-        if specialists_dir.exists():
-            for pkl in specialists_dir.glob("*.pkl"):
-                try:
-                    artifact = joblib.load(pkl)
-                    if isinstance(artifact, dict):
-                        if "auc" in artifact:
-                            if "auc_long" not in artifact:
-                                artifact["auc_long"] = artifact["auc"]
-                            if "auc_short" not in artifact:
-                                artifact["auc_short"] = artifact["auc"]
-                    self._specialists[pkl.stem.upper()] = artifact
-                except Exception as exc:
-                    applog.debug("ai.model", f"Could not reload specialist {pkl.name}: {exc}")
+        self._specialists = _LazySpecialistMap(self.models_dir / "specialists")
         self._auc_warned_symbols = set()
-        applog.info("ai.model", f"reload_specialists: loaded {len(self._specialists)} specialist(s) from disk")
+        applog.info("ai.model", f"reload_specialists: {len(self._specialists)} specialist(s) available on disk")
 
     @property
     def is_trained(self) -> bool:
@@ -343,13 +424,13 @@ class _LegacySignalModel:
                 base_trained_at = base_trained_at.replace(tzinfo=UTC)
             else:
                 base_trained_at = base_trained_at.astimezone(UTC)
-        
+
         if base_trained_at and bt_start:
             if bt_start.tzinfo is None:
                 bt_start = bt_start.replace(tzinfo=UTC)
             if base_trained_at > bt_start:
                 applog.warning(
-                    "ai.model", 
+                    "ai.model",
                     f"[BASE] Bypass BASE model due to temporal leakage | trained_at={base_trained_at_str} | backtest_start={bt_start.isoformat()} | model_source=BASE"
                 )
                 return ScoreActionResult(
@@ -360,7 +441,7 @@ class _LegacySignalModel:
                     specialist_min_auc=min_auc,
                     fallback_reason="BASE model temporal leakage"
                 )
-                
+
         raw_prob = self.p_down(features, regime_key=regime_key) if action == SignalAction.ENTER_SHORT else self.p_up(features, regime_key=regime_key)
         return self._make_validated_result(
             raw_prob, "BASE", specialist_status, auc, min_auc, fallback_reason, symbol=symbol
@@ -373,12 +454,16 @@ class _LegacySignalModel:
         from app.config import get_settings
         min_auc = get_settings().risk_config().min_specialist_auc
 
+        # Fail-closed: degraded feature input must yield probability=None so the
+        # pipeline rejects the candidate. A neutral 0.5 sentinel here previously
+        # PASSED the ML gate whenever adaptive logic relaxed thresholds below
+        # 0.5 — trading on warmup/degraded features.
         if features is None:
-            return ScoreActionResult(0.5, "BASE", "NO_ARTIFACT", None, min_auc, "features is None")
+            return ScoreActionResult(None, "BASE", "NO_ARTIFACT", None, min_auc, "features is None")
         if not all(col in features.index for col in FEATURE_COLUMNS):
-            return ScoreActionResult(0.5, "BASE", "NO_ARTIFACT", None, min_auc, "missing feature columns")
+            return ScoreActionResult(None, "BASE", "NO_ARTIFACT", None, min_auc, "missing feature columns")
         if features[FEATURE_COLUMNS].isna().any():
-            return ScoreActionResult(0.5, "BASE", "NO_ARTIFACT", None, min_auc, "features have NaNs")
+            return ScoreActionResult(None, "BASE", "NO_ARTIFACT", None, min_auc, "features have NaNs")
 
         if symbol:
             sym_upper = symbol.upper()
@@ -395,7 +480,7 @@ class _LegacySignalModel:
                         f"— falling back to global base model",
                     )
                     spec = None
-                
+
                 # 2. Check for temporal leakage relative to backtest start time
                 elif hasattr(self, "backtest_start_time") and self.backtest_start_time is not None:
                     trained_at_str = spec.get("trained_at")
@@ -519,8 +604,9 @@ class _LegacySignalModel:
         vs high-volatility market conditions.
         """
         import copy
-        from sklearn.ensemble import HistGradientBoostingClassifier
+
         import joblib
+        from sklearn.ensemble import HistGradientBoostingClassifier
 
         if not self.is_trained:
             applog.warning("ai.model", "Global model not trained. Adaptive model cannot be fine-tuned; training fresh models instead.")
@@ -540,7 +626,7 @@ class _LegacySignalModel:
                     pass # CalibratedClassifierCV doesn't support warm_start directly
             except ValueError:
                 pass
-            
+
             if self._model_short is not None:
                 new_short = copy.deepcopy(self._model_short)
                 try:
@@ -666,7 +752,6 @@ class _LegacySignalModel:
 
         # ---- Compute holdout AUC for meta-data (last 30% chronologically) ----
         from app.ai.features import build_training_set
-        import numpy as np
 
         def _holdout_auc(clf, all_frames, side):
             xs, ys = [], []
@@ -745,7 +830,6 @@ class _LegacySignalModel:
 
 
 import copy
-import pandas as pd
 
 from app.ai.generation import AtomicGenerationStore, TrainingCoordinator
 

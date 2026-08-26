@@ -1,16 +1,16 @@
 """TradingEngineHaltsMixin mixin."""
 
 from __future__ import annotations
+
 import asyncio
-import json
-from datetime import datetime, timedelta, timezone, UTC
-from typing import Any
-import pandas as pd
-from app.core.domain import EngineState, Signal, SignalAction, Position, OrderRequest, OrderSide, OrderType, Order, utcnow
+from datetime import datetime
+
 from app.core.applog import applog
-from app.indicators.ta import enrich
-from app.ai.regime import detect_regime
-from app.strategies import SignalPipeline, StrategyContext
+from app.core.domain import (
+    EngineState,
+    utcnow,
+)
+
 
 class TradingEngineHaltsMixin:
     async def _emergency_flatten_loop(self) -> None:
@@ -75,6 +75,9 @@ class TradingEngineHaltsMixin:
             if self.last_error.startswith("DAILY LOSS HALTED — liquidation unresolved"):
                 self.last_error = ""
             applog.info("engine", "Daily halt liquidation authoritatively complete: flat")
+            # Purge PIS brains so stale excursion memory cannot contaminate the next trade.
+            if hasattr(self, "pis_adapter") and self.pis_adapter and hasattr(self.pis_adapter, "service"):
+                self.pis_adapter.service.close_all()
             self.publish("status", self.status())
             return True
         except BaseException as exc:
@@ -101,13 +104,13 @@ class TradingEngineHaltsMixin:
                 for position in positions:
                     self._pending_close_symbols.add(position.symbol.upper())
                 await self.broker.flatten_all(reason="end of day")
-                
+
                 for _ in range(10):
                     await asyncio.sleep(1.0)
                     await self._drain_fills(now)
                     if not await self.broker.positions() and not await self.broker.open_orders():
                         break
-                        
+
             residual_positions = await self.broker.positions()
             residual_orders = await self.broker.open_orders()
             if residual_positions or residual_orders:
@@ -120,26 +123,13 @@ class TradingEngineHaltsMixin:
                 self.publish("status", self.status())
                 return False
             self._flattened_sessions.add(session)
+            getattr(self, "_eod_flatten_started_sessions", set()).discard(session)
             if self.last_error.startswith("CRITICAL EOD liquidation unresolved"):
                 self.last_error = ""
             applog.info("engine", "End-of-day liquidation authoritatively complete")
             # Explicitly clear out all PIS memory states for the next session
             if hasattr(self, "pis_adapter") and self.pis_adapter and hasattr(self.pis_adapter, "service"):
                 self.pis_adapter.service.close_all()
-            
-            # Refresh contextual aggregate memory at EOD
-            try:
-                from app.strategies import refresh_contextual_memory
-                refresh_contextual_memory(self.db)
-            except Exception as exc:
-                applog.error("engine", f"Failed contextual aggregates refresh: {exc}")
-            
-            # Compile EOD policy reflection report (CR-146 Phase 7: auto-promotion enabled)
-            try:
-                from app.strategies import generate_eod_reflection_report
-                generate_eod_reflection_report(self.db, now=now, engine=self)
-            except Exception as exc:
-                applog.error("engine", f"Failed EOD reflection report generation: {exc}")
             self.publish("status", self.status())
             return True
         except BaseException as exc:
@@ -177,6 +167,9 @@ class TradingEngineHaltsMixin:
             if self.last_error.startswith("HARD HALTED — liquidation unresolved"):
                 self.last_error = "HARD HALTED — flat"
             applog.info("engine", "Hard halt liquidation authoritatively complete: flat")
+            # Purge PIS brains so stale excursion memory cannot contaminate the next trade.
+            if hasattr(self, "pis_adapter") and self.pis_adapter and hasattr(self.pis_adapter, "service"):
+                self.pis_adapter.service.close_all()
             self.publish("status", self.status())
             return True
         except BaseException as exc:

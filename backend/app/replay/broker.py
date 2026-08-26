@@ -1,6 +1,8 @@
 """Deterministic Broker implementation used by production replay."""
 from __future__ import annotations
-from datetime import datetime, timezone
+
+from datetime import UTC, datetime
+
 from app.brokers.base import Broker, Fill
 from app.core.domain import AccountSnapshot, Order, OrderRequest, OrderSide, OrderStatus, OrderType, Position
 
@@ -16,12 +18,12 @@ class ReplayBroker(Broker):
         self.fill_model, self.allow_partial_fills = fill_model, bool(allow_partial_fills)
         self.volume_constrained, self.max_volume_pct = bool(volume_constrained), float(max_volume_pct)
         self._positions: dict[str, Position] = {}; self._orders: dict[str, Order] = {}; self._resting: list[str] = []
-        self._fills: list[Fill] = []; self._last_price: dict[str, float] = {}; self._now = datetime(1970,1,1,tzinfo=timezone.utc)
+        self._fills: list[Fill] = []; self._last_price: dict[str, float] = {}; self._now = datetime(1970,1,1,tzinfo=UTC)
         self._seq = 0; self._ledger = None
 
     def attach_ledger(self, ledger) -> None: self._ledger = ledger
     async def connect(self) -> None: return None
-    def set_time(self, ts: datetime) -> None: self._now = ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+    def set_time(self, ts: datetime) -> None: self._now = ts if ts.tzinfo else ts.replace(tzinfo=UTC)
     def _id(self, prefix: str) -> str: self._seq += 1; return f"{prefix}_{self._seq:08d}"
     def _slip(self, px: float, side: OrderSide) -> float: return px * (1 + self.slippage) if side == OrderSide.BUY else px * (1 - self.slippage)
     def equity(self) -> float: return self.cash + sum(p.qty * p.market_price for p in self._positions.values())

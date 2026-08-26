@@ -61,5 +61,9 @@ class TradingRuntime:
             engine_self.runtime_ledger = runtime.ledger
 
         replay_compatible_init._replay_runtime_adapter = True
+        # Preserve the unwrapped init so source introspection (and any caller
+        # that needs the real constructor) can reach past this adapter even
+        # after it replaces TradingEngine.__init__.
+        replay_compatible_init._original_engine_init = original_init
         engine_module.TradingEngine.__init__ = replay_compatible_init
         cls._adapter_installed = True

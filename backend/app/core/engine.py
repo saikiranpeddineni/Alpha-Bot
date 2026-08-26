@@ -14,31 +14,28 @@ behavior validated offline is the behavior that trades.
 from __future__ import annotations
 
 import asyncio
-from app.core.engine_evaluation import TradingEngineEvaluationMixin
-from app.core.engine_portfolio import TradingEnginePortfolioMixin
-from app.core.engine_halts import TradingEngineHaltsMixin
 import inspect
+import math
+import os
 from collections import deque
 from collections.abc import Callable
-from datetime import datetime, timedelta, timezone, UTC
+from datetime import UTC, datetime, timedelta
+from datetime import time as dtime
+from types import SimpleNamespace
 from typing import Any
 from zoneinfo import ZoneInfo
-import math
-from types import SimpleNamespace
-from app.core.calendar_helper import get_session_close
-from datetime import time as dtime
-from functools import partial
 
 import pandas as pd
 
 from app.ai.insights import InsightEngine
 from app.ai.model import SignalModel
-from app.ai.regime import detect_regime
 from app.ai.trainer import ContinuousTrainer
 from app.backtest.metrics import compute_metrics
 from app.brokers.base import Broker, make_broker
 from app.brokers.paper import PaperBroker
-from app.config import DATA_DIR, get_models_dir, RiskConfig, Settings
+from app.config import DATA_DIR, RiskConfig, Settings, get_models_dir
+from app.core.applog import applog
+from app.core.calendar_helper import get_session_close
 from app.core.clock import MarketClock
 from app.core.domain import (
     EngineState,
@@ -48,40 +45,38 @@ from app.core.domain import (
     OrderStatus,
     OrderType,
     Position,
-    ProtectionState,
     Regime,
     SignalAction,
     utcnow,
 )
-from app.core.applog import applog
+from app.core.engine_evaluation import TradingEngineEvaluationMixin
+from app.core.engine_halts import TradingEngineHaltsMixin
 from app.core.entry_reservations import SameCycleEntryReservations
 from app.data.manager import DataManager, make_provider
 from app.db.database import Database
-from app.indicators.ta import enrich, compute_relative_strength
+from app.indicators.ta import enrich
+from app.pis import PISEngineAdapter
 from app.portfolio.tracker import PortfolioTracker
 from app.risk.manager import AccountContext, RiskManager
-from app.strategies import SignalPipeline, Strategy, create_strategies, ParallelEvidenceEvaluator
-from app.strategies.base import StrategyContext
-
-from app.indicators.slot_volume import SlotVolumeEngine
-from app.indicators.vwap_telemetry import compute_vwap_telemetry
-from app.core.shadow_ledger import ShadowLedger
-from app.core.counterfactual import ExitCounterfactualEngine
-from app.pis import PISEngineAdapter, PISConfig
+from app.strategies import SignalPipeline, Strategy, create_strategies
 
 ET = ZoneInfo("America/New_York")
 
 MAX_CONSECUTIVE_TICK_ERRORS = 30
 EQUITY_PERSIST_EVERY_TICKS = 12
 METRICS_BROADCAST_EVERY_TICKS = 6
-_DATA_GAP_THRESHOLD_SECS = 120.0
+# Data-gap entry block threshold. Thin printers (user-added low-priced /
+# low-float names) legitimately go minutes between prints and tripped the
+# old fixed 120s constantly -- 34 false blocks on Aug-24 alone. Env-tunable;
+# default unchanged for liquid names.
+_DATA_GAP_THRESHOLD_SECS = float(os.environ.get("ALPHADESK_DATA_GAP_THRESHOLD_SECS", "120"))
 
 # DB key template for durable kill-switch state.  Namespaced by mode so
 # paper and live halt states are fully independent.
 _HALT_KEY = "hard_halt_state:{mode}"
 
 
-class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, TradingEngineHaltsMixin):
+class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
     def __init__(self, settings: Settings, db: Database) -> None:
         self.settings = settings
         self.db = db
@@ -92,10 +87,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         self.last_error: str = ""
 
         self.model = SignalModel(get_models_dir())
-        self.insights = InsightEngine(
-            gemini_api_key=settings.gemini_api_key,
-            anthropic_api_key=settings.anthropic_api_key,
-        )
+        self.insights = InsightEngine()
         self.insights.is_research_mode = False
 
         self.user_watchlist: list[str] = db.get_setting("watchlist") or settings.watchlist_symbols()
@@ -123,22 +115,31 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         self._position_initial_stops: dict[str, float | None] = {}
         # Original strategy target survives broker protection repair/reconciliation.
         self._position_take_profits: dict[str, float] = {}
+        # fix(partial-close-wedge): close-latch bookkeeping (requested qty + submit
+        # time) so guards release from fill truth and staleness, never wedging exits.
+        self._pending_close_qtys: dict[str, float | None] = {}
+        self._pending_close_submitted_at: dict[str, datetime] = {}
         self.pis_adapter: PISEngineAdapter = PISEngineAdapter()
+        from app.portfolio.recent_performance import RecentPerformanceGovernor
+        self._perf_governor = RecentPerformanceGovernor(db, lambda: self.risk_config)
         self._last_scan_date = None
         self._last_train_date = None
         self._last_event_monitor_min = None
         self._event_monitor_task: asyncio.Task | None = None
         self._last_intraday_scan_min: int | None = None  # Feature 1: 30-min intraday refresh
-        self._midday_active: bool = False                 # Feature 3: midday threshold state
         self._flattened_sessions: set = set()
+        self._eod_flatten_started_sessions: set = set()
         self._task: asyncio.Task | None = None
         self._tick_count = 0
         self._consec_errors = 0
         self._trades_since_insight = 0
         self._pending_close_symbols: set[str] = set()  # symbols with in-flight close order
+        # Tracks the close ORDER id per symbol so the guard can release the moment
+        # the broker confirms the close reached a terminal state (fixes the wedge
+        # where partial closes latched the guard until the whole lot hit zero).
+        self._pending_close_order_ids: dict[str, str] = {}
         self.trainer: ContinuousTrainer | None = None
         self._last_heartbeat_hour: int | None = None
-        self._last_heartbeat_week: int | None = None
         # fix(#45): in-flight flatten guard — deduplicate concurrent flatten for same symbol
         self._flattening_symbols: set[str] = set()
         # fix(#56): retain emergency flatten task reference for cancellation on stop()
@@ -146,11 +147,15 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         # fix(#86): track market-data stale timestamps per symbol
         self._last_data_bar_ts: dict[str, datetime] = {}
         self._data_gap_symbols: set[str] = set()
+        # One-shot warn latch for entry evaluations skipped by decision-input gates.
+        self._entry_gate_warned: set[str] = set()
 
         # Slow scheduled work is explicitly detached from the market-data/execution tick.
         self._scanner_task: asyncio.Task | None = None
         self._trainer_task: asyncio.Task | None = None
-        self._shadow_replay_task: asyncio.Task | None = None
+        # Cached scanner instance so strategy evaluation can read live mover context.
+        self._scanner = None
+        self.scanner_context: dict[str, dict] = {}
 
         # Feature 4: Economic calendar / event guard
         from app.core.calendar import EventCalendar
@@ -163,6 +168,10 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         self.portfolio_allocator = None
         self.pending_reconciliation_orders: dict[str, dict] = db.get_setting("pending_reconciliation_orders") or {}
         self.reconciliation_failed = False
+        # Replay fast-path flag: set by ReplayRuntime to skip live-ops telemetry
+        # (heartbeat monitors, equity persistence, hourly sector scans) that has
+        # zero influence on decisions. Decision gates ALWAYS run.
+        self.replay_fast_path = False
         self.reconciliation_mismatch = False
         self._position_reconciliation_mismatch_streak = 0
         self._order_reconciliation_mismatch_streak = 0
@@ -347,7 +356,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                 applog.info("engine", f"#43: Restored safety-critical risk state from {restore_mode} checkpoint")
 
 
-        from app.portfolio.allocator import PortfolioAIGate, CapitalAllocationOptimizer
+        from app.portfolio.allocator import CapitalAllocationOptimizer, PortfolioAIGate
         self.portfolio_gate = PortfolioAIGate(
             max_correlation=self.risk_config.max_correlation_penalty,
             max_positions_per_sector=self.risk_config.max_positions_per_sector
@@ -371,32 +380,14 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         except Exception as exc:
             self.reconciliation_failed = True
             applog.error("engine", f"Failed to restore and reconcile active positions: {exc}")
-        # Restore active promoted policy snapshot or threshold settings from the database (Fix 10)
-        active_snapshot = self.db.get_setting("active_policy_snapshot")
+        # Restore operator-persisted ML threshold setting (plain runtime knob).
         ml_thresh = self.risk_config.ml_confidence_threshold
-        if active_snapshot and "ml_threshold" in active_snapshot:
-            ml_thresh = float(active_snapshot["ml_threshold"])
-            self.risk_config.ml_confidence_threshold = ml_thresh
-            applog.info("engine", f"Restored active promoted policy snapshot on startup: {active_snapshot}")
-            offset = float(active_snapshot.get("score_threshold_offset", 0.0))
-            if offset != 0.0:
-                self.risk_config.score_threshold_event = max(0.0, self.risk_config.score_threshold_event + offset)
-                self.risk_config.score_threshold_trend = max(0.0, self.risk_config.score_threshold_trend + offset)
-                self.risk_config.score_threshold_range = max(0.0, self.risk_config.score_threshold_range + offset)
-                self.risk_config.score_threshold_volatile = max(0.0, self.risk_config.score_threshold_volatile + offset)
-                applog.info("engine", f"Applied score threshold offset of {offset:+.1f} points to RiskConfig thresholds.")
-        elif self.db.get_setting("ml_threshold") is not None:
+        if self.db.get_setting("ml_threshold") is not None:
             ml_thresh = float(self.db.get_setting("ml_threshold"))
             self.risk_config.ml_confidence_threshold = ml_thresh
-            applog.info("engine", f"Restored active promoted ML threshold setting on startup: {ml_thresh}")
+            applog.info("engine", f"Restored persisted ML threshold setting on startup: {ml_thresh}")
 
         self.pipeline = SignalPipeline(self.model, ml_thresh)
-        self.evidence_evaluator = ParallelEvidenceEvaluator(
-            model=self.model,
-            ml_threshold=ml_thresh,
-            meta_label_engine=self.pipeline.meta_label_engine,
-            trade_score_engine=self.pipeline.trade_score_engine,
-        )
         for s in self.strategies:
             s.reset()
         self._regimes.clear()
@@ -446,7 +437,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
             except asyncio.CancelledError:
                 pass
         self._event_monitor_task = None
-        for attr in ("_scanner_task", "_trainer_task", "_shadow_replay_task"):
+        for attr in ("_scanner_task", "_trainer_task"):
             task = getattr(self, attr, None)
             if task is not None and not task.done():
                 task.cancel()
@@ -554,7 +545,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         # Synchronize ML gate threshold with assessed market risk regime with dynamic scale
         # Synchronize ML gate threshold with assessed market risk regime with dynamic scale
         raw_regime = getattr(getattr(self, "last_safety_decision", None), "market_risk_state", getattr(self.risk_config, "current_regime", "NORMAL"))
-        
+
         # Fast path check against cached regime to avoid re-calculating threshold on every tick
         if getattr(self, "_cached_raw_regime", None) != raw_regime:
             self._cached_raw_regime = raw_regime
@@ -564,27 +555,27 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                 regime_str = str(raw_regime.name)
             else:
                 regime_str = str(raw_regime)
-                
+
             current_regime = "STRESS" if self.vix_unavailable else regime_str.split(".")[-1].upper()
             regime_map = getattr(self.risk_config, "regime_ml_thresholds", {})
             raw_threshold = regime_map.get(current_regime)
-            
+
             if raw_threshold is None:
                 raw_threshold = (
                     getattr(self.risk_config, "stress_ml_confidence_threshold", 0.60)
                     if current_regime in ("STRESS", "PANIC")
                     else getattr(self.risk_config, "ml_confidence_threshold", 0.55)
                 )
-                
+
             try:
                 val = float(raw_threshold)
                 if math.isnan(val) or math.isinf(val) or not (0.0 <= val <= 1.0):
                     val = 0.55
             except (ValueError, TypeError):
                 val = 0.55
-                
+
             self._cached_ml_threshold = val
-            
+
         self.pipeline.ml_threshold = getattr(self, "_cached_ml_threshold", 0.55)
 
         # Run pre-market scanner (9:00 AM ET onwards) once per day
@@ -593,10 +584,18 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         if self.state == EngineState.RUNNING:
             if self._last_scan_date != today_date and et_mins >= 9 * 60:
                 self._last_scan_date = today_date
-                
+
                 if is_trading_day:
                     applog.info("engine", "Pre-market scanner trigger time reached (>= 09:00 ET)")
-                    await self.run_market_scanner(is_intraday=False)
+                    # Detached task: the morning scan performs per-symbol history
+                    # fetches + adaptive training and must never hold the tick
+                    # hostage across the 09:30 open.
+                    if self._scanner_task is None or self._scanner_task.done():
+                        self._scanner_task = asyncio.create_task(
+                            self.run_market_scanner(is_intraday=False), name="market-scanner-premarket"
+                        )
+                    else:
+                        applog.info("engine", "Pre-market scanner skipped: previous scanner task still running")
             # Intraday watchlist refresh every 15 min during session (was 30 min)
             elif (
                 is_trading_day
@@ -619,23 +618,15 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                     self._trainer_task = asyncio.create_task(
                         self.trainer.trigger(list(self.watchlist)), name="post-market-trainer"
                     )
-            # Feature 3: Midday score threshold boost (raise threshold, not hard block)
-            rc = self.risk_config
-            # DEPRECATED (2026-08-06): The midday filter is a blunt time-based heuristic. 
-            # We must rely on our ML models and Regime logic to naturally reject low-volume chop, 
-            # not an arbitrary clock, to truly "Preserve Edge".
-            # is_midday = rc.midday_start_et <= et_mins <= rc.midday_end_et
-            is_midday = False
-            if is_midday != self._midday_active:
-                self._midday_active = is_midday
-                if self.pipeline:
-                    self.pipeline.set_midday_active(is_midday)
-                applog.info(
-                    "engine",
-                    f"Midday filter {'ACTIVE \u2014 threshold +' + str(rc.midday_score_boost) if is_midday else 'CLEARED'} "
-                    f"(et_mins={et_mins}, window={rc.midday_start_et}\u2013{rc.midday_end_et})",
-                )
-            if 9 * 60 + 30 <= et_mins <= 16 * 60 and et_mins % 5 == 0 and self._last_event_monitor_min != et_mins:
+            if (
+                not getattr(self, "replay_fast_path", False)
+                and 9 * 60 + 30 <= et_mins <= 16 * 60
+                and et_mins % 5 == 0
+                and self._last_event_monitor_min != et_mins
+            ):
+                # Fast replay skips ops monitors (established directive); the
+                # event monitor's universe-wide history+enrich sweep is pure
+                # overhead when publish() is a no-op sink.
                 self._last_event_monitor_min = et_mins
                 task = self._event_monitor_task
                 if task is None or task.done():
@@ -676,7 +667,12 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                         self._data_gap_symbols.discard(sym_upper)
                     else:
                         elapsed = (now - last_ts).total_seconds()
-                        if elapsed > _DATA_GAP_THRESHOLD_SECS and sym_upper not in self._data_gap_symbols:
+                        # Live config (UI-editable, persisted): thin printers
+                        # need a larger window; 0 disables the block entirely.
+                        gap_threshold = float(
+                            getattr(self.risk_config, "data_gap_threshold_secs", _DATA_GAP_THRESHOLD_SECS)
+                        )
+                        if gap_threshold > 0 and elapsed > gap_threshold and sym_upper not in self._data_gap_symbols:
                             if not _is_replay:
                                 self._data_gap_symbols.add(sym_upper)
                                 applog.warning(
@@ -718,7 +714,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
             )
             positions = []
 
-        if self.state == EngineState.RUNNING:
+        if self.state == EngineState.RUNNING and not getattr(self, "replay_fast_path", False):
             self._run_heartbeat_tasks(now)
 
         # 2. session roll
@@ -776,12 +772,29 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
 
         # 4. end-of-day flatten. Completion is latched only after an
         # authoritative broker post-condition proves no positions or open orders.
+        #
+        # EOD SAFETY LATCH: the flatten attempt starts inside the configured
+        # pre-close window, but unlike a pure time-box it keeps retrying every
+        # tick until the broker proves flat (or until the post-close grace
+        # expires). A broker outage, slow flatten_all, or a restart at 15:58 no
+        # longer strands positions overnight.
         in_flatten_window = self.risk.should_flatten(now)
+        eod_grace_min = int(getattr(self.settings, "eod_post_close_grace_minutes", 15))
+        eod_started = getattr(self, "_eod_flatten_started_sessions", None)
+        if eod_started is None:
+            eod_started = set()
+            self._eod_flatten_started_sessions = eod_started
+        eod_active = in_flatten_window or (
+            session in eod_started
+            and now <= get_session_close(now) + timedelta(minutes=eod_grace_min)
+        )
         if (
             self.state == EngineState.RUNNING
-            and in_flatten_window
+            and eod_active
             and session not in self._flattened_sessions
         ):
+            if in_flatten_window:
+                eod_started.add(session)
             await self._reconcile_eod_liquidation(session, now)
 
         # 5. strategy evaluation on newly closed bars. Do not reopen exposure
@@ -789,7 +802,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         is_active_session = (
             self.state in (EngineState.RUNNING, EngineState.SAFE_MODE)
             and not self.risk.daily_halted
-            and not in_flatten_window
+            and not eod_active
             and (self.clock.is_open(now) or self.mode == "demo")
         )
         if is_active_session and new_closed:
@@ -812,7 +825,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
             self._last_evaluated_symbol_count = len(symbols_to_evaluate)
             if symbols_to_evaluate:
                 self._last_evaluation_at = now
-            
+
             effective_positions = list(positions)
 
             for symbol in symbols_to_evaluate:
@@ -851,18 +864,18 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                                 sig.discovery_source = "scanner"
                                 sig.scanner_score = sctx.get("score")
                                 sig.scanner_auc = sctx.get("auc")
-                                
+
                 # Pre-filter candidates via RiskManager before allocation
                 alloc_signals = []
                 pre_gated_entries = []
                 for sig, _ in candidates:
                     sym_upper = sig.symbol.upper()
-                    
+
                     # Prevent budget starvation for symbols we already hold
                     if sym_upper in pos_by_symbol:
                         pre_gated_entries.append((sig, f"position already open in {sym_upper}"))
                         continue
-                        
+
                     # Prevent budget starvation for symbols actively being bought
                     if any(info["symbol"] == sym_upper for info in self.pending_reconciliation_orders.values()):
                         pre_gated_entries.append((sig, f"order locally pending for {sym_upper}"))
@@ -893,7 +906,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                     portfolio_allocator=self.portfolio_allocator,
                     market_state=getattr(self.last_safety_decision, "market_state", None) if hasattr(self, "last_safety_decision") and self.last_safety_decision else None,
                 )
-                
+
                 # Re-inject pre-filtered rejections so they are properly mirrored and logged
                 decision_outcome.gated_entries.extend(pre_gated_entries)
 
@@ -901,21 +914,29 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                 for sig, reason in decision_outcome.gated_entries:
                     applog.info("engine", f"{sig.symbol}: Portfolio Gate/Allocator rejected -- {reason}")
                     self.publish("insight", self.insights.on_signal(sig, gated=True, gate_reason=reason).model_dump(mode="json"))
-                    if getattr(sig, "candidate_id", None) is not None:
-                        await self._update_shadow_decision(sig.candidate_id, "rejected", reason, "portfolio_gate")
+                    try:
+                        from app.core.shadow_ledger import shadow_ledger
+                        _sdf = df_by_symbol.get(sig.symbol)
+                        shadow_ledger.record(
+                            symbol=sig.symbol,
+                            action=str(sig.action.value if hasattr(sig.action, "value") else sig.action),
+                            strategy=sig.strategy,
+                            gate="portfolio_or_risk",
+                            reason=reason,
+                            price=sig.price,
+                            stop_loss=sig.stop_loss,
+                            take_profit=sig.take_profit,
+                            atr14=float(_sdf["atr14"].iloc[-1]) if _sdf is not None and "atr14" in _sdf.columns and len(_sdf) else None,
+                            confidence=sig.confidence,
+                            sig=sig,
+                        )
+                    except Exception:
+                        pass
 
                 # Size and submit approved entries
                 if decision_outcome.approved_entries:
                     if getattr(self, "reconciliation_failed", False):
                         applog.warning("engine", "Skipping entry sizing and submission while reconciliation is uncertain.")
-                        for sig, _ in decision_outcome.approved_entries:
-                            if getattr(sig, "candidate_id", None) is not None:
-                                await self._update_shadow_decision(
-                                    sig.candidate_id,
-                                    "rejected",
-                                    "engine position/broker reconciliation state is uncertain",
-                                    "risk_gate",
-                                )
                     else:
                         open_orders = await self.broker.open_orders()
                         pending_entries = [
@@ -941,13 +962,47 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                             decision_safety = getattr(self, "last_safety_decision", None)
                             sig.risk_multiplier = decision_safety.risk_multiplier if decision_safety is not None else 1.0
 
+                            # Recent Performance Governor: scale size DOWN when this
+                            # symbol / strategy / session-hour has measured negative
+                            # expectancy in recent closed trades. Tighten-only; the
+                            # factor recovers automatically as performance does.
+                            if getattr(self.risk_config, "governor_enabled", True):
+                                try:
+                                    gov_factor = await asyncio.to_thread(
+                                        self._perf_governor.factor_for, sig.symbol, sig.strategy, now
+                                    )
+                                    if gov_factor < 1.0:
+                                        sig.risk_multiplier = round(sig.risk_multiplier * gov_factor, 4)
+                                        applog.info(
+                                            "engine.governor",
+                                            f"{sig.symbol} {sig.strategy}: recent-performance risk x{gov_factor:.2f}",
+                                        )
+                                except Exception as exc:
+                                    applog.warning("engine.governor", f"Governor factor failed (neutral applied): {exc}")
+
                             # Run behavioral safety check
                             behavioral_reason = await self._check_behavioral_safety(sig, now)
                             if behavioral_reason:
                                 applog.info("engine", f"{sig.symbol.upper()}: entry rejected by Behavioral Loop Detector — {behavioral_reason}")
                                 self.publish("insight", self.insights.on_signal(sig, gated=True, gate_reason=behavioral_reason).model_dump(mode="json"))
-                                if getattr(sig, "candidate_id", None) is not None:
-                                    await self._update_shadow_decision(sig.candidate_id, "rejected", behavioral_reason, "behavioral_safety_gate")
+                                try:
+                                    from app.core.shadow_ledger import shadow_ledger
+                                    _bdf = df_by_symbol[sig.symbol]
+                                    shadow_ledger.record(
+                                        symbol=sig.symbol,
+                                        action=str(sig.action.value if hasattr(sig.action, "value") else sig.action),
+                                        strategy=sig.strategy,
+                                        gate="behavioral",
+                                        reason=behavioral_reason,
+                                        price=sig.price,
+                                        stop_loss=sig.stop_loss,
+                                        take_profit=sig.take_profit,
+                                        atr14=float(_bdf["atr14"].iloc[-1]) if "atr14" in _bdf.columns and len(_bdf) else None,
+                                        confidence=sig.confidence,
+                                        sig=sig,
+                                    )
+                                except Exception:
+                                    pass
                                 continue
 
                             df = df_by_symbol[sig.symbol]
@@ -967,8 +1022,6 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                             if not decision.approved:
                                 applog.info("engine", f"{sig.symbol.upper()}: entry rejected by RiskManager — {decision.reason}")
                                 self.publish("insight", self.insights.on_signal(sig, gated=True, gate_reason=decision.reason).model_dump(mode="json"))
-                                if getattr(sig, "candidate_id", None) is not None:
-                                    await self._update_shadow_decision(sig.candidate_id, "rejected", decision.reason, "risk_gate")
                                 continue
 
                             # (Asset shortability was already checked in the pre-filter to prevent budget starvation)
@@ -999,18 +1052,15 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                                 await asyncio.to_thread(self.db.set_setting, "pending_reconciliation_orders", self.pending_reconciliation_orders)
                                 self.recent_orders.appendleft(order)
                                 await asyncio.to_thread(self.db.save_order, order, self.mode)
+                                # Carry the strategy's designed profit target into
+                                # PIS. Without this, _position_take_profits stayed
+                                # empty forever and PIS's target_hit banking branch
+                                # was dead code -- every trade lost its intended TP.
+                                _entry_tp = getattr(order, "take_profit", None)
+                                if _entry_tp:
+                                    self._position_take_profits[order.symbol.upper()] = float(_entry_tp)
                                 self.publish("insight", self.insights.on_signal(sig, gated=False).model_dump(mode="json"))
                                 self.publish("orders", self.orders_payload())
-                                if getattr(sig, "candidate_id", None) is not None:
-                                    if order.status == OrderStatus.REJECTED:
-                                        await self._update_shadow_decision(
-                                            sig.candidate_id,
-                                            "rejected",
-                                            order.reason or "Broker rejected order",
-                                            "broker_rejected"
-                                        )
-                                    else:
-                                        await self._update_shadow_decision(sig.candidate_id, "accepted", "", "none")
                             except Exception as exc:
                                 self.pending_reconciliation_orders[client_order_id]["submission_state"] = "ambiguous"
                                 self.pending_reconciliation_orders[client_order_id]["last_error"] = str(exc)
@@ -1037,20 +1087,6 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
 
             await self._drain_fills(now)
 
-        # 5.5 Periodic shadow replay. Historical-data I/O is research-only and
-        # cannot own or delay the production market-data/execution tick.
-        if self._tick_count % 10 == 0:
-            task = self._shadow_replay_task
-            if task is None or task.done():
-                if task is not None and not task.cancelled():
-                    try:
-                        task.result()
-                    except Exception as exc:
-                        applog.error("engine", f"Background replay error: {exc}")
-                self._shadow_replay_task = asyncio.create_task(
-                    self._replay_pending_signals(now), name="shadow-replay"
-                )
-
         # 6. mark equity + persist
         # F-04 FIX: Only re-fetch account if fills were drained this tick, which
         # is the only in-tick event that materially changes broker-side equity.
@@ -1066,7 +1102,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         self._fills_drained_this_tick = False  # reset for next tick
 
         self.portfolio.mark_equity(account.equity, now)
-        if self._tick_count % EQUITY_PERSIST_EVERY_TICKS == 0:
+        if self._tick_count % EQUITY_PERSIST_EVERY_TICKS == 0 and not getattr(self, "replay_fast_path", False):
             await asyncio.to_thread(self.db.save_equity, account.equity, account.cash, self.mode, now)
 
 
@@ -1083,6 +1119,11 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
 
     async def _drain_fills(self, now: datetime) -> None:
         assert self.broker and self.portfolio and self.risk
+        # fix(partial-close-wedge): reconcile close latches EVERY tick, not only
+        # when a new fill for the symbol happens to arrive. After a partial
+        # scale-out the residual lot may produce no further fills until EOD,
+        # which used to wedge the guard and silently swallow all PIS exits.
+        await self._reconcile_pending_closes(now)
         fills = self.broker.drain_fills()
         if not fills:
             return
@@ -1124,7 +1165,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
             symbol = fill.symbol.upper()
             peak = self._position_peaks.get(symbol)
             trough = self._position_troughs.get(symbol)
-            
+
             init_stop = self._position_initial_stops.get(symbol)
             if init_stop is None and order is not None and getattr(order, "leg", None) == "entry" and order.stop_loss is not None:
                 init_stop = order.stop_loss
@@ -1143,6 +1184,27 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
             if init_stop is not None and symbol not in self._position_initial_stops:
                 self._position_initial_stops[symbol] = init_stop
 
+            # Strategy attribution repair: after a process restart the broker's
+            # in-memory order→strategy map is empty, so bracket-child fills
+            # arrive labeled with the broker name ("alpaca"). That corrupted
+            # per-strategy forensics for hundreds of trades. Resolve from local
+            # lot → recent orders → durable DB, in that order.
+            if str(getattr(fill, "strategy", "") or "").lower() in ("", "alpaca", "unknown"):
+                resolved = None
+                lot = getattr(self.portfolio, "_lots", {}).get(symbol)
+                if lot is not None and getattr(lot, "strategy", ""):
+                    resolved = lot.strategy
+                if resolved is None and order is not None and str(order.strategy or "").lower() not in ("", "alpaca", "unknown"):
+                    resolved = order.strategy
+                if resolved is None and fill.order_id:
+                    try:
+                        db_order = await asyncio.to_thread(self.db.get_order, fill.order_id)
+                        if db_order is not None and str(db_order.strategy or "").lower() not in ("", "alpaca", "unknown"):
+                            resolved = db_order.strategy
+                    except Exception:
+                        resolved = None
+                fill.strategy = resolved or "engine"
+
             try:
                 trade = self.portfolio.on_fill(
                     fill, peak_price=peak, trough_price=trough, initial_stop=init_stop,
@@ -1159,14 +1221,39 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
             if ack_fill is not None:
                 ack_fill(fill)
 
-            # Close/cover idempotency is position-lifecycle based, not side based.
-            # Keep the guard through partial SELL exits and partial BUY covers; only
-            # release it after portfolio accounting proves the original lot is gone.
+            # Close/cover guard release. Three release paths:
+            #   1) The tracked close order reached a terminal state (FILLED,
+            #      CANCELED, REJECTED) — the close attempt is finished either way.
+            #   2) Fill truth proves the tracked close completed: this fill's
+            #      cumulative qty against the REQUESTED close size, matched by
+            #      order id. Does not depend on resolving the parent Order object
+            #      (broker-initiated closes are often absent from local history).
+            #   3) Fallback for guard entries without a tracked order id (EOD /
+            #      halt liquidations): portfolio accounting proves the lot is gone.
             pending_close = getattr(self, "_pending_close_symbols", None)
             if pending_close is not None and symbol in pending_close:
-                local_lot = getattr(self.portfolio, "_lots", {}).get(symbol)
-                if local_lot is None or abs(float(getattr(local_lot, "qty", 0.0))) < 1e-9:
-                    self._pending_close_symbols.discard(symbol)
+                tracked_id = self._get_pending_close_order_ids().get(symbol)
+                _terminal = {OrderStatus.FILLED, OrderStatus.CANCELED, OrderStatus.REJECTED}
+                if (
+                    order is not None
+                    and tracked_id
+                    and str(order.id) == tracked_id
+                    and order.status in _terminal
+                ):
+                    self._release_pending_close(symbol, f"order terminal: {order.status}")
+                elif (
+                    tracked_id
+                    and str(getattr(fill, "order_id", "") or "") == tracked_id
+                    and self._pending_close_qtys.get(symbol) is not None
+                    and float(getattr(fill, "cumulative_qty", 0.0) or 0.0) + 1e-6 >= float(self._pending_close_qtys[symbol])
+                ):
+                    # Requested close size fully executed — residual lot (if any)
+                    # is the intentional runner remainder, not an in-flight close.
+                    self._release_pending_close(symbol, "requested close size filled")
+                else:
+                    local_lot = getattr(self.portfolio, "_lots", {}).get(symbol)
+                    if local_lot is None or abs(float(getattr(local_lot, "qty", 0.0))) < 1e-9:
+                        self._release_pending_close(symbol, "lot gone")
             if trade is not None:
                 self.perf_tracker.update(trade, now=now)
                 await asyncio.to_thread(self.db.save_trade, trade, self.mode)
@@ -1202,7 +1289,15 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                     pos = self.broker._positions.get(fill.symbol)
                     stop = pos.stop_loss if pos is not None else None
                 self.portfolio.note_stop(fill.symbol, stop)
+
+            # Observer hook (durable subclass persists order-ledger state here).
+            hook = getattr(self, "_observe_processed_fill", None)
+            if hook is not None and asyncio.iscoroutinefunction(hook):
+                await hook(fill)
         self.publish("orders", self.orders_payload())
+
+    async def _observe_processed_fill(self, fill) -> None:  # noqa: ANN001
+        """Hook invoked after each fill has been applied to the portfolio."""
 
     # ------------------------------------------------------------------
     # broadcast payloads
@@ -1215,7 +1310,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         event_details: dict | None = None,
     ) -> dict:
         self._heartbeat_seq += 1
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now_iso = datetime.now(UTC).isoformat()
 
         # Classify activity state
         if self.state == EngineState.HALTED or self.system_health == "HALTED":
@@ -1303,6 +1398,12 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
 
     def _broadcast_tick(self, account, now: datetime, new_closed: dict, positions: list) -> None:  # noqa: ANN001
         assert self.portfolio is not None
+        if getattr(self, "_skip_broadcast", False):
+            # Fast replay: publish() is a no-op sink; only the data-health
+            # timestamp has downstream readers and must stay fresh.
+            if new_closed:
+                self._subsystem_timestamps["last_bar"] = datetime.now(UTC).isoformat()
+            return
         self.publish("account", {
             "equity": account.equity,
             "cash": account.cash,
@@ -1317,7 +1418,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         self.publish("quotes", self.quotes_payload())
         self.publish("positions", [p.to_payload() for p in positions])
         if new_closed:
-            self._subsystem_timestamps["last_bar"] = datetime.now(timezone.utc).isoformat()
+            self._subsystem_timestamps["last_bar"] = datetime.now(UTC).isoformat()
         for symbol, bars in new_closed.items():
             last_ts = bars.index[-1]
             row = bars.iloc[-1]
@@ -1358,15 +1459,15 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                 continue
             session = df.index.tz_convert(ET).date
             today = session == session[-1]
-            
+
             price = float(df["close"].iloc[-1])
             past_sessions = df.loc[~today]
-            
+
             if not past_sessions.empty:
                 prev_close = float(past_sessions["close"].iloc[-1])
             else:
                 prev_close = float(df.loc[today, "open"].iloc[0])
-                
+
             out.append({
                 "symbol": symbol,
                 "price": round(price, 2),
@@ -1411,8 +1512,10 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
             "system_health": getattr(self, "system_health", "NORMAL"),
             "allow_new_entries": getattr(self, "allow_new_entries", True),
             "heartbeat_diagnostics": getattr(self, "heartbeat_diagnostics", {}),
-            "replay_queue": self.db.get_replay_queue_telemetry(mode=self.mode) if self.db else {},
             "data_gap_symbols": sorted(self._data_gap_symbols),
+            # Per-symbol scanner validation (tech score + walk-forward AUC) for
+            # dynamically added watchlist symbols -- surfaced as the UI ML tag.
+            "scanner_context": getattr(self, "scanner_context", {}),
         }
 
 
@@ -1431,81 +1534,150 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         )
         return fallback, "EMERGENCY_1_5PCT_FALLBACK"
 
-    def _is_valid_protective_stop(self, order: Order, position: Position) -> bool:
-        active_statuses = {
-            OrderStatus.PENDING,
-            OrderStatus.SUBMITTED,
-            OrderStatus.PARTIALLY_FILLED,
-        }
+    async def _close_position_guarded(self, symbol: str, reason: str, qty: float | None = None) -> None:
+        """Close a position, skipping if a close order is already in-flight for this symbol."""
+        if not hasattr(self, "_pending_close_symbols"):
+            self._pending_close_symbols = set()
+        if not hasattr(self, "_pending_close_order_ids"):
+            self._pending_close_order_ids = {}
+        # fix(partial-close-wedge): track requested close size and submit time so
+        # _drain_fills can release the guard from fill truth alone and stale
+        # latches can never wedge PIS exits indefinitely (2026-08-24: after the
+        # CRWV/V/AMZN partial scale-outs every subsequent PROTECTION_BREACH
+        # exit was silently swallowed for 30-80 minutes).
+        if not hasattr(self, "_pending_close_qtys"):
+            self._pending_close_qtys = {}
+        if not hasattr(self, "_pending_close_submitted_at"):
+            self._pending_close_submitted_at = {}
+        # fix(#45): also guard against concurrent per-tick flatten submissions
+        if symbol in self._pending_close_symbols or symbol in self._flattening_symbols:
+            applog.debug("engine", f"{symbol}: skipping duplicate close — close already in-flight (#45)")
+            return
+        self._flattening_symbols.add(symbol)
+        self._pending_close_symbols.add(symbol)
+        try:
+            # Support brokers whose close_position predates the qty parameter.
+            # Signature inspection (not try/except TypeError) so a TypeError
+            # raised INSIDE broker logic can never silently convert a targeted
+            # partial close into a full-position close.
+            accepts_qty = "qty" in inspect.signature(self.broker.close_position).parameters
+            if qty is not None and accepts_qty:
+                order = await self.broker.close_position(symbol, reason=reason, qty=qty)
+            else:
+                order = await self.broker.close_position(symbol, reason=reason)
+            if order is None:
+                # Close failed immediately (no broker position) — release so retries work.
+                self._pending_close_symbols.discard(symbol)
+                self._get_pending_close_order_ids().pop(symbol, None)
+                self._pending_close_qtys.pop(symbol, None)
+                self._pending_close_submitted_at.pop(symbol, None)
+            else:
+                # Track the close order id; _drain_fills releases the guard when
+                # this order reaches a terminal state. A partial fill no longer
+                # latches the guard until the whole lot is gone.
+                self._get_pending_close_order_ids()[symbol] = str(order.id)
+                self._pending_close_qtys[symbol] = float(qty) if qty is not None else None
+                self._pending_close_submitted_at[symbol] = utcnow()
+                # Register the close order so fill-drain can resolve it by id.
+                # Broker-initiated closes never pass through submit(), and an
+                # unresolvable tracked id used to wedge the guard permanently.
+                self.recent_orders.appendleft(order)
+                hook = getattr(self, "_persist_submitted_close_order", None)
+                if hook is not None and asyncio.iscoroutinefunction(hook):
+                    await hook(order)
+        except Exception:
+            # Submission itself failed — nothing is in flight. Release both guards
+            # so a later tick can retry instead of wedging exits permanently.
+            self._pending_close_symbols.discard(symbol)
+            self._get_pending_close_order_ids().pop(symbol, None)
+            self._pending_close_qtys.pop(symbol, None)
+            self._pending_close_submitted_at.pop(symbol, None)
+            raise
+        finally:
+            self._flattening_symbols.discard(symbol)
 
-        if order.status not in active_statuses:
-            return False
+    def _get_pending_close_order_ids(self) -> dict[str, str]:
+        """Lazily materialize the close-order-id map (test engines may skip __init__)."""
+        ids = getattr(self, "_pending_close_order_ids", None)
+        if ids is None:
+            ids = {}
+            self._pending_close_order_ids = ids
+        return ids
 
-        is_standalone_stop = order.order_type in {
-            OrderType.STOP,
-            OrderType.STOP_LIMIT,
-        }
+    def _release_pending_close(self, symbol: str, cause: str) -> None:
+        """Release the per-symbol close latch so future PIS exits can execute."""
+        if not hasattr(self, "_pending_close_symbols"):
+            return
+        if symbol not in self._pending_close_symbols:
+            return
+        self._pending_close_symbols.discard(symbol)
+        self._get_pending_close_order_ids().pop(symbol, None)
+        if hasattr(self, "_pending_close_qtys"):
+            self._pending_close_qtys.pop(symbol, None)
+        if hasattr(self, "_pending_close_submitted_at"):
+            self._pending_close_submitted_at.pop(symbol, None)
+        applog.debug("engine", f"{symbol}: close-guard released ({cause})")
 
-        # A bracket/OTO/OCO *parent* may carry a child stop_price copied from
-        # nested broker legs for display/reconciliation metadata.  Parent class or
-        # parent_id alone is therefore not proof that this order is the stop leg.
-        # Rule-41 accepts only an explicit stop child or a standalone STOP order.
-        leg = str(getattr(order, "leg", "") or "").lower()
-        is_stop_leg = (
-            leg in {"stop", "stop_loss"}
-            and order.stop_price is not None
-        )
+    async def _reconcile_pending_closes(self, now: datetime) -> None:
+        """Per-tick reconciliation of pending close latches.
 
-        if not (is_standalone_stop or is_stop_leg):
-            return False
+        The legacy release path only ran when a NEW fill arrived for the same
+        symbol. After a partial scale-out the residual lot generates no further
+        fills until EOD, so a guard whose tracked order could not be resolved
+        stayed latched for the rest of the session and silently swallowed every
+        PIS exit (2026-08-24 CRWV/V/AMZN). Re-check liveness every tick from
+        three sources: tracked-order terminal state, fill-truth completion, and
+        a staleness deadline.
+        """
+        pending = getattr(self, "_pending_close_symbols", None)
+        if not pending:
+            return
+        stale_after = 90.0  # seconds; ~2 evaluation ticks even under degraded data
+        for symbol in list(pending):
+            tracked_id = self._get_pending_close_order_ids().get(symbol)
 
-        stop_price = order.stop_price
+            # 1) Tracked order reached a terminal state?
+            if tracked_id:
+                resolved = next(
+                    (o for o in self.recent_orders if str(o.id) == tracked_id or o.client_order_id == tracked_id),
+                    None,
+                )
+                if resolved is not None:
+                    status = getattr(resolved.status, "value", resolved.status)
+                    if str(status).upper() in {"FILLED", "CANCELED", "REJECTED"}:
+                        self._release_pending_close(symbol, f"order terminal: {status}")
+                        continue
 
-        if stop_price is None or stop_price <= 0:
-            return False
+            # 2) Latch older than the staleness deadline? Force-release; PIS
+            #    re-evaluates on the next bar and will re-close if still needed.
+            submitted_at = getattr(self, "_pending_close_submitted_at", {}).get(symbol)
+            if submitted_at is not None and (now - submitted_at).total_seconds() > stale_after:
+                applog.warning(
+                    "engine",
+                    f"{symbol}: close-guard force-released after {stale_after:.0f}s staleness — "
+                    "prior close never confirmed; PIS may retry",
+                )
+                self._release_pending_close(symbol, "stale latch")
 
-        required_qty = abs(float(position.qty))
-
-        if order.remaining_qty + 1e-9 < required_qty:
-            return False
-
-        if position.qty > 0:
-            if order.side != OrderSide.SELL:
-                return False
-
-            if stop_price >= position.avg_entry_price:
-                return False
-        else:
-            if order.side != OrderSide.BUY:
-                return False
-
-            if stop_price <= position.avg_entry_price:
-                return False
-
-        opened_at = getattr(position, "opened_at", None)
-
-        if (
-            opened_at is not None
-            and order.submitted_at is not None
-            and order.submitted_at < opened_at - timedelta(seconds=10)
-        ):
-            return False
-
-        return True
+    async def _persist_submitted_close_order(self, order: Order) -> None:
+        """Hook for persistence of submitted close orders (durable subclass)."""
 
     def _reconcile_positions(self, positions: list[Position]) -> None:
         """Reconcile local lots to authoritative broker positions without erasing matching lot state."""
-        broker_symbols = {p.symbol for p in positions if abs(float(p.qty)) > 1e-9}
+        _QTY_TOL = 1e-4  # fractional-share/rounding tolerance; 1e-9 caused permanent mismatch thrash
+        broker_symbols = {p.symbol for p in positions if abs(float(p.qty)) > _QTY_TOL}
         for local_symbol in list(self.portfolio._lots):
             if local_symbol not in broker_symbols:
                 self.portfolio._lots.pop(local_symbol, None)
                 self._position_take_profits.pop(local_symbol, None)
                 self._position_peaks.pop(local_symbol, None)
+                self._position_troughs.pop(local_symbol, None)
+                self._position_initial_stops.pop(local_symbol, None)
 
         for p in positions:
             existing_lot = self.portfolio._lots.get(p.symbol)
             if existing_lot is not None:
-                qty_matches = abs(float(existing_lot.qty) - float(p.qty)) <= 1e-9
+                qty_matches = abs(float(existing_lot.qty) - float(p.qty)) <= _QTY_TOL
                 price_scale = max(1.0, abs(float(p.avg_entry_price)))
                 avg_matches = abs(float(existing_lot.avg_price) - float(p.avg_entry_price)) <= 1e-8 * price_scale
                 if qty_matches and avg_matches:
@@ -1644,288 +1816,6 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
             await asyncio.to_thread(self.db.save_order, rejected_order, self.mode)
         if changed:
             await asyncio.to_thread(self.db.set_setting, "pending_reconciliation_orders", self.pending_reconciliation_orders)
-
-    async def _update_shadow_decision(self, candidate_id: str, final_decision: str, rejection_reason: str, rejection_stage: str) -> None:
-        """Update a candidate signal's gating decision in the database."""
-        if not self.db:
-            return
-        try:
-            payload = await asyncio.to_thread(self.db.get_shadow_signal, candidate_id)
-            if payload:
-                payload["final_decision"] = final_decision
-                payload["rejection_reason"] = rejection_reason
-                payload["rejection_stage"] = rejection_stage
-                
-                ts = datetime.fromisoformat(payload["timestamp"])
-                symbol = payload["symbol"]
-                strategy = payload["strategy"]
-                direction = payload["direction"]
-                
-                await asyncio.to_thread(
-                    self.db.save_shadow_signal,
-                    candidate_id=candidate_id,
-                    ts=ts,
-                    symbol=symbol,
-                    strategy=strategy,
-                    direction=direction,
-                    mode=self.mode,
-                    payload=payload,
-                )
-        except Exception as exc:
-            applog.error("engine", f"Failed to update shadow signal decision {candidate_id}: {exc}")
-
-    async def _replay_pending_signals(self, now: datetime) -> None:
-        """Scan SQLite database for pending rejected signals, replay them, and update records (#233)."""
-        if not self.db or not self.data:
-            return
-
-        import numpy as np
-        try:
-            # Query pending shadow replays directly from DB ordered by ts ASC (oldest first) (#233)
-            pending = await asyncio.to_thread(self.db.get_pending_shadow_replays, mode=self.mode, now=now, limit=100)
-            if not pending:
-                return
-
-            batch = pending[:5]
-            applog.info("engine", f"Found {len(pending)} pending signals for replay. Executing batch of {len(batch)} (oldest first).")
-
-            for s in batch:
-                candidate_id = s["candidate_id"]
-                symbol = s["symbol"]
-                from app.core.shadow_replay_eligibility import parse_datetime_to_utc
-                ts = parse_datetime_to_utc(s.get("timestamp") or s.get("ts"), candidate_id=candidate_id) or datetime.now(UTC)
-                direction = s["direction"]
-                p = s.get("payload") if isinstance(s.get("payload"), dict) else s
-                stop_loss = s.get("stop_loss") if s.get("stop_loss") is not None else p.get("stop_loss")
-                take_profit = s.get("take_profit") if s.get("take_profit") is not None else p.get("take_profit")
-                entry_price_raw = s.get("entry_price") or p.get("entry_price") or s.get("signal_price") or p.get("signal_price") or p.get("price")
-                entry_price = float(entry_price_raw) if entry_price_raw is not None else None
-                strategy_name = s.get("strategy") or p.get("strategy")
-                strategy_params = s.get("strategy_params") or p.get("strategy_params")
-
-                retry_raw = s.get("next_retry_at")
-                if retry_raw:
-                    try:
-                        retry_at = datetime.fromisoformat(retry_raw.replace("Z", "+00:00"))
-                        if retry_at.tzinfo is None:
-                            retry_at = retry_at.replace(tzinfo=UTC)
-                        if datetime.now(UTC) < retry_at:
-                            continue
-                    except (TypeError, ValueError):
-                        applog.warning(
-                            "engine.replay",
-                            f"Invalid next_retry_at for {candidate_id}: {retry_raw}",
-                        )
-
-                s["replay_attempts"] = s.get("replay_attempts", 0) + 1
-
-                start_time = ts - timedelta(minutes=15)
-                end_time = ts + timedelta(minutes=90)
-
-                applog.info("engine", f"Replaying signal {candidate_id} ({symbol} {direction}) at {ts.isoformat()}...")
-
-                try:
-                    df = await self.data.history(symbol, "1Min", start=start_time, end=end_time)
-                except Exception as df_exc:
-                    applog.warning("engine", f"Failed to fetch history for replay of {candidate_id}: {df_exc}")
-                    await asyncio.to_thread(self.db.save_shadow_signal, candidate_id, ts, symbol, strategy_name, direction, self.mode, s)
-                    continue
-
-                if df.empty:
-                    now_utc = datetime.now(UTC)
-                    attempts = int(s.get("replay_attempts", 0) or 0)
-                    delay_minutes = min(30, max(2, 2 ** min(attempts, 4)))
-                    s["replay_state"] = "deferred_data_incomplete"
-                    s["last_replay_attempt_at"] = now_utc.isoformat()
-                    s["last_defer_reason"] = "entry_or_following_bar_unavailable"
-                    s["next_retry_at"] = (now_utc + timedelta(minutes=delay_minutes)).isoformat()
-                    await asyncio.to_thread(self.db.save_shadow_signal, candidate_id, ts, symbol, strategy_name, direction, self.mode, s)
-                    applog.info(
-                        "engine.replay",
-                        f"Replay deferred for {candidate_id}: historical data incomplete; retry in {delay_minutes}m",
-                    )
-                    continue
-
-                ts_pd = pd.Timestamp(ts)
-                if df.index.tz is None and ts_pd.tz is not None:
-                    ts_pd = ts_pd.tz_localize(None)
-                elif df.index.tz is not None and ts_pd.tz is None:
-                    ts_pd = ts_pd.tz_localize(df.index.tz)
-                elif df.index.tz is not None and ts_pd.tz is not None:
-                    ts_pd = ts_pd.tz_convert(df.index.tz)
-
-                i = -1
-                if ts_pd in df.index:
-                    i = df.index.get_loc(ts_pd)
-                else:
-                    diffs = np.abs(df.index - ts_pd)
-                    min_diff_idx = diffs.argmin()
-                    if diffs[min_diff_idx] <= pd.Timedelta(minutes=2):
-                        i = min_diff_idx
-
-                if i == -1 or i + 1 >= len(df):
-                    now_utc = datetime.now(UTC)
-                    attempts = int(s.get("replay_attempts", 0) or 0)
-                    delay_minutes = min(30, max(2, 2 ** min(attempts, 4)))
-                    s["replay_state"] = "deferred_data_incomplete"
-                    s["last_replay_attempt_at"] = now_utc.isoformat()
-                    s["last_defer_reason"] = "entry_or_following_bar_unavailable"
-                    s["next_retry_at"] = (now_utc + timedelta(minutes=delay_minutes)).isoformat()
-                    await asyncio.to_thread(self.db.save_shadow_signal, candidate_id, ts, symbol, strategy_name, direction, self.mode, s)
-                    applog.info(
-                        "engine.replay",
-                        f"Replay deferred for {candidate_id}: historical data incomplete; retry in {delay_minutes}m",
-                    )
-                    continue
-
-                # Derive entry price from entry bar close if missing from signal payload (#233)
-                if entry_price is None or entry_price <= 0:
-                    if i + 1 < len(df) and "close" in df.columns:
-                        entry_price = float(df["close"].iloc[i + 1])
-                    elif i < len(df) and "close" in df.columns:
-                        entry_price = float(df["close"].iloc[i])
-
-                if entry_price is None or entry_price <= 0:
-                    applog.warning("engine", f"Missing valid entry price for replay of {candidate_id}. Skipping synthetic price fabrication.")
-                    s["replayed"] = True
-                    s["replay_failed"] = True
-                    s["replay_failure_reason"] = "missing_entry_price"
-                    await asyncio.to_thread(self.db.save_shadow_signal, candidate_id, ts, symbol, strategy_name, direction, self.mode, s)
-                    continue
-
-                replay_res = ShadowLedger.replay_signal_60m(
-                    df=df,
-                    entry_idx=i + 1,
-                    direction=direction,
-                    stop_loss=stop_loss,
-                    take_profit=take_profit,
-                    entry_price=entry_price,
-                    strategy_name=strategy_name,
-                    strategy_params=strategy_params,
-                )
-
-                if not replay_res:
-                    applog.warning("engine", f"Replay simulation returned empty result for {candidate_id}.")
-                    s["replayed"] = True
-                    s["replay_failed"] = True
-                    s["replay_failure_reason"] = "empty_replay_simulation_result"
-                    await asyncio.to_thread(self.db.save_shadow_signal, candidate_id, ts, symbol, strategy_name, direction, self.mode, s)
-                    continue
-
-                s["replayed"] = True
-                s["replay_failed"] = bool(replay_res.get("replay_failed", False))
-                s["replay_state"] = "successfully_replayed"
-                s.pop("next_retry_at", None)
-                s.pop("last_defer_reason", None)
-                s["replay_failure_reason"] = replay_res.get("replay_failure_reason")
-                s["replay_timestamp"] = utcnow().isoformat()
-                s["simulated_pnl"] = replay_res["pnl_pct"]
-                s["mfe_pct"] = replay_res["mfe_pct"]
-                s["mae_pct"] = replay_res["mae_pct"]
-                s["exit_reason"] = replay_res["exit_reason"]
-                s["tp_hit"] = replay_res["tp_hit"]
-                s["sl_hit"] = replay_res["sl_hit"]
-                s["replay_60m"] = replay_res
-
-                # Alternative exits simulation (chronological chronological replaying)
-                alt_outcomes = {}
-                alt_outcomes["exit_production"] = {
-                    "pnl_pct": replay_res["pnl_pct"],
-                    "realized_r": replay_res.get("realized_r", 0.0),
-                    "exit_reason": replay_res["exit_reason"],
-                    "tp_hit": replay_res["tp_hit"],
-                    "sl_hit": replay_res["sl_hit"],
-                    "bars_held": replay_res["bars_held"],
-                    "exit_timestamp": replay_res.get("exit_timestamp"),
-                    "mfe_r": replay_res.get("mfe_r", 0.0),
-                    "mae_r": replay_res.get("mae_r", 0.0),
-                }
-
-                alt_policies = getattr(self.risk_config, "alternative_exits", [])
-                for alt in alt_policies:
-                    alt_policy_id = alt.get("policy_id")
-                    if not alt_policy_id:
-                        continue
-                    
-                    alt_tp = None
-                    if "take_profit_pct" in alt:
-                        alt_tp = entry_price * (1.0 + alt["take_profit_pct"]/100.0 if direction == "long" else 1.0 - alt["take_profit_pct"]/100.0)
-                    alt_sl = None
-                    if "stop_loss_pct" in alt:
-                        alt_sl = entry_price * (1.0 - alt["stop_loss_pct"]/100.0 if direction == "long" else 1.0 + alt["stop_loss_pct"]/100.0)
-                    
-                    alt_params = {**strategy_params} if strategy_params else {}
-                    if "trailing_stop_atr_mult" in alt:
-                        alt_params["trailing_stop_atr_mult"] = alt["trailing_stop_atr_mult"]
-                    
-                    alt_res = ShadowLedger.replay_signal_60m(
-                        df=df,
-                        entry_idx=i + 1,
-                        direction=direction,
-                        stop_loss=alt_sl or stop_loss,
-                        take_profit=alt_tp or take_profit,
-                        entry_price=entry_price,
-                        strategy_name=strategy_name,
-                        strategy_params=alt_params,
-                    )
-                    
-                    if alt_res:
-                        alt_outcomes[alt_policy_id] = {
-                            "pnl_pct": alt_res["pnl_pct"],
-                            "realized_r": alt_res.get("realized_r", 0.0),
-                            "exit_reason": alt_res["exit_reason"],
-                            "tp_hit": alt_res["tp_hit"],
-                            "sl_hit": alt_res["sl_hit"],
-                            "bars_held": alt_res["bars_held"],
-                            "exit_timestamp": alt_res.get("exit_timestamp"),
-                            "mfe_r": alt_res.get("mfe_r", 0.0),
-                            "mae_r": alt_res.get("mae_r", 0.0),
-                        }
-                s["alternative_exits"] = alt_outcomes
-
-                if not s.get("outcomes") or not s["outcomes"]:
-                    try:
-                        s["outcomes"] = ShadowLedger.calculate_forward_outcomes(
-                            df, i, direction, stop_loss, replay_res["entry_price"]
-                        )
-                    except Exception:
-                        pass
-
-                # Calculate unique/shared/marginal veto attribution at replay time
-                gate_evidence = s.get("gate_evidence_json")
-                if gate_evidence and "vetoes" in gate_evidence:
-                    vetoes = gate_evidence["vetoes"]
-                    realized_r = 0.0
-                    if s.get("outcomes"):
-                        if "15m" in s["outcomes"]:
-                            realized_r = s["outcomes"]["15m"].get("realized_r") or 0.0
-                        elif "close" in s["outcomes"]:
-                            realized_r = s["outcomes"]["close"].get("realized_r") or 0.0
-                    else:
-                        realized_r = replay_res.get("realized_r") or 0.0
-
-                    try:
-                        realized_r = float(realized_r)
-                        from app.strategies.evaluator import ParallelEvidenceEvaluator
-                        attrib = ParallelEvidenceEvaluator.calculate_veto_attribution(vetoes, realized_r)
-                        s.update(attrib)
-                    except (TypeError, ValueError) as attrib_exc:
-                        applog.warning("engine", f"Skipping veto attribution for {candidate_id}: {attrib_exc}")
-
-                await asyncio.to_thread(
-                    self.db.save_shadow_signal,
-                    candidate_id=candidate_id,
-                    ts=ts,
-                    symbol=symbol,
-                    strategy=strategy_name,
-                    direction=direction,
-                    mode=self.mode,
-                    payload=s,
-                )
-                applog.info("engine", f"Replay successful for {candidate_id}: P&L={replay_res['pnl_pct']}% via {replay_res['exit_reason']}")
-        except Exception as exc:
-            applog.error("engine", f"Failed in _replay_pending_signals loop: {exc}")
-
     # ------------------------------------------------------------------
     # manual operations (REST)
     # ------------------------------------------------------------------
@@ -1960,16 +1850,24 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         # strategies cannot immediately re-enter on the same/next tick before the fill drains.
         if not hasattr(self, "_pending_close_symbols"):
             self._pending_close_symbols = set()
+        if not hasattr(self, "_pending_close_order_ids"):
+            self._pending_close_order_ids = {}
         sym_upper = req.symbol.upper()
-        if not is_entry and req.side == OrderSide.SELL:
-            self._pending_close_symbols.add(sym_upper)  # long → guard against immediate re-buy
-        elif not is_entry and req.side == OrderSide.BUY:
-            self._pending_close_symbols.add(sym_upper)  # short cover → guard against immediate re-short
+        if not is_entry:
+            self._pending_close_symbols.add(sym_upper)
 
-        order = await self.broker.submit(req)
-        if order.status in (OrderStatus.REJECTED,) and not is_entry:
-            # Order was rejected — release the guard immediately
+        try:
+            order = await self.broker.submit(req)
+        except Exception:
+            # Submission failed — nothing is in flight. Release the guard so a
+            # later manual attempt or strategy exit can proceed.
             self._pending_close_symbols.discard(sym_upper)
+            raise
+        if not is_entry:
+            if order.status == OrderStatus.REJECTED:
+                self._pending_close_symbols.discard(sym_upper)
+            else:
+                self._pending_close_order_ids[sym_upper] = str(order.id)
         self.recent_orders.appendleft(order)
         await asyncio.to_thread(self.db.save_order, order, self.mode)
         await self._drain_fills(utcnow())
@@ -1984,9 +1882,16 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         sym_upper = symbol.upper()
         if not hasattr(self, "_pending_close_symbols"):
             self._pending_close_symbols = set()
+        if not hasattr(self, "_pending_close_order_ids"):
+            self._pending_close_order_ids = {}
         self._pending_close_symbols.add(sym_upper)
-        order = await self.broker.close_position(symbol, reason="manual close")
+        try:
+            order = await self.broker.close_position(symbol, reason="manual close")
+        except Exception:
+            self._pending_close_symbols.discard(sym_upper)
+            raise
         if order is not None:
+            self._pending_close_order_ids[sym_upper] = str(order.id)
             self.recent_orders.appendleft(order)
             await asyncio.to_thread(self.db.save_order, order, self.mode)
         else:
@@ -2045,16 +1950,8 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
     def update_risk_config(self, partial: dict) -> RiskConfig:
         merged = {**self.risk_config.model_dump(), **partial}
         self.risk_config = RiskConfig(**merged)  # validates bounds
-        
-        # Calculate clean base risk configuration by stripping active policy offset
-        active_snapshot = self.db.get_setting("active_policy_snapshot")
-        offset = float(active_snapshot.get("score_threshold_offset", 0.0)) if active_snapshot else 0.0
-        base_risk = self.risk_config.model_dump()
-        if offset != 0.0:
-            for key in ["score_threshold_event", "score_threshold_trend", "score_threshold_range", "score_threshold_volatile"]:
-                base_risk[key] = max(0.0, float(base_risk[key]) - offset)
-                
-        self.db.set_setting("risk_config", base_risk)
+
+        self.db.set_setting("risk_config", self.risk_config.model_dump())
         if self.risk is not None:
             self.risk.config = self.risk_config
         if self.pipeline is not None:
@@ -2104,6 +2001,9 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
     async def run_market_scanner(self, is_intraday: bool = False) -> list[str]:
         from app.core.scanner import MarketScanner, ScannerOutcome
         scanner = MarketScanner(self.data, self.user_watchlist, risk_config=self.risk_config)
+        # Cache the instance so strategy evaluation can consume live mover context
+        # (gainer/loser bias) instead of reading an attribute that never existed.
+        self._scanner = scanner
         scan_label = "Intraday refresh" if is_intraday else "Pre-market"
         applog.info("engine", f"Starting autonomous market scanner ({scan_label} scan)...")
         # Mark scanner as run so Monitor 6 doesn't report scanner_never_run (covers manual triggers too)
@@ -2136,6 +2036,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
 
         if outcome in (ScannerOutcome.SUCCESS_NONEMPTY, ScannerOutcome.SUCCESS_EMPTY):
             # Feature 1: Hysteresis — protect symbols with open positions & pending orders from removal
+            old_scanned = set(self.scanned_watchlist)
             open_symbols: set[str] = set()
             pending_symbols: set[str] = set()
             try:
@@ -2180,6 +2081,14 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                 to_add = new_set - existing
                 updated = (existing - to_remove) | to_add
                 self.scanned_watchlist = sorted(updated)
+                # Newly discovered symbols need rolling frames BEFORE their
+                # first evaluation tick -- without warmup they sit below the
+                # feature threshold and ML never runs for them.
+                if to_add and self.data is not None:
+                    try:
+                        await self.data.warmup(sorted(to_add))
+                    except Exception as exc:
+                        applog.warning("engine", f"Scanner addition warmup failed for {sorted(to_add)}: {exc}")
                 if to_add or to_remove:
                     applog.info(
                         "engine",
@@ -2191,6 +2100,12 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
             else:
                 final = scanned_set | retained_dynamic | active_trade_symbols
                 self.scanned_watchlist = sorted(final)
+                premarket_additions = scanned_set - old_scanned - set(self.user_watchlist)
+                if premarket_additions and self.data is not None:
+                    try:
+                        await self.data.warmup(sorted(premarket_additions))
+                    except Exception as exc:
+                        applog.warning("engine", f"Scanner addition warmup failed for {sorted(premarket_additions)}: {exc}")
                 applog.info(
                     "engine",
                     f"Watchlist dynamically updated by pre-market scanner: {new_watchlist} "
@@ -2245,61 +2160,74 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                     applog.info("engine", f"Event guard ACTIVE — score threshold raised to event level ({reason[:60]})")
         except Exception as exc:
             applog.debug("engine", f"Calendar check error (non-critical): {exc}")
-        
+
         non_watchlist = [s for s in CANDIDATE_POOL if s not in self.watchlist]
         if not non_watchlist:
             return
-            
+
+        # Batched screening needs provider support; replay stubs (and any
+        # provider without multi-bar fetch) skip silently instead of raising
+        # 'SimpleNamespace has no attribute get_multi_bars' on every tick
+        # (observed 2026-08-26 as per-cycle warning spam inside replays).
+        if not hasattr(self.data.provider, "get_multi_bars"):
+            return
+
         applog.info("engine", f"Running event monitor on {len(non_watchlist)} non-watchlist candidates...")
-        
+
         start_time = now - timedelta(minutes=60)
-        sem = asyncio.Semaphore(5)  # allow 5 concurrent; total ~200 req/min stays within Alpaca limit
 
-        async def _check_symbol(symbol: str) -> str | None:
-            async with sem:
-                try:
-                    await asyncio.sleep(0.06)  # 5 concurrent × 0.06s ≈ 200 req/min — within Alpaca rate limit
-                    df = await self.data.history(symbol, "1Min", start_time, now)
-                    if df.empty or len(df) < 15:
-                        return None
-                    
-                    close_now = float(df["close"].iloc[-1])
-                    open_5m = float(df["open"].iloc[-5])
-                    ret_5m = abs(close_now / open_5m - 1.0) * 100.0
-                    
-                    vol_5m = float(df["volume"].iloc[-5:].sum())
-                    avg_vol_1m = float(df["volume"].mean())
-                    avg_vol_5m = avg_vol_1m * 5.0
-                    rvol = vol_5m / avg_vol_5m if avg_vol_5m > 0 else 0.0
-                    
-                    # Thresholds: 1.5% in 5 min is a notable intraday move for any liquid US equity;
-                    # 3x rvol vs same-session mean is a genuine volume surge (not the extreme 10x
-                    # that empirically fires < once per month per symbol)
-                    if ret_5m >= 1.5 or rvol >= 3.0:
-                        df_enriched = enrich(df)
-                        row = df_enriched.iloc[-1]
-                        p_up = self.model.score_action(row, SignalAction.ENTER_LONG, symbol)
-                        p_down = self.model.score_action(row, SignalAction.ENTER_SHORT, symbol)
-                        max_prob = max(p_up, p_down)
-                        
-                        if max_prob >= 0.55:
-                            applog.info(
-                                "engine",
-                                f"[Event Monitor] Symbol {symbol} triggered breakout. "
-                                f"5m Return: {ret_5m:.1f}%, RVOL: {rvol:.1f}x, AI confidence: {max_prob:.2f}."
-                            )
-                            return symbol
-                except Exception as _exc:
-                    applog.debug(
-                        "engine",
-                        f"[Event Monitor] {symbol} skipped — transient error: {type(_exc).__name__}: {_exc}",
-                    )
-                return None
+        async def _screen(symbol: str, df) -> str | None:
+            try:
+                if df is None or df.empty or len(df) < 15:
+                    return None
 
-        tasks = [_check_symbol(sym) for sym in non_watchlist]
-        results = await asyncio.gather(*tasks)
+                close_now = float(df["close"].iloc[-1])
+                open_5m = float(df["open"].iloc[-5])
+                ret_5m = abs(close_now / open_5m - 1.0) * 100.0
+
+                vol_5m = float(df["volume"].iloc[-5:].sum())
+                avg_vol_1m = float(df["volume"].mean())
+                avg_vol_5m = avg_vol_1m * 5.0
+                rvol = vol_5m / avg_vol_5m if avg_vol_5m > 0 else 0.0
+
+                # Thresholds: 1.5% in 5 min is a notable intraday move for any liquid US equity;
+                # 3x rvol vs same-session mean is a genuine volume surge (not the extreme 10x
+                # that empirically fires < once per month per symbol)
+                if ret_5m >= 1.5 or rvol >= 3.0:
+                    df_enriched = enrich(df)
+                    row = df_enriched.iloc[-1]
+                    # compute_features-derived columns are absent from enrich();
+                    # score_action fail-closes with None on incomplete features.
+                    p_up = self.model.score_action(row, SignalAction.ENTER_LONG, symbol) or 0.0
+                    p_down = self.model.score_action(row, SignalAction.ENTER_SHORT, symbol) or 0.0
+                    max_prob = max(p_up, p_down)
+
+                    if max_prob >= 0.55:
+                        applog.info(
+                            "engine",
+                            f"[Event Monitor] Symbol {symbol} triggered breakout. "
+                            f"5m Return: {ret_5m:.1f}%, RVOL: {rvol:.1f}x, AI confidence: {max_prob:.2f}."
+                        )
+                        return symbol
+            except Exception as _exc:
+                applog.debug(
+                    "engine",
+                    f"[Event Monitor] {symbol} skipped — transient error: {type(_exc).__name__}: {_exc}",
+                )
+            return None
+
+        # ONE batched multi-symbol request for the whole candidate pool. The
+        # previous per-symbol history() sweep fired ~200 req/min and tripped
+        # Alpaca 429s continuously (2026-08-24 session evidence).
+        triggered: list[str] = []
+        try:
+            batch = await self.data.provider.get_multi_bars(non_watchlist, "1Min", start=start_time, end=now)
+        except Exception as exc:
+            applog.warning("engine", f"Event monitor batched fetch failed — skipping this cycle: {exc}")
+            return
+        results = await asyncio.gather(*[_screen(sym, batch.get(sym)) for sym in non_watchlist])
         triggered = [r for r in results if r is not None]
-        
+
         if triggered:
             added_any = False
             for sym in triggered:
@@ -2320,21 +2248,12 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                 self.publish("status", self.status())
                 self.publish("quotes", self.quotes_payload())
 
-    def _persist_gemini_shadow_observation(self, observation: dict[str, Any]) -> None:
-        """Persist bounded research evidence without exposing it to execution code."""
-        key = "gemini_shadow_observations"
-        observations = self.db.get_setting(key) or []
-        if not isinstance(observations, list):
-            observations = []
-        observations.append(observation)
-        self.db.set_setting(key, observations[-200:])
-
     async def _check_system_heartbeat(self, now: datetime) -> None:
         """Runs the unified safety/system heartbeat health checks."""
         self.system_health = "NORMAL"
         self.allow_new_entries = True
         self.vix_unavailable = False
-        
+
         # Enforce manual gating override latch
         if getattr(self, "_force_gated", False):
             self.allow_new_entries = False
@@ -2344,7 +2263,35 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         if getattr(self, "reconciliation_mismatch", False):
             self.system_health = "SAFE_MODE"
             self.allow_new_entries = False
-            
+
+        # REPLAY FAST-PATH: skip ops monitors (connectivity/freshness/db-write/
+        # buying-power/reconcile streaks/VIX polling) -- none alter decisions in
+        # a deterministic replay. Market-risk gating (VIX-driven tiers) IS
+        # decision-relevant, so it still runs via the shared tail below.
+        if getattr(self, "replay_fast_path", False):
+            market_risk_state, risk_multiplier, allowed_strategies, risk_allow_entries = self._evaluate_market_risk(now)
+            is_halted = (self.state == EngineState.HALTED) or getattr(self.risk, "hard_halted", False)
+            allow_new_entries = (
+                self.allow_new_entries
+                and not getattr(self, "_force_gated", False)
+                and risk_allow_entries
+                and not is_halted
+                and self.system_health == "NORMAL"
+            )
+            from app.core.domain import SafetyDecision as _SD
+            self.last_safety_decision = _SD(
+                system_state="HALTED" if is_halted else "NORMAL",
+                market_risk_state=market_risk_state,
+                allow_new_entries=allow_new_entries,
+                risk_multiplier=risk_multiplier,
+                allowed_strategies=allowed_strategies,
+                require_exit_only=not allow_new_entries or is_halted,
+                halt_reason=getattr(self.risk, "hard_halt_reason", None) if is_halted else None,
+            )
+            self.allow_new_entries = allow_new_entries
+            self.heartbeat_diagnostics = {"replay_fast_path": True}
+            return
+
         diagnostics = {
             "broker_connected": True,
             "market_data_fresh": True,
@@ -2357,7 +2304,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
             "orders_reconciled": not getattr(self, "reconciliation_mismatch", False),
             "vix_fresh": True,
         }
-        
+
         # Monitor 1: Broker connectivity
         try:
             account = await self.broker.account()
@@ -2368,7 +2315,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
             self.allow_new_entries = False
             self.system_health = "DEGRADED"
             applog.warning("engine.heartbeat", f"Broker connection lost/unknown: {exc}")
-            
+
         # Monitor 2: Market-data freshness
         if self.state == EngineState.RUNNING:
             from zoneinfo import ZoneInfo
@@ -2378,7 +2325,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
             market_open_minutes = 9 * 60 + 30
             market_close_minutes = 16 * 60
             minutes_since_open = market_minutes - market_open_minutes
-            
+
             is_trading_day = False
             try:
                 get_session_close(now)
@@ -2447,7 +2394,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
 
         # Monitor 3: Database health
         try:
-            _ = self.db.get_setting("active_policy_snapshot")
+            _ = self.db.get_setting("risk_config")
         except Exception as exc:
             diagnostics["db_connected"] = False
             self.system_health = "DEGRADED"
@@ -2485,7 +2432,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
             now_et = now.astimezone(ZoneInfo("America/New_York"))
             today_date = now_et.date()
             is_past_scan_time = (now_et.hour * 60 + now_et.minute) >= 9 * 60 + 15
-            
+
             is_stale = False
             if self._last_scan_date is None:
                 is_stale = True
@@ -2494,7 +2441,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                 # If the difference is > 10 days, we assume it is a mock environment and bypass the mismatch.
                 if abs((today_date - self._last_scan_date).days) <= 10:
                     is_stale = True
-            
+
             if is_stale and is_past_scan_time:
                 diagnostics["scanner_ok"] = False
                 if self.system_health not in ("SAFE_MODE", "HALTED"):
@@ -2599,13 +2546,13 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                         last_vix_time = datetime.fromisoformat(last_vix_time)
                     if last_vix_time.tzinfo is None and now.tzinfo is not None:
                         last_vix_time = last_vix_time.replace(tzinfo=now.tzinfo)
-                    
+
                     vix_price_val = float(vix_df["close"].iloc[-1])
                     vix_age_seconds = (now - last_vix_time).total_seconds()
                     self._last_vix_value = vix_price_val
                     self._last_vix_timestamp = last_vix_time
                     self._last_vix_status = "STALE"
-                    
+
                     is_synthetic = getattr(getattr(self.data, "provider", None), "name", "") == "synthetic"
                     if vix_age_seconds < 1800 or self.mode == "demo" or is_synthetic:
                         vix_fresh = True
@@ -2645,25 +2592,25 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
 
         # Phase F2: Market Risk Evaluation
         market_risk_state, risk_multiplier, allowed_strategies, risk_allow_entries = self._evaluate_market_risk(now)
-        
+
         # System-level entry gating: respect manual toggle gating (_force_gated)
         system_allow_entries = self.allow_new_entries and not getattr(self, "_force_gated", False)
-        
+
         is_halted = (self.system_health == "HALTED") or (self.state == EngineState.HALTED) or getattr(self.risk, "hard_halted", False)
-        
+
         # Override allowed entries if system_health is DEGRADED, SAFE_MODE, or HALTED, or if we are halted
         allow_new_entries = system_allow_entries and risk_allow_entries and (self.system_health == "NORMAL") and not is_halted
-        
+
         # require_exit_only is True if system_health is SAFE_MODE or HALTED or if allow_new_entries is False or if we are halted
         require_exit_only = not allow_new_entries or (self.system_health in ("SAFE_MODE", "HALTED")) or is_halted
-        
+
         # halt_reason is set if system_health is HALTED or SAFE_MODE or we are hard halted
         halt_reason = None
         if is_halted:
             halt_reason = getattr(self.risk, "hard_halt_reason", None) or "Critical system health failure (HALTED)"
         elif self.system_health == "SAFE_MODE":
             halt_reason = "Position/order reconciliation discrepancy (SAFE_MODE)"
-            
+
         from app.core.domain import SafetyDecision
         self.last_safety_decision = SafetyDecision(
             system_state="HALTED" if is_halted else self.system_health,
@@ -2685,6 +2632,34 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
             allowed_strategies: list[str]
             allow_new_entries: bool
         """
+        # Fast-replay cadence: the multi-family evaluation costs ~40ms/tick;
+        # re-running it on every 1-minute bar is wasted work with zero decision
+        # benefit. Reuse the cached verdict for a configurable session-time
+        # interval (live path keeps per-tick evaluation).
+        interval = int(getattr(self.risk_config, "replay_market_risk_eval_interval_sec", 30) or 0)
+        if getattr(self, "replay_fast_path", False) and interval > 0:
+            last = getattr(self, "_market_risk_cache", None)
+            if last is not None:
+                last_now, last_result = last
+                try:
+                    if abs((now - last_now).total_seconds()) < interval:
+                        return last_result
+                except TypeError:
+                    pass
+            result = self._evaluate_market_risk_uncached(now)
+            self._market_risk_cache = (now, result)
+            return result
+        return self._evaluate_market_risk_uncached(now)
+
+    def _evaluate_market_risk_uncached(self, now: datetime) -> tuple[str, float, list[str], bool]:
+        """
+        Determines the market risk state: NORMAL -> CAUTION -> DEFENSIVE -> SURVIVAL.
+        Returns:
+            market_risk_state: str
+            risk_multiplier: float
+            allowed_strategies: list[str]
+            allow_new_entries: bool
+        """
         # Default fallback values
         vix_price = 15.0
         vix_percentile = 30.0
@@ -2697,7 +2672,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         vix_df = getattr(self, "_latest_vix_frame", None)
         if vix_df is None or vix_df.empty:
             vix_df = self._fetch_vix_frame(vix_sym, now)
-        
+
         # Calculate VIX percentile and velocity
         try:
             if vix_df is not None and not vix_df.empty and hasattr(vix_df, "columns") and "close" in vix_df.columns:
@@ -2711,12 +2686,12 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                             vix_daily = vix_df.resample("1D").last().dropna()
                         except Exception:
                             vix_daily = vix_df
-                        
+
                         daily_closes = vix_daily["close"].dropna().values
                         if len(daily_closes) > 0:
                             history = daily_closes[-200:]
                             vix_percentile = float((history < vix_price).sum() / len(history) * 100.0)
-                        
+
                         # VIX velocity (ROC over last 10 minutes)
                         if len(closes) >= 10:
                             vix_prev = closes[-10]
@@ -2810,12 +2785,12 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
     async def _check_behavioral_safety(self, sig: Signal, now: datetime) -> str | None:
         """
         Runs the Behavioral Loop Detector checks for a candidate signal.
+        DB-backed checks execute off the event loop. Any infrastructure failure
+        FAILS CLOSED (entry rejected) — a broken safety check must never wave a
+        trade through; that is exactly the condition where runaway loops occur.
         Returns:
             rejection_reason (str | None): None if safety checks pass, otherwise the failure reason.
         """
-        import json
-        from app.core.domain import SignalAction
-
         if sig.action == SignalAction.ENTER_LONG:
             sig_side = "long"
         elif sig.action == SignalAction.ENTER_SHORT:
@@ -2823,7 +2798,21 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
         else:
             return None
 
-        symbol = sig.symbol.upper()
+        return await asyncio.to_thread(
+            self._behavioral_safety_sync, sig.symbol.upper(), sig.strategy, sig_side, now
+        )
+
+    def _behavioral_safety_sync(self, symbol: str, strategy: str, sig_side: str, now: datetime) -> str | None:
+        """Synchronous behavioral checks. Called via asyncio.to_thread.
+
+        LATENCY PATH: this runs between signal generation and broker
+        submission, so all three DB checks share ONE session/roundtrip.
+        """
+        import json
+
+        from sqlalchemy import select
+
+        from app.db.database import TradeRow
 
         def _norm_side(val: object) -> str:
             v = str(val or "").strip().lower()
@@ -2833,17 +2822,13 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                 return "short"
             return ""
 
-        # 1. Re-entry on same symbol/thesis within 30 minutes after a stop-loss exit
         try:
-            cutoff = now - timedelta(minutes=30)
             with self.db._session() as s:
-                from app.db.database import TradeRow
-                from sqlalchemy import select
-                stmt = select(TradeRow).where(
-                    TradeRow.symbol == symbol,
-                    TradeRow.exit_at >= cutoff
-                )
-                rows = s.scalars(stmt).all()
+                # 1. Re-entry on same symbol/thesis within 30 minutes after a stop-loss exit
+                cutoff = now - timedelta(minutes=30)
+                rows = s.scalars(
+                    select(TradeRow).where(TradeRow.symbol == symbol, TradeRow.exit_at >= cutoff)
+                ).all()
                 for r in rows:
                     try:
                         trade_data = json.loads(r.payload)
@@ -2854,53 +2839,49 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                     trade_strategy = trade_data.get("strategy", getattr(r, "strategy", ""))
                     trade_side = _norm_side(trade_data.get("side", ""))
 
-                    same_thesis = (trade_strategy == sig.strategy) and (not trade_side or trade_side == sig_side)
+                    same_thesis = (trade_strategy == strategy) and (not trade_side or trade_side == sig_side)
                     if (exit_reason == "stop_loss" or sl_hit) and same_thesis:
-                        return f"behavioral_loop_detector: re-entry on same symbol {symbol} within 30 mins after stop ({sig.strategy}/{sig_side})"
-        except Exception as e:
-            applog.warning("engine.behavioral", f"Failed re-entry check: {e}")
+                        return f"behavioral_loop_detector: re-entry on same symbol {symbol} within 30 mins after stop ({strategy}/{sig_side})"
 
-        # 2. 3 consecutive same-symbol/thesis losses within rolling 7-day window
-        try:
-            cutoff_7d = now - timedelta(days=7)
-            with self.db._session() as s:
-                from app.db.database import TradeRow
-                from sqlalchemy import select
-                stmt = select(TradeRow).where(
-                    TradeRow.symbol == symbol,
-                    TradeRow.exit_at >= cutoff_7d
-                ).order_by(TradeRow.exit_at.desc()).limit(10)
-                rows = s.scalars(stmt).all()
+                # 2. 3 consecutive same-symbol/thesis losses within rolling 7-day window
+                cutoff_7d = now - timedelta(days=7)
+                rows7 = s.scalars(
+                    select(TradeRow)
+                    .where(TradeRow.symbol == symbol, TradeRow.exit_at >= cutoff_7d)
+                    .order_by(TradeRow.exit_at.desc())
+                    .limit(10)
+                ).all()
                 matching_losses = []
-                for r in rows:
+                for r in rows7:
                     try:
                         trade_data = json.loads(r.payload)
                     except Exception:
                         continue
                     trade_strategy = trade_data.get("strategy", getattr(r, "strategy", ""))
                     trade_side = _norm_side(trade_data.get("side", ""))
-                    if trade_strategy == sig.strategy and (not trade_side or trade_side == sig_side):
+                    if trade_strategy == strategy and (not trade_side or trade_side == sig_side):
                         pnl = trade_data.get("pnl", r.pnl)
                         matching_losses.append(pnl < 0)
                         if len(matching_losses) == 3:
                             break
                 if len(matching_losses) == 3 and all(matching_losses):
-                    return f"behavioral_loop_detector: 3 consecutive losses on symbol {symbol} ({sig.strategy}/{sig_side}) in past 7 days"
-        except Exception as e:
-            applog.warning("engine.behavioral", f"Failed consecutive loss check: {e}")
+                    return f"behavioral_loop_detector: 3 consecutive losses on symbol {symbol} ({strategy}/{sig_side}) in past 7 days"
 
-        # 3. Churn/turnover loop detection
-        try:
-            cutoff_24h = now - timedelta(hours=24)
-            with self.db._session() as s:
-                from app.db.database import TradeRow
-                from sqlalchemy import select
-                stmt = select(TradeRow).where(
-                    TradeRow.exit_at >= cutoff_24h
-                )
-                rows = s.scalars(stmt).all()
+                # 3. Churn/turnover loop detection (threshold is config-owned; original design value 2.0x)
+                # SESSION-scoped, not rolling-24h: a busy prior session otherwise
+                # carries its notional into the next morning and blocks ALL
+                # entries for hours (2026-08-25: 2.98x at open, zero same-day
+                # trades). Within-day protection is unchanged.
+                from zoneinfo import ZoneInfo as _ZI
+                _now_et = now.astimezone(_ZI("America/New_York"))
+                _session_start_utc = _now_et.replace(
+                    hour=0, minute=0, second=0, microsecond=0
+                ).astimezone(UTC)
+                rows24 = s.scalars(
+                    select(TradeRow).where(TradeRow.exit_at >= _session_start_utc)
+                ).all()
                 total_volume = 0.0
-                for r in rows:
+                for r in rows24:
                     try:
                         trade_data = json.loads(r.payload)
                     except Exception:
@@ -2908,30 +2889,26 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                     entry_price = trade_data.get("entry_price", 0.0)
                     qty = trade_data.get("qty", 0.0)
                     total_volume += abs(qty * entry_price)
-                
+
                 equity = self.portfolio.equity
                 if equity > 0:
                     turnover = total_volume / equity
-                    if turnover > 2.0:  # Increased from 2.0 for testing
-                        return f"behavioral_loop_detector: high portfolio churn/turnover (turnover={turnover:.2f}x equity)"
+                    max_turnover = float(getattr(self.risk_config, "max_daily_turnover_multiple", 2.0))
+                    if turnover > max_turnover:
+                        return f"behavioral_loop_detector: high portfolio churn/turnover (turnover={turnover:.2f}x equity > {max_turnover:.2f}x)"
         except Exception as e:
-            applog.warning("engine.behavioral", f"Failed churn check: {e}")
+            applog.error("engine.behavioral", f"Behavioral safety unavailable (fail-closed): {e}")
+            return "behavioral_loop_detector: safety checks unavailable (fail-closed)"
 
         # 4. Duplicate/pending-order loop detection
         for pending_cid, pending_info in self.pending_reconciliation_orders.items():
             if pending_info["symbol"].upper() == symbol:
                 return f"behavioral_loop_detector: duplicate pending order for symbol {symbol}"
 
-        # 5. Reject -> Resurrect -> Reject loop detection
-        policy_id = getattr(sig, "candidate_id", None) or getattr(sig, "policy_id", None)
-        if policy_id and self.db.get_policy_resurrection_count(policy_id) >= 3:
-            return f"behavioral_loop_detector: policy {policy_id} exceeded max resurrection limit of 3"
-
-        # 6. Strategy/thesis correlation clustering check
+        # 5. Strategy/thesis correlation clustering check (local data only — cannot fail closed)
         try:
             open_symbols = list(self.portfolio._lots.keys())
             if open_symbols:
-                import pandas as pd
                 cand_df = self.data.frame(symbol, "1Min")
                 if cand_df is not None and not cand_df.empty:
                     cand_series = cand_df["close"].dropna()
@@ -2953,25 +2930,10 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
 
     def _run_heartbeat_tasks(self, now: datetime) -> None:
         """Executes periodic heartbeat tasks (e.g. dynamic universe refresh based on sector leadership)."""
-        # Weekly Review Task (CR-146 Phase F)
-        current_week = now.isocalendar()[1]
-        if self._last_heartbeat_week != current_week:
-            self._last_heartbeat_week = current_week
-            applog.info("engine.heartbeat", f"Running periodic weekly review checks (week: {current_week})...")
-            try:
-                model_drift_stat = "0.02 (acceptable)"
-                data_quality_pct = "99.98%"
-                applog.info(
-                    "engine.heartbeat",
-                    f"Weekly review results: Model drift={model_drift_stat}, Data quality={data_quality_pct}, System health={self.system_health}"
-                )
-            except Exception as exc:
-                applog.error("engine.heartbeat", f"Failed weekly review checks: {exc}")
-
         current_hour = now.hour
         if self._last_heartbeat_hour == current_hour:
             return
-        
+
         self._last_heartbeat_hour = current_hour
         applog.info("engine.heartbeat", f"Running hourly sector leadership heartbeat check (hour: {current_hour})...")
 
@@ -2987,7 +2949,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEnginePortfolioMixin, T
                 "XLB": "Materials",
                 "XLU": "Utilities",
             }
-            
+
             sector_returns = {}
             for etf in sector_etfs:
                 etf_df = enrich(self.data.frame(etf, "1Min", limit=390))

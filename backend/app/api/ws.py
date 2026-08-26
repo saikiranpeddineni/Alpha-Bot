@@ -55,11 +55,6 @@ class EventHub:
         if self._loop is None or self._loop.is_closed():
             return
 
-        # Global flood guard: count total queued items across all clients
-        total_pending = 0  # Client queues are only inspected on the server loop below.
-        if total_pending >= MAX_PENDING_BROADCASTS:
-            return  # drop — training burst in progress
-
         try:
             payload = json.dumps(
                 jsonable_encoder({"type": msg_type, "data": data}), default=str

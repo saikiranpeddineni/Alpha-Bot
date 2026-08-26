@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from typing import Any
+
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from pydantic import BaseModel, Field
 
@@ -22,6 +23,9 @@ class ReplayRunRequest(BaseModel):
     max_volume_pct: float = Field(default=0.05, ge=0.001, le=1.0)
     warmup_bars: int = Field(default=800, ge=0, le=5000)
     async_mode: bool = False
+    # Fast day-sharded engine (fresh-daily-state semantics, no ledger timeline).
+    # Default False keeps full-parity continuous replay as the cockpit default.
+    fast_mode: bool = False
 
 
 def _persist_result(replay_id: str, result: dict[str, Any]) -> None:
@@ -32,13 +36,42 @@ def _persist_result(replay_id: str, result: dict[str, Any]) -> None:
     session_mgr.save_artifact(replay_id, "timeline", ledger.get("timeline", []))
 
 
-def _run_replay_bg(request: Request, replay_id: str, req: ReplayRunRequest) -> None:
+def _persist_fast_result(replay_id: str, result: dict[str, Any]) -> None:
+    session_mgr.save_artifact(replay_id, "manifest", result.get("manifest", {}))
+    # Ledger-compatible shape so the UI keeps working: the fast engine records
+    # no per-tick event timeline, but trades/equity are real shard outputs.
+    ledger = {
+        "events": [],
+        "timeline": [],
+        "trades": result.get("trades", []),
+        "equity_curve": result.get("equity_curve", []),
+        "engine": "replay_fast",
+    }
+    session_mgr.save_artifact(replay_id, "ledger", ledger)
+    session_mgr.save_artifact(replay_id, "timeline", [])
+
+
+def _run_replay_sync(request: Request, replay_id: str, req: ReplayRunRequest) -> dict[str, Any]:
     engine = request.app.state.engine
     runtime = ReplayRuntime(engine.settings, engine.db, replay_id=replay_id, session_manager=session_mgr)
-    try:
+    if req.fast_mode:
+        import asyncio
+        result = asyncio.run(runtime.run_replay_fast_async(
+            req.start_date, req.end_date, req.symbols, req.fill_model, req.slippage_bps,
+            volume_constrained=req.volume_constrained, max_volume_pct=req.max_volume_pct,
+            warmup_bars=req.warmup_bars,
+        ))
+        _persist_fast_result(replay_id, result)
+    else:
         result = runtime.run_replay(req.start_date, req.end_date, req.symbols, req.fill_model, req.slippage_bps,
                                     volume_constrained=req.volume_constrained, max_volume_pct=req.max_volume_pct, warmup_bars=req.warmup_bars)
         _persist_result(replay_id, result)
+    return result
+
+
+def _run_replay_bg(request: Request, replay_id: str, req: ReplayRunRequest) -> None:
+    try:
+        _run_replay_sync(request, replay_id, req)
     except Exception:
         # ReplayRuntime already updates session status to FAILED and logs full diagnostics
         pass
@@ -52,10 +85,7 @@ def run_replay(req: ReplayRunRequest, request: Request, background_tasks: Backgr
         background_tasks.add_task(_run_replay_bg, request, runtime.replay_id, req)
         return {"status": "LAUNCHED", "replay_id": runtime.replay_id}
     try:
-        result = runtime.run_replay(req.start_date, req.end_date, req.symbols, req.fill_model, req.slippage_bps,
-                                    volume_constrained=req.volume_constrained, max_volume_pct=req.max_volume_pct, warmup_bars=req.warmup_bars)
-        _persist_result(runtime.replay_id, result)
-        return result
+        return _run_replay_sync(request, runtime.replay_id, req)
     except (ValueError, RuntimeError, FileNotFoundError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:

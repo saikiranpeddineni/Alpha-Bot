@@ -6,8 +6,6 @@ to produce deterministic, explainable PISDecision outputs.
 
 from __future__ import annotations
 
-from typing import List, Optional
-
 from app.pis.evidence import EvidenceEvaluator
 from app.pis.models import (
     ExitAction,
@@ -21,10 +19,15 @@ from app.pis.models import (
 )
 
 
+def is_degraded_thesis(thesis: ThesisDrift) -> bool:
+    """True when the trade thesis itself is breaking down (not just price noise)."""
+    return bool(getattr(thesis, "is_degraded", False))
+
+
 class ExitPlanner:
     """Synthesizes position multi-factor state into a PISDecision."""
 
-    def __init__(self, config: Optional[PISConfig] = None) -> None:
+    def __init__(self, config: PISConfig | None = None) -> None:
         self.config = config or PISConfig()
 
     def synthesize_decision(
@@ -69,17 +72,13 @@ class ExitPlanner:
         # Check protection breach
         protection_breached = False
         if target_stop > 0:
-            if side > 0 and price <= target_stop:
-                protection_breached = True
-            elif side < 0 and price >= target_stop:
+            if side > 0 and price <= target_stop or side < 0 and price >= target_stop:
                 protection_breached = True
 
         # Check protection floor ratchet update
         protection_updated = False
         if obs.current_stop is not None and target_stop > 0:
-            if side > 0 and target_stop > obs.current_stop + 1e-4:
-                protection_updated = True
-            elif side < 0 and target_stop < obs.current_stop - 1e-4:
+            if side > 0 and target_stop > obs.current_stop + 1e-4 or side < 0 and target_stop < obs.current_stop - 1e-4:
                 protection_updated = True
         elif target_stop > 0 and abs(target_stop - obs.initial_stop) > 1e-4:
             protection_updated = True
@@ -89,9 +88,7 @@ class ExitPlanner:
         if obs.take_profit is not None and obs.take_profit > 0:
             target_dist = (obs.take_profit - obs.high) if side > 0 else (obs.low - obs.take_profit)
             target_tolerance = max(0.05, 0.20 * obs.atr)
-            if side > 0 and (obs.high >= obs.take_profit or (peak_r >= 1.50 and target_dist <= target_tolerance)):
-                target_hit = True
-            elif side < 0 and (obs.low <= obs.take_profit or (peak_r >= 1.50 and target_dist <= target_tolerance)):
+            if side > 0 and (obs.high >= obs.take_profit or (peak_r >= 1.50 and target_dist <= target_tolerance)) or side < 0 and (obs.low <= obs.take_profit or (peak_r >= 1.50 and target_dist <= target_tolerance)):
                 target_hit = True
 
         # Check Climax Reversal Exhaustion (On extreme extension >= 1.50R with wide-range blowoff wick)
@@ -128,25 +125,83 @@ class ExitPlanner:
         )
 
         # --- TWO-STAGE 50/50 INSTITUTIONAL SCALE-OUT & RUNNER EXTENSION ---
-        # Stage 1: When target hit, peak R >= 1.0R, or genuine exhaustion climax, bank 50% profit.
-        # Stage 2: Qualify remaining 50% as runner with breakeven floor + adaptive ATR trail.
+        # Stage 1: When target hit, peak R >= effective scale-out target, or
+        # genuine exhaustion climax, bank profit.
+        # Stage 2: Qualify remaining as runner with breakeven floor + adaptive ATR trail.
+        #
+        # The scale-out gate is trend-quality adaptive: in a weakening trend
+        # (momentum fading or health deteriorating) waiting for the full
+        # scale_out_target_r is how winners round-trip, so the gate drops to
+        # weak_trend_scale_out_r. Strong trends keep the full target and let
+        # runners breathe.
+        effective_scale_out_r = self.config.scale_out_target_r
+        trend_weakening = (
+            health.momentum_score < self.config.weak_momentum_threshold
+            or health.overall < self.config.health_weakening_threshold
+        )
+        if trend_weakening:
+            effective_scale_out_r = min(effective_scale_out_r, self.config.weak_trend_scale_out_r)
+
         scale_out_triggered = False
         if getattr(self.config, "enable_scale_out", True) and not has_scaled_out:
-            scale_out_r = getattr(self.config, "scale_out_target_r", 2.00)  # Delayed from 1.0R to 2.0R to maximize expectancy
-            if target_hit or peak_r >= scale_out_r or exhaustion_climax or stagnation_harvest:
+            if target_hit or peak_r >= effective_scale_out_r or exhaustion_climax or stagnation_harvest:
                 scale_out_triggered = True
 
         if scale_out_triggered and not is_runner:
             is_runner = True
 
+        # --- Profit giveback guard ---
+        # A trade that peaked and then surrendered most of its excursion while
+        # still green should bank partial profit NOW rather than hoping the
+        # trailing floor catches the reversal one bar later. This converts
+        # round-trips (peak +0.5R -> close -0.3R) into banked wins while never
+        # touching a position still making new highs. The surrendered amount
+        # must exceed a noise floor (ATR in R units) so ordinary churn on
+        # volatile names doesn't trigger it.
+        giveback_guard_triggered = False
+        if (
+            getattr(self.config, "enable_profit_giveback_guard", True)
+            and not has_scaled_out
+            and not scale_out_triggered
+            and peak_r >= self.config.profit_guard_peak_r
+            and obs.r_multiple > 0.0
+        ):
+            giveback = peak_r - obs.r_multiple
+            min_giveback = max(
+                self.config.profit_guard_max_giveback_pct * peak_r,
+                getattr(self.config, "profit_guard_min_giveback_atr_r", 0.0) * (obs.atr / obs.risk_per_share if obs.risk_per_share > 1e-8 else 0.0),
+            )
+            if giveback >= min_giveback:
+                giveback_guard_triggered = True
+
         # Determine exit action
+        # Floor-tag runner gate: thesis must be intact and health not collapsing.
+        # A tagged floor WITH degradation is a real exit, not an option to run.
+        floor_tag_runner = (
+            protection_breached
+            and getattr(self.config, "enable_floor_tag_runner", True)
+            and not early_invalidation_breach
+            and lifecycle != LifecycleState.EXIT_CANDIDATE
+            and health.overall >= self.config.health_weakening_threshold
+            and not is_degraded_thesis(thesis)
+        )
+
         if early_invalidation_breach:
             # Asymmetric Loss Reduction (Quadrant 2): Cut immediately at -0.25R to -0.35R
             action = ExitAction.FULL_EXIT
             exit_ratio = 1.0
         elif protection_breached or lifecycle == LifecycleState.EXIT_CANDIDATE:
-            action = ExitAction.FULL_EXIT
-            exit_ratio = 1.0
+            if floor_tag_runner and not has_scaled_out:
+                # Evidence-driven refinement: the floor was tagged but the trade
+                # thesis still holds. Bank half now; the remainder keeps this
+                # same floor as its stop, so downside risk shrinks while the
+                # measured post-exit continuation gets a vehicle. A second tag
+                # (or any degradation) exits everything via has_scaled_out.
+                action = ExitAction.PARTIAL_EXIT
+                exit_ratio = getattr(self.config, "floor_tag_exit_ratio", 0.50)
+            else:
+                action = ExitAction.FULL_EXIT
+                exit_ratio = 1.0
         elif ceiling_harvested and has_scaled_out:
             # Full harvest of runner at predicted max R ceiling
             action = ExitAction.FULL_EXIT
@@ -155,9 +210,20 @@ class ExitPlanner:
             # Stage 1 Scale-Out: Secure 50% core profit, trail remaining 50% as runner
             action = ExitAction.PARTIAL_EXIT
             exit_ratio = getattr(self.config, "scale_out_ratio", 0.50)
-        elif lifecycle == LifecycleState.DISTRIBUTION and health.overall < self.config.health_distribution_threshold:
+        elif giveback_guard_triggered:
+            # Bank partial profit into demonstrated weakness while still green.
             action = ExitAction.PARTIAL_EXIT
-            exit_ratio = 0.50
+            exit_ratio = self.config.profit_guard_exit_ratio
+        elif (
+            lifecycle == LifecycleState.DISTRIBUTION
+            and health.overall < self.config.health_distribution_threshold
+            and obs.r_multiple >= 0.0
+        ):
+            # Distribution trim only applies to PROFITABLE positions. Trimming a
+            # losing position "because distribution" is a panic exit with extra
+            # steps -- the protection floor already governs losses.
+            action = ExitAction.PARTIAL_EXIT
+            exit_ratio = getattr(self.config, "scale_out_ratio", 0.50)
         elif protection_updated:
             action = ExitAction.UPDATE_PROTECTION
             exit_ratio = 0.0
@@ -173,10 +239,16 @@ class ExitPlanner:
 
         if early_invalidation_breach:
             reasons.append(ReasonCode.EARLY_THESIS_INVALIDATED)
+        elif floor_tag_runner and action == ExitAction.PARTIAL_EXIT:
+            # Order matters: this must precede the plain PROTECTION_BREACH tag so
+            # telemetry distinguishes "runner left behind" from "full cut".
+            reasons.append(ReasonCode.FLOOR_TAG_RUNNER)
         elif protection_breached:
             reasons.append(ReasonCode.PROTECTION_BREACH)
         elif ceiling_harvested:
             reasons.append(ReasonCode.MAX_R_CEILING_REACHED)
+        elif giveback_guard_triggered:
+            reasons.append(ReasonCode.PROFIT_GIVEBACK_GUARD)
         elif scale_out_triggered:
             reasons.append(ReasonCode.SCALE_OUT_TARGET)
         elif target_hit:

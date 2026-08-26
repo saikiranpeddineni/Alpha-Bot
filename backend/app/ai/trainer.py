@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -26,6 +27,7 @@ import numpy as np
 import pandas as pd
 
 from app.core.applog import applog
+from app.data.base import CachePolicy, HistoricalDataCoverageError
 
 if TYPE_CHECKING:
     from app.ai.model import SignalModel
@@ -35,9 +37,18 @@ if TYPE_CHECKING:
 class _LegacyContinuousTrainer:
     """Parallel daily background trainer with model promotion gating."""
 
-    FETCH_DAYS = 365         # How many days of history to train on (served from local bars_cache.db)
-    FETCH_CONCURRENCY = 10   # Parallel API calls during data fetch
-    TRAIN_CONCURRENCY = 8    # Parallel specialist model training jobs
+    # bars_cache.db retains ~6 months of 1-min bars; requesting more makes the
+    # immutable-coverage check reject every symbol on partial boundary sessions
+    # (observed 2026-08-24). Env-overridable for boxes with deeper caches.
+    FETCH_DAYS = int(os.environ.get("ALPHADESK_TRAIN_DAYS", "180"))
+    # Parallel history() calls share one SQLite connection; >2 concurrent
+    # readers caused "database is locked" failures that silently dropped
+    # symbols from the cycle (observed 2026-08-24: 23/25 symbols lost).
+    FETCH_CONCURRENCY = int(os.environ.get("ALPHADESK_FETCH_CONCURRENCY", "2"))
+    # Concurrent specialist fits. Each fit holds 100s of MB of frame + binning
+    # buffers; oversubscribing logical cores on a RAM-limited box causes swap
+    # death (observed: 16 workers on 16 logical / ~8 physical cores, 16GB RAM).
+    TRAIN_CONCURRENCY = int(os.environ.get("ALPHADESK_TRAIN_WORKERS", "6"))
     PROMOTE_THRESHOLD = 0.002  # Min AUC improvement required to promote
 
     def __init__(
@@ -86,7 +97,23 @@ class _LegacyContinuousTrainer:
     ) -> None:
         self.training_in_progress = True
         start_time = datetime.now(UTC)
+        import time as _time
+        _stage_t0 = _time.perf_counter()
+
+        def _stage(label: str) -> None:
+            nonlocal _stage_t0
+            applog.info("trainer", f"[timing] {label}: {_time.perf_counter() - _stage_t0:.1f}s")
+            _stage_t0 = _time.perf_counter()
+
         try:
+            import sys
+            if sys.prefix == sys.base_prefix:
+                applog.warning(
+                    "trainer",
+                    f"Trainer running on NON-venv interpreter {sys.executable} "
+                    f"(py {sys.version.split()[0]}). Spawn-based parallelism can fail with "
+                    f"WinError 5 in this setup -- launch via .venv\\Scripts\\python.exe",
+                )
             applog.info(
                 "trainer",
                 f"=== Daily training cycle started | {len(watchlist)} symbols | "
@@ -100,35 +127,52 @@ class _LegacyContinuousTrainer:
             if not dfs:
                 applog.warning("trainer", "No usable data fetched. Aborting training cycle.")
                 return
+            _stage("fetch")
 
             applog.info(
                 "trainer",
                 f"Data ready for {len(dfs)}/{len(watchlist)} symbols. "
                 "Pre-computing TA-lib features incrementally...",
             )
-            
-            # Pre-compute features sequentially to avoid race conditions and guarantee memoization
-            # across the parallel Global, Specialist, and MetaLabel training stages.
+
+            # Pre-compute features concurrently (vectorized per-symbol work;
+            # results are written back per symbol so no shared-state races).
             from app.ai.features import compute_features
-            for sym in list(dfs.keys()):
-                try:
-                    dfs[sym] = compute_features(dfs[sym])
-                except Exception as exc:
-                    applog.warning("trainer", f"Feature pre-computation failed for {sym}: {exc}")
-                    del dfs[sym]
+
+            feat_sem = asyncio.Semaphore(min(4, max(2, (os.cpu_count() or 4))))
+
+            async def _featurize(sym: str) -> None:
+                async with feat_sem:
+                    try:
+                        dfs[sym] = await asyncio.to_thread(compute_features, dfs[sym])
+                    except Exception as exc:
+                        applog.warning("trainer", f"Feature pre-computation failed for {sym}: {exc}")
+                        dfs.pop(sym, None)
+
+            await asyncio.gather(*[_featurize(sym) for sym in list(dfs.keys())])
+            _stage("features")
 
             applog.info(
                 "trainer",
-                f"Features cached. Running global + specialist + MetaLabel training...",
+                "Features cached. Running global + specialist + MetaLabel training...",
             )
 
             # ---- Stage 2: global + specialists in parallel ----
             global_task = asyncio.create_task(self._train_global(dfs))
             specialist_task = asyncio.create_task(self._train_specialists(dfs))
             global_auc, specialist_results = await asyncio.gather(global_task, specialist_task)
+            _stage("global+specialists")
 
             # ---- Stage 3: MetaLabel training (sequential per strategy) ----
-            meta_results = await self._train_meta_labels(dfs)
+            # Candidate precompute is deadlock-safe (bounded process pool with
+            # inline-thread fallback, 2026-08-24 incident). ALPHADESK_SKIP_META_TRAIN=1
+            # remains an ops lever for specialist-only cycles.
+            if os.environ.get("ALPHADESK_SKIP_META_TRAIN") == "1":
+                applog.warning("trainer", "MetaLabel training SKIPPED via ALPHADESK_SKIP_META_TRAIN=1")
+                meta_results = {}
+            else:
+                meta_results = await self._train_meta_labels(dfs)
+            _stage("meta-labels")
 
             elapsed = (datetime.now(UTC) - start_time).total_seconds()
             self.last_trained = datetime.now(UTC)
@@ -140,9 +184,9 @@ class _LegacyContinuousTrainer:
                 "specialists": specialist_results,
                 "meta_labels": meta_results,
             }
-            
-            # ---- Stage 4: Archive daily models ----
-            self._archive_models_for_today()
+
+            # ---- Stage 4: Archive daily models (blocking disk I/O stays off the loop) ----
+            await asyncio.to_thread(self._archive_models_for_today)
             applog.info(
                 "trainer",
                 f"=== Training complete in {elapsed:.1f}s | "
@@ -153,8 +197,17 @@ class _LegacyContinuousTrainer:
                 f"/ {len(meta_results)} attempted ===",
             )
 
-            # ---- Stage 4: Post-training readiness audit ----
+            # ---- Stage 5: Post-training readiness audit ----
             await asyncio.to_thread(self._readiness_audit, dfs)
+
+            # ---- Stage 6: Hot-reload promoted specialists into live inference.
+            # Without this, a freshly promoted specialist existed only on disk —
+            # the in-memory cache kept serving the stale artifact (or nothing)
+            # until process restart. reload_specialists() swaps the dict atomically.
+            try:
+                await asyncio.to_thread(self.model.reload_specialists)
+            except Exception as exc:
+                applog.error("trainer", f"Specialist hot-reload failed: {exc}")
 
         except Exception as exc:
             applog.error("trainer", f"Training cycle failed: {exc}")
@@ -163,27 +216,26 @@ class _LegacyContinuousTrainer:
 
     def _archive_models_for_today(self) -> None:
         import shutil
-        import os
         from zoneinfo import ZoneInfo
         ET = ZoneInfo("America/New_York")
         today = datetime.now(ET).strftime("%Y-%m-%d")
-        
+
         archive_dir = self.model.models_dir / "archive" / today
         archive_dir.mkdir(parents=True, exist_ok=True)
-        
+
         for file in self.model.models_dir.glob("*.joblib"):
             shutil.copy2(file, archive_dir / file.name)
-            
+
         spec_archive = archive_dir / "specialists"
         spec_archive.mkdir(exist_ok=True)
         for file in (self.model.models_dir / "specialists").glob("*.pkl"):
             shutil.copy2(file, spec_archive / file.name)
-            
+
         meta_archive = archive_dir / "meta"
         meta_archive.mkdir(exist_ok=True)
         for file in (self.model.models_dir / "meta").glob("*.joblib"):
             shutil.copy2(file, meta_archive / file.name)
-            
+
         applog.info("trainer", f"Archived daily models to {archive_dir}")
 
     # ------------------------------------------------------------------
@@ -195,19 +247,94 @@ class _LegacyContinuousTrainer:
     ) -> dict[str, pd.DataFrame]:
         semaphore = asyncio.Semaphore(self.FETCH_CONCURRENCY)
 
+        from app.config import get_settings
+
+        # Adaptive span ladder: the immutable-coverage validator correctly
+        # rejects windows reaching into gappy/partially-retained cache months,
+        # which previously aborted the ENTIRE cycle ("No usable data fetched",
+        # 2026-08-25). Retry each symbol with progressively shorter spans until
+        # coverage passes; floor keeps models meaningful.
+        try:
+            ladder = [
+                int(d) for d in os.environ.get(
+                    "ALPHADESK_TRAIN_DAY_LADDER", f"{self.FETCH_DAYS},140,110,85,60,45"
+                ).split(",")
+            ]
+        except ValueError:
+            ladder = [self.FETCH_DAYS, 140, 110, 85, 60, 45]
+
+        # Clip fetch end to the last COMPLETED ET session. An in-progress
+        # session is always 'immature' to the immutable-coverage validator,
+        # which previously aborted every cycle run during market hours
+        # ('No usable data fetched', 2026-08-25). Excluding it also removes
+        # truncated forward-return labels from the training set.
+        from datetime import time as _dtime
+        from zoneinfo import ZoneInfo as _ZI
+
+        _now_et = datetime.now(_ZI("America/New_York"))
+        if _now_et.weekday() < 5 and _now_et.time() >= _dtime(9, 30):
+            fetch_end = _now_et.replace(hour=9, minute=30, second=0, microsecond=0).astimezone(UTC)
+        else:
+            fetch_end = end
+
         async def _fetch_one(sym: str) -> tuple[str, pd.DataFrame | None]:
             async with semaphore:
-                try:
-                    df = await self.data.history(sym, "1Min", start, end, prefer_cache=True)
-                    # Require at least 20k bars (~51 trading days) for meaningful model training.
-                    # 1000 was dangerously low — a symbol with <3 days of data produces garbage features.
-                    if df.empty or len(df) < 100:
-                        applog.debug("trainer", f"Fetch skipped for {sym}: only {len(df)} bars (need >= 100)")
+                cache_only = bool(getattr(get_settings(), "train_cache_only", True))
+                policy = CachePolicy.IMMUTABLE_CACHE_ONLY if cache_only else None
+                last_cov_exc: HistoricalDataCoverageError | None = None
+
+                # Final-rung repair: pull provider truth for the shortest span
+                # (also upserts the cache so later cycles pass strictly).
+                # Needed on BOTH failure shapes: history() returning a short
+                # frame AND raising HistoricalDataCoverageError -- the immutable
+                # validator raises whenever ANY session in the span is missing/
+                # partial, and the span ladder only trims the start, so a holey
+                # recent session used to poison every rung and abort the cycle
+                # ("No usable data fetched", 2026-08-26).
+                async def _repair_from_provider(days: int) -> pd.DataFrame | None:
+                    span_start = fetch_end - timedelta(days=days)
+                    try:
+                        applog.info("trainer", f"{sym}: repairing cache gap from provider ({days}d span)...")
+                        df_net = await self.data.history(
+                            sym, "1Min", span_start, fetch_end, prefer_cache=False
+                        )
+                        if df_net is not None and len(df_net) >= 100:
+                            applog.info("trainer", f"{sym}: repaired +{len(df_net)} bars")
+                            return df_net
+                    except Exception as exc:  # noqa: BLE001
+                        applog.warning("trainer", f"{sym}: repair fetch failed: {exc}")
+                    return None
+
+                for days in ladder:
+                    try:
+                        span_start = fetch_end - timedelta(days=days)
+                        df = await self.data.history(
+                            sym, "1Min", span_start, fetch_end, prefer_cache=True, cache_policy=policy
+                        )
+                        if df.empty or len(df) < 100:
+                            if days == ladder[-1]:
+                                repaired = await _repair_from_provider(days)
+                                if repaired is not None:
+                                    return sym, repaired
+                                applog.debug("trainer", f"Fetch skipped for {sym}: only {len(df)} bars (need >= 100)")
+                                return sym, None
+                            continue
+                        if days != ladder[0]:
+                            applog.info("trainer", f"{sym}: using shortened {days}d span ({len(df)} bars)")
+                        return sym, df
+                    except HistoricalDataCoverageError as exc:
+                        last_cov_exc = exc
+                        if days == ladder[-1]:
+                            repaired = await _repair_from_provider(days)
+                            if repaired is not None:
+                                return sym, repaired
+                        continue
+                    except Exception as exc:
+                        applog.warning("trainer", f"Fetch failed for {sym}: {exc}")
                         return sym, None
-                    return sym, df
-                except Exception as exc:
-                    applog.warning("trainer", f"Fetch failed for {sym}: {exc}")
-                    return sym, None
+                applog.info("trainer", f"Fetch skipped for {sym}: cache-only coverage gap at every span "
+                                       f"(last: {str(last_cov_exc)[:80]})")
+                return sym, None
 
         results = await asyncio.gather(*[_fetch_one(sym) for sym in symbols])
         return {sym: df for sym, df in results if df is not None}
@@ -222,12 +349,13 @@ class _LegacyContinuousTrainer:
         return auc
 
     def _fit_global_sync(self, dfs: dict[str, pd.DataFrame]) -> float:
-        from sklearn.ensemble import HistGradientBoostingClassifier
-        from sklearn.metrics import roc_auc_score
-        from app.ai.features import build_training_set
-        import joblib
         from datetime import timedelta
         from zoneinfo import ZoneInfo
+
+        import joblib
+        from sklearn.metrics import roc_auc_score
+
+        from app.ai.features import build_training_set
         ET = ZoneInfo("America/New_York")
 
         xs_l, ys_l, xs_s, ys_s = [], [], [], []
@@ -248,7 +376,7 @@ class _LegacyContinuousTrainer:
         # ---- Long Side Data Preparation (Temporal Split & Purge) ----
         X_l = pd.concat(xs_l).sort_index()
         y_l = pd.concat(ys_l).sort_index()
-        
+
         MAX_GLOBAL_SAMPLES = 1_000_000
         if len(X_l) > MAX_GLOBAL_SAMPLES:
             applog.info("trainer", f"Subsampling global LONG set from {len(X_l)} down to {MAX_GLOBAL_SAMPLES} to accelerate training.")
@@ -264,11 +392,11 @@ class _LegacyContinuousTrainer:
             boundary_date = dates_l[split_idx]
             train_mask = X_l.index.tz_convert(ET).date < boundary_date
             val_start_dt = X_l[~train_mask].index.min()
-            
+
             # Purge training samples whose outcome window (15 bars = 15 minutes) overlaps with validation
             purge_horizon = timedelta(minutes=15)
             train_filtered_mask = train_mask & (X_l.index < val_start_dt - purge_horizon)
-            
+
             X_tr, y_tr = X_l[train_filtered_mask], y_l[train_filtered_mask]
             X_va, y_va = X_l[~train_mask], y_l[~train_mask]
         else:
@@ -291,7 +419,7 @@ class _LegacyContinuousTrainer:
         # ---- Short Side Data Preparation (Temporal Split & Purge) ----
         X_s = pd.concat(xs_s).sort_index()
         y_s = pd.concat(ys_s).sort_index()
-        
+
         if len(X_s) > MAX_GLOBAL_SAMPLES:
             applog.info("trainer", f"Subsampling global SHORT set from {len(X_s)} down to {MAX_GLOBAL_SAMPLES} to accelerate training.")
             idx_s = np.random.choice(len(X_s), MAX_GLOBAL_SAMPLES, replace=False)
@@ -306,11 +434,11 @@ class _LegacyContinuousTrainer:
             boundary_date_s = dates_s[split_idx_s]
             train_mask_s = X_s.index.tz_convert(ET).date < boundary_date_s
             val_start_dt_s = X_s[~train_mask_s].index.min()
-            
+
             # Purge training samples whose outcome window (15 bars = 15 minutes) overlaps with validation
             purge_horizon = timedelta(minutes=15)
             train_filtered_mask_s = train_mask_s & (X_s.index < val_start_dt_s - purge_horizon)
-            
+
             X_tr_s, y_tr_s = X_s[train_filtered_mask_s], y_s[train_filtered_mask_s]
             X_va_s, y_va_s = X_s[~train_mask_s], y_s[~train_mask_s]
         else:
@@ -338,7 +466,7 @@ class _LegacyContinuousTrainer:
         # ==================================================================================================
         from app.ai.prediction import WalkForwardValidator
         from app.config import get_settings
-        
+
         # Prevent data leakage: The WFV must ONLY see the training portion of the data.
         # Otherwise, the final WFV model will be trained on the promotion gate's holdout set,
         # artificially inflating the AUC and bypassing the promotion gate.
@@ -356,11 +484,11 @@ class _LegacyContinuousTrainer:
 
         # Use WalkForwardValidator to find the best model architecture (LGBM, XGB, or HGB)
         wfv = WalkForwardValidator.from_settings(get_settings(), horizon_bars=15, threshold_pct=0.10)
-        
+
         # Extract the best classifier for long and short from the walk-forward results
         res_l = wfv.run(dfs_tr_l, side="long")
         clf_l = res_l.best_classifier
-        
+
         res_s = wfv.run(dfs_tr_s, side="short")
         clf_s = res_s.best_classifier
 
@@ -375,14 +503,19 @@ class _LegacyContinuousTrainer:
         auc_l = _safe_auc(clf_l, X_va, y_va)
         auc_s = _safe_auc(clf_s, X_va_s, y_va_s)
 
-        # Decoupled Promotion Gate
+        # Decoupled Promotion Gate. An ABSOLUTE quality floor applies: a candidate
+        # must beat both the incumbent (+PROMOTE_THRESHOLD) and the configured
+        # minimum AUC. Without the floor, a missing/zero incumbent baseline let a
+        # barely-above-random model gate capital (observed live: AUC 0.535).
+        from app.config import get_settings
+        min_promotable_auc = float(getattr(get_settings(), "ml_min_promotable_auc", 0.53))
         current_auc_l = float(self.model.meta.get("validation_auc_long") or self.model.meta.get("validation_auc") or 0.0)
         current_auc_s = float(self.model.meta.get("validation_auc_short") or self.model.meta.get("validation_auc") or 0.0)
-        
+
         promoted_l = False
         promoted_s = False
 
-        if auc_l >= current_auc_l + self.PROMOTE_THRESHOLD:
+        if auc_l >= max(current_auc_l + self.PROMOTE_THRESHOLD, min_promotable_auc):
             joblib.dump(clf_l, self.model.models_dir / "signal_model_long.joblib")
             # F-08 FIX: Removed dual-write to "signal_model.joblib" (legacy path).
             # When only the long model is promoted (short not promoted simultaneously),
@@ -401,7 +534,7 @@ class _LegacyContinuousTrainer:
         else:
             applog.info("trainer", f"Global LONG model NOT promoted: new AUC {auc_l:.3f} vs current {current_auc_l:.3f}")
 
-        if auc_s >= current_auc_s + self.PROMOTE_THRESHOLD:
+        if auc_s >= max(current_auc_s + self.PROMOTE_THRESHOLD, min_promotable_auc):
             joblib.dump(clf_s, self.model.models_dir / "signal_model_short.joblib")
             self.model._model_short = clf_s
             self.model.meta.update({
@@ -466,11 +599,13 @@ class _LegacyContinuousTrainer:
           FITTED_NOT_PROMOTED — no incumbent; candidate fitted but AUC below min_auc
           INSUFFICIENT_DATA  — not enough samples to fit
         """
+        import hashlib
+
+        import joblib
         from sklearn.ensemble import HistGradientBoostingClassifier
         from sklearn.metrics import roc_auc_score
-        from app.ai.features import build_training_set, FEATURE_COLUMNS
-        import hashlib
-        import joblib
+
+        from app.ai.features import FEATURE_COLUMNS, build_training_set
 
         X_l, y_l, w_l = build_training_set(df, horizon_bars=15, threshold_pct=0.10, side="long")
         X_s, y_s, w_s = build_training_set(df, horizon_bars=15, threshold_pct=0.10, side="short")
@@ -480,16 +615,16 @@ class _LegacyContinuousTrainer:
 
         split_l = int(len(X_l) * 0.75)
         split_s = int(len(X_s) * 0.75)
-        
+
         from datetime import timedelta
         purge = timedelta(minutes=15)
-        
+
         # Long split with purge
         val_start_l = X_l.iloc[split_l:].index.min()
         mask_l = X_l.index < val_start_l - purge
         X_tr_l, y_tr_l, w_tr_l = X_l[mask_l], y_l[mask_l], w_l[mask_l]
         X_va_l, y_va_l = X_l.iloc[split_l:], y_l.iloc[split_l:]
-        
+
         # Short split with purge
         val_start_s = X_s.iloc[split_s:].index.min()
         mask_s = X_s.index < val_start_s - purge
@@ -497,47 +632,46 @@ class _LegacyContinuousTrainer:
         X_va_s, y_va_s = X_s.iloc[split_s:], y_s.iloc[split_s:]
 
         from threadpoolctl import threadpool_limits
-        
+
         # ==================================================================================================
         # WARNING TO FUTURE AI AGENTS: DO NOT CAST TO NUMPY!
         # See explanation above. Models must be fitted with pure Pandas DataFrames.
         # ==================================================================================================
-        with threadpool_limits(limits=1, user_api='openmp'):
-            clf_l = HistGradientBoostingClassifier(
+        # Gate evaluation uses RAW fits: sigmoid calibration is a monotonic
+        # per-fold transform, so it preserves AUC ranking and the promote/
+        # retain verdict. Only PROMOTED sides pay for calibration afterwards,
+        # which previously cost 3 extra HGB fits per side per symbol even for
+        # candidates that were about to be rejected.
+        def _fit_hgb() -> HistGradientBoostingClassifier:
+            return HistGradientBoostingClassifier(
                 max_iter=150, learning_rate=0.05, max_depth=3, min_samples_leaf=100,
                 l2_regularization=5.0, early_stopping=True, random_state=42,
             )
+
+        with threadpool_limits(limits=1, user_api='openmp'):
+            raw_l = _fit_hgb()
             if not X_tr_l.empty:
                 try:
-                    from sklearn.calibration import CalibratedClassifierCV
-                    calib_l = CalibratedClassifierCV(clf_l, method="sigmoid", cv=3)
-                    calib_l.fit(X_tr_l, y_tr_l, sample_weight=w_tr_l)
-                    clf_l = calib_l
+                    raw_l.fit(X_tr_l, y_tr_l, sample_weight=w_tr_l)
                 except Exception as e:
-                    applog.debug("trainer", f"Specialist long calibration failed ({e}), falling back to raw")
-                    clf_l.fit(X_tr_l, y_tr_l, sample_weight=w_tr_l)
+                    applog.debug("trainer", f"Specialist long raw fit failed ({e})")
+                    raw_l = None
 
-            clf_s = HistGradientBoostingClassifier(
-                max_iter=150, learning_rate=0.05, max_depth=3, min_samples_leaf=100,
-                l2_regularization=5.0, early_stopping=True, random_state=42,
-            )
+            raw_s = _fit_hgb()
             if not X_tr_s.empty:
                 try:
-                    from sklearn.calibration import CalibratedClassifierCV
-                    calib_s = CalibratedClassifierCV(clf_s, method="sigmoid", cv=3)
-                    calib_s.fit(X_tr_s, y_tr_s, sample_weight=w_tr_s)
-                    clf_s = calib_s
+                    raw_s.fit(X_tr_s, y_tr_s, sample_weight=w_tr_s)
                 except Exception as e:
-                    applog.debug("trainer", f"Specialist short calibration failed ({e}), falling back to raw")
-                    clf_s.fit(X_tr_s, y_tr_s, sample_weight=w_tr_s)
+                    applog.debug("trainer", f"Specialist short raw fit failed ({e})")
+                    raw_s = None
 
         def _auc(clf, X_val, y_val) -> float:
-            if y_val.nunique() < 2:
+            if y_val.nunique() < 2 or clf is None:
                 return 0.5
             return float(roc_auc_score(y_val, clf.predict_proba(X_val)[:, 1]))
 
-        auc_l = _auc(clf_l, X_va_l, y_va_l) if not X_va_l.empty and not X_tr_l.empty else 0.5
-        auc_s = _auc(clf_s, X_va_s, y_va_s) if not X_va_s.empty and not X_tr_s.empty else 0.5
+        auc_l = _auc(raw_l, X_va_l, y_va_l) if not X_va_l.empty else 0.5
+        auc_s = _auc(raw_s, X_va_s, y_va_s) if not X_va_s.empty else 0.5
         candidate_auc = max(auc_l, auc_s)  # combined AUC for logging / artifact compat
 
         # Build feature schema fingerprint
@@ -577,8 +711,8 @@ class _LegacyContinuousTrainer:
         min_promotable_auc = get_settings().risk_config().min_specialist_auc
 
         # Promote if EITHER side independently beats its own incumbent by the threshold AND meets the min_promotable_auc floor.
-        promote_long = (auc_l >= incumbent_auc_long + self.PROMOTE_THRESHOLD) and (auc_l >= min_promotable_auc)
-        promote_short = (auc_s >= incumbent_auc_short + self.PROMOTE_THRESHOLD) and (auc_s >= min_promotable_auc)
+        promote_long = raw_l is not None and (auc_l >= incumbent_auc_long + self.PROMOTE_THRESHOLD) and (auc_l >= min_promotable_auc)
+        promote_short = raw_s is not None and (auc_s >= incumbent_auc_short + self.PROMOTE_THRESHOLD) and (auc_s >= min_promotable_auc)
         should_promote = promote_long or promote_short
         decision = "PROMOTED" if should_promote else "RETAINED_INCUMBENT"
 
@@ -590,12 +724,34 @@ class _LegacyContinuousTrainer:
             f"threshold=+{self.PROMOTE_THRESHOLD} min_floor={min_promotable_auc:.2f} decision={decision}",
         )
 
-        final_clf_l = clf_l
-        final_clf_s = clf_s
+        final_clf_l = raw_l
+        final_clf_s = raw_s
         final_auc_l = auc_l
         final_auc_s = auc_s
 
         if should_promote:
+            # Calibrate ONLY the promoted sides (sigmoid, cv=3). Rejected
+            # candidates keep their raw fits and are simply discarded.
+            from sklearn.calibration import CalibratedClassifierCV
+
+            with threadpool_limits(limits=1, user_api='openmp'):
+                if promote_long and raw_l is not None:
+                    try:
+                        calib_l = CalibratedClassifierCV(_fit_hgb(), method="sigmoid", cv=3)
+                        calib_l.fit(X_tr_l, y_tr_l, sample_weight=w_tr_l)
+                        final_clf_l = calib_l
+                    except Exception as e:
+                        applog.debug("trainer", f"Specialist long calibration failed ({e}), promoting raw")
+                        final_clf_l = raw_l
+                if promote_short and raw_s is not None:
+                    try:
+                        calib_s = CalibratedClassifierCV(_fit_hgb(), method="sigmoid", cv=3)
+                        calib_s.fit(X_tr_s, y_tr_s, sample_weight=w_tr_s)
+                        final_clf_s = calib_s
+                    except Exception as e:
+                        applog.debug("trainer", f"Specialist short calibration failed ({e}), promoting raw")
+                        final_clf_s = raw_s
+
             # Preserve the stronger incumbent side if only one side qualified for promotion
             if incumbent_dict is not None and incumbent_dict.get("feature_version") == feature_hash:
                 if not promote_long and "long" in incumbent_dict and incumbent_auc_long > 0:
@@ -608,8 +764,6 @@ class _LegacyContinuousTrainer:
             final_candidate_auc = max(final_auc_l, final_auc_s)
 
             artifact = {
-                "long": final_clf_l,
-                "short": final_clf_s,
                 "auc": final_candidate_auc,
                 "auc_long": round(final_auc_l, 6),
                 "auc_short": round(final_auc_s, 6),
@@ -629,6 +783,12 @@ class _LegacyContinuousTrainer:
                 "training_window_start": df.index.min().isoformat() if len(df) > 0 else None,
                 "training_window_end": df.index.max().isoformat() if len(df) > 0 else None,
             }
+            # Omit sides without a fitted model so inference falls back to the
+            # global model for that side ("has no 'short' sub-model" path).
+            if final_clf_l is not None:
+                artifact["long"] = final_clf_l
+            if final_clf_s is not None:
+                artifact["short"] = final_clf_s
             joblib.dump(artifact, artifact_path)
             # Invalidate in-memory specialist cache so score_action() loads the new artifact
             sym_upper = symbol.upper()
@@ -662,7 +822,6 @@ class _LegacyContinuousTrainer:
         """
         from app.ai.prediction import MetaLabelEngine
         from app.config import get_models_dir
-
         from app.strategies.base import REGISTRY
         strategies = list(REGISTRY.keys())
         sides = ["long", "short"]
@@ -730,10 +889,11 @@ class _LegacyContinuousTrainer:
         This is the single source of truth for 'what will inference use?'
         It distinguishes newly promoted artifacts from retained incumbents.
         """
-        import joblib
         import hashlib
+
+        import joblib
+
         from app.ai.features import FEATURE_COLUMNS
-        from app.ai.prediction import MetaLabelEngine
         from app.config import get_models_dir
 
         runtime_feature_hash = hashlib.md5(",".join(FEATURE_COLUMNS).encode()).hexdigest()[:12]
@@ -830,16 +990,12 @@ class _LegacyContinuousTrainer:
 
 
 
-import asyncio
 import tempfile
 import threading
-from datetime import datetime
-from pathlib import Path
 
 import joblib
 
 from app.ai.generation import AtomicSpecialistStore, TrainingCoordinator
-from app.core.applog import applog
 
 
 class ContinuousTrainer(_LegacyContinuousTrainer):
@@ -857,7 +1013,7 @@ class ContinuousTrainer(_LegacyContinuousTrainer):
         coordinator = training_coordinator or getattr(model, "_training_coordinator", None)
         if coordinator is None:
             coordinator = TrainingCoordinator()
-            setattr(model, "_training_coordinator", coordinator)
+            model._training_coordinator = coordinator
         self.training_coordinator = coordinator
         self._training_owner = f"continuous:{id(self)}"
         self._specialist_store = AtomicSpecialistStore(model_dir)

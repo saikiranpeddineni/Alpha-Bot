@@ -10,26 +10,23 @@ Phase 1 additions:
 Phase 2 additions:
   - MetaLabelEngine    : strategy-specific binary classifiers that predict
       whether a proposed setup will be profitable (meta-labeling layer).
-  - ExcursionRegressors: MAE/MFE regressors that estimate maximum adverse
-      and favorable excursion, enabling dynamic stop/target placement.
 """
 
 from __future__ import annotations
 
+import hashlib
 import math
 import warnings
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
 
-
-
-from app.ai.features import FEATURE_COLUMNS, build_mae_mfe_dataset, build_training_set
-from app.core.domain import Regime
+from app.ai.features import FEATURE_COLUMNS, build_training_set
 from app.core.applog import applog
+from app.core.domain import Regime
+
 
 def predict_proba_safe(clf, x: pd.DataFrame):
     """Predict proba safely matching the feature names contract of the fitted classifier."""
@@ -44,11 +41,11 @@ def predict_proba_safe(clf, x: pd.DataFrame):
                     x_safe[m] = np.nan
             return clf.predict_proba(x_safe[cols])
         return clf.predict_proba(x)
-        
+
     # ==================================================================================================
     # WARNING TO FUTURE AI AGENTS: DO NOT REVERT THIS LEGACY ARTIFACT FALLBACK!
-    # Legacy models on disk were saved without `.feature_names_in_`. If you revert this, 
-    # any live deployments running old nameless models will instantly CRASH with a ValueError 
+    # Legacy models on disk were saved without `.feature_names_in_`. If you revert this,
+    # any live deployments running old nameless models will instantly CRASH with a ValueError
     # (e.g. "X has 19 features, expecting 18") the moment a new feature is added to FEATURE_COLUMNS.
     # This block safely slices or pads DataFrames to perfectly match the nameless model's expected size.
     # ==================================================================================================
@@ -62,46 +59,8 @@ def predict_proba_safe(clf, x: pd.DataFrame):
             for i in range(len(x.columns), expected_n):
                 x_safe[f"__missing_{i}"] = np.nan
             return clf.predict_proba(x_safe.to_numpy())
-            
+
     return clf.predict_proba(x.to_numpy())
-
-def predict_safe(reg, x: pd.DataFrame):
-    """Predict safely matching the feature names contract of the fitted regressor."""
-    if hasattr(reg, "feature_names_in_"):
-        cols = list(reg.feature_names_in_)
-        missing = [c for c in cols if c not in x.columns]
-        if missing or list(x.columns) != cols:
-            x_safe = x.copy(deep=False)
-            if missing:
-                import numpy as np
-                for m in missing:
-                    x_safe[m] = np.nan
-            return reg.predict(x_safe[cols])
-        return reg.predict(x)
-        
-    # ==================================================================================================
-    # WARNING TO FUTURE AI AGENTS: DO NOT REVERT THIS LEGACY ARTIFACT FALLBACK!
-    # See explanation in predict_proba_safe above. This prevents catastrophic crashes on legacy nameless artifacts.
-    # ==================================================================================================
-    if hasattr(reg, "n_features_in_"):
-        expected_n = reg.n_features_in_
-        if len(x.columns) > expected_n:
-            return reg.predict(x.iloc[:, :expected_n].to_numpy())
-        elif len(x.columns) < expected_n:
-            import numpy as np
-            x_safe = x.copy(deep=False)
-            for i in range(len(x.columns), expected_n):
-                x_safe[f"__missing_{i}"] = np.nan
-            return reg.predict(x_safe.to_numpy())
-            
-    return reg.predict(x.to_numpy())
-
-if TYPE_CHECKING:
-    from app.config import RiskConfig, Settings
-
-# ---------------------------------------------------------------------------
-# 1. Data Quality Engine
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -112,12 +71,7 @@ class DataQualityReport:
 
 
 class DataQualityEngine:
-    """Validates bar DataFrame quality before feeding to ML / strategy layers.
-
-    Called by the engine on every symbol's DataFrame before strategy
-    evaluation. If ``ok`` is False the engine should skip new entries for that
-    symbol for the current bar cycle.
-    """
+    """Reject bars with data-quality problems before they reach the pipeline."""
 
     def __init__(
         self,
@@ -130,7 +84,7 @@ class DataQualityEngine:
         self.min_bars = min_bars
 
     @classmethod
-    def from_settings(cls, settings: "Settings") -> "DataQualityEngine":
+    def from_settings(cls, settings: Settings) -> DataQualityEngine:
         return cls(
             max_gap_minutes=settings.dq_max_gap_minutes,
             max_spread_pct=settings.dq_max_spread_pct,
@@ -364,10 +318,10 @@ class WalkForwardValidator:
     @classmethod
     def from_settings(
         cls,
-        settings: "Settings",
+        settings: Settings,
         horizon_bars: int = 15,
         threshold_pct: float = 0.10,
-    ) -> "WalkForwardValidator":
+    ) -> WalkForwardValidator:
         return cls(
             train_days=settings.walk_forward_train_days,
             val_days=settings.walk_forward_val_days,
@@ -380,18 +334,35 @@ class WalkForwardValidator:
     def _split_by_days(
         self, df: pd.DataFrame
     ) -> list[tuple[pd.DataFrame, pd.DataFrame]]:
-        """Generate (train_df, val_df) sliding window pairs."""
+        """Generate (train_df, val_df) sliding window pairs.
+
+        The frame is index-sorted, so each ET session occupies one contiguous
+        row block. Day boundaries are located once via searchsorted and windows
+        are cut by position -- O(log n) per boundary instead of a Python-level
+        boolean mask over every row for every window.
+        """
         windows: list[tuple[pd.DataFrame, pd.DataFrame]] = []
-        dates = sorted(set(df.index.tz_convert("America/New_York").date))
+        et_days = df.index.tz_convert("America/New_York").date
+        unique_days = sorted(set(et_days))
+        day_positions = np.searchsorted(
+            np.asarray(et_days, dtype="datetime64[D]").astype("int64"),
+            np.asarray(unique_days, dtype="datetime64[D]").astype("int64"),
+        )
+        pos_by_day = dict(zip(unique_days, day_positions.tolist(), strict=True))
+        n_rows = len(df)
         step = self.val_days
         window = self.train_days + self.val_days
         start = 0
-        while start + window <= len(dates):
-            train_dates = set(dates[start : start + self.train_days])
-            val_dates = set(dates[start + self.train_days : start + window])
-            et_idx = df.index.tz_convert("America/New_York").date
-            train_df = df[[d in train_dates for d in et_idx]]
-            val_df = df[[d in val_dates for d in et_idx]]
+        while start + window <= len(unique_days):
+            train_start = pos_by_day[unique_days[start]]
+            val_start = pos_by_day[unique_days[start + self.train_days]]
+            end = (
+                pos_by_day[unique_days[start + window]]
+                if start + window < len(unique_days)
+                else n_rows
+            )
+            train_df = df.iloc[train_start:val_start]
+            val_df = df.iloc[val_start:end]
             if len(train_df) > 100 and len(val_df) > 20:
                 windows.append((train_df, val_df))
             start += step
@@ -402,7 +373,7 @@ class WalkForwardValidator:
         self,
         frames: dict[str, pd.DataFrame],
         side: str = "long",
-    ) -> "WalkForwardResult":
+    ) -> WalkForwardResult:
         """Run walk-forward validation across all frames for a given side.
 
         Returns WalkForwardResult with the best classifier and aggregated
@@ -468,33 +439,61 @@ class WalkForwardValidator:
                 side=side,
             )
 
-        # Accumulate per-model metrics across windows
+        # Accumulate per-model metrics across windows.
+        # Fits are native (GIL-releasing) and each is capped to 1 OpenMP
+        # thread, so a small thread pool yields near-linear wall-time gains
+        # without changing any fitted result.
+        import os
+        from concurrent.futures import ThreadPoolExecutor
+
         model_window_metrics: dict[str, list[dict]] = {n: [] for n in _CLASSIFIERS}
 
         from threadpoolctl import threadpool_limits
 
-        for train_df, val_df in windows:
-            X_tr = train_df.drop(columns=["__label__", "__weight__"])
-            y_tr = train_df["__label__"]
-            w_tr = train_df["__weight__"]
-            X_va = val_df.drop(columns=["__label__", "__weight__"])
-            y_va = val_df["__label__"]
+        def _fit_window(wi: int, name: str, train_df, val_df) -> tuple[int, str, dict | None]:
+            try:
+                X_tr = train_df.drop(columns=["__label__", "__weight__"])
+                y_tr = train_df["__label__"]
+                w_tr = train_df["__weight__"]
+                X_va = val_df.drop(columns=["__label__", "__weight__"])
+                y_va = val_df["__label__"]
+                if y_tr.nunique() < 2 or y_va.nunique() < 2:
+                    return wi, name, None  # skip degenerate windows
+                clf = _make_classifier(name)
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    with threadpool_limits(limits=1, user_api="openmp"):
+                        clf.fit(X_tr, y_tr, sample_weight=w_tr)
+                proba = clf.predict_proba(X_va)[:, 1]
+                m = _trading_metrics(y_va.to_numpy(), proba)
+                return wi, name, m
+            except Exception as exc:  # noqa: BLE001
+                applog.debug("wfv", f"{name} window failed: {exc}")
+                return wi, name, None
 
-            if y_tr.nunique() < 2 or y_va.nunique() < 2:
-                continue  # skip degenerate windows
+        max_workers = max(1, min(
+            len(windows) * len(_CLASSIFIERS),
+            int(os.environ.get("ALPHADESK_TRAIN_WORKERS", "6")),
+        ))
+        collected = []
+        done = 0
+        from concurrent.futures import as_completed
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = [
+                pool.submit(_fit_window, wi, name, train_df, val_df)
+                for wi, (train_df, val_df) in enumerate(windows)
+                for name in _CLASSIFIERS
+            ]
+            for fut in as_completed(futures):
+                collected.append(fut.result())
+                done += 1
+                if done % 12 == 0 or done == len(futures):
+                    applog.info("wfv", f"walk-forward {side}: {done}/{len(futures)} window-fits done")
 
-            for name in _CLASSIFIERS:
-                try:
-                    clf = _make_classifier(name)
-                    with warnings.catch_warnings():
-                        warnings.simplefilter("ignore")
-                        with threadpool_limits(limits=1, user_api="openmp"):
-                            clf.fit(X_tr, y_tr, sample_weight=w_tr)
-                    proba = clf.predict_proba(X_va)[:, 1]
-                    m = _trading_metrics(y_va.to_numpy(), proba)
-                    model_window_metrics[name].append(m)
-                except Exception as exc:  # noqa: BLE001
-                    applog.debug("wfv", f"{name} window failed: {exc}")
+        # Deterministic aggregation order (window asc, then classifier order)
+        for wi, name, m in sorted(collected, key=lambda t: (t[0], _CLASSIFIERS.index(t[1]))):
+            if m is not None:
+                model_window_metrics[name].append(m)
 
         # Aggregate: mean Profit Factor across windows as primary rank metric
         summary: dict[str, dict] = {}
@@ -600,14 +599,13 @@ class TradeScoreEngine:
     def __init__(
         self,
         weights: tuple[float, float, float, float, float, float],
-        risk_config: "RiskConfig",
+        risk_config: RiskConfig,
     ) -> None:
         self.w = weights  # already normalized by settings.trade_score_weights()
         self.risk_config = risk_config
 
     @classmethod
-    def from_settings(cls, settings: "Settings") -> "TradeScoreEngine":
-        from app.config import RiskConfig  # avoid circular at module level
+    def from_settings(cls, settings: Settings) -> TradeScoreEngine:
         return cls(
             weights=settings.trade_score_weights(),  # type: ignore[arg-type]
             risk_config=settings.risk_config(),
@@ -664,12 +662,8 @@ class TradeScoreEngine:
         )
         return round(min(100.0, max(0.0, score)), 2)
 
-    def gate_threshold(self, regime: Regime, is_event_day: bool = False, threshold_boost: float = 0.0) -> float:
-        """Return the minimum Trade Score required to approve an entry.
-
-        ``threshold_boost`` is added on top of the base threshold, e.g. during
-        midday (low-edge hours) to require a stronger signal without hard-blocking.
-        """
+    def gate_threshold(self, regime: Regime, is_event_day: bool = False) -> float:
+        """Return the minimum Trade Score required to approve an entry."""
         rc = self.risk_config
         if is_event_day:
             base = rc.score_threshold_event
@@ -679,21 +673,16 @@ class TradeScoreEngine:
             base = rc.score_threshold_range
         else:
             base = rc.score_threshold_volatile
-        return min(100.0, base + threshold_boost)
+        return min(100.0, base)
 
     def approve(
         self,
         score: float,
         regime: Regime,
         is_event_day: bool = False,
-        threshold_boost: float = 0.0,
     ) -> tuple[bool, float]:
-        """Return (approved, threshold).
-
-        ``threshold_boost`` raises the bar without fully blocking -- exceptional
-        setups (very high score) can still trade during low-edge periods.
-        """
-        threshold = self.gate_threshold(regime, is_event_day, threshold_boost)
+        """Return (approved, threshold)."""
+        threshold = self.gate_threshold(regime, is_event_day)
         return score >= threshold, threshold
 
 
@@ -729,26 +718,28 @@ def clear_candidate_cache():
     _CANDIDATE_CACHE.clear()
 
 def _compute_candidates_for_symbol(symbol: str, df_or_path, strategy_overrides: dict | None = None) -> dict:
-    from app.strategies.base import create_strategies, StrategyContext
-    from app.core.domain import SignalAction, Regime
-    from app.indicators.ta import is_enriched, enrich
     from datetime import timedelta
+
     import pandas as pd
-    
+
+    from app.core.domain import Regime, SignalAction
+    from app.indicators.ta import enrich, is_enriched
+    from app.strategies.base import StrategyContext, create_strategies
+
     if isinstance(df_or_path, str):
         df = pd.read_parquet(df_or_path)
     else:
         df = df_or_path
-        
+
     strats = create_strategies(strategy_overrides)
     results = {}
     for s in strats:
         results[s.name] = {"long": [], "short": []}
         s.reset()
-        
+
     if not is_enriched(df):
         df = enrich(df)
-        
+
     # WARNING: To prevent extreme memory/CPU overhead, we MUST defragment the dataframe.
     # Otherwise, iloc slices on 150 mixed-type columns take 100x longer per loop iteration!
     df = df.copy()
@@ -756,19 +747,19 @@ def _compute_candidates_for_symbol(symbol: str, df_or_path, strategy_overrides: 
     n = len(df)
     if n < 60:
         return results
-        
+
     if "regime_val" in df.columns:
         regime_map = {0.0: Regime.RANGE, 1.0: Regime.TREND_UP, -1.0: Regime.TREND_DOWN, 2.0: Regime.VOLATILE}
         regimes = df["regime_val"].map(regime_map).fillna(Regime.RANGE).tolist()
     else:
         regimes = [Regime.RANGE] * n
-        
+
     for i in range(1, n):
         window = df.iloc[max(0, i - 450 + 1) : i + 1]
         regime = regimes[i]
         now_ts = (window.index[-1] + timedelta(minutes=1)).to_pydatetime()
         sctx = StrategyContext(position=None, equity=100_000.0, regime=regime, now=now_ts)
-        
+
         for strat in strats:
             try:
                 sig = strat.on_bar(sctx, symbol, window)
@@ -777,25 +768,43 @@ def _compute_candidates_for_symbol(symbol: str, df_or_path, strategy_overrides: 
                     results[strat.name][sig_side].append(df.index[i])
             except Exception:
                 pass
-                
+
     return results
 
 def precompute_all_strategy_candidates(frames: dict[str, pd.DataFrame], strategy_overrides: dict | None = None):
-    """Precompute and cache candidates for all symbols concurrently using ProcessPoolExecutor."""
+    """Precompute and cache candidates for all symbols concurrently.
+
+    Windows-hardened (2026-08-24 incident): spawned pool children died at
+    bootstrap with ``PermissionError: [WinError 5]`` when the cycle ran under
+    a foreign interpreter, and the bare executor then waited forever,
+    deadlocking every trainer thread. Strategy now:
+
+      1. Try a bounded ProcessPoolExecutor over parquet-dumped frames.
+      2. On ANY pool-level failure (spawn error, broken pool) or when the
+         wall-clock budget expires, fall back to an in-process thread pool
+         for whatever the pool did not finish. Threads are GIL-bound and
+         slower, but cannot deadlock the server.
+
+    Env knobs:
+      ALPHADESK_PRECOMPUTE_WORKERS  process workers (default min(6, cpu_count))
+      ALPHADESK_PRECOMPUTE_TIMEOUT  wall budget for the pool phase (default 900s)
+    """
     symbols_to_compute = []
     for sym, df in frames.items():
         cache_key = (sym, id(df))
         if cache_key not in _CANDIDATE_CACHE:
             symbols_to_compute.append((sym, df))
-            
+
     if not symbols_to_compute:
         return
-        
-    from concurrent.futures import ProcessPoolExecutor, as_completed
-    from app.core.applog import applog
+
     import os
+    import shutil
     import tempfile
-    
+    from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+
+    from app.core.applog import applog
+
     # Dump DataFrames to parquet to completely bypass Windows IPC pickling limits
     temp_dir = tempfile.mkdtemp()
     symbol_paths = {}
@@ -803,26 +812,66 @@ def precompute_all_strategy_candidates(frames: dict[str, pd.DataFrame], strategy
         path = os.path.join(temp_dir, f"{sym}.parquet")
         df.to_parquet(path, engine="pyarrow")
         symbol_paths[sym] = path
-    
-    applog.info("meta", f"Precomputing candidates for {len(symbols_to_compute)} symbols across all strategies concurrently...")
-    with ProcessPoolExecutor() as executor:
+
+    workers = int(os.environ.get("ALPHADESK_PRECOMPUTE_WORKERS", str(min(6, os.cpu_count() or 2))))
+    pool_budget = float(os.environ.get("ALPHADESK_PRECOMPUTE_TIMEOUT", "900"))
+
+    applog.info(
+        "meta",
+        f"Precomputing candidates for {len(symbols_to_compute)} symbols "
+        f"across all strategies concurrently (workers={workers}, budget={pool_budget:.0f}s)...",
+    )
+
+    done_keys: set[tuple] = set()
+    executor: ProcessPoolExecutor | None = None
+    try:
+        executor = ProcessPoolExecutor(max_workers=workers)
         futures = {
             executor.submit(_compute_candidates_for_symbol, sym, symbol_paths[sym], strategy_overrides): (sym, id(df))
             for sym, df in symbols_to_compute
         }
-        for future in as_completed(futures):
-            cache_key = futures[future]
+        for future in as_completed(futures, timeout=pool_budget):
+            sym, cache_key = futures[future]
             try:
                 _CANDIDATE_CACHE[cache_key] = future.result()
+                done_keys.add((sym, cache_key))
             except Exception as exc:
-                applog.warning("meta", f"Failed to precompute candidates for {cache_key[0]}: {exc}")
-                _CANDIDATE_CACHE[cache_key] = {}
-                
-    import shutil
-    try:
-        shutil.rmtree(temp_dir)
-    except:
-        pass
+                # Leave un-cached: the threaded fallback retries this symbol.
+                applog.warning("meta", f"Process worker failed for {sym} ({type(exc).__name__}: {exc}); will retry inline")
+    except Exception as exc:
+        applog.warning(
+            "meta",
+            f"Candidate process pool unavailable or timed out "
+            f"({type(exc).__name__}: {exc}); falling back to in-process threads",
+        )
+    finally:
+        if executor is not None:
+            # wait=False: never block on wedged spawn children (the observed hang)
+            try:
+                executor.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
+
+    pending = [(sym, df) for sym, df in symbols_to_compute if (sym, id(df)) not in done_keys]
+    if pending:
+        applog.info("meta", f"Inline-threaded fallback computing {len(pending)} symbol(s)...")
+
+    if pending:
+        thread_workers = max(1, min(4, len(pending)))
+        with ThreadPoolExecutor(max_workers=thread_workers) as pool:
+            futures = {
+                pool.submit(_compute_candidates_for_symbol, sym, symbol_paths[sym], strategy_overrides): (sym, id(df))
+                for sym, df in pending
+            }
+            for future in as_completed(futures):
+                sym, cache_key = futures[future]
+                try:
+                    _CANDIDATE_CACHE[cache_key] = future.result()
+                except Exception as exc:
+                    applog.warning("meta", f"Failed to precompute candidates for {sym}: {exc}")
+                    _CANDIDATE_CACHE[cache_key] = {}
+
+    shutil.rmtree(temp_dir, ignore_errors=True)
 
 def get_strategy_candidates(
     strategy_name: str,
@@ -835,7 +884,7 @@ def get_strategy_candidates(
     cache_key = (symbol, id(df))
     if cache_key not in _CANDIDATE_CACHE:
         _CANDIDATE_CACHE[cache_key] = _compute_candidates_for_symbol(symbol, df, strategy_overrides)
-        
+
     if strategy_name not in _CANDIDATE_CACHE.get(cache_key, {}):
         return []
     return _CANDIDATE_CACHE[cache_key][strategy_name].get(side, [])
@@ -869,9 +918,14 @@ class MetaLabelEngine:
     # Strategies that REQUIRE a trained MetaLabel model to pass.
     # If the model is absent, candidates are REJECTED (fail-closed).
     # Strategies not listed here are BYPASSED when no model is available.
-    MANDATORY_STRATEGIES: frozenset = frozenset()
+    # gap_and_go: 2026-08-24 session evidence -- it was the ONLY strategy
+    # bypassing the meta gate (no long/short artifacts) and therefore the
+    # only one trading, going 0-for-3 (-$230) while fully-gated strategies
+    # were held out by hair-thin margins. Fail-closed until artifacts are
+    # trained and promoted; remove from this set only with measured cause.
+    MANDATORY_STRATEGIES: frozenset = frozenset({"gap_and_go"})
 
-    def __init__(self, models_dir: "Path") -> None:  # type: ignore[name-defined]
+    def __init__(self, models_dir: Path) -> None:  # type: ignore[name-defined]
         from pathlib import Path as _Path
         self.models_dir = _Path(models_dir) / "meta"
         self.models_dir.mkdir(parents=True, exist_ok=True)
@@ -929,16 +983,15 @@ class MetaLabelEngine:
 
         return None
 
-    def predict(self, strategy: str, features: "pd.Series", side: str = "long", adaptive_threshold: float | None = None) -> MetaPrediction:  # type: ignore[name-defined]
+    def predict(self, strategy: str, features: pd.Series, side: str = "long", adaptive_threshold: float | None = None) -> MetaPrediction:  # type: ignore[name-defined]
         """Return a MetaPrediction using the explicit three-state contract.
 
         PASS   = real trained model evaluated and approved.
         REJECT = real model rejected, or mandatory model unavailable.
         BYPASS = model not configured / not yet trained for optional strategy.
         """
-        import hashlib
         clf = self._load(strategy, side)
-        
+
         # Check for temporal leakage relative to backtest start time.
         # FIX: Use `self.backtest_start_time is not None` instead of the
         # previous `hasattr(self, "backtest_start_time")` guard now that the
@@ -1054,12 +1107,12 @@ class MetaLabelEngine:
             raw_proba = predict_proba_safe(clf, x)
             prob = float(raw_proba[0, 1])
             clf_name = type(clf).__name__
-            
+
             vol_z = float(features.get("vol_z", 0.0))
             if vol_z > 3.0 and prob < threshold and prob >= 0.45:
                 applog.info("meta", f"[HARVEST BYPASS] Explosive volume (vol_z={vol_z:.1f}) dropping threshold {threshold}->0.45")
                 threshold = 0.45
-                
+
             decision = "PASS" if prob >= threshold else "REJECT"
             applog.debug(
                 "meta",
@@ -1112,6 +1165,7 @@ class MetaLabelEngine:
           8. Return provenance dict with PROMOTED or REJECTED_LOW_AUC status.
         """
         import hashlib
+
         from sklearn.metrics import roc_auc_score
 
         xs, ys, ws = [], [], []
@@ -1138,7 +1192,7 @@ class MetaLabelEngine:
         X_all = pd.concat(xs).sort_index()
         y_all = pd.concat(ys).sort_index()
         w_all = pd.concat(ws).sort_index()
-        
+
         MAX_META_SAMPLES = 1_000_000
         if len(X_all) > MAX_META_SAMPLES:
             applog.info("meta", f"[meta_train] Subsampling from {len(X_all)} down to {MAX_META_SAMPLES} to accelerate MetaLabel training.")
@@ -1359,7 +1413,7 @@ class ExcursionEstimate:
     suggested_target_pct: float  # entry_price * (1 + suggested_target_pct / 100)
 
     @classmethod
-    def from_atr(cls, atr_pct: float, side: str = "long") -> "ExcursionEstimate":
+    def from_atr(cls, atr_pct: float, side: str = "long") -> ExcursionEstimate:
         """Fallback estimate from ATR when no regressor is trained."""
         mae = atr_pct * 1.5
         mfe = atr_pct * 2.0
@@ -1372,147 +1426,3 @@ class ExcursionEstimate:
         )
 
 
-class ExcursionRegressors:
-    """Gradient-boosted regressors for MAE and MFE prediction.
-
-    Trained on historical bar data using ``build_mae_mfe_dataset()``.
-    At inference time, given the current feature row, they predict the
-    expected maximum adverse and favorable excursion over the next
-    ``horizon_bars`` bars.
-
-    The predictions are used to:
-      - Set dynamic stop-loss: entry_price x (1 - mae_predicted x safety_mult)
-      - Set dynamic take-profit: entry_price x (1 + mfe_predicted x capture_ratio)
-      - Feed expected_return_pct and expected_drawdown_pct into the Trade Score
-        engine with real model estimates instead of static defaults.
-
-    Models persist to ``{models_dir}/excursion_mae.joblib`` and
-    ``{models_dir}/excursion_mfe.joblib``.
-    """
-
-    MAE_SAFETY_MULT = 1.15    # buffer above predicted MAE for stop placement
-    MFE_CAPTURE_RATIO = 0.85  # fraction of predicted MFE to target
-
-    def __init__(self, models_dir: "Path") -> None:  # type: ignore[name-defined]
-        from pathlib import Path as _Path
-        self.models_dir = _Path(models_dir)
-        self.models_dir.mkdir(parents=True, exist_ok=True)
-        self._mae_reg = None
-        self._mfe_reg = None
-        self._trained = False
-        self._load()
-
-    def _load(self) -> None:
-        try:
-            import joblib
-            mae_path = self.models_dir / "excursion_mae.joblib"
-            mfe_path = self.models_dir / "excursion_mfe.joblib"
-            if mae_path.exists() and mfe_path.exists():
-                self._mae_reg = joblib.load(mae_path)
-                self._mfe_reg = joblib.load(mfe_path)
-                self._trained = True
-                applog.info("excursion", "Loaded MAE/MFE regressors")
-        except Exception as exc:
-            applog.warning("excursion", f"Failed to load excursion regressors: {exc}")
-
-    @property
-    def is_trained(self) -> bool:
-        return self._trained
-
-    def predict(self, features: "pd.Series", atr_pct: float = 1.0) -> ExcursionEstimate:  # type: ignore[name-defined]
-        """Predict MAE and MFE from entry feature row.
-
-        Falls back to an ATR-based estimate if regressors are not trained.
-        """
-        if not self._trained or self._mae_reg is None or self._mfe_reg is None:
-            return ExcursionEstimate.from_atr(atr_pct)
-
-        try:
-            x = pd.DataFrame([features[FEATURE_COLUMNS].to_numpy(dtype=float)], columns=FEATURE_COLUMNS)
-            mae = float(max(0.0, predict_safe(self._mae_reg, x)[0]))
-            mfe = float(max(0.0, predict_safe(self._mfe_reg, x)[0]))
-        except Exception as exc:
-            applog.debug("excursion", f"Excursion inference failed: {exc}")
-            return ExcursionEstimate.from_atr(atr_pct)
-
-        rr = mfe / max(mae, 0.001)
-        stop_pct = mae * self.MAE_SAFETY_MULT
-        target_pct = mfe * self.MFE_CAPTURE_RATIO
-
-        return ExcursionEstimate(
-            mae_pct=round(mae, 4),
-            mfe_pct=round(mfe, 4),
-            reward_risk=round(rr, 3),
-            suggested_stop_pct=round(stop_pct, 4),
-            suggested_target_pct=round(target_pct, 4),
-        )
-
-    def train(
-        self,
-        frames: dict,   # symbol -> pd.DataFrame
-        horizon_bars: int = 15,
-    ) -> dict:
-        """Train MAE and MFE regressors on historical bar data.
-
-        Pools all frames, builds excursion targets using
-        ``build_mae_mfe_dataset()``, and fits two separate
-        gradient-boosted regressors.
-        """
-        from sklearn.ensemble import HistGradientBoostingRegressor
-
-        xs, maes, mfes = [], [], []
-        for df in frames.values():
-            X, mae_s, mfe_s = build_mae_mfe_dataset(df, horizon_bars)
-            if len(X) > 20:
-                xs.append(X)
-                maes.append(mae_s)
-                mfes.append(mfe_s)
-
-        if not xs:
-            applog.warning("excursion", "Insufficient data for excursion regressor training")
-            return {"status": "skipped", "reason": "no data"}
-
-        X_all = pd.concat(xs).sort_index()
-        mae_all = pd.concat(maes).sort_index()
-        mfe_all = pd.concat(mfes).sort_index()
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-
-            mae_reg = HistGradientBoostingRegressor(
-                max_iter=200, learning_rate=0.08, max_depth=5,
-                l2_regularization=1.0, random_state=42,
-            )
-            mae_reg.fit(X_all, mae_all)
-
-            mfe_reg = HistGradientBoostingRegressor(
-                max_iter=200, learning_rate=0.08, max_depth=5,
-                l2_regularization=1.0, random_state=42,
-            )
-            mfe_reg.fit(X_all, mfe_all)
-
-        try:
-            import joblib
-            joblib.dump(mae_reg, self.models_dir / "excursion_mae.joblib")
-            joblib.dump(mfe_reg, self.models_dir / "excursion_mfe.joblib")
-        except Exception as exc:
-            applog.warning("excursion", f"Failed to save excursion regressors: {exc}")
-
-        self._mae_reg = mae_reg
-        self._mfe_reg = mfe_reg
-        self._trained = True
-
-        # Compute in-sample MAE mean for logging
-        mae_pred = mae_reg.predict(X_all)
-        mae_err = float(np.abs(mae_pred - mae_all.to_numpy()).mean())
-
-        applog.info(
-            "excursion",
-            f"Excursion regressors trained -- {len(X_all)} samples, "
-            f"MAE prediction error: {mae_err:.4f}%",
-        )
-        return {
-            "status": "success",
-            "samples": len(X_all),
-            "mae_prediction_error_pct": round(mae_err, 4),
-        }

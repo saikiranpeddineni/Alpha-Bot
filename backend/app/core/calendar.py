@@ -17,7 +17,7 @@ the last detection to cover post-announcement volatility.
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
 from app.core.applog import applog

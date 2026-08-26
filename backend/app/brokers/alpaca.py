@@ -15,10 +15,12 @@ from __future__ import annotations
 
 import asyncio
 import os
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from app.brokers.base import Broker, BrokerTimeoutError, Fill
+from app.core.applog import applog
 from app.core.domain import (
     AccountSnapshot,
     Order,
@@ -28,10 +30,9 @@ from app.core.domain import (
     OrderType,
     Position,
 )
-from app.core.applog import applog
 
 if TYPE_CHECKING:
-    from app.config import Settings
+    pass
 
 # Wall-clock budget for every Alpaca HTTP call. Tune via env var if needed.
 _API_TIMEOUT: float = float(os.environ.get("ALPACA_API_TIMEOUT_SECONDS", "10"))
@@ -66,7 +67,7 @@ async def _call(fn, *args, timeout: float = _API_TIMEOUT, label: str = "", max_r
                 asyncio.to_thread(fn, *args, **kwargs),
                 timeout=timeout,
             )
-        except asyncio.TimeoutError as exc:
+        except TimeoutError as exc:
             if attempt < max_rate_retries:
                 backoff = (2 ** attempt) * 0.5 + 0.1
                 applog.warning(
@@ -347,7 +348,7 @@ class AlpacaBroker(Broker):
                         self._meta[child_id] = (parent_strategy, parent_reason)
                     if parent_id and not getattr(child, "parent_id", None) and not getattr(child, "parent_order_id", None):
                         try:
-                            setattr(child, "parent_id", parent_id)
+                            child.parent_id = parent_id
                         except Exception:
                             pass
                     normalized.append(self._to_order(child))
@@ -479,8 +480,8 @@ class AlpacaBroker(Broker):
             LimitOrderRequest,
             MarketOrderRequest,
             StopLimitOrderRequest,
-            StopOrderRequest,
             StopLossRequest,
+            StopOrderRequest,
             TakeProfitRequest,
         )
 
@@ -530,6 +531,28 @@ class AlpacaBroker(Broker):
             # Propagate: caller must treat as ambiguous order state, not rejected.
             raise
         except Exception as exc:  # noqa: BLE001
+            # Duplicate-id rescue: a timeout-retry that hits Alpaca's
+            # "client order id must be unique" 422 means the FIRST submission is
+            # (probably) alive at the broker. Treating this as a definitive
+            # REJECT orphans a live order. Query broker truth instead.
+            err_str_l = str(exc).lower()
+            if (
+                getattr(exc, "status_code", None) == 422
+                and req.client_order_id
+                and ("client_order_id" in err_str_l or "client order id" in err_str_l)
+            ):
+                applog.warning(
+                    "broker.alpaca",
+                    f"Duplicate client_order_id on submit for {req.symbol} ({req.client_order_id}) — rescuing live order from broker",
+                )
+                rescued = await self.get_order_by_client_id(req.client_order_id)
+                if rescued is not None:
+                    self._meta[str(rescued.id)] = (req.strategy, req.reason)
+                    if req.strategy != "emergency_protection":
+                        self._symbol_strategies[req.symbol.upper()] = req.strategy
+                    rescued.stop_loss = req.stop_loss
+                    rescued.take_profit = req.take_profit
+                    return rescued
             if self._is_definitive_rejection(exc):
                 err_msg = str(exc).lower()
                 short_permission_denied = (
@@ -616,6 +639,7 @@ class AlpacaBroker(Broker):
     async def poll_fills(self) -> None:
         """Surface every cumulative execution watermark not durably processed yet."""
         from alpaca.trading.requests import GetOrdersRequest
+
         from app.db.database import Database
 
         db = Database.active()
@@ -786,6 +810,7 @@ class AlpacaBroker(Broker):
     async def close_position(self, symbol: str, reason: str = "manual", qty: float | None = None) -> Order | None:
         try:
             # First, fetch and cancel any outstanding open orders for this symbol to release held quantities
+            cancelled_ids: set[str] = set()
             try:
                 from alpaca.trading.requests import GetOrdersRequest
                 open_orders = await _call(
@@ -795,18 +820,65 @@ class AlpacaBroker(Broker):
                 )
                 for o in open_orders:
                     await _call(self._client.cancel_order_by_id, str(o.id), label=f"cancel_order/{o.id}")
+                    cancelled_ids.add(str(o.id))
                     applog.info("broker.alpaca", f"Cancelled outstanding open order {o.id} for {symbol} to release held qty")
             except Exception as e:
                 applog.warning("broker.alpaca", f"Failed to cancel open orders for {symbol} before close: {e}")
 
             if qty is not None and qty > 0:
-                from alpaca.trading.requests import ClosePositionRequest
+                # Verify the cancels actually landed before submitting the market
+                # close. Cancellation is asynchronous server-side; a triggered
+                # bracket stop leg racing an unverified close can flip the
+                # position to the opposite side with no protection attached.
+                import asyncio
+
+                verified_gone = True
+                if cancelled_ids:
+                    for attempt in range(10):
+                        await asyncio.sleep(0.25)
+                        try:
+                            still_open = await _call(
+                                self._client.get_orders,
+                                GetOrdersRequest(status="open", symbols=[symbol.upper()]),
+                                label=f"verify_cancel/close_position/{symbol}",
+                            )
+                            open_ids = {str(o.id) for o in still_open}
+                            if not (cancelled_ids & open_ids):
+                                verified_gone = True
+                                break
+                            verified_gone = False
+                        except Exception as exc:
+                            applog.warning("broker.alpaca", f"Cancel verification poll failed for {symbol}: {exc}")
+                            verified_gone = False
+                            break
+                    if not verified_gone:
+                        applog.error(
+                            "broker.alpaca",
+                            f"{symbol}: cancel confirmation incomplete before close — proceeding but stop-leg race window remains open",
+                        )
+
+                from alpaca.trading.enums import OrderSide, TimeInForce
+                from alpaca.trading.requests import MarketOrderRequest
+
+                pos = await _call(self._client.get_open_position, symbol.upper(), label=f"get_open_position/{symbol}")
+                is_long = float(pos.qty) > 0
+                opposite_side = OrderSide.SELL if is_long else OrderSide.BUY
+
                 qty_str = str(int(qty)) if float(qty).is_integer() else str(round(qty, 4))
+                # Idempotent client_order_id: a timeout-retry of this exact close
+                # reuses the same id, so Alpaca deduplicates instead of double-
+                # closing (which would flip the position to the opposite side).
+                close_cid = f"ad-close-{symbol.upper()}-{uuid.uuid4().hex[:12]}"
                 raw = await _call(
-                    self._client.close_position,
-                    symbol.upper(),
-                    ClosePositionRequest(qty=qty_str),
-                    label=f"close_position_partial/{symbol}"
+                    self._client.submit_order,
+                    MarketOrderRequest(
+                        symbol=symbol.upper(),
+                        qty=qty_str,
+                        side=opposite_side,
+                        time_in_force=TimeInForce.DAY,
+                        client_order_id=close_cid,
+                    ),
+                    label=f"close_position_partial_market/{symbol}"
                 )
             else:
                 raw = await _call(self._client.close_position, symbol.upper(), label=f"close_position/{symbol}")

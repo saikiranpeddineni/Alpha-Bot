@@ -59,12 +59,6 @@ def _awaited_broker_calls(method):
     return names
 
 
-@pytest.mark.skip(reason="Legacy Architecture removed during PIS refactor")
-def test_rule41_has_one_authoritative_verifier_definition():
-    """Rule-41 must have one implementation, not a shadowed dead definition."""
-    assert len(_methods_named("verify_broker_protective_stops")) == 1
-
-
 def test_tick_polls_real_broker_fills_once_per_cycle():
     """One tick should have one canonical real-broker fill poll/drain phase."""
     broker_calls = _awaited_broker_calls(_tick_method())

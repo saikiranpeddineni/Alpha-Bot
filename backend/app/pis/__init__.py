@@ -6,6 +6,7 @@ runner intelligence, and discretionary exit management.
 Broker-agnostic core. Deterministic, explainable, and thread-safe.
 """
 
+from app.pis.engine_adapter import PISEngineAdapter
 from app.pis.models import (
     EvidenceCoverage,
     ExitAction,
@@ -20,8 +21,7 @@ from app.pis.models import (
 )
 from app.pis.position_brain import PositionBrain
 from app.pis.service import PISService
-from app.pis.engine_adapter import PISEngineAdapter
-from app.pis.state_machine import PositionLifecycleStateMachine, InvalidLifecycleTransitionError
+from app.pis.state_machine import InvalidLifecycleTransitionError, PositionLifecycleStateMachine
 
 __all__ = [
     "EvidenceCoverage",

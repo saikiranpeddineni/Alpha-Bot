@@ -584,7 +584,12 @@ class TestIssue86MarketDataGapGate:
         """#86: TradingEngine must have _data_gap_symbols attribute initialized in __init__."""
         import inspect
         from app.core.engine import TradingEngine
-        source = inspect.getsource(TradingEngine.__init__)
+        # The replay runtime wraps __init__ with a compatible adapter; inspect
+        # the original constructor when the adapter is installed.
+        init_fn = TradingEngine.__init__
+        if getattr(init_fn, "_replay_runtime_adapter", False):
+            init_fn = getattr(init_fn, "_original_engine_init", init_fn)
+        source = inspect.getsource(init_fn)
         assert "_data_gap_symbols" in source, "#86: _data_gap_symbols must be initialized in __init__"
         assert "_last_data_bar_ts" in source, "#86: _last_data_bar_ts must be initialized in __init__"
 

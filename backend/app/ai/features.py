@@ -7,9 +7,10 @@ train/serve skew.
 
 from __future__ import annotations
 
+from zoneinfo import ZoneInfo
+
 import numpy as np
 import pandas as pd
-from zoneinfo import ZoneInfo
 
 from app.indicators.ta import enrich, is_enriched
 
@@ -48,7 +49,7 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
         return df
     if "regime_val" in df.columns:
         return df
-        
+
     out = df if is_enriched(df) else enrich(df)
     # We deliberately mutate the dataframe directly to cache features across training loops
     out["macd_hist_norm"] = out["macd_hist"] / out["close"] * 1000.0
@@ -139,7 +140,7 @@ def build_training_set(
         profit_magnitude = np.clip(-fwd_ret_pct, 0.0, 5.0)
     else:
         profit_magnitude = np.clip(fwd_ret_pct, 0.0, 5.0)
-    
+
     # Give winning trades exponential weight so big winners are NEVER missed
     weight = 1.0 + (profit_magnitude * 10.0)
 
@@ -148,52 +149,3 @@ def build_training_set(
     return X[mask], label[mask], weight[mask]
 
 
-def build_mae_mfe_dataset(
-    df: pd.DataFrame,
-    horizon_bars: int = 15,
-) -> tuple[pd.DataFrame, pd.Series, pd.Series]:
-    """Build regression targets for Maximum Adverse Excursion (MAE) and
-    Maximum Favorable Excursion (MFE) over the next ``horizon_bars``.
-
-    MAE: worst unrealised loss as a % of entry price (always positive).
-    MFE: best unrealised gain as a % of entry price (always positive).
-
-    These are used to train the ExcursionRegressors so that stop-loss and
-    take-profit levels can be set from predicted excursion distributions
-    rather than static ATR multiples.
-
-    Returns
-    -------
-    X        : feature DataFrame (FEATURE_COLUMNS)
-    mae_pct  : MAE in % (regression target, ≥ 0)
-    mfe_pct  : MFE in % (regression target, ≥ 0)
-    """
-    feats = compute_features(df)
-    if feats.empty or len(feats) <= horizon_bars:
-        empty = pd.DataFrame(columns=FEATURE_COLUMNS)
-        return empty, pd.Series(dtype=float), pd.Series(dtype=float)
-
-    close_s = feats["close"]
-    
-    # Vectorized forward window
-    indexer = pd.api.indexers.FixedForwardWindowIndexer(window_size=horizon_bars)
-    shifted_close = close_s.shift(-1)
-    window_min = shifted_close.rolling(indexer).min()
-    window_max = shifted_close.rolling(indexer).max()
-
-    # Temporal purity check
-    et_series = pd.Series(feats.index.tz_convert(ET), index=feats.index)
-    et_dates = et_series.dt.date
-    shifted_et_dates = et_series.shift(-horizon_bars).dt.date
-
-    mask_valid = (close_s > 0) & (et_dates == shifted_et_dates)
-    
-    mae_pct = ((close_s - window_min) / close_s * 100.0).clip(lower=0.0)
-    mfe_pct = ((window_max - close_s) / close_s * 100.0).clip(lower=0.0)
-
-    mae_pct.loc[~mask_valid] = np.nan
-    mfe_pct.loc[~mask_valid] = np.nan
-
-    X = feats[FEATURE_COLUMNS]
-    mask = ~(X.isna().any(axis=1) | mae_pct.isna() | mfe_pct.isna())
-    return X[mask], mae_pct[mask], mfe_pct[mask]

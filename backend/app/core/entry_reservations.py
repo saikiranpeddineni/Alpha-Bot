@@ -23,7 +23,7 @@ class SameCycleEntryReservations:
     _reserved_symbols: set[str] = field(default_factory=set)
 
     @classmethod
-    def from_snapshot(cls, cash: float, positions: list[Position]) -> "SameCycleEntryReservations":
+    def from_snapshot(cls, cash: float, positions: list[Position]) -> SameCycleEntryReservations:
         return cls(cash=max(0.0, cash), positions=list(positions))
 
     def reserve(self, order: Order, reference_price: float) -> bool:

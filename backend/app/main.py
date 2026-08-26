@@ -39,14 +39,15 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import __version__
-from app.api.dashboard_history import durable_orders, router as dashboard_history_router
-from app.api.routes import router
+from app.api.dashboard_history import durable_orders
+from app.api.dashboard_history import router as dashboard_history_router
 from app.api.replay import router as replay_router
+from app.api.routes import router
 from app.api.ws import EventHub
 from app.config import FRONTEND_DIST, Settings, get_settings
-from app.core.durable_engine import DurableTradingEngine
-from app.core.applog import applog, configure_std_logging
 from app.core.alerting import init_alerting, stop_alerting
+from app.core.applog import applog, configure_file_logging, configure_std_logging
+from app.core.durable_engine import DurableTradingEngine
 from app.db.database import Database
 
 
@@ -77,6 +78,7 @@ class SafeJSONResponse(JSONResponse):
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     configure_std_logging()
+    configure_file_logging()
     settings = settings or get_settings()
     db = Database(settings.resolved_db_path)
     engine = DurableTradingEngine(settings, db)
@@ -96,10 +98,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         hub.set_loop(asyncio.get_running_loop())
+        from app.core.shadow_ledger import resolver_loop
+        shadow_task = asyncio.create_task(resolver_loop(engine.data))
         await engine.ensure_data()
         await init_alerting(settings.slack_webhook_url)
         applog.info("app", f"AlphaDesk v{__version__} ready -- mode={settings.mode}")
         yield
+        shadow_task.cancel()
         await stop_alerting()
         await engine.shutdown()
 
@@ -132,13 +137,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         origins.append(f"http://{ip}:{settings.port}")
         origins.append(f"https://{ip}:{settings.port}")
 
+    # SECURITY: explicit localhost-only origins. A wildcard credentialed CORS
+    # policy let any webpage the operator visits issue cross-origin requests to
+    # order/flatten/start endpoints (drive-by trading). Credentials are not used.
     app.add_middleware(
         CORSMiddleware,
         allow_origins=origins,
-        allow_origin_regex=r"https?://.*",
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        allow_headers=["Content-Type"],
     )
 
     # Dashboard history is deliberately registered before the legacy runtime

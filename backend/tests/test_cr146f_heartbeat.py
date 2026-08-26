@@ -392,17 +392,15 @@ def test_heartbeat_vix_state_transition_logging(client, caplog):
         loop.close()
 
 
-def test_heartbeat_weekly_checks(client):
+def test_heartbeat_no_fabricated_weekly_metrics(client):
+    """The weekly-review block logged hardcoded fake drift/data-quality numbers
+    and was removed. Hourly sector leadership remains the only periodic task;
+    the week tracker must not exist."""
     engine = client.app.state.engine
     setup_healthy_mocks(engine)
-    
-    # Force week number to trigger weekly check
     now = datetime(2026, 1, 6, 12, 0, 0)
-    engine._last_heartbeat_week = 1
-    
     engine._run_heartbeat_tasks(now + timedelta(days=7))
-    # Verify weekly checks ran and updated the week tracker
-    assert engine._last_heartbeat_week == 3
+    assert not hasattr(engine, "_last_heartbeat_week")
 
 
 def test_dynamic_gating_manual_override(client):

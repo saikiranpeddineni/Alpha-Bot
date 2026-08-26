@@ -238,9 +238,13 @@ class TestSettingsWeights:
     def test_walk_forward_defaults(self):
         from app.config import Settings
         s = Settings()
-        assert s.walk_forward_train_days == 120
+        # 90+10 session window must fit inside the trainer's fetch span
+        # (ALPHADESK_TRAIN_DAYS=180 calendar ~= 126 ET sessions) so at least
+        # min_windows sliding windows exist; 120 previously yielded 0 windows.
+        assert s.walk_forward_train_days == 90
         assert s.walk_forward_val_days == 10
         assert s.walk_forward_min_windows == 3
+        assert s.walk_forward_train_days + s.walk_forward_val_days <= 100
 
 
 # ---------------------------------------------------------------------------

@@ -7,11 +7,10 @@ import os
 import shutil
 import threading
 import uuid
+from collections.abc import Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
-
 
 MANIFEST_FILE = "signal_model.current.json"
 GENERATIONS_DIR = "generations"
@@ -112,18 +111,24 @@ class AtomicGenerationStore:
         manifest = json.loads(self.manifest_path.read_text())
         generation_id = str(manifest["generation_id"])
         generation_dir = self.generations_dir / generation_id
-        meta = json.loads((generation_dir / "meta.json").read_text())
-        if meta.get("generation_id") != generation_id:
-            raise ValueError(
-                f"generation metadata mismatch: manifest={generation_id} "
-                f"meta={meta.get('generation_id')}"
+        # A committed generation must be complete. Partial artifacts (e.g.
+        # replay as-of pruning or interrupted publication) are treated as
+        # absent so callers fail closed to rule-based gating.
+        try:
+            meta = json.loads((generation_dir / "meta.json").read_text())
+            if meta.get("generation_id") != generation_id:
+                raise ValueError(
+                    f"generation metadata mismatch: manifest={generation_id} "
+                    f"meta={meta.get('generation_id')}"
+                )
+            snapshot = ModelGeneration(
+                generation_id=generation_id,
+                long_model=joblib.load(generation_dir / "long.joblib"),
+                short_model=joblib.load(generation_dir / "short.joblib"),
+                meta=meta,
             )
-        snapshot = ModelGeneration(
-            generation_id=generation_id,
-            long_model=joblib.load(generation_dir / "long.joblib"),
-            short_model=joblib.load(generation_dir / "short.joblib"),
-            meta=meta,
-        )
+        except Exception:
+            return None
         with self._snapshot_lock:
             self._snapshot = snapshot
         return snapshot

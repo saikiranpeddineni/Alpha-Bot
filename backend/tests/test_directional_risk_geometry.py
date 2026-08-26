@@ -99,7 +99,10 @@ def test_valid_long_and_short_geometry_are_approved_symmetrically(rm: RiskManage
     assert long_decision.order.qty == short_decision.order.qty
 
 
-def test_synthesized_stop_and_target_remain_directional(rm: RiskManager, bars):
+def test_synthesized_stop_is_directional_and_no_native_target(rm: RiskManager, bars):
+    """PIS exclusively owns profit targets (Phase 1 invariant): risk orders carry
+    a broker-side stop but never a native take-profit. Synthesized stops must
+    still be directionally correct."""
     long_decision = rm.evaluate_entry(
         _signal(SignalAction.ENTER_LONG, price=100.0, stop=None, target=None),
         _ctx(), bars, now=MID_SESSION,
@@ -109,5 +112,8 @@ def test_synthesized_stop_and_target_remain_directional(rm: RiskManager, bars):
         _ctx(), bars, now=MID_SESSION,
     )
     assert long_decision.approved and short_decision.approved
-    assert long_decision.order.stop_loss < 100.0 < long_decision.order.take_profit
-    assert short_decision.order.take_profit < 100.0 < short_decision.order.stop_loss
+    assert long_decision.order.stop_loss < 100.0
+    assert short_decision.order.stop_loss > 100.0
+    # No native broker targets — exit authority belongs to PIS.
+    assert long_decision.order.take_profit is None
+    assert short_decision.order.take_profit is None

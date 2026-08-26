@@ -7,14 +7,13 @@ API; the values here are the boot defaults.
 """
 from __future__ import annotations
 
+import contextvars
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 from pydantic import AliasChoices, BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from typing import Any
-
-import contextvars
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = REPO_ROOT / "data"
@@ -41,12 +40,18 @@ class RiskConfig(BaseModel):
     max_open_positions: int = Field(4, ge=1, le=50)                  # was 4 — 2× concurrent exposure
     max_daily_loss_pct: float = Field(2.0, ge=0.1, le=25.0)         # was 2.0 — room for higher position count
     max_drawdown_pct: float = Field(10.0, ge=1.0, le=50.0)
-    consecutive_loss_limit: int = Field(3, ge=1, le=20)              # was 3 — one more loss before pause
-    cooldown_minutes: int = Field(30, ge=1, le=390)                  # was 30 — faster recovery
+    symbol_cooldown_minutes: int = Field(30, ge=0, le=390)                  # was 30
+    strategy_consecutive_loss_limit: int = Field(3, ge=1, le=20)            # was 3
+    strategy_cooldown_minutes: int = Field(30, ge=0, le=390)                # was 30
     no_entry_minutes_before_close: int = Field(30, ge=0, le=180)     # was 30 — more trading time
     flatten_minutes_before_close: int = Field(5, ge=0, le=60)
     min_price: float = Field(5.0, ge=0.0)
     min_avg_dollar_volume: float = Field(100_000.0, ge=0.0)
+    # Market-data-gap entry block: no bar for N seconds during regular session
+    # flags the symbol untradeable. Thin printers (user-added low-priced names)
+    # legitimately go minutes between prints -- Aug-24 logged 34 false blocks.
+    # 0 disables the gap block entirely.
+    data_gap_threshold_secs: float = Field(120.0, ge=0.0, le=3900.0)
     ml_confidence_threshold: float = Field(0.52, ge=0.0, le=1.0)
     regime_ml_thresholds: dict[str, float] = Field(
         default={
@@ -66,27 +71,60 @@ class RiskConfig(BaseModel):
     max_positions_per_sector: int = Field(3, ge=1, le=10)           # was 2
     max_correlation_penalty: float = Field(0.5, ge=0.0, le=1.0)
     harvest_risk_multiplier: float = Field(3.0, ge=1.0, le=5.0)     # was 2.5 — bigger A+ sizing
-    midday_score_boost: float = Field(10.0, ge=0.0, le=50.0)        # was 15.0 — lighter midday throttle
-    midday_start_et: int = Field(690, ge=570, le=960)
-    midday_end_et: int = Field(795, ge=570, le=960)
-    rsi2_base_fallback_bypass_enabled: bool = Field(True)
-    rsi2_base_fallback_bypass_start_et: int = Field(660, ge=570, le=960)
-    rsi2_base_fallback_bypass_end_et: int = Field(840, ge=570, le=960)
-    bb_squeeze_base_fallback_bypass_enabled: bool = Field(True)
-    bb_squeeze_base_fallback_bypass_start_et: int = Field(840, ge=570, le=960)
-    bb_squeeze_base_fallback_bypass_end_et: int = Field(930, ge=570, le=960)
     scanner_watchlist_ttl: int = Field(15, ge=1, le=30)             # was 3 — hold scanner symbols longer
-    promotion_min_valid_observations: int = Field(30, ge=1, le=1000)
-    promotion_min_win_rate_pct: float = Field(50.0, ge=0.0, le=100.0)
-    promotion_min_expectancy_r: float = Field(0.1, ge=-1.0, le=10.0)
-    alternative_exits: list[dict] = Field(
-        default=[
-            {"policy_id": "exit_bracket_tight", "take_profit_pct": 1.0, "stop_loss_pct": 0.5},
-            {"policy_id": "exit_bracket_wide", "take_profit_pct": 3.0, "stop_loss_pct": 1.5},
-            {"policy_id": "exit_atr_trailing", "trailing_stop_atr_mult": 2.0},
-            {"policy_id": "exit_hybrid_breakeven_atr", "breakeven_r_trigger": 0.30, "trail_r_trigger": 0.75, "tight_trail_r_trigger": 1.50},
-        ]
-    )
+    # Behavioral loop detector: max 24h traded notional / equity before churn breaker fires.
+    # Original design value 2.0; a "for testing" bump to 20.0 accidentally shipped.
+    max_daily_turnover_multiple: float = Field(2.0, ge=0.1, le=100.0)
+    # Fast-replay only: minimum session-time seconds between full market-risk
+    # family evaluations (live path always evaluates every tick). Bars arrive
+    # at 60s cadence, so the default evaluates every other bar.
+    replay_market_risk_eval_interval_sec: int = Field(120, ge=0, le=3600)
+    # --- Recent Performance Governor (evidence-driven entry-risk scaling) ---
+    # Converts the platform's OWN recent closed-trade expectancy per
+    # symbol/strategy/session-hour into a conservative sizing multiplier.
+    # Can only tighten (<= 1.0); adapts automatically as performance changes.
+    governor_enabled: bool = Field(True)
+    governor_lookback_days: int = Field(14, ge=1, le=90)
+    governor_min_trades: int = Field(6, ge=1, le=100)
+    governor_shrink_k: float = Field(8.0, ge=0.0, le=100.0)
+    governor_loss_scale: float = Field(2.2, ge=0.0, le=10.0)
+    governor_floor: float = Field(0.25, ge=0.05, le=1.0)
+    governor_refresh_minutes: int = Field(15, ge=1, le=240)
+    # --- Entry chase veto (evidence-driven) ---
+    # Measured on live history: trades whose DECISION bar was a vertical candle
+    # (range >= 1.8x its own ATR14) closing at the directional extreme went
+    # never-green 77% of the time and lost -49R net -- buying spent moves.
+    # Rejects those candidates outright. Applies uniformly to every strategy;
+    # tightens admission, changes no existing threshold.
+    enable_entry_chase_veto: bool = Field(True)
+    entry_chase_tr_atr_mult: float = Field(1.8, ge=0.5, le=10.0)
+    entry_chase_close_pos: float = Field(0.65, ge=0.5, le=1.0)
+    # Entry location veto: reject entries when price is stretched too far from
+    # session VWAP in the trade direction (mathematically exhausted; inverted
+    # reward:risk). Sibling-bot evidence + our own 68% never-green entries.
+    enable_entry_location_veto: bool = Field(True)
+    entry_max_vwap_stretch_atr: float = Field(3.0, ge=0.5, le=20.0)
+    # Opening blackout: skip NEW entries in the first N minutes after the bell.
+    # Measured on exact-path backtest: 0-5min entries were 6/6 losers (-$910);
+    # all positive expectancy begins ~minute 11. Tightening only.
+    enable_opening_blackout: bool = Field(True)
+    entry_blackout_minutes_from_open: int = Field(10, ge=0, le=120)
+    # Session-extreme proximity guard: block momentum entries INTO a session
+    # extreme. Shorts within K x ATR14 of the session low (longs of the high)
+    # are late continuation chases buying an already-spent multi-bar move --
+    # the single decision-bar chase veto cannot see this class. Measured
+    # 2026-08-24: 3/3 gap_and_go shorts entered <=2.5 ATR of LOD, all lost
+    # (-$230 net) into immediate mean reversion. Mean-reversion strategies are
+    # exempt: fading TOWARD an extreme is their thesis.
+    enable_entry_extreme_guard: bool = Field(True)
+    entry_max_extreme_proximity_atr: float = Field(3.0, ge=0.5, le=20.0)
+    # Entry consensus (breakout strategies): MEASURED & FALSIFIED on Aug 10-21
+    # exact-path backtest -- requiring RS>=50 for momentum longs halved trade
+    # count and cut net from +$3.6k to +$0.3k (weak-RS laggard catch-ups were
+    # profitable). Kept as an opt-in experiment knob, default OFF.
+    enable_entry_consensus: bool = Field(False)
+    entry_consensus_rs_long_min: float = Field(50.0, ge=0.0, le=100.0)
+    entry_consensus_rs_short_max: float = Field(50.0, ge=0.0, le=100.0)
     adaptive_model_weight: float = Field(0.30, ge=0.0, le=1.0)
 
 
@@ -111,7 +149,7 @@ class Settings(BaseSettings):
         }
     )
 
-    host: str = Field("0.0.0.0", validation_alias=AliasChoices("ALPHADESK_HOST", "HOST"))
+    host: str = Field("127.0.0.1", validation_alias=AliasChoices("ALPHADESK_HOST", "HOST"))
     port: int = Field(8742, validation_alias=AliasChoices("ALPHADESK_PORT", "PORT"))
     mode: str = Field("demo", validation_alias=AliasChoices("ALPHADESK_MODE", "MODE"))
     data_provider: str = Field("auto", validation_alias="DATA_PROVIDER")
@@ -128,12 +166,14 @@ class Settings(BaseSettings):
     max_open_positions: int = Field(8, validation_alias="MAX_OPEN_POSITIONS")                # was 4
     max_daily_loss_pct: float = Field(3.0, validation_alias="MAX_DAILY_LOSS_PCT")            # was 2.0
     max_drawdown_pct: float = Field(10.0, validation_alias="MAX_DRAWDOWN_PCT")
-    consecutive_loss_limit: int = Field(4, validation_alias="CONSECUTIVE_LOSS_LIMIT")        # was 3
-    cooldown_minutes: int = Field(10, validation_alias="COOLDOWN_MINUTES")                   # was 30
+    symbol_cooldown_minutes: int = Field(10, validation_alias="COOLDOWN_MINUTES")                   # was 30
+    strategy_consecutive_loss_limit: int = Field(4, validation_alias="CONSECUTIVE_LOSS_LIMIT")        # was 3
+    strategy_cooldown_minutes: int = Field(10, validation_alias="STRATEGY_COOLDOWN_MINUTES")
     no_entry_minutes_before_close: int = Field(15, validation_alias="NO_ENTRY_MINUTES_BEFORE_CLOSE")  # was 30
     flatten_minutes_before_close: int = Field(5, validation_alias="FLATTEN_MINUTES_BEFORE_CLOSE")
     min_price: float = Field(5.0, validation_alias="MIN_PRICE")
     min_avg_dollar_volume: float = Field(100_000.0, validation_alias="MIN_AVG_DOLLAR_VOLUME")
+    data_gap_threshold_secs: float = Field(120.0, validation_alias="DATA_GAP_THRESHOLD_SECS")
     min_specialist_auc: float = Field(0.53, validation_alias="MIN_SPECIALIST_AUC")
     min_stop_pct: float = Field(0.5, validation_alias="MIN_STOP_PCT")
     kelly_fraction_cap: float = Field(0.15, validation_alias="KELLY_FRACTION_CAP")
@@ -156,9 +196,16 @@ class Settings(BaseSettings):
     ml_horizon_bars: int = Field(15, validation_alias="ML_HORIZON_BARS")
     gemini_api_key: str = Field("", validation_alias=AliasChoices("GEMINI_API_KEY", "GOOGLE_API_KEY"))
     anthropic_api_key: str = Field("", validation_alias="ANTHROPIC_API_KEY")
-    walk_forward_train_days: int = Field(120, validation_alias="WALK_FORWARD_TRAIN_DAYS")
+    # 90+10 session window must fit inside the trainer's fetch span
+    # (ALPHADESK_TRAIN_DAYS=180 calendar days ~= 126 ET sessions). The old
+    # 120-day default needed 130 sessions -> "Only 0 windows" every cycle
+    # and promotion AUCs silently computed on full-dataset fits (2026-08-24).
+    walk_forward_train_days: int = Field(90, validation_alias="WALK_FORWARD_TRAIN_DAYS")
     walk_forward_val_days: int = Field(10, validation_alias="WALK_FORWARD_VAL_DAYS")
     walk_forward_min_windows: int = Field(3, validation_alias="WALK_FORWARD_MIN_WINDOWS")
+    # Training is a local batch job: default to the immutable local bar cache
+    # and never hit provider rate limits (429 backoff loops stalled cycles).
+    train_cache_only: bool = Field(True, validation_alias="TRAIN_CACHE_ONLY")
     trade_score_w1: float = Field(0.30, validation_alias="TRADE_SCORE_W1")
     trade_score_w2: float = Field(0.25, validation_alias="TRADE_SCORE_W2")
     trade_score_w3: float = Field(0.20, validation_alias="TRADE_SCORE_W3")
@@ -167,15 +214,9 @@ class Settings(BaseSettings):
     trade_score_w6: float = Field(0.05, validation_alias="TRADE_SCORE_W6")
     dq_max_gap_minutes: int = Field(5, validation_alias="DQ_MAX_GAP_MINUTES")
     dq_max_spread_pct: float = Field(0.5, validation_alias="DQ_MAX_SPREAD_PCT")
-    midday_score_boost: float = Field(15.0, validation_alias="MIDDAY_SCORE_BOOST")
-    midday_start_et: int = Field(690, validation_alias="MIDDAY_START_ET")
-    midday_end_et: int = Field(795, validation_alias="MIDDAY_END_ET")
-    rsi2_base_fallback_bypass_enabled: bool = Field(True, validation_alias="RSI2_BASE_FALLBACK_BYPASS_ENABLED")
-    rsi2_base_fallback_bypass_start_et: int = Field(660, validation_alias="RSI2_BASE_FALLBACK_BYPASS_START_ET")
-    rsi2_base_fallback_bypass_end_et: int = Field(840, validation_alias="RSI2_BASE_FALLBACK_BYPASS_END_ET")
-    bb_squeeze_base_fallback_bypass_enabled: bool = Field(True, validation_alias="BB_SQUEEZE_BASE_FALLBACK_BYPASS_ENABLED")
-    bb_squeeze_base_fallback_bypass_start_et: int = Field(840, validation_alias="BB_SQUEEZE_BASE_FALLBACK_BYPASS_START_ET")
-    bb_squeeze_base_fallback_bypass_end_et: int = Field(930, validation_alias="BB_SQUEEZE_BASE_FALLBACK_BYPASS_END_ET")
+    max_daily_turnover_multiple: float = Field(2.0, validation_alias="MAX_DAILY_TURNOVER_MULTIPLE")
+    ml_min_promotable_auc: float = Field(0.53, validation_alias="ML_MIN_PROMOTABLE_AUC")
+    eod_post_close_grace_minutes: int = Field(15, validation_alias="EOD_POST_CLOSE_GRACE_MINUTES")
     dq_min_bars_warmup: int = Field(50, validation_alias="DQ_MIN_BARS_WARMUP")
     db_path: str = Field("", validation_alias="ALPHADESK_DB_PATH")
     admin_token: str = Field("", validation_alias="ALPHADESK_ADMIN_TOKEN")
@@ -216,12 +257,14 @@ class Settings(BaseSettings):
             max_open_positions=self.max_open_positions,
             max_daily_loss_pct=self.max_daily_loss_pct,
             max_drawdown_pct=self.max_drawdown_pct,
-            consecutive_loss_limit=self.consecutive_loss_limit,
-            cooldown_minutes=self.cooldown_minutes,
+            symbol_cooldown_minutes=self.symbol_cooldown_minutes,
+            strategy_consecutive_loss_limit=self.strategy_consecutive_loss_limit,
+            strategy_cooldown_minutes=self.strategy_cooldown_minutes,
             no_entry_minutes_before_close=self.no_entry_minutes_before_close,
             flatten_minutes_before_close=self.flatten_minutes_before_close,
             min_price=self.min_price,
             min_avg_dollar_volume=self.min_avg_dollar_volume,
+            data_gap_threshold_secs=self.data_gap_threshold_secs,
             ml_confidence_threshold=self.ml_confidence_threshold,
             min_specialist_auc=self.min_specialist_auc,
             min_stop_pct=self.min_stop_pct,
@@ -229,15 +272,6 @@ class Settings(BaseSettings):
             score_threshold_range=self.score_threshold_range,
             score_threshold_volatile=self.score_threshold_volatile,
             score_threshold_event=self.score_threshold_event,
-            midday_score_boost=self.midday_score_boost,
-            midday_start_et=self.midday_start_et,
-            midday_end_et=self.midday_end_et,
-            rsi2_base_fallback_bypass_enabled=self.rsi2_base_fallback_bypass_enabled,
-            rsi2_base_fallback_bypass_start_et=self.rsi2_base_fallback_bypass_start_et,
-            rsi2_base_fallback_bypass_end_et=self.rsi2_base_fallback_bypass_end_et,
-            bb_squeeze_base_fallback_bypass_enabled=self.bb_squeeze_base_fallback_bypass_enabled,
-            bb_squeeze_base_fallback_bypass_start_et=self.bb_squeeze_base_fallback_bypass_start_et,
-            bb_squeeze_base_fallback_bypass_end_et=self.bb_squeeze_base_fallback_bypass_end_et,
             kelly_fraction_cap=self.kelly_fraction_cap,
             max_positions_per_sector=self.max_positions_per_sector,
             max_correlation_penalty=self.max_correlation_penalty,

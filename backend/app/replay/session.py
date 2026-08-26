@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +27,7 @@ class ReplaySessionManager:
             conn.commit()
 
     def create_session(self, replay_id: str, start_date: str, end_date: str, config: dict[str, Any]) -> dict[str, Any]:
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("""INSERT OR REPLACE INTO replay_sessions
                 (replay_id,status,progress_pct,start_date,end_date,config_json,manifest_json,summary_json,created_at,updated_at)
@@ -38,7 +38,7 @@ class ReplaySessionManager:
 
     def update_session(self, replay_id: str, status: str | None = None, progress_pct: float | None = None,
                        manifest: dict[str, Any] | None = None, summary: dict[str, Any] | None = None) -> None:
-        fields, params = ["updated_at = ?"], [datetime.now(timezone.utc).isoformat()]
+        fields, params = ["updated_at = ?"], [datetime.now(UTC).isoformat()]
         for name, value in (("status", status), ("progress_pct", progress_pct)):
             if value is not None:
                 fields.append(f"{name} = ?"); params.append(value)

@@ -3,13 +3,13 @@
 
 from __future__ import annotations
 
-from enum import StrEnum
 from datetime import datetime
+from enum import StrEnum
 from zoneinfo import ZoneInfo
-import numpy as np
+
 import pandas as pd
 
-from app.indicators.ta import efficiency_ratio, atr, session_vwap, ema
+from app.indicators.ta import atr, efficiency_ratio, ema, session_vwap
 
 ET = ZoneInfo("America/New_York")
 
@@ -85,7 +85,7 @@ def classify_market_behavior(spy_df: pd.DataFrame, ts: datetime) -> MarketBehavi
     # Kaufman Efficiency Ratio of SPY over 20 bars
     # Compute on subset to be strictly causal
     close = sub["close"]
-    
+
     # 20-bar ER
     er_series = efficiency_ratio(close, 20)
     er_spy = float(er_series.iloc[-1]) if len(er_series) >= 20 and pd.notna(er_series.iloc[-1]) else 0.25
@@ -94,7 +94,7 @@ def classify_market_behavior(spy_df: pd.DataFrame, ts: datetime) -> MarketBehavi
     atr_series = atr(sub, 14)
     atr_pct_series = (atr_series / close * 100.0).tail(390)
     current_atr_pct = atr_pct_series.iloc[-1] if not atr_pct_series.empty else None
-    
+
     if current_atr_pct is not None and pd.notna(current_atr_pct):
         vol_percentile = float((atr_pct_series <= current_atr_pct).mean())
     else:

@@ -236,6 +236,11 @@ def test_strict_ml_veto_across_times():
         df = make_dummy_df(dt)
         sig = Signal(symbol="AAPL", action=SignalAction.ENTER_LONG, confidence=0.6, strategy="rsi2_reversion", reason="dip", price=100.0, stop_loss=98.5, take_profit=101.5)
         accepted, rejected = pipeline.process("AAPL", df, [sig], Regime.RANGE, features=feats)
-        assert getattr(sig, "ml_gate_decision", None) == "REJECT"
-        assert len(rejected) >= 1
-        assert any("ML confidence" in r for _, r in rejected)
+        if dt.hour == 9 and dt.minute < 40:
+            # Inside the opening blackout the signal is suppressed BEFORE ML
+            # scoring ever runs (Batch 6 entry intelligence).
+            assert any("Opening blackout" in r for _, r in rejected)
+        else:
+            assert getattr(sig, "ml_gate_decision", None) == "REJECT"
+            assert len(rejected) >= 1
+            assert any("ML confidence" in r for _, r in rejected)

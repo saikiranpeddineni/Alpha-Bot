@@ -167,8 +167,10 @@ def test_bb_squeeze_strategy():
     from app.strategies.bb_squeeze import BollingerBandSqueeze
     strat = BollingerBandSqueeze(params={"width_percentile_lookback": 200, "width_percentile_threshold": 0.20, "vol_z_min": -5.0})
     rng = np.random.default_rng(42)
-    # 200 bars of high volatility
-    closes_high = 100.0 + rng.normal(0, 1.0, 200).cumsum()
+    # 200 bars of high volatility with an upward drift: keeps ATR/BB semantics
+    # realistic while guaranteeing the session structural anchor (EMA20 above
+    # VWAP after the first 30 minutes) agrees with the long breakout direction.
+    closes_high = 100.0 + np.linspace(0.0, 12.0, 200) + rng.normal(0, 1.0, 200).cumsum()
     # 25 bars of low volatility consolidation (squeeze)
     closes_squeeze = closes_high[-1] + rng.normal(0, 0.02, 25).cumsum()
     # 1 breakout bar + 1 confirmation bar

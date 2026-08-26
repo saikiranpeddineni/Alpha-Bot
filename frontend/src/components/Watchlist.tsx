@@ -21,6 +21,7 @@ export function Watchlist() {
 
   const watchlist = status?.watchlist ?? [];
   const coreWatchlist = status?.core_watchlist ?? [];
+  const scannerCtx = status?.scanner_context ?? {};
   const quoteBySymbol = new Map(quotes.map((q) => [q.symbol, q]));
 
   async function addSymbol() {
@@ -76,6 +77,7 @@ export function Watchlist() {
         {watchlist.map((sym) => {
           const q = quoteBySymbol.get(sym);
           const isCore = coreWatchlist.length === 0 || coreWatchlist.includes(sym);
+          const sc = scannerCtx[sym];
           return (
             <div
               key={sym}
@@ -85,16 +87,35 @@ export function Watchlist() {
               <span className="sym">
                 {sym}{" "}
                 {!isCore && (
-                  <span 
-                    className={`scanned-badge ${q && q.change_pct < 0 ? 'loser' : 'gainer'}`} 
+                  <span
+                    className={`scanned-badge ${q && q.change_pct < 0 ? 'loser' : 'gainer'}`}
                     title="Dynamically selected by AI Market Scanner"
-                    style={{ 
+                    style={{
                       color: q && q.change_pct < 0 ? '#ff4d4f' : '#52c41a',
                       borderColor: q && q.change_pct < 0 ? '#ff4d4f33' : '#52c41a33',
                       backgroundColor: q && q.change_pct < 0 ? '#ff4d4f11' : '#52c41a11'
                     }}
                   >
                     {q && q.change_pct < 0 ? "LOSER" : "GAINER"}
+                  </span>
+                )}
+                {sc && (
+                  <span
+                    className="ml-tag"
+                    title={`Scanner ML — tech score ${sc.score?.toFixed(2) ?? "n/a"}, walk-forward AUC ${sc.auc > 0 ? sc.auc.toFixed(3) : "n/a"} (min promotable 0.53)`}
+                    style={{
+                      color: sc.auc >= 0.53 ? "#52c41a" : sc.auc > 0 ? "#faad14" : "#8c8c8c",
+                      borderColor: sc.auc >= 0.53 ? "#52c41a33" : sc.auc > 0 ? "#faad1433" : "#8c8c8c22",
+                      backgroundColor: sc.auc >= 0.53 ? "#52c41a11" : sc.auc > 0 ? "#faad1411" : "#8c8c8c0d",
+                      border: "1px solid",
+                      borderRadius: "3px",
+                      fontSize: "9px",
+                      fontWeight: 700,
+                      padding: "0 4px",
+                      marginLeft: "2px",
+                    }}
+                  >
+                    {sc.auc > 0 ? `ML ${sc.auc.toFixed(2)}` : "ML ·"}
                   </span>
                 )}
                 {q?.regime && (

@@ -53,6 +53,7 @@ export function ReplayModal({
   const [volumeConstrained, setVolumeConstrained] = useState(true);
   const [maxVolumePct, setMaxVolumePct] = useState("5");
   const [warmupBars, setWarmupBars] = useState("1500");
+  const [fastMode, setFastMode] = useState(true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [replayData, setReplayData] = useState<any>(null);
@@ -97,6 +98,7 @@ export function ReplayModal({
           volume_constrained: volumeConstrained,
           max_volume_pct: (Number(maxVolumePct) || 5) / 100,
           warmup_bars: Number(warmupBars) || 0,
+          fast_mode: fastMode,
           async_mode: false
         })
       });
@@ -311,6 +313,18 @@ export function ReplayModal({
                   style={{ width: "80px" }}
                 />
               </label>
+              <label
+                style={{ display: "flex", alignItems: "center", gap: "6px", cursor: "pointer" }}
+                title="Day-sharded engine: ~5x faster, fresh-daily state. Uncheck for full-parity continuous replay with the decision timeline."
+              >
+                <input
+                  type="checkbox"
+                  checked={fastMode}
+                  onChange={(e) => setFastMode(e.target.checked)}
+                  style={{ width: "auto", cursor: "pointer" }}
+                />
+                <span>Fast</span>
+              </label>
               <div className="replay-run-wrap">
                 <button className="btn primary replay-run" onClick={handleRunReplay} disabled={loading}>
                   {loading ? (
@@ -378,7 +392,11 @@ export function ReplayModal({
                   <div className="replay-running-flow">
                     Scanner <i /> Strategy <i /> ML + Meta <i /> Spawn <i /> Risk <i /> Broker <i /> Fill <i /> Exit
                   </div>
-                  <p>Fast single-pass deterministic execution. No live broker orders are sent.</p>
+                  <p>
+                    {fastMode
+                      ? "Day-sharded fast engine: each session runs the production tick path in parallel. No live broker orders are sent."
+                      : "Full-parity continuous replay with decision timeline. No live broker orders are sent."}
+                  </p>
                 </div>
               )}
 

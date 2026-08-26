@@ -7,9 +7,6 @@ and order-flow dynamics for every evaluation tick/minute.
 
 from __future__ import annotations
 
-import math
-from typing import Optional
-
 from app.pis.models import (
     ExitAction,
     LifecycleState,
@@ -25,7 +22,7 @@ from app.pis.models import (
 class TradeReasoningEngine:
     """Synthesizes autonomous trade brainstorming and explainable quantitative reasoning."""
 
-    def __init__(self, config: Optional[PISConfig] = None) -> None:
+    def __init__(self, config: PISConfig | None = None) -> None:
         self.config = config or PISConfig()
 
     def generate_narrative(

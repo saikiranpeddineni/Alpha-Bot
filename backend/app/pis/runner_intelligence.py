@@ -6,7 +6,6 @@ Scores runner potential [0.0, 1.0] and determines runner qualification.
 from __future__ import annotations
 
 import math
-from typing import Optional, Tuple
 
 from app.pis.models import MarketRegime, PISConfig, PositionObservation, TradeHealth
 
@@ -14,7 +13,7 @@ from app.pis.models import MarketRegime, PISConfig, PositionObservation, TradeHe
 class RunnerIntelligence:
     """Evaluates runner potential, predicts dynamic Max R capacity, and qualifies runners."""
 
-    def __init__(self, config: Optional[PISConfig] = None) -> None:
+    def __init__(self, config: PISConfig | None = None) -> None:
         self.config = config or PISConfig()
 
     def predict_max_r(
@@ -23,7 +22,7 @@ class RunnerIntelligence:
         peak_r: float,
         health: TradeHealth,
         regime: MarketRegime = MarketRegime.TREND_RUNNER,
-    ) -> Tuple[float, float]:
+    ) -> tuple[float, float]:
         """Predict dynamic maximum R reachable (R_hat_max) and runner probability.
 
         Args:
@@ -93,7 +92,7 @@ class RunnerIntelligence:
         peak_r: float,
         health: TradeHealth,
         regime: MarketRegime = MarketRegime.TREND_RUNNER,
-    ) -> Tuple[float, bool]:
+    ) -> tuple[float, bool]:
         """Evaluate runner score [0.0, 1.0] and qualification status.
 
         Args:

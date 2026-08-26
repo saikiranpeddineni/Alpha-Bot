@@ -32,11 +32,11 @@ def test_shadow_replay_does_not_block_production_tick():
             assert not (fn.value.id == "self" and fn.attr == "_replay_pending_signals")
 
 
-def test_shadow_replay_task_has_explicit_shutdown_owner():
-    init_src = _src("__init__")
-    stop_src = _src("stop")
-    assert "self._shadow_replay_task" in init_src
-    assert '"_shadow_replay_task"' in stop_src
+def test_shadow_replay_stack_is_fully_removed():
+    """The CR-146 shadow replay worker was deleted; no engine references may remain."""
+    src = ENGINE.read_text(encoding="utf-8")
+    assert "_replay_pending_signals" not in src
+    assert "_shadow_replay_task" not in src
 
 
 def test_partial_fill_does_not_mark_order_filled_unconditionally():

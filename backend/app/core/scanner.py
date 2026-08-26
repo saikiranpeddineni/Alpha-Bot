@@ -26,16 +26,15 @@ from enum import Enum
 import numpy as np
 import pandas as pd
 
+from app.ai.features import FEATURE_COLUMNS, build_training_set
 from app.core.applog import applog
+from app.core.gap_scanner import PreMarketGapScanner
 from app.core.scanner_discovery_input import resolve_stage1_symbols
 from app.core.universe_discovery import DiscoveryCoordinator
-from app.core.gap_scanner import PreMarketGapScanner
-from app.ai.features import FEATURE_COLUMNS, build_training_set
 from app.data.manager import DataManager
 from app.risk.market_regime import (
     MarketRiskAggregator,
-    MarketRiskState,
-    SignalHealth,  # re-exported for convenience
+    MarketRiskState,  # re-exported for convenience
 )
 
 
@@ -227,7 +226,7 @@ class MarketScanner:
 
         diag_records = {}
         history_fn = self.data.history
-        
+
         multi_1d: dict[str, pd.DataFrame] = {}
         multi_1m: dict[str, pd.DataFrame] = {}
         if hasattr(self.data, "multi_history"):
@@ -270,7 +269,7 @@ class MarketScanner:
                         df = multi_1d[symbol]
                     else:
                         df = await history_fn(symbol, "1Day", start, end, prefer_cache=True)
-                    
+
                     record["bars_raw"] = len(df) if df is not None else 0
                     record["bars_asof"] = len(df) if df is not None else 0
 
@@ -479,7 +478,7 @@ class MarketScanner:
                     if len(X) < 100:
                         candidate["auc"] = 0.0
                         return candidate
-                    
+
                     if y.nunique() < 2:
                         # Audit Fix: Target class imbalance implies massive one-sided trend.
                         # Do not kill it with AUC 0.0, give it a passing baseline so the main NN can evaluate.
@@ -648,9 +647,14 @@ class MarketScanner:
             applog.error("scanner", f"Scanner pipeline failed: {exc}")
             return ScannerOutcome.FAILED, []
 
-    @classmethod
-    def get_last_scans(cls) -> list[dict]:
-        # F-11 NOTE: _last_scans is now an instance attribute. This class method
-        # is retained for backward compatibility but returns empty list when called
-        # without an instance. Callers should use scanner_instance._last_scans directly.
-        return []
+    @property
+    def mover_context(self) -> dict[str, dict]:
+        """Live gainer/loser context from the gap/movers scanner.
+
+        {symbol: {"direction": "gainer"|"loser", "change_pct": float}}
+        Consumed by strategy evaluation for directional bias.
+        """
+        return getattr(self._gap_scanner, "mover_context", {}) or {}
+
+    def get_last_scans(self) -> list[dict]:
+        return list(self._last_scans)

@@ -25,13 +25,13 @@ Aggregation rules
 
 from __future__ import annotations
 
+import inspect
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import Any
 
-import inspect
 import pandas as pd
 
 
@@ -62,7 +62,6 @@ async def _safe_history(
         return pd.DataFrame()
 
 from app.core.applog import applog
-
 
 # ---------------------------------------------------------------------------
 # Public types
@@ -341,7 +340,7 @@ class MarketRiskAggregator:
                 state = MarketRiskState.CAUTION
             else:
                 state = MarketRiskState.NORMAL
-                
+
             if is_uptrend and pct >= _STRESS_THRESHOLD:
                 reason += " (downgraded due to uptrend)"
             source_ts = df.index[-1].to_pydatetime() if hasattr(df.index[-1], "to_pydatetime") else T

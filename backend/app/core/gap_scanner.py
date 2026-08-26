@@ -151,13 +151,14 @@ class PreMarketGapScanner:
         targets = set(CANDIDATE_POOL)
         targets.update(_FREQUENT_MOVERS)
         target_list = sorted(targets)
-        
+
         try:
             snaps = await provider.get_snapshots(target_list)
         except Exception as exc:
             log.warning(f"[GapScanner] get_snapshots batch failed ({exc})")
             return []
-            
+
+        movers: list[tuple[str, float]] = []
         for symbol, snap in snaps.items():
             try:
                 if snap is None:
@@ -198,7 +199,7 @@ class PreMarketGapScanner:
 
         now = datetime.now(UTC)
         start = now - timedelta(days=5)
-        
+
         res_1d = {}
         if hasattr(self.data, "multi_history"):
             try:

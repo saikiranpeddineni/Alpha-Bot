@@ -208,8 +208,12 @@ def test_restart_rejects_manifest_metadata_generation_mismatch(tmp_path: Path) -
     meta = json.loads(meta_path.read_text())
     meta["generation_id"] = "different-generation"
     meta_path.write_text(json.dumps(meta))
-    with pytest.raises(ValueError, match="generation metadata mismatch"):
-        AtomicGenerationStore(tmp_path).load()
+    # Hardened contract: a generation whose metadata mismatches its manifest is
+    # treated as absent so restart fails closed to rule-based gating instead of
+    # crashing startup.
+    fresh_store = AtomicGenerationStore(tmp_path)
+    assert fresh_store.load() is None
+    assert fresh_store.current is None
 
 
 def test_manifest_never_points_at_staging_directory(tmp_path: Path) -> None:

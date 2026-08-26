@@ -6,7 +6,6 @@ Measures thesis degradation, adverse excursion, and trade stagnation.
 from __future__ import annotations
 
 import math
-from typing import Optional
 
 from app.pis.models import PISConfig, PositionObservation, ThesisDrift
 
@@ -14,7 +13,7 @@ from app.pis.models import PISConfig, PositionObservation, ThesisDrift
 class ThesisDriftEvaluator:
     """Evaluates position thesis health and degradation without numerical instability."""
 
-    def __init__(self, config: Optional[PISConfig] = None) -> None:
+    def __init__(self, config: PISConfig | None = None) -> None:
         self.config = config or PISConfig()
 
     def evaluate(

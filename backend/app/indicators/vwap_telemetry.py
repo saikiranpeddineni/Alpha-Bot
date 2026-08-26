@@ -4,8 +4,9 @@
 from __future__ import annotations
 
 from datetime import datetime
-import pandas as pd
+
 import numpy as np
+import pandas as pd
 
 
 def compute_vwap_telemetry(
@@ -88,7 +89,7 @@ def compute_vwap_telemetry(
         if atr_before > 0:
             telemetry["distance_before_cross_atr"] = round(abs(close[c_idx - 1] - vwap[c_idx - 1]) / atr_before, 4)
             telemetry["cross_velocity"] = round((close[c_idx] - close[c_idx - 1]) / atr_before, 4)
-        
+
         if atr_after > 0:
             telemetry["close_distance_after_cross_atr"] = round(abs(close[c_idx] - vwap[c_idx]) / atr_after, 4)
 
@@ -131,7 +132,7 @@ def compute_vwap_telemetry(
             # Distance from low (if long) or high (if short) to VWAP
             dist_to_vwap = abs(post_cross_lows[idx_offset] - post_cross_vwap[idx_offset]) if crossed_above else abs(post_cross_highs[idx_offset] - post_cross_vwap[idx_offset])
             dist_atr = dist_to_vwap / post_cross_atr[idx_offset] if post_cross_atr[idx_offset] > 0 else 0.0
-            
+
             min_dist_atr = min(min_dist_atr, dist_atr)
             if dist_atr <= 0.15:  # Touched/approached VWAP within 0.15 ATR
                 retest_detected = True

@@ -86,7 +86,7 @@ class TopMoversScanner:
         """
         now = datetime.now(UTC)
         today = self._today()
-        
+
         # Use 15-minute TTL to allow intraday discovery of fresh momentum runners
         if self._cache is not None and self._cache_time is not None:
             if self._cache_date == today and (now - self._cache_time) < self.cache_ttl:
@@ -131,8 +131,8 @@ class TopMoversScanner:
 
         # alpaca-py StockScreenerRequest
         try:
-            from alpaca.data.requests import ScreenerRequest
             from alpaca.data.historical import StockHistoricalDataClient
+            from alpaca.data.requests import ScreenerRequest
             if isinstance(client, StockHistoricalDataClient):
                 req = ScreenerRequest(by="change_percent", top=_TOP_N)
                 resp = client.get_stock_most_actives(req)
@@ -196,7 +196,7 @@ class TopMoversScanner:
 
         now = datetime.now(UTC)
         start = now - timedelta(days=5)
-        
+
         res_1d = {}
         if hasattr(self.data, "multi_history"):
             try:

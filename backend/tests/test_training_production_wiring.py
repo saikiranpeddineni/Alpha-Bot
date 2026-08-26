@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 
 from app.ai.generation import AtomicGenerationStore, TrainingCoordinator
 from app.ai.trainer import ContinuousTrainer, _LegacyContinuousTrainer
+from app.data.base import HistoricalDataCoverageError
 
 
 class _Data:
@@ -121,3 +125,66 @@ def test_cancelled_continuous_global_fit_restores_incumbent_generation(tmp_path:
     assert model._model_long.generation == model._model_short.generation == "g0"
     restarted = AtomicGenerationStore(tmp_path).load()
     assert restarted.generation_id == incumbent.generation_id
+
+
+class _CoverageRaisingCache:
+    """Cache-backed history that always fails the immutable coverage check."""
+
+    def __init__(self, provider_df: pd.DataFrame | None, calls: list[bool]) -> None:
+        self.provider_df = provider_df
+        self.calls = calls
+
+    async def history(self, symbol, timeframe, start, end, prefer_cache=True, cache_policy=None):
+        self.calls.append(prefer_cache)
+        if prefer_cache:
+            raise HistoricalDataCoverageError(
+                symbol=symbol, timeframe=timeframe, start=start, end=end,
+                cached_start=None, cached_end=None,
+                reason="Cached 1-minute session is materially partial",
+            )
+        return self.provider_df
+
+
+def _minute_frame(n: int) -> pd.DataFrame:
+    idx = pd.date_range("2026-08-01 13:30", periods=n, freq="1min", tz="UTC")
+    return pd.DataFrame({"open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 10}, index=idx)
+
+
+def test_fetch_all_repairs_from_provider_when_coverage_errors_exhaust_ladder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """2026-08-26: a holey recent session raised HistoricalDataCoverageError at
+    every ladder rung; the final-rung repair only handled short frames, so the
+    whole cycle aborted with 'No usable data fetched' and models went stale."""
+    async def scenario() -> None:
+        trainer = ContinuousTrainer(_Data(), _Model(tmp_path), tmp_path)
+        calls: list[bool] = []
+        provider_df = _minute_frame(200)
+        trainer.data = _CoverageRaisingCache(provider_df, calls)
+        monkeypatch.setattr("app.config.get_settings", lambda: SimpleNamespace(train_cache_only=True))
+
+        dfs = await trainer._fetch_all(["AAPL"], datetime.now(UTC) - timedelta(days=180), datetime.now(UTC))
+
+        assert dfs.get("AAPL") is provider_df
+        assert len(calls) > 1
+        assert all(calls[:-1])         # every ladder rung tried the cache
+        assert calls[-1] is False      # final attempt repaired from provider
+
+    asyncio.run(scenario())
+
+
+def test_fetch_all_drops_symbol_when_provider_repair_also_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        trainer = ContinuousTrainer(_Data(), _Model(tmp_path), tmp_path)
+        calls: list[bool] = []
+        trainer.data = _CoverageRaisingCache(None, calls)
+        monkeypatch.setattr("app.config.get_settings", lambda: SimpleNamespace(train_cache_only=True))
+
+        dfs = await trainer._fetch_all(["AAPL"], datetime.now(UTC) - timedelta(days=180), datetime.now(UTC))
+
+        assert "AAPL" not in dfs
+        assert calls[-1] is False
+
+    asyncio.run(scenario())

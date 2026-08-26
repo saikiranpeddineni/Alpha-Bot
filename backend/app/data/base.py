@@ -31,10 +31,22 @@ def timeframe_delta(timeframe: str) -> timedelta:
     return TIMEFRAMES[timeframe]
 
 
+_EMPTY_BARS: pd.DataFrame | None = None
+
+
 def empty_bars() -> pd.DataFrame:
-    df = pd.DataFrame(columns=BAR_COLUMNS)
-    df.index = pd.DatetimeIndex([], tz="UTC", name="ts")
-    return df
+    """Canonical empty OHLCV frame.
+
+    Returns a shared immutable-by-convention singleton: constructing a fresh
+    tz-aware empty DataFrame per call showed up as ~1ms x tens-of-thousands
+    of calls in replay profiles. Treat the result as read-only.
+    """
+    global _EMPTY_BARS
+    if _EMPTY_BARS is None:
+        df = pd.DataFrame(columns=BAR_COLUMNS)
+        df.index = pd.DatetimeIndex([], tz="UTC", name="ts")
+        _EMPTY_BARS = df
+    return _EMPTY_BARS
 
 
 def normalize_bars(df: pd.DataFrame) -> pd.DataFrame:

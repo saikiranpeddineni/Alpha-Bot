@@ -22,8 +22,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from app.core.domain import TradeRecord
 from app.core.applog import applog
+from app.core.domain import TradeRecord
 
 
 @dataclass
@@ -145,16 +145,20 @@ class StrategyPerformanceTracker:
             stats._current_streak += 1
             stats.max_consec_losses = max(stats.max_consec_losses, stats._current_streak)
 
-        # R multiple: PnL / initial_risk_per_share * qty
-        initial_risk = getattr(trade, "initial_risk_per_share", None)
+        # R multiple: PnL / (initial_risk_per_share * qty). TradeRecord exposes
+        # `initial_risk` (per-share $ risk) — the previously probed
+        # `initial_risk_per_share` attribute never existed, silently zeroing
+        # every avg_R metric.
+        initial_risk = getattr(trade, "initial_risk", None)
         qty = getattr(trade, "qty", None)
         if initial_risk and qty and initial_risk > 0:
             r = pnl / (initial_risk * qty)
             stats.total_r += r
 
-        # Hold time
-        opened_at = getattr(trade, "opened_at", None)
-        closed_at = getattr(trade, "closed_at", None)
+        # Hold time. TradeRecord exposes entry_at/exit_at (the previously
+        # probed opened_at/closed_at never existed → hold minutes were always 0).
+        opened_at = getattr(trade, "entry_at", None)
+        closed_at = getattr(trade, "exit_at", None)
         if opened_at and closed_at:
             try:
                 diff = (closed_at - opened_at).total_seconds() / 60.0

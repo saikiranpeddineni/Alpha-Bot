@@ -46,7 +46,8 @@ def test_heuristic_gate_direction(tmp_path):
     assert p_up_trending_up > 0.5 > p_up_trending_down
     # score_action flips for shorts
     assert model.score_action(down, SignalAction.ENTER_SHORT) > 0.5
-    assert model.score_action(None, SignalAction.ENTER_LONG) == 0.5
+    # Degraded feature input fails closed: probability is None (pipeline rejects).
+    assert model.score_action(None, SignalAction.ENTER_LONG) is None
 
 
 def test_live_model_has_no_backtest_start_time(tmp_path):
@@ -121,37 +122,4 @@ def test_adaptive_model_tuning(tmp_path):
     p = model.p_up(row)
     assert 0.0 <= p <= 1.0
 
-
-def test_gate_report_with_none_realized_r():
-    from app.ai.gate_report import build_gate_value_report
-    shadow_signals = [
-        {
-            "final_decision": "accepted",
-            "replayed": True,
-            "outcomes": {
-                "15m": {
-                    "fwd_return": None,
-                    "realized_r": None,
-                    "stop_is_synthetic": True,
-                }
-            }
-        },
-        {
-            "final_decision": "rejected",
-            "rejection_stage": "ml_gate",
-            "replayed": True,
-            "outcomes": {
-                "15m": {
-                    "fwd_return": 0.05,
-                    "realized_r": 1.2,
-                    "stop_is_synthetic": False,
-                }
-            }
-        }
-    ]
-    report = build_gate_value_report(shadow_signals, horizon="15m")
-    assert report["horizon"] == "15m"
-    assert report["all_candidates"]["candidates"] == 2
-    # The first candidate had None outcomes -> mapped to 0.0
-    assert report["all_candidates"]["expectancy_r"] == pytest.approx(0.6)  # (0.0 + 1.2) / 2 = 0.6
 

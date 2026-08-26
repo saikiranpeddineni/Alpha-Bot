@@ -11,10 +11,10 @@ from __future__ import annotations
 
 import hashlib
 from datetime import UTC, date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
-from zoneinfo import ZoneInfo
 
 from app.core.domain import Quote
 from app.data.base import DataProvider, empty_bars, normalize_bars, resample_bars

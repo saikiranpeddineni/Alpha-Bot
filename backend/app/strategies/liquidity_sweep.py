@@ -7,11 +7,12 @@ Tight stops with potentially high R multiples.
 
 from __future__ import annotations
 
-import pandas as pd
 from datetime import time
 from zoneinfo import ZoneInfo
 
-from app.core.domain import Signal, SignalAction, Regime
+import pandas as pd
+
+from app.core.domain import Regime, Signal, SignalAction
 from app.strategies.base import Strategy, StrategyContext, register
 
 ET = ZoneInfo("America/New_York")
@@ -21,8 +22,9 @@ ET = ZoneInfo("America/New_York")
 class LiquiditySweep(Strategy):
     name = "liquidity_sweep"
     description = "Trades false breakouts beyond session highs/lows with tight stops"
-    
+
     is_breakout = False
+    is_mean_reversion = True
     ml_threshold = 0.52
     evaluation_horizons = ["30m", "close"]
     regime_weights = {
@@ -33,7 +35,7 @@ class LiquiditySweep(Strategy):
         "whipsaw_ratio_min": 0.50,    # Wick must be at least 50% of the candle
         "vol_z_min": 1.5,             # Volume must spike on the sweep
         "start_time": "10:15",        # Wait for the morning range to establish
-        "end_time": "15:30",          
+        "end_time": "15:30",
         "reward_risk": 3.0,
     }
 
@@ -77,7 +79,7 @@ class LiquiditySweep(Strategy):
 
         vol_z = float(last_row["vol_z"])
         whipsaw_ratio = float(last_row["whipsaw_ratio"])
-        
+
         if vol_z < p["vol_z_min"] or whipsaw_ratio < p["whipsaw_ratio_min"]:
             return None
 
@@ -91,7 +93,7 @@ class LiquiditySweep(Strategy):
         session_df = df.iloc[:-1]
         if session_df.empty:
             return None
-            
+
         session_high = float(session_df["high"].max())
         session_low = float(session_df["low"].min())
 

@@ -1,955 +1,432 @@
-"""Signal Shadow Ledger & Forward Outcome Tracker.
-"""
+"""Shadow ledger: records every REJECTED entry signal and resolves what
+price would have done afterwards.
 
+Purpose: quantify missed winners / avoided losers per gate (pipeline vetoes,
+ML/meta gates, Trade Score, portfolio gate, behavioral detector) without
+touching any trading decision. Purely additive:
+
+- record() is O(1): builds a row and hands it to a background writer thread.
+  It never raises and never blocks on the event loop.
+- Resolution runs in a periodic asyncio task that reads bars off the existing
+  data manager (read-only) and updates pending rows.
+
+Nothing in this module feeds back into sizing, gating, or execution.
+"""
 from __future__ import annotations
 
-import uuid
-from datetime import datetime
-import pandas as pd
-import numpy as np
+import asyncio
+import os
+import queue
+import re
+import sqlite3
+import threading
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from app.core.applog import applog
-from app.core.phase import classify_clock_phase, classify_market_behavior
-from app.core.watchlist_mapper import OpportunityMapper, OpportunityClass
 
-# Module-level persistence-failure counter for operational monitoring (Fix A9 / Issue #191).
-_persistence_failure_count: int = 0
+_DEBUG_FILE = Path(os.environ.get("SHADOW_TRACE", "")) if os.environ.get("SHADOW_TRACE") else None
 
 
-def get_persistence_failure_count() -> int:
-    """Return the number of shadow-signal save failures since process start."""
-    return _persistence_failure_count
-
-
-def _classify_hybrid_effect(
-    production_r: float,
-    hybrid_r: float,
-    epsilon: float = 1e-6,
-) -> str:
-    """Classify the research outcome of Hybrid BE relative to production."""
-    delta = hybrid_r - production_r
-    if abs(delta) <= epsilon:
-        return "HYBRID_NO_EFFECT"
-    if production_r < 0 and hybrid_r > production_r:
-        return "HYBRID_SAVED_LOSS"
-    if production_r > 0 and hybrid_r > production_r:
-        return "HYBRID_IMPROVED_WINNER"
-    if production_r > 0 and hybrid_r < production_r:
-        return "HYBRID_REDUCED_WINNER"
-    if production_r < 0 and hybrid_r < production_r:
-        return "HYBRID_WORSENED_LOSS"
-    return "HYBRID_OTHER"
-
-
-
-
-class ShadowLedger:
-    @staticmethod
-    def calculate_forward_outcomes(
-        df: pd.DataFrame,
-        i: int,
-        direction: str,
-        stop_loss: float | None,
-        entry_price: float,
-        proposed_stop_loss: float | None = None,
-    ) -> dict:
-        """Calculate causal future returns, MAE, MFE, and R multiples at offsets
-
-        1m, 5m, 15m, 30m, 60m, and session close.
-
-        Fix #194/#197: Synthetic stop detection — when stop is missing/invalid, R-metrics
-        are returned as None rather than computed from a fabricated risk distance.
-        Fix #186: Session-close offset is inclusive of the last bar of the session.
-        Fix #175/#183: MFE on a stop-hit bar is bounded by bar["open"] to prevent
-        crediting favorable movement that occurred after the stop triggered.
-        Prospective Telemetry: proposed_stop_loss preserves hypothetical risk definition prior to ML gating.
-        """
-        outcomes = {}
-        if i + 1 >= len(df):
-            return outcomes
-
-        # Determine stop validity before computing risk.
-        stop_is_synthetic = False
-        eff_stop = stop_loss if stop_loss is not None else proposed_stop_loss
-
-        if eff_stop is None or eff_stop == entry_price:
-            initial_stop = entry_price * (0.985 if direction == "long" else 1.015)
-            stop_is_synthetic = True
-        elif direction == "long" and eff_stop >= entry_price:
-            # Wrong-side stop for LONG -> invalid!
-            initial_stop = entry_price * 0.985
-            stop_is_synthetic = True
-        elif direction == "short" and eff_stop <= entry_price:
-            # Wrong-side stop for SHORT -> invalid!
-            initial_stop = entry_price * 1.015
-            stop_is_synthetic = True
-        else:
-            initial_stop = eff_stop
-            stop_is_synthetic = False
-
-        initial_risk = abs(entry_price - initial_stop)
-        # Epsilon guard only — prevents divide-by-zero; the old 0.2%/$0.05 floor
-        # that corrupted valid tight stops is removed (Fix #197).
-        initial_risk = max(initial_risk, 1e-8)
-
-        # Offsets in bars (1 bar = 1 min)
-        offsets = {
-            "1m": 1,
-            "5m": 5,
-            "15m": 15,
-            "30m": 30,
-            "60m": 60,
-        }
-
-        # Fix A6 (#186): Session-close offset is now inclusive of the last bar.
-        # Previously used close_idx - (i+1) which excluded the closing bar.
-        current_date = df.index[i].date()
-        day_bars = df[df.index.date == current_date]
-        if not day_bars.empty:
-            close_idx = df.index.get_loc(day_bars.index[-1])
-            session_close_offset = max(1, close_idx - i)
-            offsets["close"] = session_close_offset
-
-        for name, H in offsets.items():
-            end_idx = min(len(df), i + 1 + H)
-            slice_df = df.iloc[i + 1 : end_idx]
-            if slice_df.empty:
-                continue
-
-            mfe_price = entry_price
-            mae_price = entry_price
-            stop_hit = False
-            exit_price = None
-
-            for bar in slice_df.itertuples(index=False):
-                high_val = float(bar.high)
-                low_val = float(bar.low)
-                bar_open = float(bar.open)
-
-                if direction == "long":
-                    if low_val <= initial_stop:
-                        # Fix A2 (#175/#183): MFE bounded by bar open on stop-hit bar.
-                        stop_hit = True
-                        exit_price = initial_stop
-                        mae_price = min(mae_price, initial_stop)
-                        mfe_price = max(mfe_price, bar_open)
-                        break
-                    else:
-                        mfe_price = max(mfe_price, high_val)
-                        mae_price = min(mae_price, low_val)
-                else:  # short
-                    if high_val >= initial_stop:
-                        # Fix A2 (#175/#183): MFE bounded by bar open on stop-hit bar.
-                        stop_hit = True
-                        exit_price = initial_stop
-                        mae_price = max(mae_price, initial_stop)
-                        mfe_price = min(mfe_price, bar_open)
-                        break
-                    else:
-                        mfe_price = min(mfe_price, low_val)
-                        mae_price = max(mae_price, high_val)
-
-            if stop_hit:
-                pnl = -initial_risk
-            else:
-                final_close = float(slice_df["close"].iloc[-1])
-                pnl = (final_close - entry_price) if direction == "long" else (entry_price - final_close)
-
-            if direction == "long":
-                mfe = mfe_price - entry_price
-                mae = entry_price - mae_price
-            else:
-                mfe = entry_price - mfe_price
-                mae = mae_price - entry_price
-
-            fwd_ret = pnl / entry_price if entry_price > 0 else 0.0
-
-            # Fix A1 (#194/#197): Only emit R-metrics when stop is not synthetic.
-            if not stop_is_synthetic:
-                mfe_r = mfe / initial_risk
-                mae_r = mae / initial_risk
-                realized_r = pnl / initial_risk
-                winner_capture_ratio = realized_r / mfe_r if mfe_r > 0 else 0.0
-                gave_back_r = mfe_r - realized_r
-                gave_back_pct_of_mfe = (gave_back_r / mfe_r * 100.0) if mfe_r > 0 else 0.0
-
-                outcomes[name] = {
-                    "fwd_return": round(fwd_ret, 6),
-                    "mfe": round(mfe, 4),
-                    "mae": round(mae, 4),
-                    "mfe_r": round(mfe_r, 4),
-                    "mae_r": round(mae_r, 4),
-                    "realized_r": round(realized_r, 4),
-                    "winner_capture_ratio": round(winner_capture_ratio, 4),
-                    "gave_back_r": round(gave_back_r, 4),
-                    "gave_back_pct_of_mfe": round(gave_back_pct_of_mfe, 2),
-                    "mfe_before_loss_r": round(mfe_r, 4) if realized_r <= 0 else 0.0,
-                    "stop_is_synthetic": False,
-                }
-            else:
-                outcomes[name] = {
-                    "fwd_return": round(fwd_ret, 6),
-                    "mfe": round(mfe, 4),
-                    "mae": round(mae, 4),
-                    "mfe_r": None,
-                    "mae_r": None,
-                    "realized_r": None,
-                    "winner_capture_ratio": None,
-                    "gave_back_r": None,
-                    "gave_back_pct_of_mfe": None,
-                    "mfe_before_loss_r": None,
-                    "stop_is_synthetic": True,
-                }
-
-        return outcomes
-
-    @staticmethod
-    def record_candidate(
-        db_engine,
-        symbol: str,
-        ts: datetime,
-        strategy: str,
-        direction: str,
-        signal_price: float,
-        stop_loss: float | None,
-        take_profit: float | None,
-        ml_confidence: float | None,
-        final_decision: str,
-        rejection_stage: str,
-        rejection_reason: str,
-        df: pd.DataFrame,
-        spy_df: pd.DataFrame,
-        slot_rvol_val: float | None,
-        vwap_telemetry: dict,
-        mode: str = "backtest",
-        candidate_id: str | None = None,
-        strategy_params: dict | None = None,
-        policy_id: str | None = None,
-        parent_policy_id: str | None = None,
-        policy_version: str | None = None,
-        gate_evidence_json: dict | None = None,
-        spy_vol: float | None = None,
-        # Fix A5 (Issue #176): Accept runtime-tuned alternative exits from the engine.
-        # When None, falls back to boot-time settings (backward-compatible).
-        alternative_exits: list[dict] | None = None,
-        market_regime: str | None = None,
-        vix_value: float | None = None,
-        vix_age: float | None = None,
-        vix_feed_status: str | None = None,
-        regime_source: str | None = None,
-    ) -> dict:
-        """Assembles a telemetry record, computes future outcomes, and saves it to the DB."""
-        if candidate_id is None:
-            # unique prefix: symbol_strat_date_hour_min_sec
-            prefix = f"{symbol}_{strategy}_{ts.strftime('%Y%m%d_%H%M%S')}"
-            candidate_id = f"{prefix}_{uuid.uuid4().hex[:6]}".upper()
-
-        clock_phase = classify_clock_phase(ts)
-        behavior_state = classify_market_behavior(spy_df, ts)
-
-        # Track whether market_regime was supplied externally (VIX-derived) before we estimate
-        _regime_externally_supplied = market_regime is not None
-
-        if market_regime is None:
-            # Estimate regime based on spy_vol if VIX is not provided (e.g. in backtests)
-            if spy_vol is not None:
-                if spy_vol > 0.15:
-                    market_regime = "STRESS"
-                elif spy_vol > 0.08:
-                    market_regime = "CAUTION"
-                else:
-                    market_regime = "RANGE"
-            else:
-                market_regime = "RANGE"
-
-        # Determine regime_source: explicit > caller-supplied > proxy
-        if regime_source is None:
-            if _regime_externally_supplied:
-                regime_source = "VIX"
-            elif spy_vol is not None:
-                regime_source = "SPY_VOL_PROXY"
-            else:
-                regime_source = "UNKNOWN"
-
-        # Classify opportunity mapper class using premarket subset
-        # We can extract premarket bars for today (up to 09:30 AM ET)
-        prior_close = None
-        open_price = None
-        premarket_df = pd.DataFrame()
-        
-        # Causal logic: get current day premarket bars
-        if df is not None and not df.empty:
-            ts_date = ts.date()
-            day_bars = df[df.index.date == ts_date]
-            if not day_bars.empty:
-                # Prior close
-                prior_bars = df[df.index.date < ts_date]
-                if not prior_bars.empty:
-                    prior_close = float(prior_bars["close"].iloc[-1])
-                # Premarket bars
-                premarket_df = day_bars[day_bars.index < day_bars.index[0].replace(hour=9, minute=30)]
-                # Regular session open price
-                reg_bars = day_bars[day_bars.index >= day_bars.index[0].replace(hour=9, minute=30)]
-                if not reg_bars.empty:
-                    open_price = float(reg_bars["open"].iloc[0])
-
-        opp_class = OpportunityMapper.classify_symbol(premarket_df, prior_close, open_price)
-
-        # Counterfactual entry price: the open of next bar (i+1)
-        entry_price = signal_price
-        i = -1
-        if df is not None and not df.empty:
-            try:
-                ts_lookup = ts
-                if getattr(df.index, "tz", None) is None and ts_lookup.tzinfo is not None:
-                    ts_lookup = ts_lookup.replace(tzinfo=None)
-                elif getattr(df.index, "tz", None) is not None and ts_lookup.tzinfo is None:
-                    ts_lookup = ts_lookup.replace(tzinfo=UTC)
-
-                if ts_lookup in df.index:
-                    i = df.index.get_loc(ts_lookup)
-                else:
-                    idx_loc = df.index.get_indexer([ts_lookup], method="nearest")[0]
-                    if idx_loc >= 0:
-                        i = int(idx_loc)
-                if i + 1 >= len(df) and len(df) > 1:
-                    i = max(0, len(df) - 30)
-                if i >= 0 and i + 1 < len(df):
-                    entry_price = float(df["open"].iloc[i + 1])
-            except Exception:
-                pass
-
-        # Derive proposed stop loss if stop_loss was not explicitly passed
-        proposed_stop_loss = None
-        if stop_loss is not None:
-            proposed_stop_loss = stop_loss
-        elif strategy_params and isinstance(strategy_params, dict):
-            sl_pct = strategy_params.get("stop_loss_pct") or strategy_params.get("sl_pct")
-            if sl_pct and signal_price > 0:
-                proposed_stop_loss = signal_price * (1.0 - float(sl_pct) / 100.0 if direction == "long" else 1.0 + float(sl_pct) / 100.0)
-
-        # Calculate outcomes
-        outcomes = {}
-        if df is not None and not df.empty and i != -1:
-            outcomes = ShadowLedger.calculate_forward_outcomes(
-                df, i, direction, stop_loss, entry_price, proposed_stop_loss=proposed_stop_loss
-            )
-
-        payload = {
-            "candidate_id": candidate_id,
-            "timestamp": ts.isoformat(),
-            "symbol": symbol,
-            "strategy": strategy,
-            "direction": direction,
-            "signal_price": round(signal_price, 4),
-            "entry_price": round(entry_price, 4),
-            "stop_loss": round(stop_loss, 4) if stop_loss is not None else None,
-            "proposed_stop_loss": round(proposed_stop_loss, 4) if proposed_stop_loss is not None else None,
-            "take_profit": round(take_profit, 4) if take_profit is not None else None,
-            "clock_phase": clock_phase,
-            "behavior_state": behavior_state,
-            "opportunity_class": opp_class,
-            "ml_confidence": round(ml_confidence, 4) if ml_confidence is not None else None,
-            "final_decision": final_decision,
-            "rejection_stage": rejection_stage,
-            "rejection_reason": rejection_reason,
-            "vwap_state": vwap_telemetry.get("vwap_state"),
-            "vwap_distance_atr": vwap_telemetry.get("vwap_distance_atr"),
-            "vwap_slope": vwap_telemetry.get("vwap_slope"),
-            "vwap_cross_count": vwap_telemetry.get("vwap_cross_count"),
-            "slot_rvol": round(slot_rvol_val, 4) if slot_rvol_val is not None else None,
-            "outcomes": outcomes,
-            "vwap_telemetry": vwap_telemetry,
-            "strategy_params": strategy_params,
-            "replayed": False,
-            "replay_timestamp": None,
-            "replay_valid": None,
-            "replay_failure_reason": None,
-            "simulated_pnl": None,
-            "mfe_pct": None,
-            "mae_pct": None,
-            "exit_reason": None,
-            "tp_hit": None,
-            "sl_hit": None,
-            "policy_id": policy_id,
-            "parent_policy_id": parent_policy_id,
-            "policy_version": policy_version,
-            "gate_evidence_json": gate_evidence_json,
-            "spy_vol": spy_vol,
-            "regime": market_regime,
-            "market_regime": market_regime,
-            "vix_value": round(vix_value, 4) if vix_value is not None else None,
-            "vix_age": round(vix_age, 2) if vix_age is not None else None,
-            "vix_feed_status": vix_feed_status,
-            "regime_source": regime_source,
-        }
-
-        # Calculate unique/shared/redundant veto attribution if gate_evidence_json is present
-        if gate_evidence_json and "vetoes" in gate_evidence_json:
-            vetoes = gate_evidence_json["vetoes"]
-            # Fix C6 (Issue #173): Use canonical strategy horizon instead of hardcoded 15m.
-            from app.strategies.memory import _canonical_realized_r
-            realized_r_val = _canonical_realized_r(strategy, outcomes) if outcomes else 0.0
-            from app.strategies.evaluator import ParallelEvidenceEvaluator
-            attrib = ParallelEvidenceEvaluator.calculate_veto_attribution(vetoes, realized_r_val)
-            payload.update(attrib)
-
-        # Run alternative exits if future data is present (backtest mode)
-        if df is not None and not df.empty and i != -1 and outcomes:
-            # Preserve production risk denominator for common-R metric
-            production_stop = float(stop_loss) if stop_loss is not None else None
-            production_initial_risk = None
-            if production_stop is not None:
-                production_initial_risk = abs(float(entry_price) - production_stop)
-                if production_initial_risk <= 1e-8:
-                    production_initial_risk = None
-
-            # Fix A5 (Issue #176): Use runtime-tuned exits when provided by the engine.
-            if alternative_exits is not None:
-                alt_policies = alternative_exits
-            else:
-                from app.config import get_settings
-                try:
-                    settings = get_settings()
-                    alt_policies = settings.risk_config().alternative_exits
-                except Exception:
-                    alt_policies = [
-                        {"policy_id": "exit_bracket_tight", "take_profit_pct": 1.0, "stop_loss_pct": 0.5},
-                        {"policy_id": "exit_bracket_wide", "take_profit_pct": 3.0, "stop_loss_pct": 1.5},
-                        {"policy_id": "exit_atr_trailing", "trailing_stop_atr_mult": 2.0},
-                        {"policy_id": "exit_hybrid_breakeven_atr", "breakeven_r_trigger": 0.30, "trail_r_trigger": 0.75, "tight_trail_r_trigger": 1.50},
-                    ]
-
-            alt_outcomes = {}
-            # Run replay for production to get precise metrics
-            prod_res = ShadowLedger.replay_signal_60m(
-                df=df,
-                entry_idx=i + 1,
-                direction=direction,
-                stop_loss=stop_loss,
-                take_profit=take_profit,
-                entry_price=entry_price,
-                strategy_name=strategy,
-                strategy_params=strategy_params,
-            )
-            if prod_res:
-                prod_exit_p = prod_res.get("exit_price")
-                prod_common_r = prod_res.get("realized_r")
-                if production_initial_risk is not None and prod_exit_p is not None:
-                    if direction == "long":
-                        prod_common_r = (float(prod_exit_p) - float(entry_price)) / production_initial_risk
-                    else:
-                        prod_common_r = (float(entry_price) - float(prod_exit_p)) / production_initial_risk
-
-                alt_outcomes["exit_production"] = {
-                    "pnl_pct": prod_res["pnl_pct"],
-                    "realized_r": prod_res.get("realized_r"),
-                    "common_realized_r": round(prod_common_r, 6) if prod_common_r is not None else None,
-                    "initial_risk_pct": round((production_initial_risk / float(entry_price) * 100.0), 4) if (entry_price and production_initial_risk) else None,
-                    "exit_reason": prod_res["exit_reason"],
-                    "tp_hit": prod_res["tp_hit"],
-                    "sl_hit": prod_res["sl_hit"],
-                    "bars_held": prod_res["bars_held"],
-                    "mfe_r": prod_res.get("mfe_r"),
-                    "mae_r": prod_res.get("mae_r"),
-                    "stop_is_synthetic": prod_res.get("stop_is_synthetic", False),
-                    "replay_valid": prod_res.get("replay_valid", True),
-                }
-
-            for alt in alt_policies:
-                alt_policy_id = alt.get("policy_id")
-                if not alt_policy_id:
-                    continue
-
-                alt_tp_val = None
-                if "take_profit_pct" in alt:
-                    alt_tp_val = entry_price * (1.0 + alt["take_profit_pct"] / 100.0 if direction == "long" else 1.0 - alt["take_profit_pct"] / 100.0)
-                alt_sl_val = None
-                if "stop_loss_pct" in alt:
-                    alt_sl_val = entry_price * (1.0 - alt["stop_loss_pct"] / 100.0 if direction == "long" else 1.0 + alt["stop_loss_pct"] / 100.0)
-
-                alt_params = {**strategy_params} if strategy_params else {}
-                is_atr_trailing = "trailing_stop_atr_mult" in alt
-                is_hybrid_exit = "breakeven_r_trigger" in alt
-                if is_atr_trailing:
-                    alt_params["trailing_stop_atr_mult"] = alt["trailing_stop_atr_mult"]
-                if is_hybrid_exit:
-                    alt_params["breakeven_r_trigger"] = alt.get("breakeven_r_trigger", 0.30)
-                    alt_params["trail_r_trigger"] = alt.get("trail_r_trigger", 0.75)
-                    alt_params["tight_trail_r_trigger"] = alt.get("tight_trail_r_trigger", 1.50)
-
-                # Fix A4 (Issue #179): ATR trailing & hybrid policies must NOT inherit the
-                # production take-profit — they manage exits via the trailing mechanism.
-                effective_tp = None if (is_atr_trailing or is_hybrid_exit) else (alt_tp_val or take_profit)
-
-                alt_res = ShadowLedger.replay_signal_60m(
-                    df=df,
-                    entry_idx=i + 1,
-                    direction=direction,
-                    stop_loss=alt_sl_val or stop_loss,
-                    take_profit=effective_tp,
-                    entry_price=entry_price,
-                    strategy_name=strategy,
-                    strategy_params=alt_params,
-                )
-                if alt_res:
-                    alt_exit_p = alt_res.get("exit_price")
-                    common_realized_r = None
-                    if production_initial_risk is not None and alt_exit_p is not None:
-                        if direction == "long":
-                            common_realized_r = (float(alt_exit_p) - float(entry_price)) / production_initial_risk
-                        else:
-                            common_realized_r = (float(entry_price) - float(alt_exit_p)) / production_initial_risk
-
-                    eff_stop = alt_sl_val or stop_loss
-                    alt_risk = abs(entry_price - eff_stop) if eff_stop is not None else None
-                    alt_risk_pct = (alt_risk / float(entry_price) * 100.0) if (entry_price and alt_risk) else None
-
-                    alt_outcomes[alt_policy_id] = {
-                        "pnl_pct": alt_res["pnl_pct"],
-                        "realized_r": alt_res.get("realized_r"),
-                        "common_realized_r": round(common_realized_r, 6) if common_realized_r is not None else None,
-                        "initial_risk_pct": round(alt_risk_pct, 4) if alt_risk_pct is not None else None,
-                        "exit_reason": alt_res["exit_reason"],
-                        "tp_hit": alt_res["tp_hit"],
-                        "sl_hit": alt_res["sl_hit"],
-                        "bars_held": alt_res["bars_held"],
-                        "mfe_r": alt_res.get("mfe_r"),
-                        "mae_r": alt_res.get("mae_r"),
-                        "stop_is_synthetic": alt_res.get("stop_is_synthetic", False),
-                        "replay_valid": alt_res.get("replay_valid", True),
-                    }
-
-            prod_common_r = alt_outcomes.get("exit_production", {}).get("common_realized_r")
-            hybrid_outcome = alt_outcomes.get("exit_hybrid_breakeven_atr")
-            if hybrid_outcome and prod_common_r is not None and hybrid_outcome.get("common_realized_r") is not None:
-                h_r = hybrid_outcome["common_realized_r"]
-                hybrid_delta_r = h_r - prod_common_r
-                hybrid_outcome["delta_vs_production_r"] = round(hybrid_delta_r, 6)
-                hybrid_outcome["effect"] = _classify_hybrid_effect(prod_common_r, h_r)
-
-            payload["alternative_exits"] = alt_outcomes
-
-        # Fix A9 (Issue #191): Surface persistence failures instead of silently swallowing.
-        global _persistence_failure_count
-        if db_engine is not None:
-            try:
-                db_engine.save_shadow_signal(
-                    candidate_id=candidate_id,
-                    ts=ts,
-                    symbol=symbol,
-                    strategy=strategy,
-                    direction=direction,
-                    mode=mode,
-                    payload=payload,
-                )
-            except Exception as exc:
-                _persistence_failure_count += 1
-                applog.error(
-                    "shadow_ledger",
-                    f"Failed to persist shadow signal candidate_id={candidate_id} "
-                    f"symbol={symbol} strategy={strategy} ts={ts.isoformat()} — {exc}",
-                )
-
-        return payload
-
-    @staticmethod
-    def replay_signal_60m(
-        df: pd.DataFrame,
-        entry_idx: int,
-        direction: str,
-        stop_loss: float | None,
-        take_profit: float | None,
-        entry_price: float,
-        strategy_name: str | None = None,
-        strategy_params: dict | None = None,
-    ) -> dict:
-        """Simulate a 60-minute trade path to calculate MFE, MAE, TP/SL triggers, trailing stops, and P&L.
-        Runs strategy-specific exits by instantiating the strategy and calling on_bar.
-
-        Fixes applied:
-          A1 (#194/#197): Synthetic stop detection; R-metrics null when stop invalid.
-          A2 (#175/#183/#184): TP/SL checked BEFORE strategy on_bar; MFE/MAE bounded by open on exit bar.
-          A3 (#180): Trailing stop evaluated using prior-bar peak (no same-bar look-ahead).
-          A7 (#189): time_to_target_mins derived from timestamps, not bar count.
-          A8 (#187): Strategy construction/on_bar failures surfaced via replay_valid flag.
-        """
-        if entry_idx >= len(df):
-            return {}
-
-        # Fix A1 (#194/#197): Stop validity detection.
-        stop_is_synthetic = False
-        if stop_loss is None or stop_loss == entry_price:
-            initial_stop = entry_price * (0.985 if direction == "long" else 1.015)
-            stop_is_synthetic = True
-        else:
-            initial_stop = stop_loss
-
-        if direction == "long" and initial_stop >= entry_price:
-            initial_stop = entry_price * 0.985
-            stop_is_synthetic = True
-        elif direction == "short" and initial_stop <= entry_price:
-            initial_stop = entry_price * 1.015
-            stop_is_synthetic = True
-
-        # Path of the next 60 minutes capped at market session close (#231)
-        slice_df = df.iloc[entry_idx : entry_idx + 60]
-        if slice_df.empty:
-            return {}
-
-        entry_ts = slice_df.index[0]
+def _dbg(msg: str) -> None:
+    if _DEBUG_FILE:
         try:
-            from app.core.calendar_helper import get_session_close, ET
-            session_close_dt = get_session_close(entry_ts)
-            idx_tz = getattr(slice_df.index, "tz", None)
-            if idx_tz is None:
-                session_close_dt = session_close_dt.astimezone(ET).replace(tzinfo=None)
-            else:
-                session_close_dt = session_close_dt.astimezone(idx_tz)
-            if entry_ts <= session_close_dt:
-                slice_df = slice_df[slice_df.index <= session_close_dt]
+            with open(_DEBUG_FILE, "a", encoding="utf-8") as f:
+                f.write(f"{datetime.now(UTC).strftime('%H:%M:%S.%f')[:-3]} [{threading.current_thread().name}] {msg}\n")
         except Exception:
             pass
 
-        if slice_df.empty:
-            return {}
+# Default location lives beside the trading DB. Override with
+# ALPHADESK_SHADOW_LEDGER_DB (tests MUST redirect this: engine-level tests
+# otherwise wrote rejection forensics into the production ledger -- observed
+# 2026-08-24 as a 'test_strat' AAPL row inside prod data).
+_DB_PATH = Path(
+    os.environ.get("ALPHADESK_SHADOW_LEDGER_DB")
+    or (Path(__file__).resolve().parents[2] / "data" / "shadow_ledger.db")
+)
 
-        # Surface strategy construction failures (#230).
-        strategy_instance = None
-        replay_valid = True
-        replay_failure_reason: str | None = None
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS shadow_entries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    session_date TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    strategy TEXT,
+    action TEXT,
+    signal_price REAL,
+    stop_loss REAL,
+    take_profit REAL,
+    atr14 REAL,
+    confidence REAL,
+    ml_probability REAL,
+    meta_prob REAL,
+    trade_score REAL,
+    candidate_id TEXT,
+    gate TEXT NOT NULL,
+    reason TEXT,
+    -- resolution
+    resolved INTEGER NOT NULL DEFAULT 0,
+    px_5m REAL, px_15m REAL, px_30m REAL, px_60m REAL,
+    fav_pct_60m REAL,
+    mfe_pct_60m REAL, mae_pct_60m REAL,
+    r_fav_60m REAL,
+    verdict TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_shadow_created ON shadow_entries(created_at);
+CREATE INDEX IF NOT EXISTS idx_shadow_resolved ON shadow_entries(resolved);
+"""
 
-        if strategy_name and strategy_params is not None:
+_META_PROB_RE = re.compile(r"prob[_ ]([01]\.\d+)")
+_TRADE_SCORE_RE = re.compile(r"Trade Score (\d+(?:\.\d+)?)")
+
+# verdict thresholds (favorable move over next 60 minutes)
+WINNER_PCT = 0.5
+WINNER_R = 0.75
+
+
+def _parse_meta_prob(reason: str) -> float | None:
+    m = _META_PROB_RE.search(reason or "")
+    return float(m.group(1)) if m else None
+
+
+def _parse_trade_score(reason: str) -> float | None:
+    m = _TRADE_SCORE_RE.search(reason or "")
+    return float(m.group(1)) if m else None
+
+
+class ShadowLedger:
+    """Fire-and-forget recorder + background resolver."""
+
+    _initialized_paths: set[Path] = set()
+    _init_lock = threading.Lock()
+
+    def __init__(self, db_path: Path = _DB_PATH) -> None:
+        self._db_path = Path(db_path)
+        self._queue: queue.Queue[dict] = queue.Queue()
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
+        # Replay isolation: replays must not write rejection forensics into
+        # the production ledger (2026-08-26: one replay deposited ~300 rows
+        # that then stalled the resolver waiting on forward bars the cache
+        # will never have). Runtime flips this off for the duration of a pass.
+        self.enabled = True
+        # Schema/WAL are applied exactly once per file, before any concurrent
+        # connection exists. Running DDL on every connect caused persistent
+        # 'database is locked' collisions between writer and readers.
+        self._init_db(self._db_path)
+        self._start_writer()
+
+    @staticmethod
+    def _plain_connect(path: Path) -> sqlite3.Connection:
+        con = sqlite3.connect(path, timeout=10, check_same_thread=False)
+        con.execute("PRAGMA busy_timeout=5000")
+        return con
+
+    @classmethod
+    def _init_db(cls, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with cls._init_lock:
+            if path in cls._initialized_paths:
+                return
+            con = cls._plain_connect(path)
             try:
-                from app.strategies.base import REGISTRY
-                strat_cls = REGISTRY.get(strategy_name)
-                if strat_cls:
-                    strategy_instance = strat_cls(params=strategy_params)
-            except Exception as exc:
-                replay_valid = False
-                replay_failure_reason = f"strategy_construction_failed: {exc}"
-                applog.warning(
-                    "shadow_ledger",
-                    f"replay_signal_60m: could not instantiate strategy '{strategy_name}': {exc}",
-                )
+                con.execute("PRAGMA journal_mode=WAL")
+                con.executescript(_SCHEMA)
+                con.commit()
+            finally:
+                con.close()
+            cls._initialized_paths.add(path)
 
-        # Set up simulated position for strategy.on_bar exits
-        from app.core.domain import Position, SignalAction
-        from app.strategies.base import StrategyContext
-        sim_pos = Position(
-            symbol=str(slice_df.iloc[0].get("symbol", "UNKNOWN")),
-            avg_entry_price=entry_price,
-            qty=100 if direction == "long" else -100,
-            market_price=entry_price,
-            unrealized_pnl=0.0,
-            realized_pnl=0.0,
-            stop_loss=initial_stop,
-            take_profit=take_profit,
-            strategy=strategy_name or "unknown",
-        )
+    # ------------------------------------------------------------------
+    def record(
+        self,
+        *,
+        symbol: str,
+        action: str,
+        strategy: str,
+        gate: str,
+        reason: str,
+        price: float | None = None,
+        stop_loss: float | None = None,
+        take_profit: float | None = None,
+        atr14: float | None = None,
+        confidence: float | None = None,
+        sig=None,
+        extra_reason: str = "",
+    ) -> None:
+        """Capture one rejected entry signal. Never raises."""
+        if not self.enabled:
+            return
+        try:
+            now = datetime.now(UTC)
+            reason_full = f"{reason}{(' | ' + extra_reason) if extra_reason else ''}"
+            row = {
+                "created_at": now.isoformat(),
+                "session_date": now.date().isoformat(),
+                "symbol": symbol.upper(),
+                "strategy": strategy,
+                "action": action,
+                "signal_price": price,
+                "stop_loss": stop_loss,
+                "take_profit": take_profit,
+                "atr14": atr14,
+                "confidence": confidence,
+                "ml_probability": getattr(sig, "ml_probability", None),
+                "meta_prob": _parse_meta_prob(reason_full),
+                "trade_score": _parse_trade_score(reason_full),
+                "candidate_id": getattr(sig, "candidate_id", None),
+                "gate": gate,
+                "reason": reason_full[:500],
+            }
+            self._queue.put_nowait(row)
+            _dbg(f"recorded {row['symbol']} {row['action']} gate={gate}")
+        except Exception as ex:  # noqa: BLE001 - must never affect prod path
+            _dbg(f"record EXC {ex!r}")
 
-        mfe_price = entry_price
-        mae_price = entry_price
-        mfe_time: str | None = None
-        mae_time: str | None = None
-        mfe_step = 0
-        mae_step = 0
-        tp_triggered = False
-        sl_triggered = False
-        exit_price: float | None = None
-        exit_reason = "time"
-        bars_held = 0
-        exit_ts: object = None
+    # ------------------------------------------------------------------
+    def _connect(self) -> sqlite3.Connection:
+        return self._plain_connect(self._db_path)
 
-        # Fix A3 (#180): position_peak starts at entry_price (prior-bar state at bar 0).
-        # We evaluate trailing-stop triggers BEFORE updating peak with the current bar.
-        position_peak = entry_price
-        initial_risk = max(abs(entry_price - initial_stop), 1e-8)
-        ts_mult = strategy_params.get("trailing_stop_atr_mult", 0) if strategy_params else 0
-        is_hybrid = ("breakeven_r_trigger" in strategy_params) if strategy_params else False
-        be_trig = strategy_params.get("breakeven_r_trigger", 0.30) if strategy_params else 0.30
-        trail_trig = strategy_params.get("trail_r_trigger", 0.75) if strategy_params else 0.75
-        tight_trig = strategy_params.get("tight_trail_r_trigger", 1.50) if strategy_params else 1.50
-
-        entry_ts = slice_df.index[0] if not slice_df.empty else None
-
-        for step, bar in enumerate(slice_df.itertuples(index=True)):
-            bar_ts = bar.Index
-            bars_held = step + 1
-            high_val = float(bar.high)
-            low_val = float(bar.low)
-            close_val = float(bar.close)
-            bar_open = float(bar.open)
-
-            # Compute trailing stop or hybrid breakeven-ATR stop from prior-bar peak
-            trailing_stop_price: float | None = None
-            if ts_mult > 0:
-                atr_val = getattr(bar, "atr14", None)
-                atr = float(atr_val) if atr_val is not None and pd.notna(atr_val) else 0.0
-                if atr > 0:
-                    if direction == "long":
-                        trailing_stop_price = position_peak - ts_mult * atr
-                    else:
-                        trailing_stop_price = position_peak + ts_mult * atr
-            elif is_hybrid and initial_risk > 0:
-                curr_mfe = (position_peak - entry_price) if direction == "long" else (entry_price - position_peak)
-                curr_mfe_r = curr_mfe / initial_risk
-                atr_val = getattr(bar, "atr14", None)
-                atr = float(atr_val) if atr_val is not None and pd.notna(atr_val) else (entry_price * 0.01)
-                eff_stop = initial_stop
-                if curr_mfe_r >= be_trig:
-                    be_price = entry_price * (1.0005 if direction == "long" else 0.9995)
-                    eff_stop = max(eff_stop, be_price) if direction == "long" else min(eff_stop, be_price)
-                if curr_mfe_r >= trail_trig:
-                    mult = 1.0 if curr_mfe_r >= tight_trig else 1.5
-                    t_price = (position_peak - mult * atr) if direction == "long" else (position_peak + mult * atr)
-                    eff_stop = max(eff_stop, t_price) if direction == "long" else min(eff_stop, t_price)
-                if eff_stop != initial_stop:
-                    trailing_stop_price = eff_stop
-
-            # Fix A2 (#184): Bracket TP/SL evaluated FIRST (resting broker orders fill intrabar).
-            sl_hit = False
-            tp_hit = False
-
-            if direction == "long":
-                if low_val <= initial_stop:
-                    sl_hit = True
-                if take_profit is not None and high_val >= take_profit:
-                    tp_hit = True
-            else:
-                if high_val >= initial_stop:
-                    sl_hit = True
-                if take_profit is not None and low_val <= take_profit:
-                    tp_hit = True
-
-            # Check trailing stop trigger (prior-bar level) if no bracket stop
-            trailing_stop_triggered = False
-            if trailing_stop_price is not None and not sl_hit:
-                if direction == "long" and low_val <= trailing_stop_price:
-                    trailing_stop_triggered = True
-                elif direction == "short" and high_val >= trailing_stop_price:
-                    trailing_stop_triggered = True
-
-            # Resolve bracket triggers (ties: SL wins, marked ambiguous)
-            if sl_hit and tp_hit:
-                sl_triggered = True
-                exit_price = initial_stop
-                exit_reason = "ambiguous"
-                exit_ts = bar_ts
-                # Fix A2 (#175/#183): Bound MFE/MAE to bar open on exit bar
-                if direction == "long":
-                    mae_price = min(mae_price, initial_stop)
-                    mfe_price = max(mfe_price, bar_open)
-                else:
-                    mae_price = max(mae_price, initial_stop)
-                    mfe_price = min(mfe_price, bar_open)
-                break
-            elif sl_hit:
-                sl_triggered = True
-                exit_price = initial_stop
-                exit_reason = "sl"
-                exit_ts = bar_ts
-                if direction == "long":
-                    mae_price = min(mae_price, initial_stop)
-                    mfe_price = max(mfe_price, bar_open)
-                else:
-                    mae_price = max(mae_price, initial_stop)
-                    mfe_price = min(mfe_price, bar_open)
-                break
-            elif tp_hit:
-                tp_triggered = True
-                exit_price = take_profit
-                exit_reason = "tp"
-                exit_ts = bar_ts
-                if direction == "long":
-                    mfe_price = max(mfe_price, take_profit)  # type: ignore[arg-type]
-                    mae_price = min(mae_price, bar_open)
-                else:
-                    mfe_price = min(mfe_price, take_profit)  # type: ignore[arg-type]
-                    mae_price = max(mae_price, bar_open)
-                break
-            elif trailing_stop_triggered:
-                exit_price = trailing_stop_price  # type: ignore[assignment]
-                exit_reason = "trailing_stop"
-                exit_ts = bar_ts
-                if direction == "long":
-                    mae_price = min(mae_price, trailing_stop_price)  # type: ignore[arg-type]
-                    mfe_price = max(mfe_price, bar_open)
-                else:
-                    mae_price = max(mae_price, trailing_stop_price)  # type: ignore[arg-type]
-                    mfe_price = min(mfe_price, bar_open)
-                break
-
-            # No bracket/trailing exit — update excursion metrics, then check close-based strategy exit.
-            if direction == "long":
-                if high_val > mfe_price:
-                    mfe_price = high_val
-                    mfe_time = bar_ts.strftime("%H:%M:%S")
-                    mfe_step = step + 1
-                if low_val < mae_price:
-                    mae_price = low_val
-                    mae_time = bar_ts.strftime("%H:%M:%S")
-                    mae_step = step + 1
-            else:
-                if low_val < mfe_price:
-                    mfe_price = low_val
-                    mfe_time = bar_ts.strftime("%H:%M:%S")
-                    mfe_step = step + 1
-                if high_val > mae_price:
-                    mae_price = high_val
-                    mae_time = bar_ts.strftime("%H:%M:%S")
-                    mae_step = step + 1
-
-            # Update simulated position's current market price
-            sim_pos.market_price = close_val
-
-            # Fix A2 (#184): Strategy on_bar is close-based — after bracket checks.
-            # Fix A8 (#187): Surface on_bar failures via replay_valid flag.
-            strategy_exit = False
-            if strategy_instance is not None and replay_valid:
+    def _start_writer(self) -> None:
+        def _writer_loop() -> None:
+            _dbg("writer thread started")
+            try:
+                con = self._connect()
+            except Exception as ex:
+                _dbg(f"writer connect FAILED: {ex!r}")
+                return
+            cols = ["created_at", "session_date", "symbol", "strategy", "action", "signal_price", "stop_loss", "take_profit", "atr14", "confidence", "ml_probability", "meta_prob", "trade_score", "candidate_id", "gate", "reason"]
+            sql = (
+                f"INSERT INTO shadow_entries ({', '.join(cols)}) "
+                f"VALUES ({', '.join(':' + c for c in cols)})"
+            )
+            while not self._stop.is_set():
+                batch: list[dict] = []
                 try:
-                    sub_df = df.iloc[: entry_idx + step + 1]
-                    from app.core.domain import Regime
-                    regime = Regime.RANGE
-                    if "regime" in bar:
-                        regime = bar["regime"]
+                    batch.append(self._queue.get(timeout=2.0))
+                    while len(batch) < 200:
+                        batch.append(self._queue.get_nowait())
+                except queue.Empty:
+                    pass
+                except Exception:
+                    continue
+                if not batch:
+                    continue
+                # Retry: dropping a batch on a transient lock would silently
+                # lose rejection forensics forever.
+                for attempt in range(5):
+                    try:
+                        con.executemany(sql, batch)
+                        con.commit()
+                        _dbg(f"committed {len(batch)} rows (attempt {attempt})")
+                        break
+                    except sqlite3.OperationalError as e:
+                        if attempt == 4:
+                            applog.warning("shadow", f"write batch dropped after retries: {e}")
+                        else:
+                            self._stop.wait(0.2 * (attempt + 1))
+                    except Exception as e:  # noqa: BLE001
+                        applog.warning("shadow", f"writer flush failed: {e}")
+                        break
 
-                    sctx = StrategyContext(
-                        position=sim_pos,
-                        equity=100000.0,
-                        regime=regime,
-                        now=bar_ts.to_pydatetime() if hasattr(bar_ts, "to_pydatetime") else bar_ts,
-                    )
-                    exit_sig = strategy_instance.on_bar(sctx, sim_pos.symbol, sub_df)
-                    if exit_sig is not None and exit_sig.action == SignalAction.EXIT:
-                        strategy_exit = True
-                except Exception as exc:
-                    replay_valid = False
-                    replay_failure_reason = f"on_bar_failed: {exc}"
-                    applog.warning(
-                        "shadow_ledger",
-                        f"replay_signal_60m: on_bar raised for '{strategy_name}' step={step}: {exc}",
-                    )
+        self._thread = threading.Thread(target=_writer_loop, name="shadow-ledger", daemon=True)
+        self._thread.start()
 
-            if strategy_exit:
-                exit_price = close_val
-                exit_reason = "strategy_exit"
-                exit_ts = bar_ts
-                break
+    # ------------------------------------------------------------------
+    async def resolve_pending(self, data_manager, max_rows: int = 300) -> int:
+        """Update forward-return fields for unresolved entries. Read-only w.r.t. prod."""
+        if not self.enabled:
+            return 0
 
-            # Fix A3 (#180): Update peak AFTER trigger evaluation.
-            if direction == "long":
-                position_peak = max(position_peak, high_val)
-            else:
-                position_peak = min(position_peak, low_val)
+        updated = 0
 
-        # (bracket/trailing check blocks moved above strategy on_bar — see fix A2/A3)
-
-        # Fallback if trade did not exit via TP/SL/trailing stop/strategy exit
-        if exit_price is None:
-            exit_price = float(slice_df["close"].iloc[-1])
-            exit_reason = "time"
-            exit_ts = slice_df.index[-1]
-
-        # Excursion and returns calculation
-        pnl = (exit_price - entry_price) if direction == "long" else (entry_price - exit_price)
-        pnl_pct = (pnl / entry_price * 100.0) if entry_price > 0 else 0.0
-
-        if direction == "long":
-            mfe = mfe_price - entry_price
-            mae = entry_price - mae_price
-        else:
-            mfe = entry_price - mfe_price
-            mae = mae_price - entry_price
-
-        mfe_pct = (mfe / entry_price * 100.0) if entry_price > 0 else 0.0
-        mae_pct = (mae / entry_price * 100.0) if entry_price > 0 else 0.0
-
-        # Fix A7 (#189): time_to_target_mins derived from timestamps, not bar count.
-        time_to_target_mins: float | None = None
-        target_reached = tp_triggered or sl_triggered or exit_reason in ("trailing_stop", "strategy_exit")
-        if target_reached and entry_ts is not None and exit_ts is not None:
+        def _fetch(symbol: str, target: datetime):
             try:
-                entry_dt = entry_ts.to_pydatetime() if hasattr(entry_ts, "to_pydatetime") else entry_ts
-                exit_dt = exit_ts.to_pydatetime() if hasattr(exit_ts, "to_pydatetime") else exit_ts
-                time_to_target_mins = round((exit_dt - entry_dt).total_seconds() / 60.0, 2)
+                df = data_manager.frame(symbol, "1Min", limit=600)
+                if df is not None and not getattr(df, "empty", True):
+                    idx = df.index
+                    if getattr(idx, "tz", None) is None:
+                        idx = idx.tz_localize(UTC)
+                    if len(idx) and idx.min() <= target <= idx.max():
+                        return df
+                # Retro path: the rolling frame only holds the most recent
+                # ~600 bars, so rows older than that (server restart, weekend)
+                # could NEVER resolve and stuck unresolved forever. Pull the
+                # decision window from cache-backed history instead.
+                try:
+                    return data_manager.history(
+                        symbol.upper(), "1Min",
+                        target - timedelta(minutes=30), target + timedelta(minutes=90),
+                    )
+                except Exception:
+                    return df
             except Exception:
-                time_to_target_mins = None
+                return None
 
-        exit_ts_str = None
-        if exit_ts is not None:
-            try:
-                exit_ts_str = exit_ts.isoformat() if hasattr(exit_ts, "isoformat") else str(exit_ts)
-            except Exception:
-                exit_ts_str = str(exit_ts)
+        con = await asyncio.to_thread(self._connect)
+        errors = 0
+        skipped = 0
+        try:
+            rows = await asyncio.to_thread(
+                con.execute,
+                "SELECT id, created_at, symbol, action, signal_price, stop_loss, atr14 "
+                "FROM shadow_entries WHERE resolved = 0 ORDER BY id LIMIT ?",
+                (max_rows,),
+            )
+            pending = rows.fetchall()
+            for row_id, created_at, symbol, action, entry_px, stop_px, atr in pending:
+                try:
+                    dec_dt = datetime.fromisoformat(created_at)
+                    age = datetime.now(UTC) - dec_dt
+                    target = dec_dt.astimezone(UTC).replace(second=0, microsecond=0)
+                    df = await asyncio.to_thread(_fetch, symbol, target)
+                    if df is None or getattr(df, "empty", True):
+                        if age > timedelta(hours=6):
+                            await asyncio.to_thread(
+                                con.execute,
+                                "UPDATE shadow_entries SET resolved=1, verdict='NO_BARS' WHERE id=?",
+                                (row_id,),
+                            )
+                            updated += 1
+                        else:
+                            skipped += 1
+                        continue
+                    idx = df.index
+                    # Normalize the bar index to tz-aware UTC regardless of what
+                    # the provider returns (naive UTC, aware, etc.). A mismatch
+                    # here silently skipped every row (2026-08-24 finding).
+                    if getattr(idx, "tz", None) is None:
+                        idx = idx.tz_localize(UTC)
+                    idx = idx.tz_convert(UTC)
+                    # Positional lookup: get_loc breaks on duplicate timestamps.
+                    start_loc = int(idx.searchsorted(target, side="left"))
+                    if start_loc >= len(idx):
+                        if age > timedelta(hours=6):
+                            await asyncio.to_thread(
+                                con.execute,
+                                "UPDATE shadow_entries SET resolved=1, verdict='NO_BARS' WHERE id=?",
+                                (row_id,),
+                            )
+                            updated += 1
+                        else:
+                            skipped += 1
+                        continue
+                    window = df.iloc[start_loc : start_loc + 61]
+                    if len(window) < 2:
+                        # Sparse forward bars (cache gaps on thin names): without
+                        # this age-out the row waited forever and the cycle
+                        # logged waiting=N resolved=0 every minute (2026-08-25).
+                        if age > timedelta(hours=6):
+                            await asyncio.to_thread(
+                                con.execute,
+                                "UPDATE shadow_entries SET resolved=1, verdict='NO_BARS' WHERE id=?",
+                                (row_id,),
+                            )
+                            updated += 1
+                        else:
+                            skipped += 1
+                        continue
+                    closes = [float(x) for x in window["close"].iloc[:61]]
+                    highs = [float(x) for x in window["high"].iloc[:61]]
+                    lows = [float(x) for x in window["low"].iloc[:61]]
+                    entry = entry_px if entry_px is not None else closes[0]
 
-        # Fix A1 (#194/#197): Null R-metrics when stop is synthetic.
-        if not stop_is_synthetic:
-            initial_risk = abs(entry_price - initial_stop)
-            initial_risk = max(initial_risk, 1e-8)
+                    def px_at(k: int, _closes: list[float] = closes) -> float:
+                        return _closes[k] if k < len(_closes) else _closes[-1]
 
-            mfe_r = mfe / initial_risk
-            mae_r = mae / initial_risk
-            realized_r = pnl / initial_risk
-            winner_capture_ratio = realized_r / mfe_r if (realized_r > 0 and mfe_r > 0) else 0.0
-            gave_back_r = mfe_r - realized_r
-            gave_back_pct_of_mfe = (gave_back_r / mfe_r * 100.0) if mfe_r > 0 else 0.0
-            mfe_before_loss_r = mfe_r if realized_r <= 0 else 0.0
+                    p5, p15, p30, p60 = px_at(5), px_at(15), px_at(30), px_at(min(60, len(closes) - 1))
+                    sign = 1.0 if str(action).upper().endswith("LONG") else -1.0
+                    fav_pct = (p60 - entry) / entry * 100 * sign
+                    if sign > 0:
+                        mfe = (max(highs) - entry) / entry * 100
+                        mae = (entry - min(lows)) / entry * 100
+                    else:
+                        mfe = (entry - min(lows)) / entry * 100
+                        mae = (max(highs) - entry) / entry * 100
+                    r_fav = None
+                    if stop_px is not None and atr is not None:
+                        risk = abs(entry - stop_px) or atr
+                        r_fav = (p60 - entry) * sign / risk
+                    elapsed_bars = len(window) - 1
+                    fully_elapsed = elapsed_bars >= 60 or age > timedelta(hours=6)
+                    if not fully_elapsed:
+                        skipped += 1
+                        continue
+                    if fav_pct >= WINNER_PCT or (r_fav is not None and r_fav >= WINNER_R):
+                        verdict = "MISSED_WINNER"
+                    elif fav_pct <= -WINNER_PCT or (r_fav is not None and r_fav <= -WINNER_R):
+                        verdict = "AVOIDED_LOSER"
+                    else:
+                        verdict = "NEUTRAL"
+                    await asyncio.to_thread(
+                        con.execute,
+                        "UPDATE shadow_entries SET resolved=1, px_5m=?, px_15m=?, px_30m=?, "
+                        "px_60m=?, fav_pct_60m=?, mfe_pct_60m=?, mae_pct_60m=?, r_fav_60m=?, "
+                        "verdict=? WHERE id=?",
+                        (
+                            round(p5, 4), round(p15, 4), round(p30, 4), round(p60, 4),
+                            round(fav_pct, 3), round(mfe, 3), round(mae, 3),
+                            round(r_fav, 3) if r_fav is not None else None,
+                            verdict, row_id,
+                        ),
+                    )
+                    updated += 1
+                except Exception as e:  # noqa: BLE001
+                    errors += 1
+                    if errors <= 3:
+                        applog.warning("shadow", f"resolve failed for row {row_id} ({symbol}): {e!r}")
+            if updated or errors:
+                await asyncio.to_thread(con.commit)
+        finally:
+            con.close()
+        # Visibility: a fully silent cycle hid the tz bug for a full session.
+        if pending and (updated or skipped or errors):
+            applog.info(
+                "shadow",
+                f"cycle: pending={len(pending)} resolved={updated} waiting={skipped} errors={errors}",
+            )
+        return updated
 
+    # ------------------------------------------------------------------
+    def query(self, limit: int = 100, verdict: str | None = None) -> dict:
+        con = self._plain_connect(self._db_path)
+        con.row_factory = sqlite3.Row
+        try:
+            where, params = "", []
+            if verdict and verdict != "all":
+                where = "WHERE verdict = ?"
+                params.append(verdict)
+            rows = con.execute(
+                f"SELECT * FROM shadow_entries {where} ORDER BY id DESC LIMIT ?", (*params, limit)
+            ).fetchall()
+            summary = con.execute(
+                "SELECT verdict, COUNT(*) n FROM shadow_entries WHERE resolved=1 GROUP BY verdict"
+            ).fetchall()
+            missed = con.execute(
+                "SELECT * FROM shadow_entries WHERE verdict='MISSED_WINNER' ORDER BY fav_pct_60m DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
             return {
-                "entry_price": round(entry_price, 4),
-                "exit_price": round(exit_price, 4),
-                "exit_reason": exit_reason,
-                "bars_held": bars_held,
-                "exit_timestamp": exit_ts_str,
-                "mfe_pct": round(mfe_pct, 4),
-                "mae_pct": round(mae_pct, 4),
-                "mfe_r": round(mfe_r, 4),
-                "mae_r": round(mae_r, 4),
-                "realized_r": round(realized_r, 4),
-                "winner_capture_ratio": round(winner_capture_ratio, 4),
-                "gave_back_r": round(gave_back_r, 4),
-                "gave_back_pct_of_mfe": round(gave_back_pct_of_mfe, 2),
-                "mfe_before_loss_r": round(mfe_before_loss_r, 4),
-                "time_to_mfe": mfe_step,
-                "time_to_mae": mae_step,
-                "mfe_time": mfe_time or slice_df.index[0].strftime("%H:%M:%S"),
-                "mae_time": mae_time or slice_df.index[0].strftime("%H:%M:%S"),
-                "tp_hit": tp_triggered,
-                "sl_hit": sl_triggered,
-                "pnl_pct": round(pnl_pct, 4),
-                "time_to_target_mins": time_to_target_mins,
-                "stop_is_synthetic": False,
-                "replay_valid": replay_valid,
-                "replay_failed": not replay_valid,
-                "replay_failure_reason": replay_failure_reason,
+                "entries": [dict(r) for r in rows],
+                "summary": {r["verdict"]: r["n"] for r in summary},
+                "missed_winners": [dict(r) for r in missed],
             }
-        else:
-            return {
-                "entry_price": round(entry_price, 4),
-                "exit_price": round(exit_price, 4),
-                "exit_reason": exit_reason,
-                "bars_held": bars_held,
-                "exit_timestamp": exit_ts_str,
-                "mfe_pct": round(mfe_pct, 4),
-                "mae_pct": round(mae_pct, 4),
-                "mfe_r": None,
-                "mae_r": None,
-                "realized_r": None,
-                "winner_capture_ratio": None,
-                "gave_back_r": None,
-                "gave_back_pct_of_mfe": None,
-                "mfe_before_loss_r": None,
-                "time_to_mfe": mfe_step,
-                "time_to_mae": mae_step,
-                "mfe_time": mfe_time or slice_df.index[0].strftime("%H:%M:%S"),
-                "mae_time": mae_time or slice_df.index[0].strftime("%H:%M:%S"),
-                "tp_hit": tp_triggered,
-                "sl_hit": sl_triggered,
-                "pnl_pct": round(pnl_pct, 4),
-                "time_to_target_mins": time_to_target_mins,
-                "stop_is_synthetic": True,
-                "replay_valid": replay_valid,
-                "replay_failed": not replay_valid,
-                "replay_failure_reason": replay_failure_reason,
-            }
+        finally:
+            con.close()
+
+
+shadow_ledger = ShadowLedger()
+
+
+async def resolver_loop(data_manager, interval_sec: int = 60) -> None:
+    """Periodic resolver task. Spawn from lifespan; cancel on shutdown."""
+    while True:
+        try:
+            await asyncio.sleep(interval_sec)
+            n = await shadow_ledger.resolve_pending(data_manager)
+            if n:
+                applog.info("shadow", f"resolved {n} shadow entries")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            applog.warning("shadow", f"resolver cycle failed: {e}")

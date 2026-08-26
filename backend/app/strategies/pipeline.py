@@ -22,8 +22,8 @@ from app.ai.features import latest_feature_row
 from app.ai.model import SignalModel
 from app.ai.prediction import TradeScoreEngine
 from app.config import RiskConfig, Settings, get_settings
-from app.core.domain import Regime, Signal, SignalAction
 from app.core.applog import applog
+from app.core.domain import Regime, Signal, SignalAction
 from app.strategies.base import REGISTRY
 
 REGIME_WEIGHTS: dict[str, dict[Regime, float]] = {
@@ -52,11 +52,10 @@ class SignalPipeline:
         from app.config import get_models_dir
         self.meta_label_engine = MetaLabelEngine(get_models_dir())
         # Shadow challengers are intentionally not instantiated here. Champion owns only
-        # authoritative ML/Meta/TradeScore behavior; research consumers live behind ShadowResearchRuntime.
+        # authoritative ML/Meta/TradeScore behavior.
         if not hasattr(model, "_meta_label_engine") or model._meta_label_engine is None:
             model._meta_label_engine = self.meta_label_engine
         self._is_event_day: bool = False
-        self._midday_active: bool = False
 
     def compute_composite_score(self, ml_prob: float, meta_prob: float, trade_score: float,
                                 portfolio_alignment: float = 1.0, risk_factor: float = 1.0) -> float:
@@ -70,22 +69,12 @@ class SignalPipeline:
     def set_event_day(self, is_event: bool) -> None:
         self._is_event_day = is_event
 
-    def set_midday_active(self, is_midday: bool) -> None:
-        self._midday_active = is_midday
-
     def regime_weight(self, strategy: str, regime: Regime) -> float:
         return self.regime_weights.get(strategy, {}).get(regime, 1.0)
 
-    def should_enforce_ml_veto(self, strategy: str, action: SignalAction, model_source: str,
-                               specialist_status: str, mins_et: int) -> bool:
-        # We now strictly trust the AI pipeline. 
-        # All manual bypass hacks have been removed.
-        return True
-
     def process(self, symbol: str, df: pd.DataFrame, signals: list[Signal], regime: Regime,
-                features: pd.Series | None = None, sector_strength: float | None = None,
-                adaptive_ml_thresholds: dict[str, float] | None = None) -> tuple[list[Signal], list[tuple[Signal, str]]]:
-        """Return accepted and rejected signals. Shadow challengers never execute in this path."""
+                features: pd.Series | None = None, sector_strength: float | None = None) -> tuple[list[Signal], list[tuple[Signal, str]]]:
+        """Return accepted and rejected signals."""
         if not signals:
             return [], []
         accepted: list[Signal] = []
@@ -109,6 +98,154 @@ class SignalPipeline:
             if features is None:
                 rejected.append((sig, "feature row unavailable (warmup)"))
                 continue
+
+            # Opening blackout: no NEW entries in the first N minutes after the
+            # bell (opening-drive noise; measured 100% loss rate 0-5min).
+            rc0 = self.trade_score_engine.risk_config
+            if (
+                getattr(rc0, "enable_opening_blackout", True)
+                and df is not None and len(df) > 0 and hasattr(df.index, "tz_convert")
+            ):
+                try:
+                    from zoneinfo import ZoneInfo as _ZI
+                    bar_et = df.index[-1].tz_convert(_ZI("America/New_York"))
+                    mins_from_open = (bar_et.hour * 60 + bar_et.minute) - (9 * 60 + 30)
+                    if 0 <= mins_from_open < int(getattr(rc0, "entry_blackout_minutes_from_open", 10)):
+                        sig.ml_gate_decision = "REJECT"
+                        rejected.append((sig, f"Opening blackout: entry suppressed ({mins_from_open}min after open)"))
+                        continue
+                except Exception:
+                    pass
+
+            # Entry chase veto: reject candidates whose decision bar was a
+            # vertical candle closing at the directional extreme. Evidence:
+            # such chases went never-green 77% and lost -49R net (29 sessions).
+            # SCOPE: momentum/breakout entries only. Mean-reversion strategies
+            # deliberately fade vertical bars -- entering against the extreme
+            # is their thesis, so the veto would kill every valid setup.
+            rc = self.trade_score_engine.risk_config
+            from app.strategies.base import REGISTRY as _REG
+            _strat_cls = _REG.get(sig.strategy)
+            is_reversion_strat = bool(getattr(_strat_cls, "is_mean_reversion", False)) if _strat_cls else False
+            if (
+                getattr(rc, "enable_entry_chase_veto", True)
+                and not is_reversion_strat
+                and df is not None and len(df) >= 2
+            ):
+                last_bar = df.iloc[-1]
+                try:
+                    b_hi = float(last_bar["high"]); b_lo = float(last_bar["low"])
+                    b_cl = float(last_bar["close"]); atr = float(last_bar.get("atr14") or 0.0)
+                except (KeyError, TypeError, ValueError):
+                    b_hi = b_lo = b_cl = atr = 0.0
+                if atr > 0 and b_cl > 0:
+                    rng = b_hi - b_lo
+                    tr_atr = (rng / atr) if atr > 0 else 0.0
+                    close_pos_long = ((b_cl - b_lo) / rng) if rng > 0 else 0.5
+                    close_pos_short = ((b_hi - b_cl) / rng) if rng > 0 else 0.5
+                    is_long = sig.action == SignalAction.ENTER_LONG
+                    ext_pos = close_pos_long if is_long else close_pos_short
+                    if (
+                        tr_atr >= float(getattr(rc, "entry_chase_tr_atr_mult", 1.8))
+                        and ext_pos >= float(getattr(rc, "entry_chase_close_pos", 0.65))
+                    ):
+                        sig.ml_gate_decision = "REJECT"
+                        rejected.append((sig, f"Entry veto: chasing extended signal bar (range {tr_atr:.1f}x ATR, close at {ext_pos*100:.0f}% extreme)"))
+                        continue
+
+            # Location veto: price stretched too far from session VWAP in the
+            # trade direction = mathematically exhausted entry (reward:risk
+            # inverted before the trade even starts).
+            if getattr(rc, "enable_entry_location_veto", True) and df is not None and len(df) >= 2:
+                last_bar = df.iloc[-1]
+                try:
+                    b_cl = float(last_bar["close"])
+                    vwap_px = float(last_bar.get("vwap") or 0.0)
+                    atr_loc = float(last_bar.get("atr14") or 0.0)
+                except (KeyError, TypeError, ValueError):
+                    b_cl = vwap_px = atr_loc = 0.0
+                if vwap_px > 0 and atr_loc > 0 and b_cl > 0:
+                    # Breakout-class strategies (ORB etc.) are inherently
+                    # extended from VWAP on valid momentum days -- sibling
+                    # evidence: VWAP-stretch checks belong on momentum-style
+                    # entries, NOT structural range breakouts.
+                    from app.strategies.base import REGISTRY as _REG2
+                    is_breakout_strat = (
+                        sig.strategy in _REG2 and getattr(_REG2[sig.strategy], "is_breakout", False)
+                    )
+                    if not is_breakout_strat:
+                        stretch = ((b_cl - vwap_px) / atr_loc) if sig.action == SignalAction.ENTER_LONG \
+                            else ((vwap_px - b_cl) / atr_loc)
+                        if stretch > float(getattr(rc, "entry_max_vwap_stretch_atr", 3.0)):
+                            sig.ml_gate_decision = "REJECT"
+                            rejected.append((sig, f"Entry veto: location exhausted ({stretch:.1f} ATR from VWAP > limit)"))
+                            continue
+
+            # Session-extreme proximity guard: momentum entries INTO the
+            # session low (shorts) or high (longs) are late continuation
+            # chases of a spent multi-bar move -- invisible to the single-bar
+            # chase veto. Evidence 2026-08-24: 3/3 gap_and_go shorts within
+            # <=2.5 ATR of LOD, all immediate losers (-$230 net). Mean-
+            # reversion strategies fade TOWARD extremes by design and are
+            # exempt (same scope rule as the chase veto).
+            if (
+                getattr(rc, "enable_entry_extreme_guard", True)
+                and not is_reversion_strat
+                and df is not None and len(df) >= 30 and hasattr(df.index, "tz_convert")
+            ):
+                try:
+                    from zoneinfo import ZoneInfo as _ZI
+                    _et = _ZI("America/New_York")
+                    idx_et = df.index.tz_convert(_et)
+                    last_ts = idx_et[-1]
+                    sess_mask = (idx_et.date == last_ts.date()) & (
+                        (idx_et.hour > 9) | ((idx_et.hour == 9) & (idx_et.minute >= 30))
+                    )
+                    sess = df.loc[sess_mask]
+                    atr_x = float(df["atr14"].iloc[-1]) if "atr14" in df.columns else 0.0
+                    # 15 session bars ~= first quarter-hour; the opening
+                    # blackout already owns the pre-09:45 window.
+                    if len(sess) >= 15 and atr_x > 0:
+                        b_cl_x = float(df["close"].iloc[-1])
+                        if sig.action == SignalAction.ENTER_SHORT:
+                            prox = (b_cl_x - float(sess["low"].min())) / atr_x
+                            limit_lbl = "session low"
+                        elif sig.action == SignalAction.ENTER_LONG:
+                            prox = (float(sess["high"].max()) - b_cl_x) / atr_x
+                            limit_lbl = "session high"
+                        else:
+                            prox = None
+                            limit_lbl = ""
+                        max_prox = float(getattr(rc, "entry_max_extreme_proximity_atr", 3.0))
+                        if prox is not None and prox <= max_prox:
+                            sig.ml_gate_decision = "REJECT"
+                            rejected.append((sig, f"Entry veto: chasing session extreme ({prox:.1f} ATR from {limit_lbl} <= {max_prox:.1f})"))
+                            continue
+                except Exception:
+                    pass
+
+            # Entry consensus (breakout strategies only): a breakout against the
+            # symbol's relative strength vs SPY is a lone-wolf entry -- the
+            # market is not corroborating the move. Longs need RS >= threshold,
+            # shorts <= threshold. Skipped when RS unavailable (neutral pass).
+            if (
+                getattr(rc, "enable_entry_consensus", True)
+                and _strat_cls is not None and getattr(_strat_cls, "is_breakout", False)
+                and sector_strength is not None
+            ):
+                try:
+                    rs_val = float(sector_strength)
+                    is_long_c = sig.action == SignalAction.ENTER_LONG
+                    if is_long_c and rs_val < float(getattr(rc, "entry_consensus_rs_long_min", 50.0)):
+                        sig.ml_gate_decision = "REJECT"
+                        rejected.append((sig, f"Entry consensus: long breakout with weak RS ({rs_val:.0f} < {getattr(rc, 'entry_consensus_rs_long_min', 50.0):.0f})"))
+                        continue
+                    if not is_long_c and rs_val > float(getattr(rc, "entry_consensus_rs_short_max", 50.0)):
+                        sig.ml_gate_decision = "REJECT"
+                        rejected.append((sig, f"Entry consensus: short breakout with strong RS ({rs_val:.0f} > {getattr(rc, 'entry_consensus_rs_short_max', 50.0):.0f})"))
+                        continue
+                except (TypeError, ValueError):
+                    pass
 
             use_detailed = False
             if hasattr(self.model, "score_action_detailed"):
@@ -150,44 +287,17 @@ class SignalPipeline:
                     continue
             else:
                 sig.ml_probability = round(ml, 4)
-                from zoneinfo import ZoneInfo
-                from datetime import datetime, UTC
-                et_tz = ZoneInfo("America/New_York")
-                if df is not None and len(df) > 0 and hasattr(df.index, "tz_convert"):
-                    try:
-                        now_et = df.index[-1].tz_convert(et_tz)
-                    except Exception:
-                        now_et = datetime.now(et_tz)
-                elif df is not None and len(df) > 0 and isinstance(df.index[-1], datetime):
-                    now_et = df.index[-1].astimezone(et_tz) if df.index[-1].tzinfo else df.index[-1].replace(tzinfo=UTC).astimezone(et_tz)
-                else:
-                    now_et = datetime.now(et_tz)
-                mins_et = now_et.hour * 60 + now_et.minute
-                enforce_veto = self.should_enforce_ml_veto(sig.strategy, sig.action, score_res.model_source,
-                                                           score_res.specialist_status, mins_et)
-                
-                # Audit Phase 3: Use adaptive threshold if available
+                # Strict ML veto: any probability below the configured threshold is
+                # rejected. All manual bypass hacks have been removed.
                 current_threshold = self.ml_threshold
-                if adaptive_ml_thresholds and getattr(sig, "candidate_id", None) in adaptive_ml_thresholds:
-                    current_threshold = adaptive_ml_thresholds[sig.candidate_id]
-                
-                hard_reject_cutoff = getattr(self.trade_score_engine.risk_config, "ml_hard_reject_threshold", 0.48)
                 if ml < current_threshold:
                     if self.soft_composite_gating and ml >= (current_threshold - 0.04):
                         sig.ml_gate_decision = "GRAY_ZONE_EVALUATION"
                         applog.info("pipeline", f"{symbol}: ML gray zone active ({ml:.4f} in [{(current_threshold - 0.04):.2f}, {current_threshold:.2f}]). Evaluating Meta & TradeScore.")
-                    elif ml < hard_reject_cutoff:
-                        applog.info("pipeline", f"{symbol}: ML confidence {ml:.4f} < hard cutoff {hard_reject_cutoff:.2f}. Rejected.")
-                        sig.ml_gate_decision = "REJECT"
-                        rejected.append((sig, f"ML confidence {ml:.4f} < threshold {current_threshold:.4f}"))
-                        continue
-                    elif enforce_veto:
-                        sig.ml_gate_decision = "REJECT"
-                        rejected.append((sig, f"ML confidence {ml:.4f} < threshold {current_threshold:.4f}"))
-                        continue
                     else:
-                        sig.ml_gate_decision = "BASE_FALLBACK_BYPASS"
-                        applog.info("pipeline", f"{symbol}: {sig.strategy.upper()} BASE_FALLBACK ML advisory bypass active: prob={ml:.4f} < threshold={current_threshold:.4f} (mins_et={mins_et})")
+                        sig.ml_gate_decision = "REJECT"
+                        rejected.append((sig, f"ML confidence {ml:.4f} < threshold {current_threshold:.4f}"))
+                        continue
                 else:
                     sig.ml_gate_decision = "PASS"
 
@@ -248,13 +358,8 @@ class SignalPipeline:
                             sig.take_profit = min(sig.take_profit, round(minimum_target, 4))
 
             side_str = "long" if sig.action == SignalAction.ENTER_LONG else "short"
-            
-            # Fetch dynamic threshold again for the Meta Label Supervisor
-            meta_threshold = self.ml_threshold
-            if adaptive_ml_thresholds and getattr(sig, "candidate_id", None) in adaptive_ml_thresholds:
-                meta_threshold = adaptive_ml_thresholds[sig.candidate_id]
-                
-            meta_pred = self.meta_label_engine.predict(sig.strategy, features, side=side_str, adaptive_threshold=meta_threshold)
+
+            meta_pred = self.meta_label_engine.predict(sig.strategy, features, side=side_str, adaptive_threshold=self.ml_threshold)
             if not meta_pred.approved:
                 rejected.append((sig, f"Meta-label {meta_pred.decision} [{meta_pred.source}]: {meta_pred.reason}"))
                 continue
@@ -273,15 +378,11 @@ class SignalPipeline:
                                                         avg_daily_volume=avg_volume, sector_strength=sector_strength)
             trade_score = min(100.0, max(0.0, raw_score))
             sig.score = round(trade_score / 100.0, 4)
-            is_breakout = REGISTRY[sig.strategy].is_breakout if sig.strategy in REGISTRY else False
-            approved, threshold = self.trade_score_engine.approve(
-                trade_score, regime, is_event_day=self._is_event_day,
-                threshold_boost=self.trade_score_engine.risk_config.midday_score_boost if (self._midday_active and is_breakout) else 0.0)
+            approved, threshold = self.trade_score_engine.approve(trade_score, regime, is_event_day=self._is_event_day)
             if not approved:
-                midday_note = f", midday_boost={self.trade_score_engine.risk_config.midday_score_boost:.0f}" if (self._midday_active and is_breakout) else ""
                 effective_rr = exp_ret_pct / exp_dd_pct if exp_dd_pct > 0 else excursion.reward_risk
                 ml_str = f"{ml:.2f}" if ml is not None else "N/A"
-                rejected.append((sig, f"Trade Score {trade_score:.1f} < {threshold:.1f} (raw={raw_score:.1f}{midday_note}) [regime={regime}, ml={ml_str}, rr={effective_rr:.2f}]"))
+                rejected.append((sig, f"Trade Score {trade_score:.1f} < {threshold:.1f} (raw={raw_score:.1f}) [regime={regime}, ml={ml_str}, rr={effective_rr:.2f}]"))
             else:
                 if getattr(sig, "ml_gate_decision", None) == "GRAY_ZONE_EVALUATION":
                     sig.ml_gate_decision = "GRAY_ZONE_RESCUED"

@@ -10,8 +10,8 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from app.core.domain import Position, Signal, SignalAction
 from app.core.applog import applog
+from app.core.domain import Position, Signal, SignalAction
 
 _SECTOR_MAP: dict[str, str] = {
     "AAPL": "TECH", "MSFT": "TECH", "NVDA": "TECH", "AMD": "TECH",
@@ -254,5 +254,5 @@ def process_portfolio_allocations(
             kelly_map[res.symbol] = res.kelly_fraction  # now flows to RiskManager.evaluate_entry()
 
 
-    approved_entries = [(sig, kelly_map.get(sig.symbol, None)) for sig in approved_candidates]
+    approved_entries = [(sig, kelly_map.get(sig.symbol)) for sig in approved_candidates]
     return PortfolioDecision(approved_entries=approved_entries, gated_entries=gated_entries)

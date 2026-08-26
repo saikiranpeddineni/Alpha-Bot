@@ -4,14 +4,15 @@ Pydantic models double as the wire format for the REST/WebSocket layer, so
 the frontend consumes exactly what the engine produces.
 """
 from __future__ import annotations
+
+import contextvars
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
-from pydantic import BaseModel, Field, model_validator
 
-import contextvars
-from typing import Callable
+from pydantic import BaseModel, Field, model_validator
 
 _mock_utcnow: contextvars.ContextVar[Callable[[], datetime] | None] = contextvars.ContextVar("mock_utcnow", default=None)
 
@@ -39,13 +40,6 @@ class OrderStatus(StrEnum):
     FILLED = "filled"
     CANCELED = "canceled"
     REJECTED = "rejected"
-class ProtectionState(StrEnum):
-    UNPROTECTED = "unprotected"
-    AWAITING_CANCEL_CONFIRMATION = "awaiting_cancel_confirmation"
-    AWAITING_STOP_CONFIRMATION = "awaiting_stop_confirmation"
-    PROTECTED = "protected"
-    RECOVERY_REJECTED = "recovery_rejected"
-    AMBIGUOUS = "ambiguous"
 class SignalAction(StrEnum):
     ENTER_LONG = "enter_long"
     ENTER_SHORT = "enter_short"

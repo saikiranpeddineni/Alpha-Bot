@@ -14,8 +14,8 @@ from datetime import UTC, date, datetime
 from typing import Any, NamedTuple
 
 from app.brokers.base import Fill
-from app.core.domain import OrderSide, TradeRecord
 from app.core.applog import applog
+from app.core.domain import OrderSide, TradeRecord
 
 
 class RollResult(NamedTuple):

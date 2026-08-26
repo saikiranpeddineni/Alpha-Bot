@@ -9,9 +9,9 @@ targets at a fixed reward:risk. One attempt per symbol per session.
 from __future__ import annotations
 
 from datetime import timedelta
+from zoneinfo import ZoneInfo
 
 import pandas as pd
-from zoneinfo import ZoneInfo
 
 from app.core.domain import Regime, Signal, SignalAction
 from app.data.base import resample_bars
@@ -24,7 +24,7 @@ ET = ZoneInfo("America/New_York")
 class OpeningRangeBreakout(Strategy):
     name = "orb"
     description = "Trades breakouts of the opening N-minute range"
-    
+
     is_breakout = True
     ml_threshold = 0.55
     evaluation_horizons = ["60m", "close"]
@@ -40,6 +40,14 @@ class OpeningRangeBreakout(Strategy):
         "reward_risk": 2.0,
         "trailing_stop_atr_mult": 1.5, # if > 0, activates dynamic trailing stop
         "mft_alignment": False,       # optional 5m higher-timeframe trend alignment (set True in config)
+        "use_daily_drift_filter": True,  # fade-proofing: don't fight the 20-day trend
+        "drift_buffer_pct": 1.0,         # +/- % around daily SMA20 that counts as neutral
+        "min_risk_atr": 0.75,            # skip entries whose stop sits unrealistically tight
+        "min_acceptance_ratio": 0.50,    # breakout bar must CLOSE in its directional
+                                         # extreme (body-dominant = accepted breakout,
+                                         # not a wick fake-out). Sibling-proven gate.
+        "climax_atr_mult": 2.5,          # relaxed from 1.5: breakouts legitimately detach
+                                         # from EMA9; acceptance+drift now carry quality.
     }
 
     def __init__(self, params: dict | None = None, enabled: bool = True) -> None:
@@ -127,18 +135,47 @@ class OpeningRangeBreakout(Strategy):
         confidence = min(0.85, 0.55 + 0.08 * max(0.0, vol_z))
 
         # Climax guard: prevent entering if price is stretched more than climax_atr_mult ATR from EMA9
-        climax_limit = float(p.get("climax_atr_mult", 1.5))  # Default enforced internally if missing
+        climax_limit = float(p.get("climax_atr_mult", 2.5))
         ema9 = float(last.get("ema9", close))
         if climax_limit > 0.0 and abs(close - ema9) > climax_limit * atr:
             return None
 
+        # Acceptance gate (sibling-proven): the breakout bar must CLOSE in its
+        # directional extreme -- a body-dominant candle shows the range break
+        # was accepted, not rejected with a wick.
+        min_acceptance = float(p.get("min_acceptance_ratio", 0.50))
+        bar_high = float(last["high"]); bar_low = float(last["low"])
+        bar_range = max(1e-6, bar_high - bar_low)
+        close_pos_in_bar = ((close - bar_low) / bar_range)
+        acceptance_long = close_pos_in_bar
+        acceptance_short = 1.0 - close_pos_in_bar
+
         mft_enabled = bool(p.get("mft_alignment", True))
         is_bullish_5m, is_bearish_5m = self._check_5m_trend(df) if mft_enabled else (True, True)
 
+        # Daily drift filter (param-gated; ported from sibling evidence):
+        # breakout longs BELOW the 20-day mean and shorts ABOVE it fight
+        # persistent order flow -- measured there as the single biggest ORB
+        # loss source. Neutral band keeps range days tradable.
+        drift_long_ok = drift_short_ok = True
+        daily_sma = float(ctx.daily_sma20) if getattr(ctx, "daily_sma20", None) else 0.0
+        if p.get("use_daily_drift_filter", True) and daily_sma > 0:
+            buf = daily_sma * (float(p.get("drift_buffer_pct", 1.0)) / 100.0)
+            drift_long_ok = close > daily_sma - buf
+            drift_short_ok = close < daily_sma + buf
+
+        # Minimum-risk geometry floor: skip degenerate entries whose stop would
+        # sit unrealistically tight relative to the symbol's own volatility.
+        min_risk_atr = float(p.get("min_risk_atr", 0.75))
+
         if close > or_high * buffer and volume_ok and is_bullish_5m and ctx.regime == Regime.TREND_UP:
+            if not drift_long_ok:
+                return None
+            if acceptance_long < min_acceptance:
+                return None
             stop = max(or_low, close - p["atr_stop_mult"] * atr)
             risk = close - stop
-            if risk <= 0:
+            if risk <= 0 or risk < min_risk_atr * atr:
                 return None
             self._pending[key] = ctx.now
             return Signal(
@@ -152,9 +189,13 @@ class OpeningRangeBreakout(Strategy):
                 take_profit=close + p["reward_risk"] * risk,
             )
         if close < or_low / buffer and volume_ok and is_bearish_5m and ctx.regime == Regime.TREND_DOWN:
+            if not drift_short_ok:
+                return None
+            if acceptance_short < min_acceptance:
+                return None
             stop = min(or_high, close + p["atr_stop_mult"] * atr)
             risk = stop - close
-            if risk <= 0:
+            if risk <= 0 or risk < min_risk_atr * atr:
                 return None
             self._pending[key] = ctx.now
             return Signal(

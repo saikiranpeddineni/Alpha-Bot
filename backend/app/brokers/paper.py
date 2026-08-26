@@ -18,6 +18,7 @@ from datetime import datetime
 import pandas as pd
 
 from app.brokers.base import Broker, Fill
+from app.core.applog import applog
 from app.core.domain import (
     AccountSnapshot,
     Order,
@@ -28,7 +29,6 @@ from app.core.domain import (
     Position,
     utcnow,
 )
-from app.core.applog import applog
 
 
 class PaperBroker(Broker):
@@ -427,9 +427,7 @@ class PaperBroker(Broker):
                     if (
                         order.side == OrderSide.BUY
                         and h >= stop_px
-                    ):
-                        order.stop_triggered = True
-                    elif (
+                    ) or (
                         order.side == OrderSide.SELL
                         and low <= stop_px
                     ):

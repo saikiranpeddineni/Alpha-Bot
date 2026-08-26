@@ -13,6 +13,7 @@ import { ThemeSelector } from "./components/ThemeSelector";
 import { TopBar } from "./components/TopBar";
 import { TrainerPanel } from "./components/TrainerPanel";
 import { Watchlist } from "./components/Watchlist";
+import { Modal } from "./components/Modal";
 import { MobileHome } from "./components/MobileHome";
 import { MobileActivity } from "./components/MobileActivity";
 import { useStore } from "./store";
@@ -156,25 +157,41 @@ function MobileHeader({ theme, onThemeChange, onSettings }: { theme: AppTheme; o
   const market = status?.market;
   const showToast = useStore((s) => s.showToast);
   const [busy, setBusy] = useState(false);
+  const [liveConfirm, setLiveConfirm] = useState(false);
+  const [confirmText, setConfirmText] = useState("");
+  const currentMode = status?.mode ?? "demo";
 
-  async function handleStartStop() {
+  async function start(confirm = "") {
     setBusy(true);
     try {
-      if (running) {
-        const s = await api.stopEngine();
-        useStore.getState().setStatus(s);
-        showToast("info", "Engine stopped");
-      } else {
-        const currentMode = status?.mode ?? "demo";
-        const s = await api.startEngine(currentMode);
-        useStore.getState().setStatus(s);
-        showToast("info", `Engine started (${currentMode} mode)`);
-      }
+      const s = await api.startEngine(currentMode, confirm);
+      useStore.getState().setStatus(s);
+      showToast("info", `Engine started (${currentMode} mode)`);
     } catch (e) {
       showToast("error", (e as Error).message);
     } finally {
       setBusy(false);
+      setLiveConfirm(false);
+      setConfirmText("");
     }
+  }
+
+  async function handleStartStop() {
+    if (running) {
+      setBusy(true);
+      try {
+        const s = await api.stopEngine();
+        useStore.getState().setStatus(s);
+        showToast("info", "Engine stopped");
+      } catch (e) {
+        showToast("error", (e as Error).message);
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+    if (currentMode === "live") { setLiveConfirm(true); return; }
+    await start();
   }
 
   return (
@@ -196,6 +213,7 @@ function MobileHeader({ theme, onThemeChange, onSettings }: { theme: AppTheme; o
         </button>
         <button className="mobile-icon-btn" onClick={onSettings} aria-label="Settings">⚙</button>
       </div>
+      {liveConfirm && <Modal narrow title="Confirm live trading" onClose={() => setLiveConfirm(false)}><div className="modal-body"><p style={{ marginTop: 0 }}>You are about to start the engine in <b style={{ color: "var(--red)" }}>LIVE</b> mode. Orders will be placed with real money through your broker.</p><p className="muted">Type <b className="mono">LIVE</b> to confirm.</p><input type="text" className="mono" value={confirmText} onChange={(e) => setConfirmText(e.target.value)} placeholder="LIVE" style={{ width: "100%" }} autoFocus /></div><div className="modal-foot"><button className="btn ghost" onClick={() => setLiveConfirm(false)}>Cancel</button><button className="btn danger" disabled={confirmText !== "LIVE" || busy} onClick={() => start("LIVE")}>Start live trading</button></div></Modal>}
     </header>
   );
 }

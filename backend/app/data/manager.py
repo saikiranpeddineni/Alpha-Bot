@@ -7,17 +7,24 @@ cache used by backtests and ML training.
 
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
 
-from app.core.domain import Quote
 from app.core.applog import applog
-from app.data.base import DataProvider, empty_bars, resample_bars, timeframe_delta, HistoricalDataCoverageError, CachePolicy
+from app.core.domain import Quote
+from app.data.base import (
+    CachePolicy,
+    DataProvider,
+    HistoricalDataCoverageError,
+    empty_bars,
+    resample_bars,
+)
+from app.data.session_coverage import validate_requested_session_coverage
 from app.data.store import BarCache
 from app.data.synthetic import SyntheticProvider
-from app.data.session_coverage import validate_requested_session_coverage
 
 CLOSED_BAR_GRACE_SEC = 3.0
 
@@ -38,6 +45,11 @@ def make_provider(name: str, settings) -> DataProvider:  # noqa: ANN001
 
 
 class DataManager:
+    # VIX is a slow-moving risk input polled via Yahoo (unofficial API, no rate
+    # limit headroom). A short TTL cache keeps the engine tick from hammering
+    # Yahoo once per poll while staying fresh enough for regime gating.
+    VIX_POLL_TTL_SEC = 60.0
+
     def __init__(self, provider: DataProvider, cache_path: Path, max_rows: int = 3000) -> None:
         self.provider = provider
         self.cache = BarCache(cache_path)
@@ -46,6 +58,7 @@ class DataManager:
         self._last_closed_ts: dict[str, pd.Timestamp] = {}
         self.provenance: dict[str, dict] = {}
         self.cache_policy: str = "default"
+        self._vix_last_poll: dict[str, datetime] = {}
 
     @property
     def is_synthetic(self) -> bool:
@@ -66,7 +79,7 @@ class DataManager:
                 if symbol in ("VIX", "^VIX") and not self.is_synthetic:
                     from app.data.yahoo import YahooProvider
                     provider = YahooProvider()
-                
+
                 # Market regime needs 20 hourly bars (approx 1300 1-min bars) for SPY/QQQ
                 fetch_limit = 2000 if symbol in ("SPY", "QQQ", "VIX", "^VIX") else lookback_bars
                 df = await provider.get_bars(symbol, "1Min", limit=fetch_limit)
@@ -100,7 +113,7 @@ class DataManager:
             self.provider.advance()  # type: ignore[attr-defined]
 
         new_closed: dict[str, pd.DataFrame] = {}
-        
+
         # Split symbols by provider
         yahoo_symbols = []
         default_symbols = []
@@ -110,7 +123,7 @@ class DataManager:
                 yahoo_symbols.append(symbol)
             else:
                 default_symbols.append(symbol)
-                
+
         # Batch fetch from default provider if supported
         tails = {}
         multi_supported = hasattr(self.provider, "get_multi_bars")
@@ -120,7 +133,7 @@ class DataManager:
             except Exception as exc:
                 applog.warning("data", f"Batched poll failed: {exc}")
                 # Do NOT fall back to sequential loop; it will spam the API and cause massive async latency.
-        
+
         # Fetch sequentially only if batching is NOT supported.
         # If batching is supported, any missing symbol simply has no data right now.
         if not multi_supported:
@@ -130,11 +143,16 @@ class DataManager:
                         tails[symbol] = await self.provider.get_bars(symbol, "1Min", limit=30)
                     except Exception as exc:
                         applog.warning("data", f"{symbol}: poll failed: {exc}")
-                    
+
         for symbol in yahoo_symbols:
             try:
+                now = datetime.now(UTC)
+                last = self._vix_last_poll.get(symbol)
+                if last is not None and (now - last).total_seconds() < self.VIX_POLL_TTL_SEC:
+                    continue  # serve the cached rolling frame; VIX is a slow risk input
                 from app.data.yahoo import YahooProvider
                 tails[symbol] = await YahooProvider().get_bars(symbol, "1Min", limit=30)
+                self._vix_last_poll[symbol] = datetime.now(UTC)
             except Exception as exc:
                 applog.warning("data", f"{symbol}: poll failed: {exc}")
 
@@ -166,6 +184,39 @@ class DataManager:
             df = df.iloc[-limit:]
         return df
 
+    async def backfill(self, symbol: str, bars: int | None = None) -> bool:
+        """Deepen a thin rolling frame with the provider's most recent history.
+
+        Scanner-discovered symbols start with only live-stream bars; until
+        enough accumulate, every candidate hard-rejects with 'feature row
+        unavailable (warmup)' (20 such rejections on 2026-08-24 alone).
+        Caller throttles attempts; this is idempotent and never raises.
+        """
+        symbol = symbol.upper()
+        try:
+            n = int(bars or int(os.environ.get("ALPHADESK_WARMUP_BACKFILL_BARS", "800")))
+        except ValueError:
+            n = 800
+        try:
+            df = await self.provider.get_bars(symbol, "1Min", limit=n)
+        except Exception as exc:  # noqa: BLE001
+            applog.warning("data", f"{symbol}: warmup backfill fetch failed: {exc}")
+            return False
+        if getattr(df, "empty", True):
+            applog.info("data", f"{symbol}: warmup backfill returned no bars")
+            return False
+        current = self._frames.get(symbol, empty_bars())
+        merged = pd.concat([current, df])
+        merged = merged[~merged.index.duplicated(keep="last")].sort_index()
+        if len(merged) > self.max_rows:
+            merged = merged.iloc[-self.max_rows :]
+        self._frames[symbol] = merged
+        closed = self._closed_slice(merged)
+        if not closed.empty:
+            self._last_closed_ts[symbol] = closed.index[-1]
+        applog.info("data", f"{symbol}: warmup backfilled +{len(df)} bars (rolling {len(merged)})")
+        return True
+
     def last_price(self, symbol: str) -> float | None:
         df = self._frames.get(symbol.upper())
         if df is None or df.empty:
@@ -186,13 +237,22 @@ class DataManager:
         except Exception as exc:  # noqa: BLE001
             applog.warning("data", f"quotes failed: {exc}")
             quotes = {}
-        # Fall back to the rolling frame for anything the provider missed
+        # Fall back to the rolling frame for anything the provider missed.
+        # The quote timestamp carries the underlying BAR time, not fetch time —
+        # downstream consumers can therefore detect a stale fallback price.
         for symbol in symbols:
             symbol = symbol.upper()
             if symbol not in quotes:
-                price = self.last_price(symbol)
-                if price is not None:
-                    quotes[symbol] = Quote(symbol=symbol, price=round(price, 2))
+                df = self._frames.get(symbol)
+                if df is not None and not df.empty:
+                    bar_ts = df.index[-1].to_pydatetime()
+                    if bar_ts.tzinfo is None:
+                        bar_ts = bar_ts.replace(tzinfo=UTC)
+                    quotes[symbol] = Quote(
+                        symbol=symbol,
+                        price=round(float(df["close"].iloc[-1]), 2),
+                        ts=bar_ts,
+                    )
         return quotes
 
     def validate_cache_coverage(
@@ -299,7 +359,20 @@ class DataManager:
         if df.empty:
             cached = self.cache.query(symbol, timeframe, start, end)
             if not cached.empty:
-                applog.warning("data", f"{symbol}: provider empty; serving {len(cached)} cached bars")
+                # Outage masking guard: only serve the cache when it actually
+                # covers the requested window. Unvalidated fallback previously
+                # served hours-old partial data as if it were fresh history.
+                try:
+                    self.validate_cache_coverage(symbol, timeframe, start, end, cached)
+                except HistoricalDataCoverageError as cov_exc:
+                    applog.error(
+                        "data",
+                        f"{symbol}: provider empty AND cached bars fail coverage validation "
+                        f"({cov_exc}); returning empty frame instead of stale data",
+                    )
+                    self._record_provenance(symbol, "network", provider_name, empty_bars())
+                    return empty_bars()
+                applog.warning("data", f"{symbol}: provider empty; serving {len(cached)} validated cached bars")
                 df = cached
                 source = "cache"
                 provider_name = None
@@ -321,10 +394,10 @@ class DataManager:
         """Batched range fetch with cache-first reads and automatic cache writes."""
         out: dict[str, pd.DataFrame] = {}
         policy = cache_policy or self.cache_policy
-        
+
         yahoo_symbols = []
         default_symbols = []
-        
+
         for sym in symbols:
             s = sym.upper()
             if s in ("VIX", "^VIX") and not self.is_synthetic:
@@ -333,7 +406,7 @@ class DataManager:
                 default_symbols.append(s)
 
         missing_symbols = []
-        
+
         if self.is_synthetic or policy == CachePolicy.IMMUTABLE_CACHE_ONLY:
             for s in default_symbols:
                 out[s] = await self.history(s, timeframe, start, end, prefer_cache, policy)

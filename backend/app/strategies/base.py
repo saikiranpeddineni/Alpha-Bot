@@ -13,7 +13,7 @@ API, UI and backtester.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 
 import pandas as pd
@@ -35,6 +35,10 @@ class StrategyContext:
     mover_change_pct: float = 0.0
     # Relative strength score vs SPY (0.0 to 1.0)
     rs_score: float | None = None
+    # Multi-day anchor: SMA20 of daily closes (None when unavailable).
+    # Enables drift filters -- e.g. ORB longs below the 20-day mean fight
+    # persistent order flow (Betadesk's single biggest measured ORB loss source).
+    daily_sma20: float | None = None
 
 
 class Strategy(ABC):
@@ -47,6 +51,10 @@ class Strategy(ABC):
     # --- Dynamic Core Traits ---
     max_allocation: float = 50000.0
     is_breakout: bool = False
+    # Mean-reversion entries deliberately fade vertical moves (capitulation
+    # bars, swept lows). Bar-shape vetoes tuned for momentum chasing must not
+    # apply to them -- entering against the extreme IS the thesis.
+    is_mean_reversion: bool = False
     ml_threshold: float = 0.53
     evaluation_horizons: list[str] = ["15m", "close"]
     regime_weights: dict[Regime, float] = {

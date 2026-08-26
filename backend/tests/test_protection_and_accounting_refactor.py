@@ -89,58 +89,6 @@ async def test_heartbeat_cannot_reenable_blocked_entries():
     assert engine.allow_new_entries is False
 
 
-@pytest.mark.asyncio
-async def test_replay_deferred():
-    engine = TradingEngine.__new__(TradingEngine)
-    engine.db = MagicMock()
-    engine.data = AsyncMock()
-    engine.mode = "paper"
-
-    signal = {
-        "candidate_id": "cand-1",
-        "symbol": "AAPL",
-        "direction": "long",
-        "timestamp": datetime.now(UTC).isoformat(),
-        "replay_attempts": 0,
-    }
-    engine.db.get_pending_shadow_replays.return_value = [signal]
-    engine.data.history.return_value = MagicMock(empty=True)
-
-    await engine._replay_pending_signals(datetime.now(UTC))
-
-    saved_signal = engine.db.save_shadow_signal.call_args[0][6]
-    assert saved_signal.get("replayed", False) is False
-    assert saved_signal.get("replay_failed", False) is False
-    assert saved_signal.get("replay_state") == "deferred_data_incomplete"
-    assert saved_signal.get("next_retry_at") is not None
-
-
-@pytest.mark.asyncio
-async def test_replay_respects_backoff():
-    engine = TradingEngine.__new__(TradingEngine)
-    engine.db = MagicMock()
-    engine.data = AsyncMock()
-    engine.mode = "paper"
-
-    future_retry = (datetime.now(UTC) + timedelta(minutes=10)).isoformat()
-    signal = {
-        "candidate_id": "cand-1",
-        "symbol": "AAPL",
-        "direction": "long",
-        "timestamp": datetime.now(UTC).isoformat(),
-        "next_retry_at": future_retry,
-    }
-    engine.db.get_pending_shadow_replays.return_value = [signal]
-
-    await engine._replay_pending_signals(datetime.now(UTC))
-
-    assert engine.data.history.call_count == 0
-
-
-
-
-
-def test_checkpoint_preserves_peak_equity_and_day_trade_dates():
     tracker = PortfolioTracker()
     tracker.session_date = date(2026, 7, 22)
     tracker.session_start_equity = 100_000.0

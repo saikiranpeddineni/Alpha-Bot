@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 
 class LifecycleState(str, Enum):
@@ -53,6 +53,7 @@ class ReasonCode(str, Enum):
     HEALTHY_TREND = "HEALTHY_TREND"
     RUNNER_QUALIFIED = "RUNNER_QUALIFIED"
     SCALE_OUT_TARGET = "SCALE_OUT_TARGET"
+    PROFIT_GIVEBACK_GUARD = "PROFIT_GIVEBACK_GUARD"
     PROTECTION_RATCHET = "PROTECTION_RATCHET"
     THESIS_DEGRADED = "THESIS_DEGRADED"
     EARLY_THESIS_INVALIDATED = "EARLY_THESIS_INVALIDATED"
@@ -60,6 +61,7 @@ class ReasonCode(str, Enum):
     MAX_R_CEILING_REACHED = "MAX_R_CEILING_REACHED"
     DISTRIBUTION_DETECTED = "DISTRIBUTION_DETECTED"
     PROTECTION_BREACH = "PROTECTION_BREACH"
+    FLOOR_TAG_RUNNER = "FLOOR_TAG_RUNNER"
     MANUAL_OVERRIDE = "MANUAL_OVERRIDE"
     KILL_SWITCH_ACTIVE = "KILL_SWITCH_ACTIVE"
     EMERGENCY_STOP = "EMERGENCY_STOP"
@@ -101,8 +103,8 @@ class PositionObservation:
     atr: float
     initial_stop: float
     risk_per_share: float
-    current_stop: Optional[float] = None
-    take_profit: Optional[float] = None
+    current_stop: float | None = None
+    take_profit: float | None = None
     r_multiple: float = 0.0
     news_sentiment_score: float = 0.0
 
@@ -185,7 +187,7 @@ class EvidenceCoverage:
     bars_observed: int
     data_quality_score: float
     confidence: float
-    evidence_factors: Dict[str, float] = field(default_factory=dict)
+    evidence_factors: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -195,9 +197,9 @@ class PISDecision:
     timestamp: datetime
     symbol: str
     action: ExitAction
-    target_stop_loss: Optional[float]
+    target_stop_loss: float | None
     exit_ratio: float
-    reason_codes: List[ReasonCode]
+    reason_codes: list[ReasonCode]
     health: TradeHealth
     thesis: ThesisDrift
     runner_score: float
@@ -210,14 +212,14 @@ class PISDecision:
     runner_probability: float = 0.0
     market_regime: MarketRegime = MarketRegime.TREND_RUNNER
     brainstorm_narrative: str = ""
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
 class SnapshotHistory:
     """Immutable sequence snapshot for audit or replay."""
 
-    snapshots: Tuple[PositionObservation, ...]
+    snapshots: tuple[PositionObservation, ...]
 
     def __len__(self) -> int:
         return len(self.snapshots)
@@ -254,6 +256,50 @@ class PISConfig:
     enable_scale_out: bool = True
     scale_out_ratio: float = 0.50
     scale_out_target_r: float = 2.00
+    # --- Progressive profit lock (sub-activation zone) ---
+    # Live winners average only ~0.44R peak, yet the protection floor stayed on
+    # the initial stop until activation_mfe_r (1.5R). Everything below that
+    # threshold gave back its entire excursion (2026-08-24: book peaked
+    # +$718, closed -$391). Once peak reaches breakeven_trigger_r, ratchet the
+    # floor to breakeven+ and progressively lock a fraction of the peak as it
+    # grows toward activation_mfe_r.
+    breakeven_trigger_r: float = 0.40
+    # High-ATR names carry 0.5-1.5R of pure noise inside their risk unit; a
+    # lock that arms on a sub-noise peak is guaranteed to be churned out. The
+    # lock arms only after profit exceeds BOTH the R trigger and 2.5 ATRs of
+    # favorable movement -- past ordinary churn, before the mature zone.
+    breakeven_trigger_atr_mult: float = 2.50
+    progressive_lock_start_frac: float = 0.20
+    progressive_lock_end_frac: float = 0.30
+    # The locked floor may never trail closer than this many ATRs behind the
+    # peak -- banking profit is pointless if normal churn stops you out one
+    # bar later.
+    progressive_lock_trail_atr_mult: float = 1.00
+    # --- Profit giveback guard ---
+    # When a trade peaked above profit_guard_peak_r and then surrendered more
+    # than profit_guard_max_giveback_pct of that peak while still green, bank a
+    # partial immediately instead of waiting for the trailing floor.
+    enable_profit_giveback_guard: bool = True
+    profit_guard_peak_r: float = 0.60
+    profit_guard_max_giveback_pct: float = 0.55
+    # A giveback smaller than this many ATRs is noise, not reversal.
+    profit_guard_min_giveback_atr_r: float = 0.75
+    profit_guard_exit_ratio: float = 0.50
+    # --- Trend-quality adaptive scale-out ---
+    # Strong trends keep the full scale_out_target_r; weakening trends bank at
+    # weak_trend_scale_out_r instead (1R) so soft runners don't round-trip.
+    weak_trend_scale_out_r: float = 1.00
+    weak_momentum_threshold: float = 0.45
+    # --- Floor-tag runner (evidence-driven) ---
+    # Measured on live history: winners average only ~0.44R peak, so the 2R
+    # scale-out gate almost never arms and EVERY protection-floor tag became a
+    # full exit -- while 38% of exits were followed by >= +1R continuation
+    # (~696 R left behind across 29 sessions). When the floor is tagged but the
+    # thesis is NOT invalidated, exit only this fraction and let the remainder
+    # ride with the same floor as its stop. The second floor tag (or any thesis
+    # degradation) still exits everything.
+    enable_floor_tag_runner: bool = True
+    floor_tag_exit_ratio: float = 0.50
     runner_wide_atr_mult: float = 2.00
     enable_dynamic_max_r: bool = True
     max_r_cap: float = 8.00
@@ -287,6 +333,24 @@ class PISConfig:
             raise ValueError(f"scale_out_ratio must be between 0 and 1, got {self.scale_out_ratio}")
         if self.scale_out_target_r <= 0.0:
             raise ValueError(f"scale_out_target_r must be > 0, got {self.scale_out_target_r}")
+        if not (0.0 < self.breakeven_trigger_r < self.activation_mfe_r):
+            raise ValueError(
+                f"breakeven_trigger_r must be between 0 and activation_mfe_r ({self.activation_mfe_r}), got {self.breakeven_trigger_r}"
+            )
+        if self.breakeven_trigger_atr_mult < 0.0:
+            raise ValueError(f"breakeven_trigger_atr_mult must be >= 0, got {self.breakeven_trigger_atr_mult}")
+        if self.progressive_lock_trail_atr_mult <= 0.0:
+            raise ValueError(f"progressive_lock_trail_atr_mult must be > 0, got {self.progressive_lock_trail_atr_mult}")
+        if self.profit_guard_min_giveback_atr_r < 0.0:
+            raise ValueError(f"profit_guard_min_giveback_atr_r must be >= 0, got {self.profit_guard_min_giveback_atr_r}")
+        if not (0.0 < self.progressive_lock_start_frac <= self.progressive_lock_end_frac < 1.0):
+            raise ValueError("progressive lock fractions must satisfy 0 < start <= end < 1")
+        if not (0.0 < self.profit_guard_max_giveback_pct < 1.0):
+            raise ValueError(f"profit_guard_max_giveback_pct must be between 0 and 1, got {self.profit_guard_max_giveback_pct}")
+        if self.weak_trend_scale_out_r <= 0.0 or self.weak_trend_scale_out_r > self.scale_out_target_r:
+            raise ValueError(f"weak_trend_scale_out_r must be in (0, scale_out_target_r], got {self.weak_trend_scale_out_r}")
+        if not (0.0 < self.floor_tag_exit_ratio < 1.0):
+            raise ValueError(f"floor_tag_exit_ratio must be between 0 and 1, got {self.floor_tag_exit_ratio}")
         if self.runner_wide_atr_mult <= 0.0:
             raise ValueError(f"runner_wide_atr_mult must be > 0, got {self.runner_wide_atr_mult}")
 

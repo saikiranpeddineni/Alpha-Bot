@@ -18,8 +18,9 @@ from app.strategies.base import Strategy, StrategyContext, register
 class VwapReversion(Strategy):
     name = "vwap_reversion"
     description = "Fade extreme stretches from session VWAP in range-bound tape"
-    
+
     is_breakout = False
+    is_mean_reversion = True
     ml_threshold = 0.52
     evaluation_horizons = ["15m", "30m", "close"]
     regime_weights = {
@@ -92,7 +93,7 @@ class VwapReversion(Strategy):
                     return None
                 if z >= p["z_entry"] and is_bullish_stack:
                     return None
-                    
+
 
 
         if z <= -p["z_entry"] and rsi2 <= p["rsi2_oversold"] and close < vwap:

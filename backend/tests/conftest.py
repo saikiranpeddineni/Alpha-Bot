@@ -2,7 +2,18 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
 from datetime import UTC, datetime, timedelta
+
+# Test isolation FIRST (before any app.* import reads it): engine-level tests
+# flow rejections into the global shadow-ledger singleton whose default path
+# is the PRODUCTION database -- a 'test_strat' AAPL row was found inside prod
+# data on 2026-08-24. Every test run now gets a throwaway ledger file.
+os.environ.setdefault(
+    "ALPHADESK_SHADOW_LEDGER_DB",
+    os.path.join(tempfile.mkdtemp(prefix="alphadesk_test_ledger_", dir=tempfile.gettempdir()), "shadow_ledger.db"),
+)
 
 import numpy as np
 import pandas as pd
@@ -61,8 +72,9 @@ def risk_config() -> RiskConfig:
         max_open_positions=2,
         max_daily_loss_pct=2.0,
         max_drawdown_pct=10.0,
-        consecutive_loss_limit=2,
-        cooldown_minutes=30,
+        strategy_consecutive_loss_limit=2,
+        strategy_cooldown_minutes=30,
+        symbol_cooldown_minutes=30,
         no_entry_minutes_before_close=30,
         flatten_minutes_before_close=5,
         min_price=1.0,

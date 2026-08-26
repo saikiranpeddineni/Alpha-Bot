@@ -6,9 +6,9 @@ Offers higher reward-to-risk (often 2.5R-3.5R).
 
 from __future__ import annotations
 
-import pandas as pd
-from datetime import time
 from zoneinfo import ZoneInfo
+
+import pandas as pd
 
 from app.core.domain import Regime, Signal, SignalAction
 from app.strategies.base import Strategy, StrategyContext, register
@@ -20,8 +20,9 @@ ET = ZoneInfo("America/New_York")
 class TrendPullback(Strategy):
     name = "trend_pullback"
     description = "Buys pullbacks into the EMA20/50 value zone during established trends"
-    
+
     is_breakout = False
+    is_mean_reversion = True
     ml_threshold = 0.53
     evaluation_horizons = ["60m", "close"]
     regime_weights = {
@@ -53,7 +54,7 @@ class TrendPullback(Strategy):
         et_times = df.index.tz_convert(ET).time
         today = et_dates[-1]
         now_time = et_times[-1]
-        
+
         # Only trade once per symbol per day
         if (symbol, today) in self._traded:
             return None
@@ -61,7 +62,7 @@ class TrendPullback(Strategy):
         p = self.params
 
         last_row = df.iloc[-1]
-        
+
         # Required indicators
         for col in ["er20", "ema20", "ema50", "rsi14", "vol_z", "atr14"]:
             if col not in last_row or pd.isna(last_row[col]):
@@ -73,12 +74,12 @@ class TrendPullback(Strategy):
         rsi14 = float(last_row["rsi14"])
         vol_z = float(last_row["vol_z"])
         atr14 = float(last_row["atr14"])
-        
+
         close_px = float(last_row["close"])
         open_px = float(last_row["open"])
         high_px = float(last_row["high"])
         low_px = float(last_row["low"])
-        
+
         candle_range = max(high_px - low_px, 1e-6)
 
         # Trend Strength Check
@@ -93,6 +94,7 @@ class TrendPullback(Strategy):
             return None
 
         # Long Setup (Uptrend Pullback)
+        reward_risk = float(p["reward_risk"])
         if is_uptrend:
             # 1. Price dipped into the Value Zone (between EMA20 and EMA50 - small buffer)
             if low_px <= ema20 and low_px >= (ema50 - 0.5 * atr14):
@@ -101,7 +103,7 @@ class TrendPullback(Strategy):
                     # 3. Trigger: Bullish rejection candle closing back above EMA20
                     lower_wick = min(open_px, close_px) - low_px
                     wick_ratio = lower_wick / candle_range
-                    
+
                     if close_px > open_px and close_px > ema20 and wick_ratio >= p["min_wick_ratio"]:
                         confidence = min(0.90, 0.55 + (0.15 * min(2.0, er20)) + (0.10 * min(1.0, wick_ratio)))
                         return Signal(
@@ -125,13 +127,19 @@ class TrendPullback(Strategy):
                     # 3. Trigger: Bearish rejection candle closing back below EMA20
                     upper_wick = high_px - max(open_px, close_px)
                     wick_ratio = upper_wick / candle_range
-                    
+
                     if close_px < open_px and close_px < ema20 and wick_ratio >= p["min_wick_ratio"]:
+                        confidence = min(0.90, 0.55 + (0.15 * min(2.0, er20)) + (0.10 * min(1.0, wick_ratio)))
                         return Signal(
                             symbol=symbol,
                             action=SignalAction.ENTER_SHORT,
+                            confidence=round(confidence, 4),
                             strategy=self.name,
-                            score=0.80,
+                            reason=f"Trend pullback short (er20 {er20:.2f}, wick {wick_ratio:.2f})",
+                            price=close_px,
+                            score=0.80,  # Very high probability setup
+                            stop_loss=ema50 + 0.5 * atr14,
+                            take_profit=close_px - ((ema50 + 0.5 * atr14) - close_px) * reward_risk,
                         )
 
         return None

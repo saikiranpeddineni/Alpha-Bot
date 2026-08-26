@@ -13,11 +13,10 @@ Guarantees:
 
 from __future__ import annotations
 
-import math
 import threading
 from collections import deque
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from app.pis.authority import PISAuthority
 from app.pis.models import (
@@ -29,7 +28,7 @@ from app.pis.models import (
     SnapshotHistory,
     TradeHealth,
 )
-from app.pis.profit_memory import ProfitMemoryState, ProfitMemoryTracker
+from app.pis.profit_memory import ProfitMemoryTracker
 from app.pis.state_machine import PositionLifecycleStateMachine
 
 
@@ -46,8 +45,8 @@ class PositionBrain:
         self,
         symbol: str,
         initial_observation: PositionObservation,
-        config: Optional[PISConfig] = None,
-        restored_memory: Optional[Any] = None,
+        config: PISConfig | None = None,
+        restored_memory: Any | None = None,
     ) -> None:
         """Initialize PositionBrain for a symbol with initial observation.
 
@@ -88,13 +87,13 @@ class PositionBrain:
             self._last_observation: PositionObservation = initial_observation
             self._last_timestamp: datetime = initial_observation.timestamp
             self._current_stop_floor: float = initial_observation.initial_stop
-            self._last_decision: Optional[PISDecision] = None
+            self._last_decision: PISDecision | None = None
             self._is_closed: bool = False
             self._stagnation_counter: int = 0
             self._degradation_counter: int = 0
             self._runner_qualified: bool = False
             self._has_scaled_out: bool = False
-            self._smoothed_health_score: Optional[float] = None
+            self._smoothed_health_score: float | None = None
 
             # Initial evaluation
             self._evaluate_internal(initial_observation)
@@ -110,6 +109,21 @@ class PositionBrain:
         """Check if position has executed first-stage scale-out."""
         with self._lock:
             return self._has_scaled_out
+
+    def revert_scale_out(self) -> None:
+        """Undo decision-time scale-out flags after a failed exit execution.
+
+        PARTIAL_EXIT sets `_has_scaled_out`/`_runner_qualified` at DECISION time.
+        If the broker rejects or loses that order, the brain must not keep
+        phantom runner posture (ratcheted floors, ceiling-harvest arming) built
+        on a partial exit that never filled. Flags re-qualify naturally on a
+        later bar if the setup genuinely deserves them.
+        """
+        with self._lock:
+            if self._is_closed:
+                return
+            self._has_scaled_out = False
+            self._runner_qualified = False
 
 
     @property
@@ -137,7 +151,7 @@ class PositionBrain:
             return self._current_stop_floor
 
     @property
-    def last_decision(self) -> Optional[PISDecision]:
+    def last_decision(self) -> PISDecision | None:
         """Get last PISDecision output."""
         with self._lock:
             return self._last_decision
@@ -385,6 +399,10 @@ class PositionBrain:
                 target = LifecycleState.RUNNER
             elif is_degraded_bar or health.overall <= self.config.health_weakening_threshold:
                 target = LifecycleState.WEAKENING
+            elif health.overall < self.config.health_accelerating_threshold and peak_r >= self.config.activation_mfe_r:
+                # Reached activation R but momentum cooled: a mature hold, not a
+                # fresh accelerator. Previously unreachable state.
+                target = LifecycleState.MATURING
         elif current == LifecycleState.RUNNER:
             if health.overall < self.config.health_distribution_threshold:
                 target = LifecycleState.DISTRIBUTION
@@ -421,7 +439,7 @@ class PositionBrain:
             self._history.clear()
             self._is_closed = True
 
-    def serialize_state(self) -> Dict[str, Any]:
+    def serialize_state(self) -> dict[str, Any]:
         """Serialize state for recovery (Priority 15)."""
         with self._lock:
             return {

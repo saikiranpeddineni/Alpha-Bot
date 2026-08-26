@@ -7,9 +7,10 @@ Uses VWAP + EMA confirmation and requires a bullish/bearish candle close.
 
 from __future__ import annotations
 
-import pandas as pd
 from datetime import time
 from zoneinfo import ZoneInfo
+
+import pandas as pd
 
 from app.core.domain import Regime, Signal, SignalAction
 from app.strategies.base import Strategy, StrategyContext, register
@@ -21,7 +22,7 @@ ET = ZoneInfo("America/New_York")
 class GapAndGo(Strategy):
     name = "gap_and_go"
     description = "Pre-market catalyst continuation (Gap & Go)"
-    
+
     is_breakout = True
     ml_threshold = 0.54
     evaluation_horizons = ["60m", "close"]
@@ -55,7 +56,7 @@ class GapAndGo(Strategy):
         et_times = df.index.tz_convert(ET).time
         today = et_dates[-1]
         now_time = et_times[-1]
-        
+
         # Only trade once per symbol per day
         if (symbol, today) in self._traded:
             return None
@@ -68,9 +69,6 @@ class GapAndGo(Strategy):
             return None
 
         # Requires scanner gap context
-        if ctx.mover_change_pct is None:
-            return None
-
         gap_pct = ctx.mover_change_pct
         min_gap = p["min_gap_pct"]
         is_gap_up = gap_pct >= min_gap
@@ -96,8 +94,11 @@ class GapAndGo(Strategy):
         confidence = min(0.90, 0.55 + (0.05 * max(0.0, vol_z)) + (0.05 * min(2.0, ema_spread_pct)))
 
         # Long Setup (Gap Up)
+        reward_risk = float(p["reward_risk"])
         if is_gap_up:
-            if close_px > vwap and ema9 > ema20 and close_px > open_px:
+            # close > ema20 guarantees stop (ema20-0.05) sits below entry and the
+            # R-multiple target sits above entry.
+            if close_px > vwap and ema9 > ema20 and close_px > ema20 and close_px > open_px:
                 # Confirmed gap & go long
                 return Signal(
                     symbol=symbol,
@@ -113,7 +114,9 @@ class GapAndGo(Strategy):
 
         # Short Setup (Gap Down)
         elif is_gap_down:
-            if close_px < vwap and ema9 < ema20 and close_px < open_px:
+            # close < ema20 guarantees stop (ema20+0.05) sits above entry and the
+            # R-multiple target sits below entry.
+            if close_px < vwap and ema9 < ema20 and close_px < ema20 and close_px < open_px:
                 # Confirmed gap & go short
                 return Signal(
                     symbol=symbol,

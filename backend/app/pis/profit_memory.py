@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Tuple
 
 from app.pis.models import PositionObservation
 

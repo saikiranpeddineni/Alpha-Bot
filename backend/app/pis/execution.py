@@ -6,9 +6,7 @@ PIS does not issue orders directly to brokers.
 
 from __future__ import annotations
 
-from typing import Optional
-
-from app.core.domain import OrderRequest, OrderSide, OrderType, utcnow
+from app.core.domain import OrderRequest, OrderSide, OrderType
 from app.pis.models import ExitAction, PISDecision, PositionObservation
 
 
@@ -19,7 +17,7 @@ class PISExecutionAdapter:
     def build_order_request(
         decision: PISDecision,
         obs: PositionObservation,
-    ) -> Optional[OrderRequest]:
+    ) -> OrderRequest | None:
         """Build engine OrderRequest from PISDecision.
 
         Args:

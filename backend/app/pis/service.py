@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from app.pis.models import PISConfig, PISDecision, PositionObservation
 from app.pis.position_brain import PositionBrain
@@ -21,12 +21,12 @@ logger = logging.getLogger(__name__)
 class PISService:
     """Service container for managing PositionBrain lifecycles and telemetry."""
 
-    def __init__(self, config: Optional[PISConfig] = None) -> None:
+    def __init__(self, config: PISConfig | None = None) -> None:
         self.config = config or PISConfig()
         self._lock = threading.Lock()
-        self._brains: Dict[str, PositionBrain] = {}
-        self._symbol_locks: Dict[str, threading.Lock] = {}
-        self._telemetry: Dict[str, Any] = {
+        self._brains: dict[str, PositionBrain] = {}
+        self._symbol_locks: dict[str, threading.Lock] = {}
+        self._telemetry: dict[str, Any] = {
             "evaluations_total": 0,
             "duplicate_evaluations": 0,
             "rejected_observations": 0,
@@ -49,7 +49,7 @@ class PISService:
                 self._symbol_locks[symbol_key] = threading.Lock()
             return self._symbol_locks[symbol_key]
 
-    def get_brain(self, symbol: str) -> Optional[PositionBrain]:
+    def get_brain(self, symbol: str) -> PositionBrain | None:
         """Get active PositionBrain for symbol, if present."""
         symbol_key = symbol.upper()
         with self._lock:
@@ -61,7 +61,7 @@ class PISService:
                 return None
             return brain
 
-    def observe(self, obs: PositionObservation, restored_memory: Optional[Any] = None) -> PISDecision:
+    def observe(self, obs: PositionObservation, restored_memory: Any | None = None) -> PISDecision:
         """Process observation for symbol through PIS, serializing per-symbol evaluations.
 
         Args:
@@ -109,12 +109,20 @@ class PISService:
         symbol_key = symbol.upper()
         symbol_lock = self._get_symbol_lock(symbol_key)
 
-        with symbol_lock:
-            with self._lock:
-                brain = self._brains.pop(symbol_key, None)
-                if brain:
-                    brain.close()
-                    self._telemetry["closed_brains_cleaned"] += 1
+        with symbol_lock, self._lock:
+            brain = self._brains.pop(symbol_key, None)
+            if brain:
+                brain.close()
+                self._telemetry["closed_brains_cleaned"] += 1
+
+    def revert_scale_out(self, symbol: str) -> None:
+        """Revert decision-time scale-out/runner flags after failed execution."""
+        symbol_key = symbol.upper()
+        symbol_lock = self._get_symbol_lock(symbol_key)
+        with symbol_lock, self._lock:
+            brain = self._brains.get(symbol_key)
+            if brain is not None:
+                brain.revert_scale_out()
 
     def close_all(self) -> None:
         """Close and purge all active PositionBrains."""
@@ -124,7 +132,7 @@ class PISService:
         for sym in symbols:
             self.close_brain(sym)
 
-    def get_telemetry(self) -> Dict[str, Any]:
+    def get_telemetry(self) -> dict[str, Any]:
         """Expose telemetry for observability (Priority 14)."""
         with self._lock:
             active_brains = len(self._brains)
@@ -135,7 +143,7 @@ class PISService:
                 "telemetry": dict(self._telemetry),
             }
 
-    def serialize_all_states(self) -> Dict[str, Any]:
+    def serialize_all_states(self) -> dict[str, Any]:
         """Serialize all brains state for restart recovery (Priority 15)."""
         with self._lock:
             return {

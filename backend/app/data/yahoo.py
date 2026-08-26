@@ -12,8 +12,8 @@ from datetime import UTC, datetime, timedelta
 
 import pandas as pd
 
-from app.core.domain import Quote
 from app.core.applog import applog
+from app.core.domain import Quote
 from app.data.base import DataProvider, empty_bars, normalize_bars, resample_bars
 
 _INTERVALS = {"1Min": "1m", "5Min": "5m", "15Min": "15m", "1Day": "1d"}

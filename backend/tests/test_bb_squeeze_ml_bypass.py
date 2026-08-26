@@ -214,8 +214,10 @@ def test_boundary_and_killswitch_bb_squeeze():
     pipeline.process("AAPL", df_1530, [sig_1530], Regime.VOLATILE, features=feats)
     assert getattr(sig_1530, "ml_gate_decision", None) == "REJECT"
 
-    # Kill-switch test: bb_squeeze_base_fallback_bypass_enabled = False -> Should REJECT
-    pipeline.trade_score_engine.risk_config.bb_squeeze_base_fallback_bypass_enabled = False
+    # Kill-switch regression guard: the legacy bb_squeeze base-fallback bypass
+    # knob was removed entirely. The ML gate must reject unconditionally below
+    # threshold, with no config surface to re-enable a bypass.
+    assert not hasattr(pipeline.trade_score_engine.risk_config, "bb_squeeze_base_fallback_bypass_enabled")
     sig_ks = Signal(symbol="AAPL", action=SignalAction.ENTER_SHORT, confidence=0.6, strategy="bb_squeeze", reason="breakdown", price=100.0, stop_loss=101.5, take_profit=98.5)
     pipeline.process("AAPL", df_1400, [sig_ks], Regime.VOLATILE, features=feats)
     assert getattr(sig_ks, "ml_gate_decision", None) == "REJECT"
