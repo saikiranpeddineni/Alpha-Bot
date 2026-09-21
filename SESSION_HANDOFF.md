@@ -42,7 +42,39 @@ Validation state:
 
 ---
 
-## 0b. RESUME UPDATE (day 3 — 2026-08-24, pre-open)
+## 0c. RESUME UPDATE (day 4 — 2026-09-21, 30-Session Forensic Overhaul & Test Remediation)
+
+### 1. 30-Session Forensic Analysis (2026-08-05 to 2026-09-18)
+- Audited 1,028 trades across 30 live/paper sessions:
+  - Actual Live P&L: **-$14,025.89**
+  - Replay with calibrated PIS: **-$5,837.03**
+  - Live to Replay Delta: **+$8,188.86** (+58.4% loss reduction; positive delta in 23 of 30 sessions).
+- Root Causes Identified:
+  1. **Peak R Giveback**: Winners reaching $\ge 1.0R$ to $2.0R$ gave back gains due to over-wide breathing room ($1.0R$) and slow giveback triggers ($1.25R$).
+  2. **Dead-on-Arrival Entry Leak**: 717 of 1,028 trades (69.7%) never reached $+0.30R$ peak excursion, losing -$26,800.87. Meta-label models approved ~95% of trades.
+
+### 2. PIS Calibrations & Engine Fixes (Commits `7073b2b`, `7adbbaa`, `acd8ede`)
+- **PIS Calibration (`app/pis/models.py`, `app/pis/protection.py`, `app/pis/exit_planner.py`)**:
+  - `progressive_lock_cap_trigger_r = 0.85`: Caps the trigger so high-ATR names don't require unrealistic R-multiples to arm profit locking.
+  - Dynamic breathing room & buffer: Scaled proportionally to peak R ($\min(\dots, \text{Peak R} \times 0.35)$) with $0.35R$ floor.
+  - Guaranteed monotonic Breakeven $+0.05R$ when peak $R \ge 1.0R$.
+  - Post-peak stagnation harvesting: Exits trades that stall for $\ge 10$ bars after reaching $\ge 1.0R$ with momentum $\le 0.35$.
+  - Monotonic stop loss synchronization: Engine ratchets `_lot.stop_loss` on every bar when PIS advances `target_stop_loss`.
+- **Exit Architecture Ownership**:
+  - Confirmed: Exits are 100% exclusively owned and evaluated by PIS.
+  - Legacy strategy exits are explicitly discarded in `engine_evaluation.py:383`.
+- **Bug Fixes**:
+  - `engine_evaluation.py`: Moved `skip_entries_reason` gate strictly below PIS position exit evaluation. Fixed stale-bar check to only apply in live/paper trading (`not clock.always_open and not replay_fast_path`).
+  - `engine.py`: Made `_drain_fills()` mock-safe when awaiting `_reconcile_pending_closes(now)` and preserved substring search for `_release_pending_close`.
+  - `pipeline.py`: Reordered excursion geometry estimation ahead of veto gates so candidates always have complete risk geometry.
+  - `prediction.py`: Removed undocumented volume threshold bypass (`vol_z > 3.0`). Derived `mover_change_pct` in candidate replay.
+  - Test invariants repaired: `test_008`, `test_bb_squeeze_ml_bypass`, `test_blocking_golive_p0`, `test_partial_fill_close_guard`, `test_pillar1_target_geometry_invariant`, `test_rsi2_ml_bypass`, `test_runtime_lifecycle_isolation`.
+
+### 3. Test Suite Status
+- All 123 test files (790 tests) passing across the entire repository.
+- Active branch: `Alphadesk_001` (all commits pushed to `origin/Alphadesk_001`).
+
+---
 
 Readiness work completed:
 - Full test suite green: **745 passed / 0 failed** (fixed 6 stale tests: deleted
