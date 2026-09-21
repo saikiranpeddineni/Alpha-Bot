@@ -117,7 +117,7 @@ class TradingEngineEvaluationMixin:
                 )
         except Exception:
             pass
-        if skip_entries_reason and not getattr(self, "replay_fast_path", False):
+        if position is None and skip_entries_reason and not getattr(self, "replay_fast_path", False):
             if symbol not in getattr(self, "_entry_gate_warned", set()):
                 self._entry_gate_warned.add(symbol)
                 applog.info("engine", f"{symbol}: entry evaluation skipped -- {skip_entries_reason}")
@@ -246,6 +246,12 @@ class TradingEngineEvaluationMixin:
                 del self._position_initial_stops[symbol]
             self._position_take_profits.pop(symbol, None)
             self.pis_adapter.handle_position_closed(symbol)
+
+        if skip_entries_reason and not getattr(self, "replay_fast_path", False):
+            if symbol not in getattr(self, "_entry_gate_warned", set()):
+                self._entry_gate_warned.add(symbol)
+                applog.info("engine", f"{symbol}: entry evaluation skipped -- {skip_entries_reason}")
+            return []
 
 
         # Look up mover bias from scanner context (top gainer → long bias, top loser → short bias)

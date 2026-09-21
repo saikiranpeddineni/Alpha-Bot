@@ -1206,11 +1206,6 @@ class MetaLabelEngine:
             prob = float(raw_proba[0, 1])
             clf_name = type(clf).__name__
 
-            vol_z = float(features.get("vol_z", 0.0))
-            if vol_z > 3.0 and prob < threshold and prob >= 0.45:
-                applog.info("meta", f"[HARVEST BYPASS] Explosive volume (vol_z={vol_z:.1f}) dropping threshold {threshold}->0.45")
-                threshold = 0.45
-
             decision = "PASS" if prob >= threshold else "REJECT"
             applog.debug(
                 "meta",
