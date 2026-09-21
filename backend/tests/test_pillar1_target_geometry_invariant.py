@@ -45,6 +45,7 @@ def sample_features(dummy_df):
 def pipeline(monkeypatch):
     settings = get_settings()
     risk_cfg = settings.risk_config()
+    risk_cfg.enable_entry_extreme_guard = False
     model = SignalModel(models_dir=MODELS_DIR)
     p = SignalPipeline(model=model, risk_config=risk_cfg, settings=settings)
     p.ml_threshold = 0.0

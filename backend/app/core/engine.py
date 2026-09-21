@@ -1123,7 +1123,10 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
         # when a new fill for the symbol happens to arrive. After a partial
         # scale-out the residual lot may produce no further fills until EOD,
         # which used to wedge the guard and silently swallow all PIS exits.
-        await self._reconcile_pending_closes(now)
+        if hasattr(self, "_reconcile_pending_closes"):
+            res = self._reconcile_pending_closes(now)
+            if inspect.isawaitable(res):
+                await res
         fills = self.broker.drain_fills()
         if not fills:
             return

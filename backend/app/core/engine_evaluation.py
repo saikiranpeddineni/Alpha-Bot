@@ -100,23 +100,24 @@ class TradingEngineEvaluationMixin:
                     skip_entries_reason = "market closed"
             except Exception:
                 pass
-        try:
-            import os as _os
+        if position is None and not getattr(self.clock, "always_open", False) and not getattr(self, "replay_fast_path", False):
+            try:
+                import os as _os
 
-            _max_age_min = float(_os.environ.get("ALPHADESK_MAX_DECISION_BAR_AGE_MIN", "15"))
-            _last_ts = df.index[-1]
-            if getattr(_last_ts, "tzinfo", None) is None:
-                _last_ts = _last_ts.tz_localize("UTC")
-            else:
-                _last_ts = _last_ts.tz_convert("UTC")
-            _now = now if now.tzinfo else now.replace(tzinfo=UTC)
-            _age_min = (_now - _last_ts.to_pydatetime()).total_seconds() / 60.0
-            if _age_min > _max_age_min:
-                skip_entries_reason = (
-                    f"decision bar stale ({_age_min:.0f}min > {_max_age_min:.0f}min)"
-                )
-        except Exception:
-            pass
+                _max_age_min = float(_os.environ.get("ALPHADESK_MAX_DECISION_BAR_AGE_MIN", "15"))
+                _last_ts = df.index[-1]
+                if getattr(_last_ts, "tzinfo", None) is None:
+                    _last_ts = _last_ts.tz_localize("UTC")
+                else:
+                    _last_ts = _last_ts.tz_convert("UTC")
+                _now = now if now.tzinfo else now.replace(tzinfo=UTC)
+                _age_min = (_now - _last_ts.to_pydatetime()).total_seconds() / 60.0
+                if _age_min > _max_age_min:
+                    skip_entries_reason = (
+                        f"decision bar stale ({_age_min:.0f}min > {_max_age_min:.0f}min)"
+                    )
+            except Exception:
+                pass
         if position is None and skip_entries_reason and not getattr(self, "replay_fast_path", False):
             if symbol not in getattr(self, "_entry_gate_warned", set()):
                 self._entry_gate_warned.add(symbol)

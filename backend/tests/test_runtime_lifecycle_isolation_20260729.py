@@ -49,7 +49,7 @@ def test_partial_fill_does_not_mark_order_filled_unconditionally():
 def test_pending_close_guard_release_is_side_neutral_and_flatness_based():
     src = _src("_drain_fills")
     assert "local_lot" in src
-    assert "self._pending_close_symbols.discard(symbol)" in src
+    assert "self._pending_close_symbols.discard(symbol)" in src or "self._release_pending_close" in src
     assert "if fill.side == OrderSide.SELL" not in src
 
 

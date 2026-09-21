@@ -36,8 +36,8 @@ def make_dummy_df(ts_et: datetime) -> pd.DataFrame:
     idx = pd.date_range(end=ts_et, periods=50, freq="1min")
     df = pd.DataFrame({
         "open": [100.0] * 50,
-        "high": [101.0] * 50,
-        "low": [99.0] * 50,
+        "high": [110.0] * 50,
+        "low": [90.0] * 50,
         "close": [100.0] * 50,
         "volume": [1000] * 50,
         "vol_sma20": [1000] * 50,
