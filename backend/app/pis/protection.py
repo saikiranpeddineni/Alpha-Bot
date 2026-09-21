@@ -87,12 +87,16 @@ class AdaptiveProtectionPlanner:
             candidate_floor = max(breakeven_floor, wide_trail) if side > 0 else min(breakeven_floor, wide_trail)
         elif peak_r < activation_r:
             # Volatility-scaled trigger: on a name whose ATR is large relative to
-            # its risk unit, 0.40R of profit is inside the noise band. Demand
-            # both the R trigger and a full noise-unit (ATR) of excursion.
+            # its risk unit, ensure effective_trigger cannot exceed 85% of activation_r
+            # so high ATR-to-risk names are never permanently disarmed.
             atr_r = obs.atr / risk if risk > 1e-8 else 0.0
-            effective_trigger = max(
-                self.config.breakeven_trigger_r,
-                getattr(self.config, "breakeven_trigger_atr_mult", 0.0) * atr_r,
+            cap_trig = getattr(self.config, "progressive_lock_cap_trigger_r", 0.85)
+            effective_trigger = min(
+                cap_trig,
+                max(
+                    self.config.breakeven_trigger_r,
+                    getattr(self.config, "breakeven_trigger_atr_mult", 0.0) * atr_r,
+                ),
             )
             if peak_r >= effective_trigger:
                 # Progressive profit lock: once a trade has shown real
@@ -113,6 +117,8 @@ class AdaptiveProtectionPlanner:
                 # is slack (frac target binds); on noisy names it forces patience.
                 trail_cap = peak_r - getattr(self.config, "progressive_lock_trail_atr_mult", 1.0) * atr_r
                 locked_r = min(frac_target, max(self.config.min_locked_r, trail_cap))
+                if peak_r >= 1.00:
+                    locked_r = max(locked_r, self.config.min_locked_r, 0.05)
                 candidate_floor = entry + side * locked_r * risk
             else:
                 # Below breakeven trigger: cleanly maintain initial stop loss or previous floor
@@ -166,14 +172,14 @@ class AdaptiveProtectionPlanner:
 
             runner_threshold = getattr(self.config, "hyper_runner_threshold_r", 1.50)
             if peak_r >= runner_threshold and health.overall >= 0.70 and proximity < 0.80:
-                atr_r_buffer = 2.0 * (obs.atr / max(1e-6, risk))
-            else:
                 atr_r_buffer = 1.5 * (obs.atr / max(1e-6, risk))
+            else:
+                atr_r_buffer = 1.0 * (obs.atr / max(1e-6, risk))
 
-            # If health is degrading or we are exhausted, we must allow the trailing stop to choke tighter
-            # than the min_breathing_room. Otherwise the max() function blinds the PIS exhaustion logic.
-            dynamic_min_breathing = self.config.min_breathing_room_r
-            dynamic_atr_buffer = atr_r_buffer
+            # Scale dynamic breathing room and atr buffer proportionally to Peak R
+            # Prevents atr_r_buffer from exceeding 45% of peak_r and draining mature gains
+            dynamic_min_breathing = min(self.config.min_breathing_room_r, peak_r * 0.35)
+            dynamic_atr_buffer = min(peak_r * 0.45, atr_r_buffer)
 
             if health.overall < 0.50 or (peak_r >= 1.50 and health.overall < 0.65):
                 # Scale down the mandatory buffers so we can choke
@@ -181,8 +187,10 @@ class AdaptiveProtectionPlanner:
                 dynamic_min_breathing *= health_factor
                 dynamic_atr_buffer *= health_factor
 
-            giveback_allowance_r = max(dynamic_min_breathing, dynamic_atr_buffer, peak_r * giveback_pct)
+            giveback_allowance_r = max(dynamic_min_breathing, min(dynamic_atr_buffer, peak_r * giveback_pct))
             locked_r = max(self.config.min_locked_r, peak_r - giveback_allowance_r)
+            if peak_r >= 1.00:
+                locked_r = max(locked_r, self.config.min_locked_r, 0.05)
 
             # Raw desired floor from R-multiple locking
             desired_floor = entry + side * locked_r * risk

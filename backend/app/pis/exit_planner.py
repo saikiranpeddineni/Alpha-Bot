@@ -114,14 +114,27 @@ class ExitPlanner:
         early_invalidation_breach = thesis.early_invalidation_detected
 
         # Check Extended Stagnation / Time-Decay Profit Harvesting
-        # Requires true structural stall over substantial duration (>= 25 bars) without progress
+        # 1. Fast post-peak stall: >= 1.0R peak that stalls for >= 10 bars with fading momentum
+        # 2. Structural stall over substantial duration (>= 25 bars)
+        fast_stagnation = (
+            peak_r >= 1.00
+            and history_len >= 12
+            and thesis.stagnation_bars >= 10
+            and health.momentum_score <= 0.35
+            and obs.r_multiple >= 0.20
+        )
         stagnation_harvest = (
             not has_scaled_out
-            and history_len >= 25
-            and thesis.stagnation_bars >= 20
-            and peak_r >= 0.50
-            and obs.r_multiple >= 0.30
-            and health.momentum_score <= 0.30
+            and (
+                fast_stagnation
+                or (
+                    history_len >= 25
+                    and thesis.stagnation_bars >= 20
+                    and peak_r >= 0.50
+                    and obs.r_multiple >= 0.30
+                    and health.momentum_score <= 0.30
+                )
+            )
         )
 
         # --- TWO-STAGE 50/50 INSTITUTIONAL SCALE-OUT & RUNNER EXTENSION ---
@@ -167,9 +180,16 @@ class ExitPlanner:
             and obs.r_multiple > 0.0
         ):
             giveback = peak_r - obs.r_multiple
-            min_giveback = max(
-                self.config.profit_guard_max_giveback_pct * peak_r,
-                getattr(self.config, "profit_guard_min_giveback_atr_r", 0.0) * (obs.atr / obs.risk_per_share if obs.risk_per_share > 1e-8 else 0.0),
+            atr_r_buffer = (
+                getattr(self.config, "profit_guard_min_giveback_atr_r", 0.0)
+                * (obs.atr / obs.risk_per_share if obs.risk_per_share > 1e-8 else 0.0)
+            )
+            min_giveback = min(
+                peak_r * 0.50,
+                max(
+                    self.config.profit_guard_max_giveback_pct * peak_r,
+                    atr_r_buffer,
+                ),
             )
             if giveback >= min_giveback:
                 giveback_guard_triggered = True

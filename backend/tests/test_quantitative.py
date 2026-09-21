@@ -50,6 +50,16 @@ def _make_multi_day_df(n_days: int = 30) -> pd.DataFrame:
     return pd.concat(frames).sort_index()
 
 
+def _make_sessions_df(n_sessions: int = 30) -> pd.DataFrame:
+    """Session bar frames across an arbitrary number of ET dates (month-safe)."""
+    frames = []
+    base = datetime(2025, 1, 2, tzinfo=UTC)
+    for d in range(n_sessions):
+        day = (base + timedelta(days=d)).date().isoformat()
+        frames.append(_make_bar_df(n_bars=390, start=f"{day} 09:31"))
+    return pd.concat(frames).sort_index()
+
+
 # ---------------------------------------------------------------------------
 # 1. Data Quality Engine
 # ---------------------------------------------------------------------------
@@ -139,6 +149,44 @@ class TestWalkForwardValidator:
         # summary may be empty if not enough windows, but result must exist
         assert isinstance(result.summary, dict)
         assert result.side == "long"
+
+    def test_short_span_adapts_window_sizes_not_zero_windows(self):
+        """31 usable sessions vs the 90+10x3 plan used to yield "Only 0 windows"
+        -> silent non-walk-forward fits for every promotion (2026-08-26)."""
+        from app.ai.prediction import WalkForwardValidator
+
+        wfv = WalkForwardValidator(
+            train_days=90, val_days=10, min_windows=3, horizon_bars=5, threshold_pct=0.05
+        )
+        n = 31
+        t_eff, v_eff = wfv._resolve_session_windows(n)
+        assert wfv._window_count(n, t_eff, v_eff) >= 3
+        # Adapted plan must genuinely cut windows on real row blocks
+        df = _make_sessions_df(n_sessions=n)
+        windows = wfv._split_by_days(df, train_days=t_eff, val_days=v_eff)
+        assert len(windows) >= 3
+
+    def test_moderate_span_shrinks_train_only_keeps_val(self):
+        """110 sessions cannot fit three 90+10 folds, but training depth alone
+        can give way while validation width stays untouched."""
+        from app.ai.prediction import WalkForwardValidator
+
+        wfv = WalkForwardValidator(
+            train_days=90, val_days=10, min_windows=3, horizon_bars=5, threshold_pct=0.05
+        )
+        n = 110
+        t_eff, v_eff = wfv._resolve_session_windows(n)
+        assert v_eff == 10
+        assert wfv._window_count(n, t_eff, v_eff) >= 3
+
+    def test_healthy_span_returns_configured_sizes(self):
+        from app.ai.prediction import WalkForwardValidator
+
+        wfv = WalkForwardValidator(
+            train_days=90, val_days=10, min_windows=3, horizon_bars=5, threshold_pct=0.05
+        )
+        assert wfv._resolve_session_windows(120) == (90, 10)
+        assert wfv._resolve_session_windows(400) == (90, 10)
 
 
 # ---------------------------------------------------------------------------

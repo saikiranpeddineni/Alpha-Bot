@@ -223,6 +223,15 @@ class TradingEngineEvaluationMixin:
                         self.pis_adapter.revert_scale_out(symbol)
                     except Exception:
                         pass
+            # Synchronize ratcheted protective stop floor to portfolio lot so broker & tracker stay aligned
+            if pis_decision is not None and pis_decision.target_stop_loss is not None and _lot is not None:
+                new_floor = float(pis_decision.target_stop_loss)
+                if position.qty > 0:
+                    if _lot.stop_loss is None or new_floor > _lot.stop_loss:
+                        _lot.stop_loss = new_floor
+                else:
+                    if _lot.stop_loss is None or new_floor < _lot.stop_loss:
+                        _lot.stop_loss = new_floor
 
             # All exits (including strategy take profit targets) are now handled exclusively by PIS
             # to guarantee PIS acts as the single source of truth for intelligent exits.

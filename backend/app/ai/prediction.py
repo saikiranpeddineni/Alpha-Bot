@@ -14,6 +14,7 @@ Phase 2 additions:
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import math
 import warnings
@@ -315,6 +316,73 @@ class WalkForwardValidator:
         self.horizon_bars = horizon_bars
         self.threshold_pct = threshold_pct
 
+    # ------------------------------------------------------------------
+    # Session floors for span-shortfall adaptation below. Walk-forward on a
+    # shorter training window beats the full-dataset fallback it replaces:
+    # the fallback trains on data its own holdout overlaps.
+    MIN_ADAPT_TRAIN_SESSIONS = 10
+    MIN_ADAPT_VAL_SESSIONS = 3
+
+    def _window_count(self, n_sessions: int, train: int, val: int) -> int:
+        """Window count the splitter would produce for a session span."""
+        if n_sessions < train + val:
+            return 0
+        return (n_sessions - train - val) // val + 1
+
+    def _resolve_session_windows(self, n_sessions: int) -> tuple[int, int]:
+        """Adapt train/val SESSION spans when the data cannot fit the plan.
+
+        A recent provider-repair ladder can leave cycles with ~31 usable
+        sessions against a 90+10x3-session plan -- "Only 0 windows" then
+        silently degraded every promotion to a non-walk-forward fit
+        (2026-08-26 cycle). Shrinks ONLY when required, prefers cutting
+        train depth over validation integrity, never violates min_windows,
+        and returns untouched values as soon as the cached span heals.
+        """
+        t, v, mw = self.train_days, self.val_days, self.min_windows
+        if self._window_count(n_sessions, t, v) >= mw:
+            return t, v
+
+        # Step 1: shrink train only, down to half depth.
+        t_cap = min(t, n_sessions - mw * v)
+        if t_cap >= max(self.MIN_ADAPT_TRAIN_SESSIONS, t // 2):
+            applog.info(
+                "wfv",
+                f"Short data span ({n_sessions} sessions): adapting walk-forward "
+                f"train {t}->{t_cap} sessions (val {v} kept)",
+            )
+            return t_cap, v
+
+        # Step 2: shrink both proportionally toward the session floors until
+        # at least min_windows folds genuinely fit.
+        f = n_sessions / max(1, t + mw * v)
+        t_eff = max(self.MIN_ADAPT_TRAIN_SESSIONS, int(t * f))
+        v_eff = max(self.MIN_ADAPT_VAL_SESSIONS, int(v * f))
+        while (
+            self._window_count(n_sessions, t_eff, v_eff) < mw
+            and (t_eff > self.MIN_ADAPT_TRAIN_SESSIONS or v_eff > self.MIN_ADAPT_VAL_SESSIONS)
+        ):
+            if t_eff > self.MIN_ADAPT_TRAIN_SESSIONS:
+                t_eff -= 1
+            else:
+                v_eff -= 1
+        if self._window_count(n_sessions, t_eff, v_eff) >= mw:
+            applog.info(
+                "wfv",
+                f"Short data span ({n_sessions} sessions): adapting walk-forward "
+                f"to {t_eff}+{v_eff} sessions x{mw} windows (configured {t}+{v})",
+            )
+            return t_eff, v_eff
+
+        # Truly tiny span: leave configured sizes -> 0 windows -> documented
+        # full-dataset fallback for this pathological case only.
+        applog.warning(
+            "wfv",
+            f"Data span ({n_sessions} sessions) too short for any walk-forward "
+            f"plan (need >= {mw} folds); using full-dataset training.",
+        )
+        return t, v
+
     @classmethod
     def from_settings(
         cls,
@@ -332,7 +400,7 @@ class WalkForwardValidator:
 
     # ------------------------------------------------------------------
     def _split_by_days(
-        self, df: pd.DataFrame
+        self, df: pd.DataFrame, train_days: int | None = None, val_days: int | None = None
     ) -> list[tuple[pd.DataFrame, pd.DataFrame]]:
         """Generate (train_df, val_df) sliding window pairs.
 
@@ -341,6 +409,8 @@ class WalkForwardValidator:
         are cut by position -- O(log n) per boundary instead of a Python-level
         boolean mask over every row for every window.
         """
+        train_days = self.train_days if train_days is None else train_days
+        val_days = self.val_days if val_days is None else val_days
         windows: list[tuple[pd.DataFrame, pd.DataFrame]] = []
         et_days = df.index.tz_convert("America/New_York").date
         unique_days = sorted(set(et_days))
@@ -350,12 +420,12 @@ class WalkForwardValidator:
         )
         pos_by_day = dict(zip(unique_days, day_positions.tolist(), strict=True))
         n_rows = len(df)
-        step = self.val_days
-        window = self.train_days + self.val_days
+        step = val_days
+        window = train_days + val_days
         start = 0
         while start + window <= len(unique_days):
             train_start = pos_by_day[unique_days[start]]
-            val_start = pos_by_day[unique_days[start + self.train_days]]
+            val_start = pos_by_day[unique_days[start + train_days]]
             end = (
                 pos_by_day[unique_days[start + window]]
                 if start + window < len(unique_days)
@@ -416,7 +486,9 @@ class WalkForwardValidator:
         combined["__label__"] = y_all
         combined["__weight__"] = w_all
 
-        windows = self._split_by_days(combined)
+        n_sessions = len(set(combined.index.tz_convert("America/New_York").date))
+        eff_train, eff_val = self._resolve_session_windows(n_sessions)
+        windows = self._split_by_days(combined, train_days=eff_train, val_days=eff_val)
         n_windows = len(windows)
 
         if n_windows < self.min_windows:
@@ -754,11 +826,37 @@ def _compute_candidates_for_symbol(symbol: str, df_or_path, strategy_overrides: 
     else:
         regimes = [Regime.RANGE] * n
 
+    # Live entry contexts carry scanner state (mover_change_pct = % change vs
+    # prior session close). Candidate replay has no scanner, so derive the
+    # equivalent from the bars themselves; strategies gated on it (gap_and_go)
+    # would otherwise emit ZERO training candidates and stay fail-closed forever.
+    mover_chg = [0.0] * n
+    with contextlib.suppress(Exception):  # tz-naive/odd frames: keep neutral context (pre-fix behavior)
+        from zoneinfo import ZoneInfo
+
+        et_dates = df.index.tz_convert(ZoneInfo("America/New_York")).date
+        closes = df["close"].to_numpy(dtype=float)
+        day_last_idx: dict = {}
+        for di, d in enumerate(et_dates):
+            day_last_idx[d] = di
+        ordered_days = list(day_last_idx)
+        prev_of_day = {
+            d: (closes[day_last_idx[ordered_days[k - 1]]] if k else None)
+            for k, d in enumerate(ordered_days)
+        }
+        for i in range(n):
+            pc = prev_of_day[et_dates[i]]
+            if pc:
+                mover_chg[i] = (closes[i] - pc) / pc * 100.0
+
     for i in range(1, n):
         window = df.iloc[max(0, i - 450 + 1) : i + 1]
         regime = regimes[i]
         now_ts = (window.index[-1] + timedelta(minutes=1)).to_pydatetime()
-        sctx = StrategyContext(position=None, equity=100_000.0, regime=regime, now=now_ts)
+        sctx = StrategyContext(
+            position=None, equity=100_000.0, regime=regime, now=now_ts,
+            mover_change_pct=mover_chg[i],
+        )
 
         for strat in strats:
             try:

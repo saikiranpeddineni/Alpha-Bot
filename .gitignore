@@ -36,11 +36,14 @@ temp/
 
 # Local databases
 *.db
+*.db-shm
+*.db-wal
 *.sqlite
 *.sqlite3
 
 # Trading/runtime artifacts
 /data/
+backend/data/
 cache/
 backtest_results/
 reports/

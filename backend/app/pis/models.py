@@ -236,13 +236,13 @@ class PISConfig:
     """
 
     history_max_len: int = 500
-    activation_mfe_r: float = 1.5
+    activation_mfe_r: float = 1.50
     runner_qualification_r: float = 3.0
     giveback_pct_runner: float = 0.35
     giveback_pct_hyper_runner_min: float = 0.10
     hyper_runner_decay_rate: float = 0.05
-    giveback_pct_maturing: float = 0.45
-    min_breathing_room_r: float = 1.00
+    giveback_pct_maturing: float = 0.25
+    min_breathing_room_r: float = 0.35
     min_locked_r: float = 0.05
     health_weakening_threshold: float = 0.55
     health_distribution_threshold: float = 0.35
@@ -257,20 +257,14 @@ class PISConfig:
     scale_out_ratio: float = 0.50
     scale_out_target_r: float = 2.00
     # --- Progressive profit lock (sub-activation zone) ---
-    # Live winners average only ~0.44R peak, yet the protection floor stayed on
-    # the initial stop until activation_mfe_r (1.5R). Everything below that
-    # threshold gave back its entire excursion (2026-08-24: book peaked
-    # +$718, closed -$391). Once peak reaches breakeven_trigger_r, ratchet the
-    # floor to breakeven+ and progressively lock a fraction of the peak as it
-    # grows toward activation_mfe_r.
+    # Live winners average ~0.44R to 1.5R peaks. Sub-activation arms once peak reaches
+    # breakeven_trigger_r (0.40R) and 2.5x ATR confirmation, capped at progressive_lock_cap_trigger_r (0.85R)
+    # so high ATR names are never permanently disarmed. Locks a fraction of peak profit toward activation_mfe_r.
     breakeven_trigger_r: float = 0.40
-    # High-ATR names carry 0.5-1.5R of pure noise inside their risk unit; a
-    # lock that arms on a sub-noise peak is guaranteed to be churned out. The
-    # lock arms only after profit exceeds BOTH the R trigger and 2.5 ATRs of
-    # favorable movement -- past ordinary churn, before the mature zone.
     breakeven_trigger_atr_mult: float = 2.50
+    progressive_lock_cap_trigger_r: float = 0.85
     progressive_lock_start_frac: float = 0.20
-    progressive_lock_end_frac: float = 0.30
+    progressive_lock_end_frac: float = 0.35
     # The locked floor may never trail closer than this many ATRs behind the
     # peak -- banking profit is pointless if normal churn stops you out one
     # bar later.
