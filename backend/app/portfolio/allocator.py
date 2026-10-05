@@ -14,16 +14,15 @@ from app.core.applog import applog
 from app.core.domain import Position, Signal, SignalAction
 
 _SECTOR_MAP: dict[str, str] = {
-    "AAPL": "TECH", "MSFT": "TECH", "NVDA": "TECH", "AMD": "TECH",
-    "INTC": "TECH", "META": "TECH", "GOOGL": "TECH", "GOOG": "TECH",
-    "AMZN": "CONSUMER", "TSLA": "CONSUMER", "PLTR": "TECH", "UBER": "INDUSTRIAL",
-    "NET": "TECH", "SNOW": "TECH", "CRM": "TECH", "NOW": "TECH",
+    "AAPL": "BIG_TECH", "MSFT": "BIG_TECH", "GOOGL": "BIG_TECH", "GOOG": "BIG_TECH", "META": "BIG_TECH",
+    "NVDA": "SEMIS", "AMD": "SEMIS", "INTC": "SEMIS", "MU": "SEMIS", "QCOM": "SEMIS", "AVGO": "SEMIS", "SMCI": "SEMIS", "ARM": "SEMIS",
+    "CRM": "SOFTWARE", "NOW": "SOFTWARE", "SNOW": "SOFTWARE", "NET": "SOFTWARE", "PLTR": "SOFTWARE", "DDOG": "SOFTWARE", "CRWD": "SOFTWARE", "PANW": "SOFTWARE",
+    "AMZN": "CONSUMER", "TSLA": "CONSUMER", "UBER": "INDUSTRIAL",
     "BAC": "FINANCE", "JPM": "FINANCE", "GS": "FINANCE", "WFC": "FINANCE",
-    "C": "FINANCE", "MS": "FINANCE", "XOM": "ENERGY", "CVX": "ENERGY",
-    "COP": "ENERGY", "EOG": "ENERGY", "KO": "CONSUMER", "PEP": "CONSUMER",
-    "WMT": "CONSUMER", "COST": "CONSUMER", "MCD": "CONSUMER", "NKE": "CONSUMER",
-    "JNJ": "HEALTHCARE", "PFE": "HEALTHCARE", "MRK": "HEALTHCARE",
-    "ABBV": "HEALTHCARE", "LLY": "HEALTHCARE", "UNH": "HEALTHCARE",
+    "C": "FINANCE", "MS": "FINANCE", "COIN": "FINANCE", "HOOD": "FINANCE", "SOFI": "FINANCE",
+    "XOM": "ENERGY", "CVX": "ENERGY", "COP": "ENERGY", "EOG": "ENERGY", "OXY": "ENERGY", "SLB": "ENERGY",
+    "KO": "CONSUMER", "PEP": "CONSUMER", "WMT": "CONSUMER", "COST": "CONSUMER", "MCD": "CONSUMER", "NKE": "CONSUMER",
+    "JNJ": "HEALTHCARE", "PFE": "HEALTHCARE", "MRK": "HEALTHCARE", "ABBV": "HEALTHCARE", "LLY": "HEALTHCARE", "UNH": "HEALTHCARE",
     "SPY": "ETF", "QQQ": "ETF", "IWM": "ETF", "DIA": "ETF",
 }
 
@@ -103,9 +102,9 @@ class PortfolioAIGate:
         if market_state is not None:
             state_str = getattr(market_state, "value", str(market_state)).upper()
             if state_str == "NORMAL":
-                limit = 5
+                limit = max(5, self.max_positions_per_sector)
             elif state_str == "CAUTION":
-                limit = 3
+                limit = max(4, self.max_positions_per_sector - 1)
             elif state_str in ("STRESS", "PANIC"):
                 limit = 1
 

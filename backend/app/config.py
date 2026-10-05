@@ -37,7 +37,7 @@ class RiskConfig(BaseModel):
     entry_order_type: str = Field("market", pattern="^(market|limit)$")
     risk_per_trade_pct: float = Field(0.5, ge=0.01, le=5.0)        # was 0.5 — 2× capital per trade
     max_position_pct: float = Field(20.0, ge=1.0, le=100.0)
-    max_open_positions: int = Field(4, ge=1, le=50)                  # was 4 — 2× concurrent exposure
+    max_open_positions: int = Field(8, ge=1, le=50)                  # was 4 — 2× concurrent exposure
     max_daily_loss_pct: float = Field(2.0, ge=0.1, le=25.0)         # was 2.0 — room for higher position count
     max_drawdown_pct: float = Field(10.0, ge=1.0, le=50.0)
     symbol_cooldown_minutes: int = Field(30, ge=0, le=390)                  # was 30
@@ -68,7 +68,7 @@ class RiskConfig(BaseModel):
     score_threshold_volatile: float = Field(65.0, ge=0.0, le=100.0) # was 65.0
     score_threshold_event: float = Field(75.0, ge=0.0, le=100.0)    # was 75.0
     kelly_fraction_cap: float = Field(0.20, ge=0.01, le=0.50)       # was 0.15
-    max_positions_per_sector: int = Field(3, ge=1, le=10)           # was 2
+    max_positions_per_sector: int = Field(5, ge=1, le=10)           # was 2
     max_correlation_penalty: float = Field(0.5, ge=0.0, le=1.0)
     harvest_risk_multiplier: float = Field(3.0, ge=1.0, le=5.0)     # was 2.5 — bigger A+ sizing
     scanner_watchlist_ttl: int = Field(15, ge=1, le=30)             # was 3 — hold scanner symbols longer
@@ -87,7 +87,7 @@ class RiskConfig(BaseModel):
     governor_lookback_days: int = Field(14, ge=1, le=90)
     governor_min_trades: int = Field(6, ge=1, le=100)
     governor_shrink_k: float = Field(8.0, ge=0.0, le=100.0)
-    governor_loss_scale: float = Field(2.2, ge=0.0, le=10.0)
+    governor_loss_scale: float = Field(2.2, ge=0.0, le=100.0)
     governor_floor: float = Field(0.25, ge=0.05, le=1.0)
     governor_refresh_minutes: int = Field(15, ge=1, le=240)
     # --- Entry chase veto (evidence-driven) ---
@@ -112,12 +112,10 @@ class RiskConfig(BaseModel):
     # Session-extreme proximity guard: block momentum entries INTO a session
     # extreme. Shorts within K x ATR14 of the session low (longs of the high)
     # are late continuation chases buying an already-spent multi-bar move --
-    # the single decision-bar chase veto cannot see this class. Measured
-    # 2026-08-24: 3/3 gap_and_go shorts entered <=2.5 ATR of LOD, all lost
-    # (-$230 net) into immediate mean reversion. Mean-reversion strategies are
-    # exempt: fading TOWARD an extreme is their thesis.
+    # the single decision-bar chase veto cannot see this class. Breakout
+    # strategies and mean reversion strategies are exempt.
     enable_entry_extreme_guard: bool = Field(True)
-    entry_max_extreme_proximity_atr: float = Field(3.0, ge=0.5, le=20.0)
+    entry_max_extreme_proximity_atr: float = Field(1.0, ge=0.5, le=20.0)
     # Entry consensus (breakout strategies): MEASURED & FALSIFIED on Aug 10-21
     # exact-path backtest -- requiring RS>=50 for momentum longs halved trade
     # count and cut net from +$3.6k to +$0.3k (weak-RS laggard catch-ups were

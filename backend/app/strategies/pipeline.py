@@ -183,6 +183,7 @@ class SignalPipeline:
             from app.strategies.base import REGISTRY as _REG
             _strat_cls = _REG.get(sig.strategy)
             is_reversion_strat = bool(getattr(_strat_cls, "is_mean_reversion", False)) if _strat_cls else False
+            is_breakout_strat = bool(getattr(_strat_cls, "is_breakout", False)) if _strat_cls else False
             if (
                 getattr(rc, "enable_entry_chase_veto", True)
                 and not is_reversion_strat
@@ -247,6 +248,7 @@ class SignalPipeline:
             if (
                 getattr(rc, "enable_entry_extreme_guard", True)
                 and not is_reversion_strat
+                and not is_breakout_strat
                 and df is not None and len(df) >= 30 and hasattr(df.index, "tz_convert")
             ):
                 try:
