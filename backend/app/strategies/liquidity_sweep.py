@@ -105,12 +105,20 @@ class LiquiditySweep(Strategy):
                 if close_px < open_px: # Bearish rejection
                     sweep_score = max(0, (p["sweep_tolerance_pct"] - sweep_extension) / p["sweep_tolerance_pct"])
                     confidence = min(0.90, 0.55 + (0.1 * vol_z) + (0.1 * sweep_score))
+                    # Structural stop placed slightly above the sweep high wick
+                    stop = round(high_px + max(0.05, 0.10 * (high_px - low_px)), 4)
+                    risk = abs(stop - close_px)
+                    rr = float(p.get("reward_risk", 3.0))
+                    target = round(close_px - (rr * risk), 4)
                     return Signal(
                         symbol=symbol,
                         action=SignalAction.ENTER_SHORT,
                         confidence=round(confidence, 4),
                         strategy=self.name,
                         reason=f"Sweep high breakdown (ext {sweep_extension:.2f}%, vol {vol_z:.1f})",
+                        price=close_px,
+                        stop_loss=stop,
+                        take_profit=target,
                         score=0.75,
                     )
 
@@ -122,12 +130,20 @@ class LiquiditySweep(Strategy):
                 if close_px > open_px: # Bullish rejection
                     sweep_score = max(0, (p["sweep_tolerance_pct"] - sweep_extension) / p["sweep_tolerance_pct"])
                     confidence = min(0.90, 0.55 + (0.1 * vol_z) + (0.1 * sweep_score))
+                    # Structural stop placed slightly below the sweep low wick
+                    stop = round(low_px - max(0.05, 0.10 * (high_px - low_px)), 4)
+                    risk = abs(close_px - stop)
+                    rr = float(p.get("reward_risk", 3.0))
+                    target = round(close_px + (rr * risk), 4)
                     return Signal(
                         symbol=symbol,
                         action=SignalAction.ENTER_LONG,
                         confidence=round(confidence, 4),
                         strategy=self.name,
                         reason=f"Sweep low breakout (ext {sweep_extension:.2f}%, vol {vol_z:.1f})",
+                        price=close_px,
+                        stop_loss=stop,
+                        take_profit=target,
                         score=0.75,
                     )
 

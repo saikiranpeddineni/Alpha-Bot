@@ -2896,7 +2896,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
                 equity = self.portfolio.equity
                 if equity > 0:
                     turnover = total_volume / equity
-                    max_turnover = float(getattr(self.risk_config, "max_daily_turnover_multiple", 2.0))
+                    max_turnover = float(getattr(self.risk_config, "max_daily_turnover_multiple", 5.0))
                     if turnover > max_turnover:
                         return f"behavioral_loop_detector: high portfolio churn/turnover (turnover={turnover:.2f}x equity > {max_turnover:.2f}x)"
         except Exception as e:

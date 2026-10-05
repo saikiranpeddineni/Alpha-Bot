@@ -50,7 +50,7 @@ class MomentumCross(Strategy):
     default_params = {
         "rsi_min": 50.0,
         "rsi_max": 78.0,
-        "vol_z_min": 0.0,
+        "vol_z_min": 0.5,
         "event_window_bars": 10,
         "atr_stop_mult": 2.0,
         "reward_risk": 1.8,
@@ -203,33 +203,28 @@ class MomentumCross(Strategy):
         # (today's open vs yesterday's close) as the structural bias instead.
         # Ported from sibling-bot evidence: momentum aligned to structure won;
         # counter-structure entries were its biggest bleed.
-        if p.get("use_structural_vwap_filter", True) and (crossed_up or crossed_down):
+        structural_uptrend = False
+        structural_downtrend = False
+        if p.get("use_structural_vwap_filter", True):
             vwap_now = float(last.get("vwap", close)) if pd.notna(last.get("vwap")) else None
             ema20_now = float(last["ema20"]) if pd.notna(last["ema20"]) else None
-            if vwap_now is None or ema20_now is None or vwap_now == 0.0:
-                return None
-            minutes_from_open = mins_et - (9 * 60 + 30)
-            if minutes_from_open > 30:
-                structural_uptrend = ema20_now > vwap_now
-                structural_downtrend = ema20_now < vwap_now
-            else:
-                et_zone = ZoneInfo("America/New_York")
-                et_dates = df.index.tz_convert(et_zone).date
-                today_mask = et_dates == et_dates[-1]
-                prev_days = df[et_dates < et_dates[-1]]
-                if today_mask.any() and not prev_days.empty:
-                    session_open = float(df.loc[today_mask, "open"].iloc[0])
-                    prev_close = float(prev_days["close"].iloc[-1])
-                    structural_uptrend = session_open > prev_close
-                    structural_downtrend = session_open < prev_close
+            if vwap_now is not None and ema20_now is not None and vwap_now > 0.0:
+                minutes_from_open = mins_et - (9 * 60 + 30)
+                if minutes_from_open > 30:
+                    structural_uptrend = ema20_now > vwap_now
+                    structural_downtrend = ema20_now < vwap_now
                 else:
-                    structural_uptrend = structural_downtrend = False
-            if crossed_up and structural_downtrend:
-                self._debug(ctx, f"[momentum] STRUCTURE_VETO long {symbol}: EMA20<VWAP (trap)")
-                return None
-            if crossed_down and structural_uptrend:
-                self._debug(ctx, f"[momentum] STRUCTURE_VETO short {symbol}: EMA20>VWAP (trap)")
-                return None
+                    et_zone = ZoneInfo("America/New_York")
+                    et_dates = df.index.tz_convert(et_zone).date
+                    today_mask = et_dates == et_dates[-1]
+                    prev_days = df[et_dates < et_dates[-1]]
+                    if today_mask.any() and not prev_days.empty:
+                        session_open = float(df.loc[today_mask, "open"].iloc[0])
+                        prev_close = float(prev_days["close"].iloc[-1])
+                        structural_uptrend = session_open > prev_close
+                        structural_downtrend = session_open < prev_close
+                    else:
+                        structural_uptrend = structural_downtrend = False
 
         # ---- Volume / ATR guard ----
         if atr <= 0 or vol_z < p["vol_z_min"]:
@@ -272,6 +267,7 @@ class MomentumCross(Strategy):
         # ---- Long candidate ----
         if (
             allow_long
+            and not structural_downtrend
             and last["ema9"] > last["ema20"]
             and close > float(last["vwap"])
             and p["rsi_min"] <= rsi <= p["rsi_max"]
@@ -279,7 +275,9 @@ class MomentumCross(Strategy):
         ):
             # Dynamic Stop Tightening: 1.0 * ATR if explosive volume and expanding MACD
             dynamic_mult = 1.0 if (vol_z > 2.0 and hist_now > hist_prev) else p["atr_stop_mult"]
-            stop = close - dynamic_mult * atr
+            stop = round(close - dynamic_mult * atr, 4)
+            rr = float(p.get("reward_risk", 1.8))
+            target = round(close + (rr * dynamic_mult * atr), 4)
             self._consume_event(ctx, symbol, "long", current_time)
             mover_tag = f" [top_gainer +{ctx.mover_change_pct:.1f}%]" if bias == "gainer" else ""
             return Signal(
@@ -290,12 +288,13 @@ class MomentumCross(Strategy):
                 reason=f"EMA9>EMA20 above VWAP, MACD event confirmed, RSI {rsi:.0f}{mover_tag}",
                 price=close,
                 stop_loss=stop,
-                take_profit=None,
+                take_profit=target,
             )
 
         # ---- Short candidate ----
         if (
             allow_short
+            and not structural_uptrend
             and last["ema9"] < last["ema20"]
             and close < float(last["vwap"])
             and (100.0 - p["rsi_max"]) <= rsi <= (100.0 - p["rsi_min"])
@@ -303,7 +302,9 @@ class MomentumCross(Strategy):
         ):
             # Dynamic Stop Tightening: 1.0 * ATR if explosive volume and expanding MACD
             dynamic_mult = 1.0 if (vol_z > 2.0 and hist_now < hist_prev) else p["atr_stop_mult"]
-            stop = close + dynamic_mult * atr
+            stop = round(close + dynamic_mult * atr, 4)
+            rr = float(p.get("reward_risk", 1.8))
+            target = round(close - (rr * dynamic_mult * atr), 4)
             self._consume_event(ctx, symbol, "short", current_time)
             mover_tag = f" [top_loser {ctx.mover_change_pct:.1f}%]" if bias == "loser" else ""
             return Signal(
@@ -314,7 +315,7 @@ class MomentumCross(Strategy):
                 reason=f"EMA9<EMA20 below VWAP, MACD event confirmed, RSI {rsi:.0f}{mover_tag}",
                 price=close,
                 stop_loss=stop,
-                take_profit=None,
+                take_profit=target,
             )
 
         return None

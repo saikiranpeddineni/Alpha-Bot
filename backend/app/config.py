@@ -73,8 +73,8 @@ class RiskConfig(BaseModel):
     harvest_risk_multiplier: float = Field(3.0, ge=1.0, le=5.0)     # was 2.5 — bigger A+ sizing
     scanner_watchlist_ttl: int = Field(15, ge=1, le=30)             # was 3 — hold scanner symbols longer
     # Behavioral loop detector: max 24h traded notional / equity before churn breaker fires.
-    # Original design value 2.0; a "for testing" bump to 20.0 accidentally shipped.
-    max_daily_turnover_multiple: float = Field(2.0, ge=0.1, le=100.0)
+    # Calibrated to 5.0x to allow high-conviction full-session trading across morning and afternoon windows.
+    max_daily_turnover_multiple: float = Field(5.0, ge=0.1, le=100.0)
     # Fast-replay only: minimum session-time seconds between full market-risk
     # family evaluations (live path always evaluates every tick). Bars arrive
     # at 60s cadence, so the default evaluates every other bar.
@@ -214,7 +214,7 @@ class Settings(BaseSettings):
     trade_score_w6: float = Field(0.05, validation_alias="TRADE_SCORE_W6")
     dq_max_gap_minutes: int = Field(5, validation_alias="DQ_MAX_GAP_MINUTES")
     dq_max_spread_pct: float = Field(0.5, validation_alias="DQ_MAX_SPREAD_PCT")
-    max_daily_turnover_multiple: float = Field(2.0, validation_alias="MAX_DAILY_TURNOVER_MULTIPLE")
+    max_daily_turnover_multiple: float = Field(5.0, validation_alias="MAX_DAILY_TURNOVER_MULTIPLE")
     ml_min_promotable_auc: float = Field(0.53, validation_alias="ML_MIN_PROMOTABLE_AUC")
     eod_post_close_grace_minutes: int = Field(15, validation_alias="EOD_POST_CLOSE_GRACE_MINUTES")
     dq_min_bars_warmup: int = Field(50, validation_alias="DQ_MIN_BARS_WARMUP")
