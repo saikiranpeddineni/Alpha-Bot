@@ -1918,26 +1918,46 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
         cleaned = sorted({s.strip().upper() for s in symbols if s.strip()})
         if not cleaned:
             raise ValueError("Watchlist cannot be empty")
-        if len(cleaned) > 30:
-            raise ValueError("Watchlist is capped at 30 symbols")
+        # =============================================================================
+        # [MODIFIED 2026-10-06]: Remove 30 watchlist cap
+        # ORIGINAL INTENT: The 30 cap was a hard limit to prevent excessive watchlist growth.
+        # REASON FOR CHANGE: User directive: remove the 30 watchlist cap and always allow addition from UI without any errors.
+        # SAFE ROLLBACK: The original cap check is preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # if len(cleaned) > 30:
+        #     raise ValueError("Watchlist is capped at 30 symbols")
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        # Watchlist cap removed: any number of symbols can be added from the UI.
+        # =============================================================================
 
         current_active = set(self.watchlist)
+        # --- PREVIOUS IMPLEMENTATION (Preserved for historical intent & audit) ---
+        # additions = new_active - current_active
+        # for sym in additions:
+        #     if sym not in self.user_watchlist:
+        #         self.user_watchlist.append(sym)
+        #
+        # removals = current_active - new_active
+        # for sym in removals:
+        #     if sym in self.user_watchlist:
+        #         self.user_watchlist.remove(sym)
+        #     if sym in self.scanned_watchlist:
+        #         self.scanned_watchlist.remove(sym)
+        #
+        # self.user_watchlist = sorted(list(set(self.user_watchlist)))
+        # self.scanned_watchlist = sorted(list(set(self.scanned_watchlist)))
+        # self.watchlist = sorted(list(set(self.user_watchlist + self.scanned_watchlist)))
+        # self.core_watchlist = list(self.user_watchlist)
+        # --------------------------------------------------------------------------
+        # --- NEW IMPLEMENTATION ---
+        # When user explicitly sets watchlist, user_watchlist becomes exactly cleaned.
+        # Any symbol previously in scanned_watchlist promoted by user is removed from temporary scanner pool.
         new_active = set(cleaned)
-
         additions = new_active - current_active
-        for sym in additions:
-            if sym not in self.user_watchlist:
-                self.user_watchlist.append(sym)
-
-        removals = current_active - new_active
-        for sym in removals:
-            if sym in self.user_watchlist:
-                self.user_watchlist.remove(sym)
-            if sym in self.scanned_watchlist:
-                self.scanned_watchlist.remove(sym)
-
-        self.user_watchlist = sorted(list(set(self.user_watchlist)))
-        self.scanned_watchlist = sorted(list(set(self.scanned_watchlist)))
+        self.user_watchlist = cleaned
+        self.scanned_watchlist = [s for s in self.scanned_watchlist if s not in new_active]
         self.watchlist = sorted(list(set(self.user_watchlist + self.scanned_watchlist)))
         self.core_watchlist = list(self.user_watchlist)
 
