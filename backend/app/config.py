@@ -45,6 +45,12 @@ class RiskConfig(BaseModel):
     strategy_cooldown_minutes: int = Field(30, ge=0, le=390)                # was 30
     no_entry_minutes_before_close: int = Field(30, ge=0, le=180)     # was 30 — more trading time
     # --- PREVIOUS IMPLEMENTATION (Preserved for historical intent & audit) ---
+    # (flatten_minutes_before_close was only in Settings, causing AttributeError on RiskConfig)
+    # --------------------------------------------------------------------------
+    # --- NEW IMPLEMENTATION ---
+    # Minutes before market close when positions must be flattened.
+    flatten_minutes_before_close: int = Field(5, ge=0, le=60)
+    # --- PREVIOUS IMPLEMENTATION (Preserved for historical intent & audit) ---
     # min_price: float = Field(5.0, ge=0.0)
     # min_avg_dollar_volume: float = Field(100_000.0, ge=0.0)
     # --------------------------------------------------------------------------

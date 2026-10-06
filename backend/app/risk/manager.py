@@ -228,7 +228,13 @@ class RiskManager:
         return cooldown_until is not None and now < cooldown_until
 
     def should_flatten(self, now: datetime | None = None) -> bool:
-        return self.clock.in_flatten_window(self.config.flatten_minutes_before_close, now)
+        # --- PREVIOUS IMPLEMENTATION (Preserved for historical intent & audit) ---
+        # return self.clock.in_flatten_window(self.config.flatten_minutes_before_close, now)
+        # --------------------------------------------------------------------------
+        # --- NEW IMPLEMENTATION ---
+        # Defensive getattr fallback to default 5 minutes prevents engine tick halts on missing attribute.
+        flatten_mins = int(getattr(self.config, "flatten_minutes_before_close", 5) or 5)
+        return self.clock.in_flatten_window(flatten_mins, now)
 
     # ---- entry evaluation ----
 
