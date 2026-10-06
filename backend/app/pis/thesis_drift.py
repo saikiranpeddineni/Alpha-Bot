@@ -57,9 +57,10 @@ class ThesisDriftEvaluator:
         early_invalidation = False
         if getattr(self.config, "enable_early_invalidation", True):
             max_early_bars = getattr(self.config, "early_invalidation_max_bars", 5)
+            min_early_bars = getattr(self.config, "early_invalidation_min_bars", 2)
             r_threshold = getattr(self.config, "early_invalidation_r_threshold", -0.55)
             if (
-                history_len <= max_early_bars
+                min_early_bars <= history_len <= max_early_bars
                 and obs.r_multiple <= r_threshold
                 and peak_r <= 0.05
             ):

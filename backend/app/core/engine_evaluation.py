@@ -134,10 +134,16 @@ class TradingEngineEvaluationMixin:
             close = float(df["close"].iloc[-1])
             high_val = float(df["high"].iloc[-1])
             low_val = float(df["low"].iloc[-1])
+            _lot = getattr(self.portfolio, "_lots", {}).get(symbol)
             if symbol not in self._position_peaks:
                 self._position_peaks[symbol] = position.avg_entry_price
                 self._position_troughs[symbol] = position.avg_entry_price
-                self._position_initial_stops[symbol] = position.stop_loss
+                _init_stop = getattr(_lot, "initial_stop_loss", None) or getattr(_lot, "stop_loss", None) if _lot is not None else None
+                self._position_initial_stops[symbol] = _init_stop if _init_stop is not None else getattr(position, "stop_loss", None)
+            elif self._position_initial_stops.get(symbol) is None and _lot is not None:
+                _init_stop = getattr(_lot, "initial_stop_loss", None) or getattr(_lot, "stop_loss", None)
+                if _init_stop is not None:
+                    self._position_initial_stops[symbol] = _init_stop
 
             # Track excursion memory FIRST so the bar that triggers an exit is
             # itself included. Trade records derive mfe/mae from these maps at

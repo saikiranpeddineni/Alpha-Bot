@@ -299,6 +299,7 @@ class PISConfig:
     max_r_cap: float = 8.00
     enable_market_regime_awareness: bool = True
     enable_early_invalidation: bool = True
+    early_invalidation_min_bars: int = 2
     early_invalidation_max_bars: int = 5
     early_invalidation_r_threshold: float = -0.55
     enable_trade_reasoning_narrative: bool = True

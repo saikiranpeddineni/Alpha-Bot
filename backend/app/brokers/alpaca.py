@@ -555,14 +555,18 @@ class AlpacaBroker(Broker):
                     return rescued
             if self._is_definitive_rejection(exc):
                 err_msg = str(exc).lower()
-                short_permission_denied = (
+                account_short_denied = (
                     "not allowed to short" in err_msg
                     or "shorting is not permitted" in err_msg
-                    or "asset is not shortable" in err_msg
+                )
+                asset_not_shortable = (
+                    "asset is not shortable" in err_msg
                     or "not shortable" in err_msg
                 )
-                if short_permission_denied:
+                if account_short_denied:
                     self._shorting_enabled = False
+                    self._shortable_cache[req.symbol.upper()] = False
+                elif asset_not_shortable:
                     self._shortable_cache[req.symbol.upper()] = False
                 applog.error("broker.alpaca", f"Order rejected {req.symbol} {req.side} {qty}: {exc}")
                 return Order(

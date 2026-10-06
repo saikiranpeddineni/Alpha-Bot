@@ -188,7 +188,7 @@ class Settings(BaseSettings):
     paper_commission_per_share: float = Field(0.0, validation_alias="PAPER_COMMISSION_PER_SHARE")
     poll_interval_sec: float = Field(5.0, validation_alias="POLL_INTERVAL_SEC")
     demo_bar_seconds: float = Field(5.0, validation_alias="DEMO_BAR_SECONDS")
-    default_watchlist: str = Field("SPY,QQQ,AAPL,NVDA,TSLA,MSFT,AMD,META", validation_alias="DEFAULT_WATCHLIST")
+    default_watchlist: str = Field("SPY,QQQ,AAPL,NVDA,TSLA,MSFT,AMD,META,AMZN,AVGO,BABA,PLTR,ARM", validation_alias="DEFAULT_WATCHLIST")
 
     ml_confidence_threshold: float = Field(0.55, validation_alias="ML_CONFIDENCE_THRESHOLD")
     ml_horizon_bars: int = Field(15, validation_alias="ML_HORIZON_BARS")
