@@ -1963,8 +1963,24 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
 
         self.db.set_setting("watchlist", self.user_watchlist)
 
+        # =============================================================================
+        # [MODIFIED 2026-10-06]: Resilient warmup for additions from UI
+        # ORIGINAL INTENT: Direct await self.data.warmup(list(additions)) would propagate
+        # any network/data exception as an unhandled error to the API route.
+        # REASON FOR CHANGE: Always allow addition from UI without any errors.
+        # SAFE ROLLBACK: Previous code preserved below.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # if self.data is not None and additions:
+        #     await self.data.warmup(list(additions))
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
         if self.data is not None and additions:
-            await self.data.warmup(list(additions))
+            try:
+                await self.data.warmup(list(additions))
+            except Exception as exc:
+                applog.warning("engine", f"Warmup for added symbols {additions} caught gracefully: {exc}")
+        # =============================================================================
 
         self.publish("status", self.status())
         self.publish("quotes", self.quotes_payload())
