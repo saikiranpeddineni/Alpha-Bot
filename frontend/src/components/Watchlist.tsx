@@ -28,7 +28,8 @@ export function Watchlist() {
     const sym = draft.trim().toUpperCase();
     if (!sym) return;
     try {
-      await api.setWatchlist([...watchlist, sym]);
+      const base = coreWatchlist.length > 0 ? coreWatchlist : watchlist;
+      await api.setWatchlist(Array.from(new Set([...base, sym])));
       setDraft("");
     } catch (e) {
       showToast("error", (e as Error).message);
@@ -37,7 +38,8 @@ export function Watchlist() {
 
   async function removeSymbol(sym: string) {
     try {
-      await api.setWatchlist(watchlist.filter((s) => s !== sym));
+      const base = coreWatchlist.length > 0 ? coreWatchlist : watchlist;
+      await api.setWatchlist(base.filter((s) => s !== sym));
     } catch (e) {
       showToast("error", (e as Error).message);
     }
