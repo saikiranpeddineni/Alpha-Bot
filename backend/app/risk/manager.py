@@ -427,15 +427,44 @@ class RiskManager:
         if qty < 1:
             return RiskDecision(False, "computed size below 1 share (risk budget or cash too small)")
 
+        # --- PREVIOUS IMPLEMENTATION (Preserved for historical intent & audit) ---
+        # side = OrderSide.BUY if signal.action == SignalAction.ENTER_LONG else OrderSide.SELL
+        # executable_entry = round(float(price), 2)
+        # executable_stop = round(float(stop_loss), 2)
+        # if side == OrderSide.BUY:
+        #     if executable_stop >= executable_entry:
+        #         executable_stop = round(executable_entry - 0.01, 2)
+        # else:
+        #     if executable_stop <= executable_entry:
+        #         executable_stop = round(executable_entry + 0.01, 2)
+        # if executable_stop <= 0:
+        #     return RiskDecision(False, "broker-valid bracket geometry unavailable at current price")
+        #
+        # entry_type = str(getattr(self.config, "entry_order_type", "market") or "market").lower().strip()
+        # if entry_type == "limit":
+        #     order_type = OrderType.LIMIT
+        #     max_slippage_pct = 0.0015
+        #     if side == OrderSide.BUY:
+        #         limit_price = round(price * (1 + max_slippage_pct), 2)
+        #     else:
+        #         limit_price = round(price * (1 - max_slippage_pct), 2)
+        # --------------------------------------------------------------------------
+        # --- NEW IMPLEMENTATION ---
+        # Penny Stock & Sub-Penny Precision Support (SEC Rule 612 / Alpaca API compliance):
+        # Stocks >= $1.00 use 2 decimal places with 0.01 tick.
+        # Penny stocks < $1.00 use 4 decimal places with 0.0001 tick.
+        # This preserves granular stop/limit levels and prevents rounding collisions on low-dollar equities.
         side = OrderSide.BUY if signal.action == SignalAction.ENTER_LONG else OrderSide.SELL
-        executable_entry = round(float(price), 2)
-        executable_stop = round(float(stop_loss), 2)
+        precision = 4 if price < 1.0 else 2
+        min_tick = 0.0001 if price < 1.0 else 0.01
+        executable_entry = round(float(price), precision)
+        executable_stop = round(float(stop_loss), precision)
         if side == OrderSide.BUY:
             if executable_stop >= executable_entry:
-                executable_stop = round(executable_entry - 0.01, 2)
+                executable_stop = round(executable_entry - min_tick, precision)
         else:
             if executable_stop <= executable_entry:
-                executable_stop = round(executable_entry + 0.01, 2)
+                executable_stop = round(executable_entry + min_tick, precision)
         if executable_stop <= 0:
             return RiskDecision(False, "broker-valid bracket geometry unavailable at current price")
 
@@ -444,9 +473,9 @@ class RiskManager:
             order_type = OrderType.LIMIT
             max_slippage_pct = 0.0015
             if side == OrderSide.BUY:
-                limit_price = round(price * (1 + max_slippage_pct), 2)
+                limit_price = round(price * (1 + max_slippage_pct), precision)
             else:
-                limit_price = round(price * (1 - max_slippage_pct), 2)
+                limit_price = round(price * (1 - max_slippage_pct), precision)
         else:
             order_type = OrderType.MARKET
             limit_price = None

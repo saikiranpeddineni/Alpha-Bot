@@ -44,9 +44,16 @@ class RiskConfig(BaseModel):
     strategy_consecutive_loss_limit: int = Field(3, ge=1, le=20)            # was 3
     strategy_cooldown_minutes: int = Field(30, ge=0, le=390)                # was 30
     no_entry_minutes_before_close: int = Field(30, ge=0, le=180)     # was 30 — more trading time
-    flatten_minutes_before_close: int = Field(5, ge=0, le=60)
-    min_price: float = Field(5.0, ge=0.0)
-    min_avg_dollar_volume: float = Field(100_000.0, ge=0.0)
+    # --- PREVIOUS IMPLEMENTATION (Preserved for historical intent & audit) ---
+    # min_price: float = Field(5.0, ge=0.0)
+    # min_avg_dollar_volume: float = Field(100_000.0, ge=0.0)
+    # --------------------------------------------------------------------------
+    # --- NEW IMPLEMENTATION ---
+    # Calibrated to permit penny stock trading ($0.50+), allowing the bot to capture
+    # volatile sub-$5.00 small-cap momentum runners and breakouts while maintaining
+    # a sensible $5,000/min dollar-volume safety floor against completely dead tickers.
+    min_price: float = Field(0.50, ge=0.0)
+    min_avg_dollar_volume: float = Field(5_000.0, ge=0.0)
     # Market-data-gap entry block: no bar for N seconds during regular session
     # flags the symbol untradeable. Thin printers (user-added low-priced names)
     # legitimately go minutes between prints -- Aug-24 logged 34 false blocks.
@@ -169,8 +176,14 @@ class Settings(BaseSettings):
     strategy_cooldown_minutes: int = Field(10, validation_alias="STRATEGY_COOLDOWN_MINUTES")
     no_entry_minutes_before_close: int = Field(15, validation_alias="NO_ENTRY_MINUTES_BEFORE_CLOSE")  # was 30
     flatten_minutes_before_close: int = Field(5, validation_alias="FLATTEN_MINUTES_BEFORE_CLOSE")
-    min_price: float = Field(5.0, validation_alias="MIN_PRICE")
-    min_avg_dollar_volume: float = Field(100_000.0, validation_alias="MIN_AVG_DOLLAR_VOLUME")
+    # --- PREVIOUS IMPLEMENTATION (Preserved for historical intent & audit) ---
+    # min_price: float = Field(5.0, validation_alias="MIN_PRICE")
+    # min_avg_dollar_volume: float = Field(100_000.0, validation_alias="MIN_AVG_DOLLAR_VOLUME")
+    # --------------------------------------------------------------------------
+    # --- NEW IMPLEMENTATION ---
+    # Calibrated to permit penny stock trading ($0.50+) and small-cap momentum runners.
+    min_price: float = Field(0.50, validation_alias="MIN_PRICE")
+    min_avg_dollar_volume: float = Field(5_000.0, validation_alias="MIN_AVG_DOLLAR_VOLUME")
     data_gap_threshold_secs: float = Field(120.0, validation_alias="DATA_GAP_THRESHOLD_SECS")
     min_specialist_auc: float = Field(0.53, validation_alias="MIN_SPECIALIST_AUC")
     min_stop_pct: float = Field(0.5, validation_alias="MIN_STOP_PCT")

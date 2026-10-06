@@ -497,31 +497,67 @@ class AlpacaBroker(Broker):
         if req.stop_loss is not None or req.take_profit is not None:
             from alpaca.trading.enums import OrderClass
 
-            if req.stop_loss is not None and req.take_profit is not None:
-                kwargs["order_class"] = OrderClass.BRACKET
-                kwargs["stop_loss"] = StopLossRequest(stop_price=round(req.stop_loss, 2))
-                kwargs["take_profit"] = TakeProfitRequest(limit_price=round(req.take_profit, 2))
-            elif req.stop_loss is not None:
-                kwargs["order_class"] = OrderClass.OTO
-                kwargs["stop_loss"] = StopLossRequest(stop_price=round(req.stop_loss, 2))
-            elif req.take_profit is not None:
-                kwargs["order_class"] = OrderClass.OTO
-                kwargs["take_profit"] = TakeProfitRequest(limit_price=round(req.take_profit, 2))
+        # --- PREVIOUS IMPLEMENTATION (Preserved for historical intent & audit) ---
+        # if req.stop_loss is not None and req.take_profit is not None:
+        #     kwargs["order_class"] = OrderClass.BRACKET
+        #     kwargs["stop_loss"] = StopLossRequest(stop_price=round(req.stop_loss, 2))
+        #     kwargs["take_profit"] = TakeProfitRequest(limit_price=round(req.take_profit, 2))
+        # elif req.stop_loss is not None:
+        #     kwargs["order_class"] = OrderClass.OTO
+        #     kwargs["stop_loss"] = StopLossRequest(stop_price=round(req.stop_loss, 2))
+        # elif req.take_profit is not None:
+        #     kwargs["order_class"] = OrderClass.OTO
+        #     kwargs["take_profit"] = TakeProfitRequest(limit_price=round(req.take_profit, 2))
+        #
+        # if req.order_type == OrderType.MARKET:
+        #     request = MarketOrderRequest(**kwargs)
+        # elif req.order_type == OrderType.LIMIT:
+        #     if req.limit_price is None:
+        #         raise ValueError("LIMIT orders require limit_price")
+        #     request = LimitOrderRequest(limit_price=round(req.limit_price, 2), **kwargs)
+        # elif req.order_type == OrderType.STOP:
+        #     if req.stop_price is None:
+        #         raise ValueError("STOP orders require stop_price")
+        #     request = StopOrderRequest(stop_price=round(req.stop_price, 2), **kwargs)
+        # elif req.order_type == OrderType.STOP_LIMIT:
+        #     if req.stop_price is None or req.limit_price is None:
+        #         raise ValueError("STOP_LIMIT orders require stop_price and limit_price")
+        #     request = StopLimitOrderRequest(stop_price=round(req.stop_price, 2), limit_price=round(req.limit_price, 2), **kwargs)
+        # --------------------------------------------------------------------------
+        # --- NEW IMPLEMENTATION ---
+        # Sub-penny precision support: Apply normalize_stock_price (2dp >= $1.00, 4dp < $1.00)
+        # per SEC Rule 612 and Alpaca API requirements for penny stock orders.
+        from app.brokers.alpaca_hardening import normalize_stock_price
+
+        if req.stop_loss is not None and req.take_profit is not None:
+            kwargs["order_class"] = OrderClass.BRACKET
+            kwargs["stop_loss"] = StopLossRequest(stop_price=normalize_stock_price(req.stop_loss))
+            kwargs["take_profit"] = TakeProfitRequest(limit_price=normalize_stock_price(req.take_profit))
+        elif req.stop_loss is not None:
+            kwargs["order_class"] = OrderClass.OTO
+            kwargs["stop_loss"] = StopLossRequest(stop_price=normalize_stock_price(req.stop_loss))
+        elif req.take_profit is not None:
+            kwargs["order_class"] = OrderClass.OTO
+            kwargs["take_profit"] = TakeProfitRequest(limit_price=normalize_stock_price(req.take_profit))
 
         if req.order_type == OrderType.MARKET:
             request = MarketOrderRequest(**kwargs)
         elif req.order_type == OrderType.LIMIT:
             if req.limit_price is None:
                 raise ValueError("LIMIT orders require limit_price")
-            request = LimitOrderRequest(limit_price=round(req.limit_price, 2), **kwargs)
+            request = LimitOrderRequest(limit_price=normalize_stock_price(req.limit_price), **kwargs)
         elif req.order_type == OrderType.STOP:
             if req.stop_price is None:
                 raise ValueError("STOP orders require stop_price")
-            request = StopOrderRequest(stop_price=round(req.stop_price, 2), **kwargs)
+            request = StopOrderRequest(stop_price=normalize_stock_price(req.stop_price), **kwargs)
         elif req.order_type == OrderType.STOP_LIMIT:
             if req.stop_price is None or req.limit_price is None:
                 raise ValueError("STOP_LIMIT orders require stop_price and limit_price")
-            request = StopLimitOrderRequest(stop_price=round(req.stop_price, 2), limit_price=round(req.limit_price, 2), **kwargs)
+            request = StopLimitOrderRequest(
+                stop_price=normalize_stock_price(req.stop_price),
+                limit_price=normalize_stock_price(req.limit_price),
+                **kwargs,
+            )
         else:
             raise ValueError(f"Unsupported Alpaca order type: {req.order_type}")
 

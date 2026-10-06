@@ -34,9 +34,16 @@ log = logging.getLogger(__name__)
 # How many top gainers / losers to return per session
 _TOP_N = 20
 
-# Minimum price and dollar volume for a mover to be considered
-_MIN_PRICE = 5.0
-_MIN_DOLLAR_VOLUME = 2_000_000.0   # $2M daily dollar volume
+# --- PREVIOUS IMPLEMENTATION (Preserved for historical intent & audit) ---
+# _MIN_PRICE = 5.0
+# _MIN_DOLLAR_VOLUME = 2_000_000.0   # $2M daily dollar volume
+# --------------------------------------------------------------------------
+# --- NEW IMPLEMENTATION ---
+# Calibrated to permit penny stock trading ($0.50+) so the scanner captures
+# explosive small-cap / penny momentum movers (e.g. 50c - $5 stocks up 10%+),
+# while requiring $500k daily dollar volume to eliminate untradeable phantom prints.
+_MIN_PRICE = 0.50
+_MIN_DOLLAR_VOLUME = 500_000.0   # $500k daily dollar volume for penny candidates
 
 # Minimum directional move to qualify
 _MIN_GAINER_PCT = 2.5    # up ≥ 2.5% today

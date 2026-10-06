@@ -46,7 +46,12 @@ _PREMARKET_FETCH_CONCURRENCY = 5      # was 10 — reduced to share Alpaca rate 
 class PreMarketGapScanner:
     """Discovers pre-market gap movers + intraday top gainers/losers."""
 
-    def __init__(self, data_manager: DataManager, min_price: float = 5.0) -> None:
+    # --- PREVIOUS IMPLEMENTATION (Preserved for historical intent & audit) ---
+    # def __init__(self, data_manager: DataManager, min_price: float = 5.0) -> None:
+    # --------------------------------------------------------------------------
+    # --- NEW IMPLEMENTATION ---
+    # Default min_price = 0.50 allows pre-market gap discovery on high-momentum penny stocks
+    def __init__(self, data_manager: DataManager, min_price: float = 0.50) -> None:
         self.data = data_manager
         self.min_price = min_price
         self._cache: list[str] = []
