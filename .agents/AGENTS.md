@@ -73,6 +73,41 @@ Always:
 
 These rules are mandatory and should be followed for every development session unless I explicitly override them.
 
+---
+
+# Mandatory Code Modification & Historical Preservation Policy (Hard Rule)
+
+Whenever you review, refactor, optimize, fix, or modify ANY code file in this repository, you MUST strictly adhere to this policy on EVERY single change:
+
+## 1. Mandatory Comment & Intent Analysis Before Making Any Change
+* Before editing or touching any line of code, you **MUST thoroughly read and analyze all existing comments, docstrings, annotations, and commit notes** surrounding that code.
+* You **MUST determine the exact historical rationale**: Why was this code originally written this way? What specific bug, market condition, incident, edge case, or quant research insight did it address?
+* If a comment documents a past incident, bug fix, or statistical finding (e.g. `# Evidence 2026-08-24: 3/3 gap_and_go shorts losers`, `# fix(#61): bind checkpoint restoration`), you must strictly account for and respect that constraint. Never break or discard historical intent.
+
+## 2. Never Delete Replaced Code — Preserve by Commenting Out
+* **DO NOT DELETE existing or legacy code outright when modifying or replacing it.**
+* When altering logic, refactoring an algorithm, adjusting a calculation, or replacing a function, **comment out the previous code in place** instead of deleting it.
+* Clearly delineate the previous implementation so future developers, agents, and auditors can immediately inspect what was previously running:
+  ```python
+  # --- PREVIOUS IMPLEMENTATION (Preserved for historical intent & audit) ---
+  # if condition_a:
+  #     do_old_behavior()
+  # --------------------------------------------------------------------------
+  # --- NEW IMPLEMENTATION ---
+  # [Detailed comment explaining why the change was made, what was improved, and what bug was resolved]
+  if condition_b:
+      do_new_behavior()
+  ```
+
+## 3. High-Standard Explanatory Comments on New Code
+* Every change must include detailed, high-standard comments directly above or alongside the new code:
+  * **What** the new code does.
+  * **Why** the change was necessary (the exact deficiency or bug in the previous implementation).
+  * **How** the new implementation resolves the issue while preserving the invariants of the original code.
+* Do not leave unannotated or mysterious diffs. Every modification must be self-explanatory to an institutional quant auditor.
+
+---
+
 # Engineering Analysis & Change Management Policy (Mandatory)
 
 ## Core Principle
@@ -309,6 +344,9 @@ Wait for approval if the change is significant or behavior-altering.
 
 Every change must:
 
+* **Read and analyze existing comments and historical rationale before editing any line.**
+* **Never delete existing code outright: comment out the old code in place and write the new code adjacent to it.**
+* **Include proper explanatory documentation and comments detailing why the change was made, what was improved, and how it relates to the preserved old code.**
 * Preserve existing behavior unless intentionally modified.
 * Follow existing project conventions.
 * Avoid duplicate logic.

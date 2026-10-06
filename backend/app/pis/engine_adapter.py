@@ -100,9 +100,18 @@ class PISEngineAdapter:
         if initial_stop is None or math.isnan(initial_stop) or initial_stop <= 0:
             initial_stop = entry_px - (side * 2.0 * atr_px)
 
+        # --- PREVIOUS IMPLEMENTATION (Preserved for historical intent & audit) ---
+        # risk_per_share = abs(entry_px - initial_stop)
+        # if risk_per_share <= 1e-8 or math.isnan(risk_per_share):
+        #     risk_per_share = max(0.01, atr_px)
+        # --------------------------------------------------------------------------
+        # --- NEW IMPLEMENTATION ---
+        # When evaluating high-priced stocks (e.g. AVGO at $363) during low-volatility windows,
+        # atr_px can be as low as $0.20-$0.25, collapsing risk_per_share to $0.50.
+        # A sub-0.1% tick fluctuation (-$0.26) would then artificially register as > -0.55R,
+        # prematurely triggering early thesis invalidation in under 60 seconds.
+        # Enforce a sensible minimum risk floor of at least 0.5% of entry price (matching RiskConfig.min_stop_pct).
         risk_per_share = abs(entry_px - initial_stop)
-        # Protect against microscopic denominators on high-priced equities (e.g. 25c ATR on a $360 stock)
-        # Enforces a sensible minimum risk floor of at least 0.5% of entry price (RiskConfig.min_stop_pct)
         min_risk_floor = max(0.01, entry_px * 0.005)
         if risk_per_share < min_risk_floor or math.isnan(risk_per_share):
             risk_per_share = max(risk_per_share, min_risk_floor) if not math.isnan(risk_per_share) and risk_per_share > 1e-8 else min_risk_floor

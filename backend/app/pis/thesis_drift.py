@@ -56,6 +56,20 @@ class ThesisDriftEvaluator:
         # with zero upside traction within the initial entry window, preserving capital before full -1.0R stop.
         early_invalidation = False
         if getattr(self.config, "enable_early_invalidation", True):
+            # --- PREVIOUS IMPLEMENTATION (Preserved for historical intent & audit) ---
+            # max_early_bars = getattr(self.config, "early_invalidation_max_bars", 5)
+            # r_threshold = getattr(self.config, "early_invalidation_r_threshold", -0.55)
+            # if (
+            #     history_len <= max_early_bars
+            #     and obs.r_multiple <= r_threshold
+            #     and peak_r <= 0.05
+            # ):
+            # --------------------------------------------------------------------------
+            # --- NEW IMPLEMENTATION ---
+            # Require at least min_early_bars (default 2 completed observation bars)
+            # before evaluating early thesis invalidation. This prevents instant 0-second
+            # scratch exits on the entry fill tick (history_len == 1) before the setup
+            # has printed a single full candle of price action.
             max_early_bars = getattr(self.config, "early_invalidation_max_bars", 5)
             min_early_bars = getattr(self.config, "early_invalidation_min_bars", 2)
             r_threshold = getattr(self.config, "early_invalidation_r_threshold", -0.55)

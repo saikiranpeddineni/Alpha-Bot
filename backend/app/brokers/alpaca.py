@@ -555,6 +555,21 @@ class AlpacaBroker(Broker):
                     return rescued
             if self._is_definitive_rejection(exc):
                 err_msg = str(exc).lower()
+                # --- PREVIOUS IMPLEMENTATION (Preserved for historical intent & audit) ---
+                # short_permission_denied = (
+                #     "not allowed to short" in err_msg
+                #     or "shorting is not permitted" in err_msg
+                #     or "asset is not shortable" in err_msg
+                #     or "not shortable" in err_msg
+                # )
+                # if short_permission_denied:
+                #     self._shorting_enabled = False
+                #     self._shortable_cache[req.symbol.upper()] = False
+                # --------------------------------------------------------------------------
+                # --- NEW IMPLEMENTATION ---
+                # Decouple account-level margin permission denial from single-asset borrow restrictions.
+                # If a single ticker (e.g. ONDS) is not shortable, cache that specific asset as unshortable,
+                # but DO NOT disable self._shorting_enabled globally for the entire trading account.
                 account_short_denied = (
                     "not allowed to short" in err_msg
                     or "shorting is not permitted" in err_msg

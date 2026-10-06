@@ -138,6 +138,13 @@ class TradingEngineEvaluationMixin:
             if symbol not in self._position_peaks:
                 self._position_peaks[symbol] = position.avg_entry_price
                 self._position_troughs[symbol] = position.avg_entry_price
+                # --- PREVIOUS IMPLEMENTATION (Preserved for historical intent & audit) ---
+                # self._position_initial_stops[symbol] = position.stop_loss
+                # --------------------------------------------------------------------------
+                # --- NEW IMPLEMENTATION ---
+                # Broker Position objects (e.g. from Alpaca) do not expose a native stop_loss attribute.
+                # Query the portfolio tracker's internal lot memory (_lot.initial_stop_loss or _lot.stop_loss)
+                # to obtain the true initial risk stop rather than having PIS fall back to sub-noise ATR defaults.
                 _init_stop = getattr(_lot, "initial_stop_loss", None) or getattr(_lot, "stop_loss", None) if _lot is not None else None
                 self._position_initial_stops[symbol] = _init_stop if _init_stop is not None else getattr(position, "stop_loss", None)
             elif self._position_initial_stops.get(symbol) is None and _lot is not None:
