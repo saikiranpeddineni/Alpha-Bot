@@ -196,15 +196,28 @@ class RiskManager:
 
     def check_halts(self, ctx: AccountContext, now: datetime | None = None) -> str | None:
         """Returns 'daily' or 'hard' when a halt newly trips this tick."""
-        if not self.hard_halted and ctx.peak_equity > 0:
-            dd_pct = (ctx.peak_equity - ctx.equity) / ctx.peak_equity * 100.0
-            if dd_pct >= self.config.max_drawdown_pct:
-                self.hard_halted = True
-                self.hard_halt_reason = (
-                    f"Max drawdown breached: {dd_pct:.1f}% >= {self.config.max_drawdown_pct}%"
-                )
-                applog.error("risk", f"KILL SWITCH: {self.hard_halt_reason}")
-                return "hard"
+        # =============================================================================
+        # [MODIFIED 2026-10-08]: Disable Max Drawdown Kill Switch
+        # ORIGINAL INTENT: Hard halt engine and liquidate positions when account equity
+        # dropped by >= max_drawdown_pct (10%) from peak equity to protect capital.
+        # REASON FOR CHANGE: Operator directive (Option 2): "remove risk KILL SWITCH: Max drawdown breached: 10.1% >= 10.0% in alphabot".
+        # SAFE ROLLBACK: The original code is preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # if not self.hard_halted and ctx.peak_equity > 0:
+        #     dd_pct = (ctx.peak_equity - ctx.equity) / ctx.peak_equity * 100.0
+        #     if dd_pct >= self.config.max_drawdown_pct:
+        #         self.hard_halted = True
+        #         self.hard_halt_reason = (
+        #             f"Max drawdown breached: {dd_pct:.1f}% >= {self.config.max_drawdown_pct}%"
+        #         )
+        #         applog.error("risk", f"KILL SWITCH: {self.hard_halt_reason}")
+        #         return "hard"
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        # Max drawdown kill switch removed per operator directive.
+        # Daily loss halt (max_daily_loss_pct) remains fully operational below.
+        # =============================================================================
         if not self.daily_halted and ctx.session_start_equity > 0:
             loss_pct = -ctx.day_pnl / ctx.session_start_equity * 100.0
             if loss_pct >= self.config.max_daily_loss_pct:
