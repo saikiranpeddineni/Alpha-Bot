@@ -216,7 +216,15 @@ class MarketRiskAggregator:
         reason_codes : list[str]
         input_healths : dict[family_name, SignalHealth]
         """
-        T = as_of or datetime.now(UTC)
+        # --- PREVIOUS IMPLEMENTATION (Preserved for historical audit) ---
+        # T = as_of or datetime.now(UTC)
+        # -----------------------------------------------------------------
+        if as_of is not None:
+            T = as_of
+        elif hasattr(self._data, "_now") and isinstance(self._data._now, datetime):
+            T = self._data._now
+        else:
+            T = datetime.now(UTC)
 
         votes: list[SignalVote] = []
         votes.append(await self._family_broad_market("SPY", "broad_market", T))

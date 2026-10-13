@@ -2054,7 +2054,18 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
         self.publish("status", self.status())
         return info
 
-    async def run_market_scanner(self, is_intraday: bool = False) -> list[str]:
+    # =============================================================================
+    # [MODIFIED 2026-10-13]: Support simulated as_of time in run_market_scanner
+    # ORIGINAL INTENT: run_market_scanner took only is_intraday.
+    # REASON FOR CHANGE: Backtest replay needs to pass simulated as_of time.
+    # SAFE ROLLBACK: Defaults to None (resolves to clock.now_utc()).
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # async def run_market_scanner(self, is_intraday: bool = False) -> list[str]:
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    async def run_market_scanner(self, is_intraday: bool = False, as_of: datetime | None = None) -> list[str]:
+    # =============================================================================
         from app.core.scanner import MarketScanner, ScannerOutcome
         scanner = MarketScanner(self.data, self.user_watchlist, risk_config=self.risk_config)
         # Cache the instance so strategy evaluation can consume live mover context
@@ -2064,15 +2075,22 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
         applog.info("engine", f"Starting autonomous market scanner ({scan_label} scan)...")
         # Mark scanner as run so Monitor 6 doesn't report scanner_never_run (covers manual triggers too)
         from zoneinfo import ZoneInfo
-        self._last_scan_date = datetime.now(ZoneInfo("America/New_York")).date()
-        outcome, new_watchlist = await scanner.run()
+        effective_now = as_of or (self.clock.now_utc() if hasattr(self, "clock") else utcnow())
+        self._last_scan_date = effective_now.astimezone(ZoneInfo("America/New_York")).date()
+        # --- PREVIOUS IMPLEMENTATION (Preserved for historical audit) ---
+        # outcome, new_watchlist = await scanner.run()
+        # -----------------------------------------------------------------
+        outcome, new_watchlist = await scanner.run(as_of=effective_now)
         if outcome == ScannerOutcome.FAILED:
             applog.error("engine", "Market scanner failed; preserving the existing watchlist")
             return []
         if outcome == ScannerOutcome.SUCCESS_EMPTY:
             new_watchlist = []
 
-        now_utc = utcnow()
+        # --- PREVIOUS IMPLEMENTATION (Preserved for historical audit) ---
+        # now_utc = utcnow()
+        # -----------------------------------------------------------------
+        now_utc = effective_now
         ttl_minutes = max(1, int(getattr(self.risk_config, "scanner_watchlist_ttl_minutes", 120)))
         expires_at_scan = now_utc + timedelta(minutes=ttl_minutes)
 
@@ -2174,7 +2192,10 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
                 # Only retrain model on the morning scan (30-day history)
                 applog.info("engine", "Pre-market scan complete. Starting targeted warm-start training...")
                 try:
-                    end = utcnow()
+                    # --- PREVIOUS IMPLEMENTATION (Preserved for historical audit) ---
+                    # end = utcnow()
+                    # -----------------------------------------------------------------
+                    end = effective_now
                     start = end - timedelta(days=30)
 
                     frames = {}

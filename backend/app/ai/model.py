@@ -479,7 +479,22 @@ class _LegacySignalModel:
                         f"artifact version {spec.get('feature_version')} != current code version {current_hash} "
                         f"— falling back to global base model",
                     )
-                    spec = None
+                    # =============================================================================
+                    # [MODIFIED 2026-10-13]: Explicit FEATURE_VERSION_MISMATCH tagging
+                    # ORIGINAL INTENT: Reset spec to None to fall through to base model.
+                    # REASON FOR CHANGE: Explicitly tag fallback reason as FEATURE_VERSION_MISMATCH.
+                    # SAFE ROLLBACK: The original code is preserved below as comments.
+                    # -----------------------------------------------------------------------------
+                    # [PREVIOUS CODE - PRESERVED]:
+                    # spec = None
+                    # -----------------------------------------------------------------------------
+                    # [NEW CODE]:
+                    return self._get_base_result(
+                        features, action, "FEATURE_VERSION_MISMATCH", None, min_auc,
+                        f"Specialist feature version {spec.get('feature_version')} != current {current_hash}",
+                        symbol=symbol, regime_key=regime_key,
+                    )
+                    # =============================================================================
 
                 # 2. Check for temporal leakage relative to backtest start time
                 elif hasattr(self, "backtest_start_time") and self.backtest_start_time is not None:
@@ -673,6 +688,7 @@ class _LegacySignalModel:
 
         if save_to_disk:
             try:
+                self.models_dir.mkdir(parents=True, exist_ok=True)
                 if regime_key:
                     # Regime-specific adaptive model
                     joblib.dump(new_long, self.models_dir / f"adaptive_{regime_key}_long.joblib")

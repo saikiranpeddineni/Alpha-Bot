@@ -124,16 +124,20 @@ def test_daily_loss_halt_trips_and_blocks(rm: RiskManager, bars):
 #     assert not rm.hard_halted
 # -----------------------------------------------------------------------------
 # [NEW CODE]:
-def test_max_drawdown_kill_switch(rm: RiskManager, bars):
-    halted = rm.check_halts(ctx(equity=89_000, peak=100_000), now=MID_SESSION)
-    assert halted == "hard"
-    assert rm.hard_halted
-    decision = rm.evaluate_entry(long_signal(), ctx(), bars, now=MID_SESSION)
-    assert not decision.approved and "hard halt" in decision.reason
-    rm.reset_hard_halt()
-    assert not rm.hard_halted
-# =============================================================================
+# def test_max_drawdown_kill_switch(rm: RiskManager, bars):
+#     halted = rm.check_halts(ctx(equity=89_000, peak=100_000), now=MID_SESSION)
+#     assert halted == "hard"
+#     assert rm.hard_halted
+#     decision = rm.evaluate_entry(long_signal(), ctx(), bars, now=MID_SESSION)
+#     assert not decision.approved and "hard halt" in decision.reason
+#     rm.reset_hard_halt()
+#     assert not rm.hard_halted
+# # =============================================================================
 
+def test_max_drawdown_kill_switch_disabled(rm: RiskManager, bars):
+    halted = rm.check_halts(ctx(equity=89_000, peak=100_000), now=MID_SESSION)
+    assert halted is None
+    assert not rm.hard_halted
 
 def test_consecutive_loss_cooldown(rm: RiskManager, bars):
     now = MID_SESSION

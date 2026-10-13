@@ -124,9 +124,24 @@ async def _run_day_shard_async(payload: dict[str, Any]) -> dict[str, Any]:
         engine.state = EngineState.RUNNING
         engine.publish = lambda *_a, **_k: None
 
+        window_timestamps = {bar["ts_dt"] for bar in bars if bar.get("in_replay_window", False)}
+        min_window_ts = min(window_timestamps) if window_timestamps else min(b["ts_dt"] for b in bars)
+        pre_window_ts = sorted({b["ts_dt"] for b in bars if b["ts_dt"] < min_window_ts})
+        warmup_n = int(payload.get("warmup_bars", 800) or 800)
+        if warmup_n <= 0:
+            tick_start_ts = min_window_ts
+        elif len(pre_window_ts) >= warmup_n:
+            tick_start_ts = pre_window_ts[-warmup_n]
+        else:
+            tick_start_ts = pre_window_ts[0] if pre_window_ts else min_window_ts
         by_ts: dict[datetime, list[dict[str, Any]]] = defaultdict(list)
         for bar in bars:
-            by_ts[bar["ts_dt"]].append(bar)
+            # --- PREVIOUS IMPLEMENTATION (Preserved for historical audit) ---
+            # by_ts[bar["ts_dt"]].append(bar)
+            # -----------------------------------------------------------------
+            # Tick only rolling warmup bars before the day window; historical reference bars remain in data._frames
+            if bar.get("in_replay_window", False) or bar["ts_dt"] >= tick_start_ts:
+                by_ts[bar["ts_dt"]].append(bar)
 
         class ContextAwareDateTime(datetime):
             @classmethod
@@ -142,6 +157,7 @@ async def _run_day_shard_async(payload: dict[str, Any]) -> dict[str, Any]:
             stack.enter_context(patch("app.core.engine.datetime", ContextAwareDateTime))
             stack.enter_context(patch("app.core.scanner.datetime", ContextAwareDateTime))
             stack.enter_context(patch("app.risk.manager.datetime", ContextAwareDateTime))
+            stack.enter_context(patch("app.risk.market_regime.datetime", ContextAwareDateTime))
             stack.enter_context(patch("app.core.domain.uuid", deterministic_uuid))
 
             eq_every = 30
@@ -171,6 +187,12 @@ async def _run_day_shard_async(payload: dict[str, Any]) -> dict[str, Any]:
                         acct = await broker.account()
                         equity_out.append([ts.isoformat(), acct.equity])
 
+        # A shard has no later tick on which the normal EOD path can submit its
+        # flatten order.  Close the book explicitly at the last observed prices
+        # and drain the fills so the shard's ledger and cash agree.
+        if await broker.positions():
+            await broker.flatten_all(reason="end of day")
+            await engine._drain_fills(clock.now_utc())
         positions_left = await broker.positions()
         flat_ok = len(positions_left) == 0
 
@@ -186,7 +208,7 @@ async def _run_day_shard_async(payload: dict[str, Any]) -> dict[str, Any]:
             details.setdefault("symbol", symbol)
             trades_out.append(details)
 
-        return {"trades": trades_out, "equity_curve": equity_out, "ticks": ticks, "flat_ok": flat_ok}
+        return {"day": payload["day"], "trades": trades_out, "equity_curve": equity_out, "ticks": ticks, "flat_ok": flat_ok}
     finally:
         import app.db.database as db_module
         db_module._ACTIVE_DATABASE = None

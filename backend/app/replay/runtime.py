@@ -79,8 +79,12 @@ class ReplayRuntime:
                 target_symbols = [s.upper() for s in
                                   (self.source_db.get_setting("watchlist") or self.settings.watchlist_symbols())]
 
-            await self.feed.ensure_data(start_date, end_date, target_symbols)
-            bars = self.feed.load_bars(start_date, end_date, target_symbols)
+            from datetime import timedelta
+            history_start = start_date if self.feed._explicit_data_path else (datetime.fromisoformat(start_date).date() - timedelta(days=60)).isoformat()
+            await self.feed.ensure_data(history_start, end_date, target_symbols)
+            bars = self.feed.load_bars(history_start, end_date, target_symbols)
+            for bar in bars:
+                bar["in_replay_window"] = start_date <= bar["ts_dt"].strftime("%Y-%m-%d") <= end_date
 
             # per-symbol warmup prefix + window filter (identical semantics to full runtime)
             by_sym = defaultdict(list)
@@ -90,7 +94,11 @@ class ReplayRuntime:
             for sym, sb in by_sym.items():
                 sb.sort(key=lambda x: x["ts_dt"])
                 first_w = next((i for i, b in enumerate(sb) if b["in_replay_window"]), len(sb))
-                start_idx = max(0, first_w - int(warmup_bars))
+                # --- PREVIOUS IMPLEMENTATION (Preserved for historical audit) ---
+                # start_idx = max(0, first_w - int(warmup_bars))
+                # -----------------------------------------------------------------
+                # Market risk calculation (e.g. SPY/QQQ ATR percentile) requires >= 20 hourly bars (multi-week history).
+                start_idx = 0 if sym in {"SPY", "QQQ", "VIX", "^VIX"} else max(0, first_w - int(warmup_bars))
                 filtered.extend(sb[start_idx:])
             bars = sorted(filtered, key=lambda b: (b["ts_dt"], b["symbol"]))
             window_bars = [b for b in bars if b.get("in_replay_window")]
@@ -134,7 +142,10 @@ class ReplayRuntime:
                 kept: list[dict[str, Any]] = []
                 for b in reversed(warm):
                     c = per_sym[b["symbol"]]
-                    if c < warmup_bars:
+                    # --- PREVIOUS IMPLEMENTATION (Preserved for historical audit) ---
+                    # if c < warmup_bars:
+                    # -----------------------------------------------------------------
+                    if b["symbol"] in {"SPY", "QQQ", "VIX", "^VIX"} or c < warmup_bars:
                         kept.append(b)
                         per_sym[b["symbol"]] += 1
                 kept.reverse()
@@ -156,6 +167,7 @@ class ReplayRuntime:
             workers = max_workers or min(len(day_payloads), os.cpu_count() or 4, 10)
             trades: list[dict[str, Any]] = []
             equity: list[list[Any]] = []
+            shard_results: dict[str, dict[str, Any]] = {}
             ticks_total = 0
             all_flat = True
             done = 0
@@ -164,15 +176,25 @@ class ReplayRuntime:
                 futures = {loop.run_in_executor(pool, run_day_shard, p): p["day"] for p in day_payloads}
                 for fut in asyncio.as_completed(list(futures.keys())):
                     res = await fut
+                    shard_results[res["day"]] = res
                     done += 1
                     ticks_total += res.get("ticks", 0)
                     all_flat = all_flat and res.get("flat_ok", True)
-                    equity.extend(res.get("equity_curve", []))
                     trades.extend(res.get("trades", []))
                     self.session_manager.update_session(
                         self.replay_id, progress_pct=min(99.0, 5.0 + 94.0 * done / max(1, len(day_payloads)))
                     )
 
+            # Workers intentionally start from starting_cash. Rebase each day's
+            # marked equity by prior realized P&L before merging; otherwise the
+            # last day's equity silently replaces the account equity.
+            carry = float(getattr(self.settings, "paper_starting_cash", 100000.0))
+            for day in sorted(shard_results):
+                res = shard_results[day]
+                day_trades = res.get("trades", [])
+                for point in res.get("equity_curve", []):
+                    equity.append([point[0], float(point[1]) + carry - getattr(self.settings, "paper_starting_cash", 100000.0)])
+                carry += sum(float(t.get("pnl") or 0.0) for t in day_trades)
             trades.sort(key=lambda t: str(t.get("exit_at", "")))
             equity.sort(key=lambda e: e[0])
             if not all_flat:
@@ -235,9 +257,13 @@ class ReplayRuntime:
                     pass
                 target_symbols = list(set(base_watchlist) | live_symbols)
 
-            await self.feed.ensure_data(start_date, end_date, target_symbols)
+            from datetime import timedelta
+            history_start = start_date if self.feed._explicit_data_path else (datetime.fromisoformat(start_date).date() - timedelta(days=60)).isoformat()
+            await self.feed.ensure_data(history_start, end_date, target_symbols)
 
-            bars = self.feed.load_bars(start_date, end_date, target_symbols)
+            bars = self.feed.load_bars(history_start, end_date, target_symbols)
+            for bar in bars:
+                bar["in_replay_window"] = start_date <= bar["ts_dt"].strftime("%Y-%m-%d") <= end_date
 
             # Filter bars to include only requested warmup + replay window
             filtered_bars = []
@@ -249,7 +275,11 @@ class ReplayRuntime:
             for sym, sym_bars in by_sym.items():
                 sym_bars.sort(key=lambda x: x["ts_dt"])
                 first_in_window = next((i for i, b in enumerate(sym_bars) if b["in_replay_window"]), len(sym_bars))
-                start_idx = max(0, first_in_window - warmup_bars)
+                # --- PREVIOUS IMPLEMENTATION (Preserved for historical audit) ---
+                # start_idx = max(0, first_in_window - warmup_bars)
+                # -----------------------------------------------------------------
+                # Market risk calculation (e.g. SPY/QQQ ATR percentile) requires >= 20 hourly bars (multi-week history).
+                start_idx = 0 if sym in {"SPY", "QQQ", "VIX", "^VIX"} else max(0, first_in_window - warmup_bars)
                 filtered_bars.extend(sym_bars[start_idx:])
 
             bars = sorted(filtered_bars, key=lambda b: (b["ts_dt"], b["symbol"]))
@@ -373,7 +403,22 @@ class ReplayRuntime:
                 engine.model = SignalModel(replay_models)
                 await self._initialize_engine(engine, clock, broker, data, ledger, replay_models)
             by_ts: dict[datetime, list[dict[str, Any]]] = defaultdict(list)
-            for bar in bars: by_ts[bar["ts_dt"]].append(bar)
+            # --- PREVIOUS IMPLEMENTATION (Preserved for historical audit) ---
+            # for bar in bars: by_ts[bar["ts_dt"]].append(bar)
+            # -----------------------------------------------------------------
+            # Tick only rolling warmup bars before the replay window; historical reference bars remain in data._frames
+            window_timestamps = {bar["ts_dt"] for bar in bars if bar.get("in_replay_window", False)}
+            min_window_ts = min(window_timestamps) if window_timestamps else min(b["ts_dt"] for b in bars)
+            pre_window_ts = sorted({b["ts_dt"] for b in bars if b["ts_dt"] < min_window_ts})
+            if int(warmup_bars) <= 0:
+                tick_start_ts = min_window_ts
+            elif len(pre_window_ts) >= int(warmup_bars):
+                tick_start_ts = pre_window_ts[-int(warmup_bars)]
+            else:
+                tick_start_ts = pre_window_ts[0] if pre_window_ts else min_window_ts
+            for bar in bars:
+                if bar["ts_dt"] >= tick_start_ts:
+                    by_ts[bar["ts_dt"]].append(bar)
 
             class ContextAwareDateTime(datetime):
                 @classmethod
@@ -391,6 +436,7 @@ class ReplayRuntime:
                 stack.enter_context(patch("app.core.engine.datetime", ContextAwareDateTime))
                 stack.enter_context(patch("app.core.scanner.datetime", ContextAwareDateTime))
                 stack.enter_context(patch("app.risk.manager.datetime", ContextAwareDateTime))
+                stack.enter_context(patch("app.risk.market_regime.datetime", ContextAwareDateTime))
                 stack.enter_context(patch("app.core.domain.uuid", deterministic_uuid))
                 for idx, ts in enumerate(sorted(by_ts)):
                     if self.session_manager.is_cancelled(self.replay_id): raise RuntimeError("Replay cancelled")
@@ -557,7 +603,21 @@ class ReplayRuntime:
         try: commit = subprocess.check_output(["git","rev-parse","HEAD"],text=True,stderr=subprocess.DEVNULL).strip()
         except Exception: commit = os.getenv("GIT_COMMIT_SHA","unknown")
         window=[b for b in bars if b.get("in_replay_window",True)]; syms=sorted({b["symbol"] for b in bars})
-        return {"replay_id":self.replay_id,"engine_commit":commit,"config_hash":hashlib.sha256(json.dumps(config,sort_keys=True).encode()).hexdigest(),"data_hash":digest,"bar_count_total":len(bars),"bar_count_replay_window":len(window),"symbols":syms,"first_timestamp":bars[0]["ts_dt"].isoformat(),"last_timestamp":bars[-1]["ts_dt"].isoformat(),"decision_path":"TradingEngine._tick","lookahead_policy":"strict_as_of","database_policy":"single_immutable_run_snapshot_cloned_per_pass","model_policy":"immutable_asof_snapshot_cloned_per_pass","clock_policy":"ReplayClock + engine/scanner/risk datetime binding","identity_policy":"deterministic replay-only UUID binding","context_memory_policy":"immutable_run_start_snapshot_no_replay_feedback","market_risk_policy":"historical SPY+QQQ+VIX required; no UNKNOWN substitution","strategy_observation_policy":"replay-only wrapper around production on_bar","risk_observation_policy":"replay-only wrapper around production evaluate_entry","fill_model":config["fill_model"],"slippage_bps":config["slippage_bps"]}
+        return {"replay_id":self.replay_id,"engine_commit":commit,"config_hash":hashlib.sha256(json.dumps(config,sort_keys=True).encode()).hexdigest(),"data_hash":digest,"bar_count_total":len(bars),"bar_count_replay_window":len(window),"symbols":syms,"first_timestamp":bars[0]["ts_dt"].isoformat(),"last_timestamp":bars[-1]["ts_dt"].isoformat(),"decision_path":"TradingEngine._tick","lookahead_policy":"strict_as_of","database_policy":"single_immutable_run_snapshot_cloned_per_pass","model_policy":"immutable_asof_snapshot_cloned_per_pass","clock_policy":"ReplayClock + engine/scanner/risk datetime binding","identity_policy":"deterministic replay-only UUID binding","context_memory_policy":"immutable_run_start_snapshot_no_replay_feedback","market_risk_policy":"historical SPY+QQQ+VIX required; no UNKNOWN substitution","strategy_observation_policy":"replay-only wrapper around production on_bar","risk_observation_policy":"replay-only wrapper around production evaluate_entry","fill_model":config["fill_model"],"slippage_bps":config["slippage_bps"],"model_artifacts":self._model_artifact_manifest()}
+
+    @staticmethod
+    def _model_artifact_manifest() -> dict[str, Any]:
+        from app.config import MODELS_DIR
+        import hashlib
+        result: dict[str, Any] = {"global": {}, "specialists": {}}
+        for path in sorted(MODELS_DIR.glob("signal_model*.joblib")):
+            result["global"][path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
+        meta = MODELS_DIR / "signal_model.meta.json"
+        if meta.exists():
+            result["global"][meta.name] = hashlib.sha256(meta.read_bytes()).hexdigest()
+        for path in sorted((MODELS_DIR / "specialists").glob("*.pkl")):
+            result["specialists"][path.stem.upper()] = hashlib.sha256(path.read_bytes()).hexdigest()
+        return result
 
     @staticmethod
     def _assert_meaningful_execution(ledger: ReplayLedger) -> None:

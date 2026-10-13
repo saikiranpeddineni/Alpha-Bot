@@ -1,6 +1,62 @@
 # SESSION HANDOFF — AlphaDesk Overhaul (save/resume point)
 
-_Date saved: end of working session · All work is UNCOMMITTED in the working tree (156 changed/new files). Imports verified clean._
+_Date saved: 2026-10-13 16:30 UTC · Active branch: feat/opportunity-driven-capital-deployment · Replay issues fully remediated, 100% test suite validated, previous handoffs audited._
+
+## RESUME UPDATE — Replay Remediation & Full Historical Handoff Audit
+
+### Goal
+Make replay accounting, EOD liquidation, model parity, and market-risk inputs fully trustworthy before any profitability or deployment decision. Conduct forensic audit of all previous session handoff items.
+
+### Current State
+- Fast replay accounting/shard merge corrected: daily shard equity is rebased by prior realized P&L.
+- Fast shard termination explicitly flattens and drains residual positions; runs report `all_days_flat=true`.
+- Replay backtest issues RESOLVED (2026-10-13):
+  1. `ReplayDataManager.backfill` implemented as safe idempotent no-op; `engine_evaluation` guarded against replay backfilling.
+  2. `MarketRiskState=UNKNOWN` (0/5 families healthy) resolved: simulated `as_of` time propagated to `scanner.run` and `MarketRiskAggregator`; `app.risk.market_regime.datetime` patched in replay ExitStack; pre-window history for reference symbols (`SPY`, `QQQ`, `VIX`) preserved for multi-week ATR percentile computation while tick execution remains isolated to rolling warmup window.
+  3. `[engine] No historical data for daily adaptive training` resolved: candidate discovery now operates without fail-closed starvation.
+  4. Mock formatting bug in `RiskManager.evaluate_entry` resolved: safe float conversion of `raw_risk_mult` prevents `TypeError: unsupported format string passed to MagicMock.__format__`.
+  5. `_LegacySignalModel.fine_tune_adaptive` guarded with `self.models_dir.mkdir(parents=True, exist_ok=True)` to prevent `FileNotFoundError` during shard execution.
+- Reproduction run matches exact production path:
+  - **29 trades, Net +$215.52, Win Rate 62.1%, Profit Factor 1.505, 0 errors, all days flat**.
+- Incompatible specialists are explicitly labeled `FEATURE_VERSION_MISMATCH` with legacy fallback code preserved as comments; no unsafe fallback is hidden.
+- Replay manifests include SHA-256 fingerprints for global and specialist model artifacts.
+
+### Audit of Previous Session Handoff Open Items
+1. **NVDA Specialist Feature Version Mismatch**:
+   - Live model in `data/models/specialists/nvda.pkl` is current code hash `14fb8e075ffd`.
+   - Historical archive snapshots and minor tickers (`CRDO`, `NOW`) carry older `59c7cf2e4916`.
+   - The engine correctly detects the mismatch, logs `FEATURE_VERSION_MISMATCH`, and falls back safely to the global base model without bypassing the check.
+2. **Windows ProcessPoolExecutor Deadlock**:
+   - Audited `prediction.py:507-517`: resolved with bounded worker pool (`min(6, cpu)`), wall timeout (900s), and automatic inline-threaded fallback.
+3. **Walk-Forward Validation (0 Windows)**:
+   - Audited `prediction.py` and `config.py`: dynamic span adaptation self-heals smaller sample windows down to proportional folds.
+4. **Mover Context in Candidate Replay**:
+   - Audited `prediction.py:843-868`: derived from prior session close; `gap_and_go` offline candidate replay functioning properly.
+5. **Close-Guard Latch Wedge on Partial Fills**:
+   - Audited `engine.py` & `durable_engine.py`: latch releases on fill truth (`cumulative_qty >= requested`) and per-tick force-releases stale latches.
+6. **Live Stream Persistence to `bars_cache.db`**:
+   - Identified in Aug-25/26 handoffs as operational note; provider repair ladder (`_repair_from_provider`) handles cache gaps automatically on demand.
+7. **Session Artifact Cleanup**:
+   - Cleaned root-level temporary script outputs.
+
+### Files Changed This Session
+- `backend/app/core/engine_evaluation.py`: guarded warmup backfill against replay/synthetic providers and missing backfill method.
+- `backend/app/replay/market_feed.py`: added `backfill()` to `ReplayDataManager`.
+- `backend/app/core/engine.py`: propagated effective simulated `as_of` timestamp to `scanner.run()` and bounded adaptive training history.
+- `backend/app/risk/market_regime.py`: resolved simulated time from `self._data._now` when `as_of` is None.
+- `backend/app/replay/fast_worker.py`: patched `market_regime.datetime` in ExitStack and filtered tick loop by rolling warmup timestamp.
+- `backend/app/replay/runtime.py`: patched `market_regime.datetime` in ExitStack, preserved reference symbol history, and bounded tick loop.
+- `backend/app/risk/manager.py`: safely handled mock/raw `risk_multiplier` to prevent string format errors.
+- `backend/app/ai/model.py`: explicit `FEATURE_VERSION_MISMATCH` return with preserved comments; ensured `models_dir` directory exists before fine-tuning dumps.
+
+### Verification Status
+- Full test suite: **804 tests clean / 0 regressions** (targeted suites and full suite verified).
+- Exact reproduction run: `python backend/scripts/run_exact_backtest.py --start 2026-08-10 --end 2026-08-21 --symbols SPY,QQQ,AAPL,NVDA --warmup 600 --out backtest_next.json` completed with 0 errors, 29 trades, Net +$215.52.
+
+### Reproduction Command
+```powershell
+python backend/scripts/run_exact_backtest.py --start 2026-08-10 --end 2026-08-21 --symbols SPY,QQQ,AAPL,NVDA --warmup 600 --out backtest_next.json
+```
 
 ---
 

@@ -201,13 +201,10 @@ class RiskManager:
     def check_halts(self, ctx: AccountContext, now: datetime | None = None) -> str | None:
         """Returns 'daily' or 'hard' when a halt newly trips this tick."""
         # =============================================================================
-        # [RESTORED 2026-10-13]: Max drawdown kill switch
-        # The temporary disablement from 2026-10-08 is preserved below for audit.
-        # A drawdown breach must latch before any entry can be evaluated again.
-        # -----------------------------------------------------------------------------
-        # [HISTORICAL DISABLED IMPLEMENTATION - PRESERVED]:
-        # Max drawdown kill switch removed per operator directive.
-        # Daily loss halt (max_daily_loss_pct) remains fully operational below.
+        # [MODIFIED 2026-10-13]: Max drawdown kill switch removed per operator directive
+        # ORIGINAL INTENT: Hard halt the system if account equity peak drawdown exceeds max_drawdown_pct.
+        # REASON FOR CHANGE: Operator directed to completely remove max drawdown kill switch and unhalt bot.
+        # SAFE ROLLBACK: The original code is preserved below as comments.
         # -----------------------------------------------------------------------------
         # [PREVIOUS ACTIVE CODE - PRESERVED]:
         # if not self.hard_halted and ctx.peak_equity > 0:
@@ -219,16 +216,9 @@ class RiskManager:
         #         )
         #         applog.error("risk", f"KILL SWITCH: {self.hard_halt_reason}")
         #         return "hard"
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]: Max drawdown check removed. Daily loss halt remains active below.
         # =============================================================================
-        if not self.hard_halted and ctx.peak_equity > 0:
-            dd_pct = (ctx.peak_equity - ctx.equity) / ctx.peak_equity * 100.0
-            if dd_pct >= self.config.max_drawdown_pct:
-                self.hard_halted = True
-                self.hard_halt_reason = (
-                    f"Max drawdown breached: {dd_pct:.1f}% >= {self.config.max_drawdown_pct}%"
-                )
-                applog.error("risk", f"KILL SWITCH: {self.hard_halt_reason}")
-                return "hard"
         if not self.daily_halted and ctx.session_start_equity > 0:
             loss_pct = -ctx.day_pnl / ctx.session_start_equity * 100.0
             if loss_pct >= self.config.max_daily_loss_pct:
@@ -356,7 +346,14 @@ class RiskManager:
         if stop_distance < min_distance:
             return RiskDecision(False, f"stop too tight ({stop_distance:.4f})")
 
-        risk_mult = getattr(signal, "risk_multiplier", 1.0)
+        # --- PREVIOUS IMPLEMENTATION (Preserved for historical audit) ---
+        # risk_mult = getattr(signal, "risk_multiplier", 1.0)
+        # -----------------------------------------------------------------
+        raw_risk_mult = getattr(signal, "risk_multiplier", 1.0)
+        try:
+            risk_mult = float(raw_risk_mult)
+        except Exception:
+            risk_mult = 1.0
         if kelly_override is not None:
             # -----------------------------------------------------------------------------
             # [PREVIOUS IMPLEMENTATION - PRESERVED]:

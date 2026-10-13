@@ -59,7 +59,25 @@ class TradingEngineEvaluationMixin:
         # scanned symbols start with empty/30-bar tails and would otherwise
         # starve below the feature threshold for hours -- ML never runs for
         # them and every candidate dies as 'feature row unavailable (warmup)'.
-        if len(df) < 120 and not getattr(getattr(self.data, "provider", None), "name", "") == "synthetic":
+        # =============================================================================
+        # [MODIFIED 2026-10-13]: Guard warmup backfill against replay provider & missing backfill
+        # ORIGINAL INTENT: Guard excluded 'synthetic' provider from triggering live backfills.
+        # REASON FOR CHANGE: In replay mode, provider is 'replay' and data is immutable.
+        #                    Spawning asynchronous backfill tasks during replay attempts to
+        #                    query live network providers or hits missing attributes.
+        # SAFE ROLLBACK: Live trading continues to trigger backfill for non-synthetic/non-replay
+        #                providers when hasattr(self.data, "backfill") is True.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # if len(df) < 120 and not getattr(getattr(self.data, "provider", None), "name", "") == "synthetic":
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        if (
+            len(df) < 120
+            and getattr(getattr(self.data, "provider", None), "name", "") not in ("synthetic", "replay")
+            and hasattr(self.data, "backfill")
+        ):
+        # =============================================================================
             self._backfill_inflight = getattr(self, "_backfill_inflight", set())
             self._backfill_last_try = getattr(self, "_backfill_last_try", {})
             import time as _time

@@ -253,6 +253,25 @@ class ReplayDataManager:
         """No-op: all bars are preloaded and enriched at construction."""
         return None
 
+    # =============================================================================
+    # [MODIFIED 2026-10-13]: Add backfill method to ReplayDataManager
+    # ORIGINAL INTENT: ReplayDataManager historically did not define backfill();
+    #                  only warmup() was stubbed as a no-op because bars are preloaded.
+    # REASON FOR CHANGE: TradingEngineEvaluationMixin._evaluate_symbol schedules
+    #                    await self.data.backfill(sym) when a thin frame is encountered.
+    #                    Without backfill(), an unhandled AttributeError was raised.
+    # SAFE ROLLBACK: ReplayDataManager remains immutable; backfill() returns False
+    #                without performing any network I/O or modifying preloaded frames.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # (Method backfill was not present in ReplayDataManager)
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    async def backfill(self, symbol: str, bars: int | None = None) -> bool:
+        """No-op in replay: all historical bars are preloaded and immutable."""
+        return False
+    # =============================================================================
+
     def set_time(self, ts: datetime) -> None:
         self._now = ts
 
