@@ -387,7 +387,15 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
             self.risk_config.ml_confidence_threshold = ml_thresh
             applog.info("engine", f"Restored persisted ML threshold setting on startup: {ml_thresh}")
 
-        self.pipeline = SignalPipeline(self.model, ml_thresh)
+        # The persisted runtime RiskConfig is authoritative for pipeline gates
+        # and TradeScore thresholds; do not let SignalPipeline rebuild defaults
+        # from process environment on startup.
+        self.pipeline = SignalPipeline(
+            self.model,
+            ml_thresh,
+            risk_config=self.risk_config,
+            settings=self.settings,
+        )
         for s in self.strategies:
             s.reset()
         self._regimes.clear()
@@ -809,10 +817,9 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
             pos_by_symbol = {p.symbol: p for p in positions}
             candidates = []
 
-            # Heartbeat establishes baseline eligibility before broker protection is
-            # audited. Rule-41 runs later in this tick and may fail-close entries when
-            # an authoritative broker position lacks a verified stop. Intersect both
-            # authorities so a stale pre-Rule-41 SafetyDecision can never bypass #41.
+            # Heartbeat establishes the current entry permission before strategy
+            # evaluation. Keep the manual/system gate and the heartbeat decision
+            # intersected so a stale decision cannot reopen entries.
             decision = getattr(self, "last_safety_decision", None)
             heartbeat_allows_entries = decision.allow_new_entries if decision is not None else True
             allow_entries = bool(heartbeat_allows_entries and self.allow_new_entries)
@@ -1030,6 +1037,12 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
                             if not client_order_id:
                                 client_order_id = f"ad-ent-{sig.symbol}-{sig.action.value}-{sig.strategy}-{now.strftime('%Y%m%d%H%M%S')}"
                                 decision.order.client_order_id = client_order_id
+                            # Keep the validated target in engine/PIS state only. The
+                            # broker request deliberately remains target-free so PIS
+                            # remains the sole discretionary exit authority.
+                            entry_target = getattr(decision, "take_profit", None)
+                            if entry_target is None:
+                                entry_target = sig.take_profit
                             self.pending_reconciliation_orders[client_order_id] = {
                                 "symbol": decision.order.symbol.upper(),
                                 "client_order_id": client_order_id,
@@ -1037,6 +1050,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
                                 "qty": decision.order.qty,
                                 "order_type": str(decision.order.order_type),
                                 "limit_price": decision.order.limit_price,
+                                "take_profit": entry_target,
                                 "submitted_at": utcnow().isoformat(),
                                 "submission_state": "submitting",
                             }
@@ -1051,14 +1065,24 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
                                     self.pending_reconciliation_orders[client_order_id]["broker_order_id"] = getattr(order, "id", None)
                                 await asyncio.to_thread(self.db.set_setting, "pending_reconciliation_orders", self.pending_reconciliation_orders)
                                 self.recent_orders.appendleft(order)
-                                await asyncio.to_thread(self.db.save_order, order, self.mode)
-                                # Carry the strategy's designed profit target into
-                                # PIS. Without this, _position_take_profits stayed
-                                # empty forever and PIS's target_hit banking branch
-                                # was dead code -- every trade lost its intended TP.
-                                _entry_tp = getattr(order, "take_profit", None)
-                                if _entry_tp:
-                                    self._position_take_profits[order.symbol.upper()] = float(_entry_tp)
+                                # --- PREVIOUS IMPLEMENTATION (Preserved for historical intent & audit) ---
+                                # await asyncio.to_thread(self.db.save_order, order, self.mode)
+                                # _entry_tp = getattr(order, "take_profit", None)
+                                # if _entry_tp:
+                                #     self._position_take_profits[order.symbol.upper()] = float(_entry_tp)
+                                # --------------------------------------------------------------------------
+                                # Persist a target-bearing state copy for restart/PIS recovery while keeping
+                                # the broker-owned Order object target-free (no duplicate native target).
+                                # The broker order remains the execution truth; this copy is only the
+                                # deterministic strategy/PIS metadata needed after a restart.
+                                persisted_order = (
+                                    order.model_copy(update={"take_profit": float(entry_target)})
+                                    if entry_target is not None and float(entry_target) > 0
+                                    else order
+                                )
+                                if entry_target is not None and float(entry_target) > 0:
+                                    self._position_take_profits[order.symbol.upper()] = float(entry_target)
+                                await asyncio.to_thread(self.db.save_order, persisted_order, self.mode)
                                 self.publish("insight", self.insights.on_signal(sig, gated=False).model_dump(mode="json"))
                                 self.publish("orders", self.orders_payload())
                             except Exception as exc:
@@ -1521,22 +1545,6 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
             "scanner_context": getattr(self, "scanner_context", {}),
         }
 
-
-    def _resolve_recovery_stop(self, position: Position) -> tuple[float, str]:
-        sym = position.symbol
-        if self.portfolio and sym in self.portfolio._lots:
-            lot = self.portfolio._lots[sym]
-            if getattr(lot, "initial_stop_loss", None) is not None and lot.initial_stop_loss > 0:
-                return round(float(lot.initial_stop_loss), 4), "ORIGINAL_STRATEGY_STOP"
-            if getattr(lot, "stop_loss", None) is not None and lot.stop_loss > 0:
-                return round(float(lot.stop_loss), 4), "PORTFOLIO_CURRENT_STOP"
-        stop_pct = 0.015
-        fallback = round(
-            position.avg_entry_price * (1.0 - stop_pct if position.qty > 0 else 1.0 + stop_pct),
-            4,
-        )
-        return fallback, "EMERGENCY_1_5PCT_FALLBACK"
-
     async def _close_position_guarded(self, symbol: str, reason: str, qty: float | None = None) -> None:
         """Close a position, skipping if a close order is already in-flight for this symbol."""
         if not hasattr(self, "_pending_close_symbols"):
@@ -1741,8 +1749,8 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
                     except Exception:
                         pass
 
-            # fix(#41): local DB stop_loss metadata is stored for initial lot tracking,
-            # but MUST NOT count as proof of authoritative broker-side protection.
+            # Restore local stop/risk metadata for lot tracking and PIS. This
+            # fallback does not submit or verify a protective broker order.
             if stop_loss is None or stop_loss <= 0:
                 stop_pct = 0.015  # 1.5% conservative protective fallback
                 if p.qty > 0:
@@ -1793,6 +1801,15 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
             if order is not None:
                 applog.info("engine", f"Ambiguous order resolved from broker truth: {symbol} ({cid}) status={order.status}.")
                 self.pending_reconciliation_orders.pop(cid, None)
+                recovered_target = order_info.get("take_profit")
+                if recovered_target is not None:
+                    try:
+                        recovered_target = float(recovered_target)
+                    except (TypeError, ValueError):
+                        recovered_target = None
+                if recovered_target is not None and recovered_target > 0:
+                    self._position_take_profits[symbol] = recovered_target
+                    order = order.model_copy(update={"take_profit": recovered_target})
                 await asyncio.to_thread(self.db.save_order, order, self.mode)
                 changed = True
                 continue

@@ -3,8 +3,7 @@
 Verifies:
 1. End-to-end position flow through PISEngineAdapter.
 2. Single discretionary exit ownership (PIS owns runner and dynamic trail ratchets).
-3. Non-discretionary safety nets (Rule-41, EOD flatten, Hard Halt) coexist without interference.
-4. Portfolio stop tracking (`note_stop`).
+3. Position-close cleanup of PISService state.
 """
 
 from __future__ import annotations

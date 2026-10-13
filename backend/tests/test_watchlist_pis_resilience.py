@@ -83,8 +83,8 @@ def test_pis_engine_adapter_enforces_minimum_risk_floor():
     assert pis_decision.thesis.early_invalidation_detected is False
 
 
-def test_early_invalidation_requires_two_bars():
-    """Early thesis invalidation requires at least 2 bars of evidence; bar 1 must never trigger it."""
+def test_early_invalidation_requires_confirmed_bars():
+    """Early thesis invalidation requires two completed adverse bars after entry."""
     evaluator = ThesisDriftEvaluator(PISConfig(early_invalidation_min_bars=2))
     obs = PositionObservation(
         timestamp=datetime.now(timezone.utc),
@@ -107,6 +107,10 @@ def test_early_invalidation_requires_two_bars():
     drift_bar1 = evaluator.evaluate(obs, trough_r=-0.75, stagnation_bars=0, peak_r=0.0, history_len=1)
     assert drift_bar1.early_invalidation_detected is False
 
-    # Bar 2 (confirmed bar): triggers early invalidation
+    # Bar 2 is the first completed adverse observation, not enough by itself.
     drift_bar2 = evaluator.evaluate(obs, trough_r=-0.75, stagnation_bars=0, peak_r=0.0, history_len=2)
-    assert drift_bar2.early_invalidation_detected is True
+    assert drift_bar2.early_invalidation_detected is False
+
+    # Bar 3 confirms the same structural failure.
+    drift_bar3 = evaluator.evaluate(obs, trough_r=-0.75, stagnation_bars=0, peak_r=0.0, history_len=3)
+    assert drift_bar3.early_invalidation_detected is True

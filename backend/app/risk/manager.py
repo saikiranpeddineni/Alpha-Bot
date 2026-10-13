@@ -74,6 +74,10 @@ class RiskDecision:
     reason: str
     order: OrderRequest | None = None
     kelly_fraction: float | None = None
+    # The validated strategy target is carried separately from OrderRequest.
+    # PIS owns discretionary targets; putting this on the broker request would
+    # create a second, competing native broker target.
+    take_profit: float | None = None
 
 
 class RiskManager:
@@ -197,13 +201,15 @@ class RiskManager:
     def check_halts(self, ctx: AccountContext, now: datetime | None = None) -> str | None:
         """Returns 'daily' or 'hard' when a halt newly trips this tick."""
         # =============================================================================
-        # [MODIFIED 2026-10-08]: Disable Max Drawdown Kill Switch
-        # ORIGINAL INTENT: Hard halt engine and liquidate positions when account equity
-        # dropped by >= max_drawdown_pct (10%) from peak equity to protect capital.
-        # REASON FOR CHANGE: Operator directive (Option 2): "remove risk KILL SWITCH: Max drawdown breached: 10.1% >= 10.0% in alphabot".
-        # SAFE ROLLBACK: The original code is preserved below as comments.
+        # [RESTORED 2026-10-13]: Max drawdown kill switch
+        # The temporary disablement from 2026-10-08 is preserved below for audit.
+        # A drawdown breach must latch before any entry can be evaluated again.
         # -----------------------------------------------------------------------------
-        # [PREVIOUS CODE - PRESERVED]:
+        # [HISTORICAL DISABLED IMPLEMENTATION - PRESERVED]:
+        # Max drawdown kill switch removed per operator directive.
+        # Daily loss halt (max_daily_loss_pct) remains fully operational below.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS ACTIVE CODE - PRESERVED]:
         # if not self.hard_halted and ctx.peak_equity > 0:
         #     dd_pct = (ctx.peak_equity - ctx.equity) / ctx.peak_equity * 100.0
         #     if dd_pct >= self.config.max_drawdown_pct:
@@ -213,11 +219,16 @@ class RiskManager:
         #         )
         #         applog.error("risk", f"KILL SWITCH: {self.hard_halt_reason}")
         #         return "hard"
-        # -----------------------------------------------------------------------------
-        # [NEW CODE]:
-        # Max drawdown kill switch removed per operator directive.
-        # Daily loss halt (max_daily_loss_pct) remains fully operational below.
         # =============================================================================
+        if not self.hard_halted and ctx.peak_equity > 0:
+            dd_pct = (ctx.peak_equity - ctx.equity) / ctx.peak_equity * 100.0
+            if dd_pct >= self.config.max_drawdown_pct:
+                self.hard_halted = True
+                self.hard_halt_reason = (
+                    f"Max drawdown breached: {dd_pct:.1f}% >= {self.config.max_drawdown_pct}%"
+                )
+                applog.error("risk", f"KILL SWITCH: {self.hard_halt_reason}")
+                return "hard"
         if not self.daily_halted and ctx.session_start_equity > 0:
             loss_pct = -ctx.day_pnl / ctx.session_start_equity * 100.0
             if loss_pct >= self.config.max_daily_loss_pct:
@@ -347,10 +358,17 @@ class RiskManager:
 
         risk_mult = getattr(signal, "risk_multiplier", 1.0)
         if kelly_override is not None:
-            # Fix #192 (Phase 2): Align Kelly limits with Fixed-Risk limits to prevent blowout on slippage.
-            # Kelly bet fraction should never exceed an absolute hard cap of 2.0x the configured max fixed risk.
-            base_risk_pct_cap = (getattr(cfg, "risk_per_trade_pct", 1.0) * 2.0) / 100.0
-            kelly_cap = min(getattr(cfg, "kelly_fraction_cap", 0.15), base_risk_pct_cap)
+            # -----------------------------------------------------------------------------
+            # [PREVIOUS IMPLEMENTATION - PRESERVED]:
+            # base_risk_pct_cap = (getattr(cfg, "risk_per_trade_pct", 1.0) * 2.0) / 100.0
+            # kelly_cap = min(getattr(cfg, "kelly_fraction_cap", 0.15), base_risk_pct_cap)
+            # -----------------------------------------------------------------------------
+            # [RESTORED CONFIG-DRIVEN IMPLEMENTATION]: Kelly may refine risk downward,
+            # but it cannot override the configured per-trade risk budget. The configured
+            # Kelly cap remains an additional ceiling, and the existing safety multiplier
+            # still tightens the resulting allocation.
+            configured_risk_fraction = float(cfg.risk_per_trade_pct) / 100.0
+            kelly_cap = min(float(cfg.kelly_fraction_cap), configured_risk_fraction)
 
             effective_kelly = min(kelly_override, kelly_cap) * risk_mult
             risk_amount = ctx.equity * effective_kelly
@@ -388,31 +406,25 @@ class RiskManager:
             if risk_mult != 1.0:
                 applog.info("risk", f"Dynamic safety risk multiplier applied: scaling risk to {effective_risk_pct}%")
 
-            # ---- Dynamic TradeScore-Based Sizing ----
-            # Scale risk linearly from 0.5% (score 0.50) to 2.0% (score 0.90+)
-            # Signals that bypassed scoring (score is None) receive base risk_per_trade_pct unchanged.
-            # NOTE: The legacy harvest_risk_multiplier path was removed (F-01). It could trigger
-            # on a raw volume spike alone (no pipeline gate required) and consume the entire
-            # daily loss budget in a single trade. TradeScore-based dynamic sizing is the
-            # sole authority for high-conviction sizing.
-            conf = getattr(signal, "score", None)
-
-            if isinstance(conf, (int, float)) and conf > 0.0:
-                # Interpolate between 0.5% and 2.0% risk based on [0.50, 0.90] score range
-                min_risk = 0.50
-                max_risk = 2.00
-                min_conf = 0.50
-                max_conf = 0.90
-
-                clamped_conf = max(min_conf, min(max_conf, conf))
-                ratio = (clamped_conf - min_conf) / (max_conf - min_conf)
-
-                base_risk = min_risk + (ratio * (max_risk - min_risk))
-                effective_risk_pct = base_risk * risk_mult
-                applog.info("risk", f"Dynamic sizing: TradeScore {conf:.2f} -> scaled risk to {effective_risk_pct:.2f}%")
-            else:
-                # No score available — use effective_risk_pct as-is (already adjusted by scanner/legacy multipliers above)
-                applog.info("risk", f"No TradeScore for {symbol}: using base risk {effective_risk_pct}%")
+            # -----------------------------------------------------------------------------
+            # [PREVIOUS IMPLEMENTATION - PRESERVED]:
+            # conf = getattr(signal, "score", None)
+            # if isinstance(conf, (int, float)) and conf > 0.0:
+            #     min_risk = 0.50
+            #     max_risk = 2.00
+            #     min_conf = 0.50
+            #     max_conf = 0.90
+            #     clamped_conf = max(min_conf, min(max_conf, conf))
+            #     ratio = (clamped_conf - min_conf) / (max_conf - min_conf)
+            #     base_risk = min_risk + (ratio * (max_risk - min_risk))
+            #     effective_risk_pct = base_risk * risk_mult
+            #     applog.info("risk", f"Dynamic sizing: TradeScore {conf:.2f} -> scaled risk to {effective_risk_pct:.2f}%")
+            # else:
+            #     applog.info("risk", f"No TradeScore for {symbol}: using base risk {effective_risk_pct}%")
+            # -----------------------------------------------------------------------------
+            # Trade Score remains an admission/ranking signal. It must not replace the
+            # configured risk budget with an unrelated hardcoded percentage range.
+            applog.info("risk", f"Configured risk sizing for {symbol}: {effective_risk_pct:.4f}%")
 
 
             kelly_used = effective_risk_pct / 100.0
@@ -518,6 +530,7 @@ class RiskManager:
             reason=f"sized {qty} shares, risk {risk_str}",
             order=order,
             kelly_fraction=round(kelly_used, 6) if isinstance(kelly_used, (int, float)) else 0.0,
+            take_profit=take_profit,
         )
 
     def status(self) -> dict:

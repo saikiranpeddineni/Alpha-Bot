@@ -26,6 +26,7 @@ class OpeningRangeBreakout(Strategy):
     description = "Trades breakouts of the opening N-minute range"
 
     is_breakout = True
+    is_structural_breakout = True
     ml_threshold = 0.55
     evaluation_horizons = ["60m", "close"]
     regime_weights = {

@@ -114,26 +114,23 @@ def test_daily_loss_halt_trips_and_blocks(rm: RiskManager, bars):
 
 
 # =============================================================================
-# [MODIFIED 2026-10-08]: Update test_max_drawdown_kill_switch for disabled kill switch
-# ORIGINAL INTENT: Verified that a 11% drawdown tripped a hard halt ("hard").
-# REASON FOR CHANGE: Operator directive: removed max drawdown kill switch in RiskManager.
-# SAFE ROLLBACK: The original test code is preserved below as comments.
+# [RESTORED 2026-10-13]: Max-drawdown kill switch is capital protection.
+# The temporary disabled behavior is preserved below as comments for audit.
 # -----------------------------------------------------------------------------
-# [PREVIOUS CODE - PRESERVED]:
-# def test_max_drawdown_kill_switch(rm: RiskManager, bars):
+# [HISTORICAL DISABLED IMPLEMENTATION - PRESERVED]:
+# def test_max_drawdown_kill_switch_disabled(rm: RiskManager, bars):
 #     halted = rm.check_halts(ctx(equity=89_000, peak=100_000), now=MID_SESSION)
-#     assert halted == "hard"
-#     assert rm.hard_halted
-#     decision = rm.evaluate_entry(long_signal(), ctx(), bars, now=MID_SESSION)
-#     assert not decision.approved and "hard halt" in decision.reason
-#     rm.reset_hard_halt()
+#     assert halted is None
 #     assert not rm.hard_halted
 # -----------------------------------------------------------------------------
 # [NEW CODE]:
-def test_max_drawdown_kill_switch_disabled(rm: RiskManager, bars):
-    # Under removed/disabled kill switch, a drawdown beyond 10% does NOT trip hard halt
+def test_max_drawdown_kill_switch(rm: RiskManager, bars):
     halted = rm.check_halts(ctx(equity=89_000, peak=100_000), now=MID_SESSION)
-    assert halted is None
+    assert halted == "hard"
+    assert rm.hard_halted
+    decision = rm.evaluate_entry(long_signal(), ctx(), bars, now=MID_SESSION)
+    assert not decision.approved and "hard halt" in decision.reason
+    rm.reset_hard_halt()
     assert not rm.hard_halted
 # =============================================================================
 

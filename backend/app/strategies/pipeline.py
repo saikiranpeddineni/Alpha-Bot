@@ -127,7 +127,10 @@ class SignalPipeline:
                         sig.take_profit = round(entry_price * (1 + excursion.suggested_target_pct / 100.0), 4)
                 original_stop = sig.stop_loss
                 original_target = sig.take_profit
-                min_stop_pct = get_settings().risk_config().min_stop_pct
+                # The engine injects the persisted runtime RiskConfig into the
+                # pipeline.  Reading process defaults here created a split-brain
+                # stop policy after a UI/API risk update.
+                min_stop_pct = float(getattr(self.trade_score_engine.risk_config, "min_stop_pct", 0.0))
                 adjusted = False
                 if min_stop_pct > 0:
                     min_dist = entry_price * (min_stop_pct / 100.0)
@@ -183,7 +186,7 @@ class SignalPipeline:
             from app.strategies.base import REGISTRY as _REG
             _strat_cls = _REG.get(sig.strategy)
             is_reversion_strat = bool(getattr(_strat_cls, "is_mean_reversion", False)) if _strat_cls else False
-            is_breakout_strat = bool(getattr(_strat_cls, "is_breakout", False)) if _strat_cls else False
+            is_structural_breakout = bool(getattr(_strat_cls, "is_structural_breakout", False)) if _strat_cls else False
             if (
                 getattr(rc, "enable_entry_chase_veto", True)
                 and not is_reversion_strat
@@ -222,15 +225,15 @@ class SignalPipeline:
                 except (KeyError, TypeError, ValueError):
                     b_cl = vwap_px = atr_loc = 0.0
                 if vwap_px > 0 and atr_loc > 0 and b_cl > 0:
-                    # Breakout-class strategies (ORB etc.) are inherently
-                    # extended from VWAP on valid momentum days -- sibling
-                    # evidence: VWAP-stretch checks belong on momentum-style
-                    # entries, NOT structural range breakouts.
+                    # Only structural breakout strategies (ORB/squeeze release)
+                    # are inherently extended from VWAP on valid breakout days.
+                    # Continuation strategies such as momentum and gap-and-go
+                    # still need the location exhaustion check.
                     from app.strategies.base import REGISTRY as _REG2
-                    is_breakout_strat = (
-                        sig.strategy in _REG2 and getattr(_REG2[sig.strategy], "is_breakout", False)
+                    is_structural_breakout = (
+                        sig.strategy in _REG2 and getattr(_REG2[sig.strategy], "is_structural_breakout", False)
                     )
-                    if not is_breakout_strat:
+                    if not is_structural_breakout:
                         stretch = ((b_cl - vwap_px) / atr_loc) if sig.action == SignalAction.ENTER_LONG \
                             else ((vwap_px - b_cl) / atr_loc)
                         if stretch > float(getattr(rc, "entry_max_vwap_stretch_atr", 3.0)):
@@ -248,7 +251,7 @@ class SignalPipeline:
             if (
                 getattr(rc, "enable_entry_extreme_guard", True)
                 and not is_reversion_strat
-                and not is_breakout_strat
+                and not is_structural_breakout
                 and df is not None and len(df) >= 30 and hasattr(df.index, "tz_convert")
             ):
                 try:
@@ -288,7 +291,7 @@ class SignalPipeline:
             # shorts <= threshold. Skipped when RS unavailable (neutral pass).
             if (
                 getattr(rc, "enable_entry_consensus", True)
-                and _strat_cls is not None and getattr(_strat_cls, "is_breakout", False)
+                and _strat_cls is not None and getattr(_strat_cls, "is_structural_breakout", False)
                 and sector_strength is not None
             ):
                 try:
@@ -361,7 +364,19 @@ class SignalPipeline:
 
             side_str = "long" if sig.action == SignalAction.ENTER_LONG else "short"
 
-            meta_pred = self.meta_label_engine.predict(sig.strategy, features, side=side_str, adaptive_threshold=self.ml_threshold)
+            # Keep the global ML floor as a lower bound, but never let it
+            # silently weaken a strategy's own validated meta-label threshold.
+            thresholds = getattr(self.meta_label_engine, "default_thresholds", {})
+            fallback_threshold = getattr(self.meta_label_engine, "FALLBACK_THRESHOLD", 0.5)
+            strategy_meta_floor = thresholds.get(sig.strategy, fallback_threshold) if isinstance(thresholds, dict) else fallback_threshold
+            if not isinstance(strategy_meta_floor, (int, float)):
+                strategy_meta_floor = 0.5
+            meta_pred = self.meta_label_engine.predict(
+                sig.strategy,
+                features,
+                side=side_str,
+                adaptive_threshold=max(self.ml_threshold, strategy_meta_floor),
+            )
             if not meta_pred.approved:
                 rejected.append((sig, f"Meta-label {meta_pred.decision} [{meta_pred.source}]: {meta_pred.reason}"))
                 continue
@@ -378,13 +393,20 @@ class SignalPipeline:
             raw_score = self.trade_score_engine.compute(ml_prob=ml, expected_return_pct=exp_ret_pct,
                                                         expected_drawdown_pct=exp_dd_pct, regime=regime,
                                                         avg_daily_volume=avg_volume, sector_strength=sector_strength)
-            trade_score = min(100.0, max(0.0, raw_score))
+            # Regime weights are tightening-only in the Champion path.  A
+            # weight below 1.0 reduces admission in a hostile regime; a weight
+            # above 1.0 cannot bypass the configured score threshold.  This
+            # preserves the existing capital-protection gates while making the
+            # strategy/regime research configuration operational.
+            configured_regime_weight = float(self.regime_weight(sig.strategy, regime))
+            effective_regime_weight = min(1.0, max(0.0, configured_regime_weight))
+            trade_score = min(100.0, max(0.0, raw_score * effective_regime_weight))
             sig.score = round(trade_score / 100.0, 4)
             approved, threshold = self.trade_score_engine.approve(trade_score, regime, is_event_day=self._is_event_day)
             if not approved:
                 effective_rr = exp_ret_pct / exp_dd_pct if exp_dd_pct > 0 else excursion.reward_risk
                 ml_str = f"{ml:.2f}" if ml is not None else "N/A"
-                rejected.append((sig, f"Trade Score {trade_score:.1f} < {threshold:.1f} (raw={raw_score:.1f}) [regime={regime}, ml={ml_str}, rr={effective_rr:.2f}]"))
+                rejected.append((sig, f"Trade Score {trade_score:.1f} < {threshold:.1f} (raw={raw_score:.1f}, regime_weight={effective_regime_weight:.2f}) [regime={regime}, ml={ml_str}, rr={effective_rr:.2f}]"))
             else:
                 if getattr(sig, "ml_gate_decision", None) == "GRAY_ZONE_EVALUATION":
                     sig.ml_gate_decision = "GRAY_ZONE_RESCUED"

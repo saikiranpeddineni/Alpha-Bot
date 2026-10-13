@@ -165,6 +165,11 @@ class AlpacaBroker(Broker):
         self._emitted_fill_qty: dict[str, float] = {}
         self._emitted_fill_notional: dict[str, float] = {}
         self._meta: dict[str, tuple[str, str]] = {}  # order id -> (strategy, reason)
+        # Alpaca's nested Order model exposes a child relationship through the
+        # parent's ``legs`` list but does not consistently expose a parent ID on
+        # the child object.  Keep that broker relationship by child ID so the
+        # conversion layer can classify flattened nested children correctly.
+        self._order_parent_ids: dict[str, str] = {}
 
         self._symbol_strategies: dict[str, str] = {}
         self._shortable_cache: dict[str, bool] = {}
@@ -306,6 +311,8 @@ class AlpacaBroker(Broker):
         )
         normalized: list[Order] = []
         seen_ids: set[str] = set()
+        if not hasattr(self, "_order_parent_ids"):
+            self._order_parent_ids = {}
 
         for raw_order in raw:
             parent = self._to_order(raw_order)
@@ -328,6 +335,11 @@ class AlpacaBroker(Broker):
                     cid = str(getattr(item, "id", ""))
                     if cid and cid not in child_seen:
                         child_seen.add(cid)
+                        # Preserve the parent/child identifier even when the
+                        # Alpaca SDK rejects adding a synthetic parent_id
+                        # attribute to its Pydantic Order model below.
+                        if parent_id:
+                            self._order_parent_ids[cid] = parent_id
                         stack.append(item)
 
             while stack:
@@ -338,6 +350,8 @@ class AlpacaBroker(Broker):
                         cid = str(getattr(item, "id", ""))
                         if cid and cid not in child_seen:
                             child_seen.add(cid)
+                            if parent_id:
+                                self._order_parent_ids[cid] = parent_id
                             stack.append(item)
 
             for child in children:
@@ -427,18 +441,63 @@ class AlpacaBroker(Broker):
                     if child_lm_px is not None:
                         limit_price = float(child_lm_px)
 
+        raw_parent_id = getattr(o, "parent_order_id", None) or getattr(o, "parent_id", None)
+        parent_id = str(raw_parent_id) if raw_parent_id else None
+        if parent_id is None:
+            # Nested Alpaca SDK objects can omit parent_order_id/parent_id.  The
+            # open_orders() traversal records the authoritative relationship by
+            # child ID, so a flattened child remains distinguishable from its
+            # bracket/OTO parent during recovery and reconciliation.
+            parent_id = getattr(self, "_order_parent_ids", {}).get(str(getattr(o, "id", "")))
+
         raw_leg = getattr(o, "leg", None)
-        if raw_leg is not None:
-            leg = str(raw_leg).split(".")[-1].lower()
-        elif order_type in (OrderType.STOP, OrderType.STOP_LIMIT):
-            leg = "stop"
-        elif order_class in {"bracket", "oco", "oto"} or getattr(o, "parent_order_id", None) or getattr(o, "parent_id", None):
-            if stop_price is not None and limit_price is None:
+        broker_leg = (
+            str(raw_leg).split(".")[-1].lower()
+            if raw_leg is not None and str(raw_leg)
+            else None
+        )
+        is_child_order = parent_id is not None
+        is_group_parent = order_class in {"bracket", "oco", "oto"} and not is_child_order
+
+        # --- PREVIOUS IMPLEMENTATION (Preserved for historical intent & audit) ---
+        # raw_leg = getattr(o, "leg", None)
+        # if raw_leg is not None:
+        #     leg = str(raw_leg).split(".")[-1].lower()
+        # elif order_type in (OrderType.STOP, OrderType.STOP_LIMIT):
+        #     leg = "stop"
+        # elif order_class in {"bracket", "oco", "oto"} or getattr(o, "parent_order_id", None) or getattr(o, "parent_id", None):
+        #     if stop_price is not None and limit_price is None:
+        #         leg = "stop"
+        #     elif limit_price is not None and stop_price is None:
+        #         leg = "take_profit"
+        #     else:
+        #         leg = "entry"
+        # else:
+        #     leg = "entry"
+        # --------------------------------------------------------------------------
+        # --- NEW IMPLEMENTATION ---
+        # A parent order can carry stop/target prices copied from nested broker
+        # legs for metadata, so price presence must not identify the parent as a
+        # protective leg.  Trust explicit broker leg metadata first; otherwise
+        # use a parent identifier (including the nested-ID map above) to classify
+        # real children, and treat an advanced order class without a parent as
+        # the entry container.  Standalone STOP/STOP_LIMIT orders retain their
+        # historical stop classification.
+        if broker_leg is not None:
+            leg = broker_leg
+        elif is_group_parent:
+            leg = "entry"
+        elif is_child_order:
+            if order_type in (OrderType.STOP, OrderType.STOP_LIMIT) or (
+                stop_price is not None and limit_price is None
+            ):
                 leg = "stop"
             elif limit_price is not None and stop_price is None:
                 leg = "take_profit"
             else:
                 leg = "entry"
+        elif order_type in (OrderType.STOP, OrderType.STOP_LIMIT):
+            leg = "stop"
         else:
             leg = "entry"
 
@@ -460,11 +519,16 @@ class AlpacaBroker(Broker):
             stop_loss=None,
             status=order_status,
             order_class=order_class,
-            parent_id=(
-                str(o.parent_order_id)
-                if getattr(o, "parent_order_id", None)
-                else (str(o.parent_id) if getattr(o, "parent_id", None) else None)
-            ),
+            # --- PREVIOUS IMPLEMENTATION (Preserved for historical intent & audit) ---
+            # parent_id=(
+            #     str(o.parent_order_id)
+            #     if getattr(o, "parent_order_id", None)
+            #     else (str(o.parent_id) if getattr(o, "parent_id", None) else None)
+            # ),
+            # --------------------------------------------------------------------------
+            # Use the resolved broker relationship so nested children retain
+            # their parent identity even when the SDK only supplied ``legs``.
+            parent_id=parent_id,
             leg=leg,
             strategy=strategy,
             reason=reason,

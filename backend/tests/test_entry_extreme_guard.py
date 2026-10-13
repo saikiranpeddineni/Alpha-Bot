@@ -142,9 +142,9 @@ def test_location_veto_independent_of_chase_veto_flag():
     assert "location exhausted" in reasons
 
 
-@pytest.mark.parametrize("strat", ["orb", "bb_squeeze", "momentum", "gap_and_go"])
+@pytest.mark.parametrize("strat", ["orb", "bb_squeeze"])
 def test_breakout_strategy_exempt_from_guard(strat):
-    # Breakout strategies enter at or through session extremes by definition.
+    # Structural breakout strategies enter at or through session extremes by definition.
     # Long at the session high must NOT be guard-blocked.
     closes = [100 + 0.05 * i for i in range(120)]
     df = _bars(closes)
@@ -153,4 +153,15 @@ def test_breakout_strategy_exempt_from_guard(strat):
         Regime.TREND_UP, features=_features(df))
     reasons = " | ".join(r for _, r in rejected)
     assert "chasing session extreme" not in reasons
+
+
+@pytest.mark.parametrize("strat", ["momentum", "gap_and_go"])
+def test_continuation_strategy_is_not_exempt_from_guard(strat):
+    closes = [100 + 0.05 * i for i in range(120)]
+    df = _bars(closes)
+    _, rejected = _pipeline().process(
+        "AAPL", df, [_sig(SignalAction.ENTER_LONG, strategy=strat)],
+        Regime.TREND_UP, features=_features(df))
+    reasons = " | ".join(r for _, r in rejected)
+    assert "chasing session extreme" in reasons
 

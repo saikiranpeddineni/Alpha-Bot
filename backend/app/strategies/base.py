@@ -51,6 +51,11 @@ class Strategy(ABC):
     # --- Dynamic Core Traits ---
     max_allocation: float = 50000.0
     is_breakout: bool = False
+    # Structural breakouts (for example ORB and a confirmed squeeze release)
+    # may legitimately enter near a fresh session extreme.  Continuation
+    # strategies must not inherit that exemption merely because they use
+    # momentum language in their name.
+    is_structural_breakout: bool = False
     # Mean-reversion entries deliberately fade vertical moves (capitulation
     # bars, swept lows). Bar-shape vetoes tuned for momentum chasing must not
     # apply to them -- entering against the extreme IS the thesis.

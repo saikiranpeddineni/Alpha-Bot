@@ -59,6 +59,15 @@ def test_allocator_negative_kelly_branch_cannot_crash_or_reject():
     assert [sig.symbol for sig, _ in decision.approved_entries] == ["AAPL", "MSFT"]
 
 
+def test_allocator_redeploys_budget_released_by_capped_leader():
+    signals = [_signal("AAPL", 100.0, 0.8), _signal("MSFT", 1.0, 0.8), _signal("NVDA", 1.0, 0.8)]
+    results = CapitalAllocationOptimizer().allocate(signals, available_capital=100_000, equity=100_000)
+    by_symbol = {result.symbol: result.allocated_dollars for result in results}
+    assert by_symbol["AAPL"] == 15_000.0
+    assert by_symbol["MSFT"] > 1_000.0
+    assert by_symbol["NVDA"] > 1_000.0
+
+
 def test_unknown_symbols_do_not_share_fake_other_sector():
     gate = PortfolioAIGate(max_positions_per_sector=1)
     positions = [Position(symbol="UNKNOWN_A", qty=1, avg_entry_price=10, market_price=10, strategy="test")]

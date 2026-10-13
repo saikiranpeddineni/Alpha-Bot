@@ -159,23 +159,36 @@ class CapitalAllocationOptimizer:
         # approved candidate a positive weight so allocation cannot become a
         # second, undocumented signal gate.
         weighted = [(sig, max(float(sig.score or 0.0), 1e-6)) for sig in signals]
-        total_weight = sum(weight for _, weight in weighted)
         remaining = available_capital
+        allocations: dict[str, float] = {sig.symbol: 0.0 for sig, _ in weighted}
+        active = list(weighted)
+        # Redistribute budget released by a capped candidate instead of leaving
+        # it idle.  This changes only the budget ceiling; RiskManager still owns
+        # stop-distance sizing and all account-level risk limits.
+        while active and remaining > 0:
+            total_active_weight = sum(weight for _, weight in active)
+            if total_active_weight <= 0:
+                break
+            next_active = []
+            distributed = 0.0
+            for sig, weight in active:
+                share = weight / total_active_weight
+                requested = remaining * share
+                hard_max = equity * self.kelly_fraction_cap
+                room = max(0.0, hard_max - allocations[sig.symbol])
+                dollars = min(requested, room)
+                allocations[sig.symbol] += dollars
+                distributed += dollars
+                if room - dollars > 0.005:
+                    next_active.append((sig, weight))
+            if distributed <= 0.005:
+                break
+            remaining -= distributed
+            active = next_active
         results: list[AllocationResult] = []
 
-        for index, (sig, weight) in enumerate(sorted(weighted, key=lambda item: item[1], reverse=True)):
-            candidates_left = len(weighted) - index
-            share = weight / total_weight if total_weight > 0 else 1.0 / len(weighted)
-            requested = available_capital * share
-            # Keep the historical cap as a budget ceiling only.  RiskManager
-            # will normally request materially less based on stop distance.
-            hard_max = equity * self.kelly_fraction_cap
-            dollars = min(requested, hard_max, remaining)
-            if candidates_left == 1:
-                dollars = min(dollars, remaining)
-            dollars = round(max(dollars, 0.0), 2)
-            remaining -= dollars
-
+        for sig, weight in sorted(weighted, key=lambda item: item[1], reverse=True):
+            dollars = round(max(allocations[sig.symbol], 0.0), 2)
             p_win = getattr(sig, "ml_probability", None)
             if p_win is None:
                 p_win = 0.50

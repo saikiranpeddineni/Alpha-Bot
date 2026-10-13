@@ -24,6 +24,10 @@ class GapAndGo(Strategy):
     description = "Pre-market catalyst continuation (Gap & Go)"
 
     is_breakout = True
+    # Gap-and-go follows an already extended mover.  Treating it as a
+    # structural breakout would exempt the exact late-continuation failure
+    # class the session-extreme guard was added to prevent.
+    is_structural_breakout = False
     ml_threshold = 0.54
     evaluation_horizons = ["60m", "close"]
     regime_weights = {

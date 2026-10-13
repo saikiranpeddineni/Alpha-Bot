@@ -1,7 +1,7 @@
 """Unit tests for blocking go-live P0 capital-safety and execution-integrity fixes.
 
 Covers:
-  #41 — live position reconcile must synthesize protective stop when missing
+  Position reconciliation retains local stop/risk metadata when missing
   #43 — fill watermark must NOT advance before durable commit_fill_processing
   #44 — partial fill accounting preserves avg_price and correct realized PnL
   #45 — duplicate flatten submissions blocked within one tick
@@ -23,10 +23,10 @@ import pytest
 
 
 # ---------------------------------------------------------------------------
-# #41 — Live position reconcile must synthesize protective stop when missing
+# Local lot reconstruction retains stop/risk metadata; no broker stop repair.
 # ---------------------------------------------------------------------------
 
-class TestIssue41ProtectiveExitRecovery:
+class TestReconciledLotStopMetadata:
     def _make_position(self, symbol="AAPL", qty=100.0, avg_price=150.0):
         from app.core.domain import Position
         p = Position(symbol=symbol, qty=qty, avg_entry_price=avg_price, market_price=avg_price, side="long")
@@ -44,13 +44,11 @@ class TestIssue41ProtectiveExitRecovery:
         engine.db.get_latest_order_payload.return_value = None
         engine.mode = "paper"
         engine.reconciliation_failed = False
-        engine.risk_config = MagicMock()
-        engine.risk_config.bypass_rule41 = False
         return engine
 
     @pytest.mark.asyncio
     async def test_synthesizes_protective_stop_when_missing(self):
-        """#41: When no stop loss in DB, _reconcile_positions must synthesize a 1.5% stop."""
+        """With no DB stop, reconstruction retains the 1.5% local risk fallback."""
         from app.core.engine import TradingEngine
         engine = self._make_engine_with_portfolio()
         position = self._make_position("AAPL", qty=100.0, avg_price=200.0)
@@ -59,14 +57,14 @@ class TestIssue41ProtectiveExitRecovery:
 
         lot = engine.portfolio._lots.get("AAPL")
         assert lot is not None, "Lot must be reconstructed"
-        assert lot.stop_loss is not None, "#41: stop_loss must be synthesized"
-        assert lot.stop_loss > 0, "#41: stop_loss must be positive"
+        assert lot.stop_loss is not None, "Local stop metadata must be reconstructed"
+        assert lot.stop_loss > 0, "Local stop metadata must be positive"
         expected_stop = round(200.0 * (1.0 - 0.015), 4)
         assert abs(lot.stop_loss - expected_stop) < 1e-6
 
     @pytest.mark.asyncio
     async def test_preserves_existing_stop_from_db(self):
-        """#41: When a valid stop loss exists in DB payload, it must be preserved."""
+        """When a valid stop loss exists in DB payload, it must be preserved."""
         from app.core.engine import TradingEngine
         engine = self._make_engine_with_portfolio()
         engine.db.get_latest_order_payload.return_value = {"stop_loss": 185.0}
@@ -80,7 +78,7 @@ class TestIssue41ProtectiveExitRecovery:
 
     @pytest.mark.asyncio
     async def test_synthesizes_stop_for_short_position(self):
-        """#41: Short position gets a stop ABOVE avg_entry_price."""
+        """Short position's local stop metadata is above avg_entry_price."""
         from app.core.engine import TradingEngine
         engine = self._make_engine_with_portfolio()
         position = self._make_position("NVDA", qty=-50.0, avg_price=400.0)

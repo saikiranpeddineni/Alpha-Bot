@@ -5,7 +5,6 @@ production trades in the `trades` table.
 
 Integrates:
 - Exact recorded broker fill entry prices, position sizing (qty), and initial stops
-- Rule-41 Protective Stop Repair via `TradingEngine._resolve_recovery_stop`
 - Hard Halt, Emergency Liquidation, and EOD Session Flatten
 - Detailed Trade Outcome Categorization (Captured Larger Runner, Loss Reduced, Protected Gains, Worse/Giveback)
 """
@@ -22,7 +21,6 @@ import pandas as pd
 sys.path.insert(0, 'backend')
 
 from app.core.domain import Position
-from app.core.engine import TradingEngine
 from app.pis import PISConfig, PISEngineAdapter
 
 
@@ -168,16 +166,7 @@ def run_executed_trades_replay(conn_alpha: sqlite3.Connection, conn_bars: sqlite
                 safety_channel = "EOD_FLATTEN"
                 break
 
-            # 2. Safety Net: Rule-41 Stop Geometry Verification
-            is_invalid_stop_geom = (side_val > 0 and current_stop >= pos.market_price) or (
-                side_val < 0 and current_stop <= pos.market_price
-            )
-            if is_invalid_stop_geom:
-                stop_pct = 0.015
-                current_stop = round(pos.avg_entry_price * (1.0 - stop_pct if pos.qty > 0 else 1.0 + stop_pct), 4)
-                safety_channel = "RULE_41_REPAIR"
-
-            # 3. Discretionary Authority: PIS Evaluation
+            # 2. Discretionary Authority: PIS Evaluation
             _, decision = asyncio.run(adapter.evaluate_position_exit(
                 position=pos,
                 bar_df=sub_df,

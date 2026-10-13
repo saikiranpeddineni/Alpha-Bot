@@ -33,6 +33,10 @@ class MomentumCross(Strategy):
     description = "EMA crossover momentum with MACD inflection pending event"
 
     is_breakout = True
+    # Momentum confirmation is a continuation setup, not an opening-range
+    # structural breakout.  It must remain subject to multi-bar exhaustion and
+    # session-extreme protection.
+    is_structural_breakout = False
     ml_threshold = 0.55
     evaluation_horizons = ["60m", "close"]
     regime_weights = {

@@ -11,7 +11,7 @@ import pandas as pd
 
 from app.ai.regime import detect_regime
 from app.core.applog import applog
-from app.core.domain import Position, Signal, SignalAction
+from app.core.domain import OrderStatus, Position, Signal, SignalAction
 from app.indicators.ta import compute_relative_strength, enrich
 from app.strategies import StrategyContext
 
@@ -237,14 +237,21 @@ class TradingEngineEvaluationMixin:
                         self.pis_adapter.revert_scale_out(symbol)
                     except Exception:
                         pass
-            # Synchronize ratcheted protective stop floor to portfolio lot so broker & tracker stay aligned
+            # Synchronize ratcheted protective stop floor to broker truth first,
+            # then update the local lot.  Updating only _lot.stop_loss made the
+            # PIS floor look protected locally while Alpaca's original OTO stop
+            # remained live at the broker, defeating peak-R harvesting.
             if pis_decision is not None and pis_decision.target_stop_loss is not None and _lot is not None:
                 new_floor = float(pis_decision.target_stop_loss)
-                if position.qty > 0:
-                    if _lot.stop_loss is None or new_floor > _lot.stop_loss:
-                        _lot.stop_loss = new_floor
-                else:
-                    if _lot.stop_loss is None or new_floor < _lot.stop_loss:
+                improves_floor = (
+                    position.qty > 0
+                    and (_lot.stop_loss is None or new_floor > _lot.stop_loss)
+                ) or (
+                    position.qty < 0
+                    and (_lot.stop_loss is None or new_floor < _lot.stop_loss)
+                )
+                if improves_floor:
+                    if await self._sync_broker_protective_stop(symbol, new_floor):
                         _lot.stop_loss = new_floor
 
             # All exits (including strategy take profit targets) are now handled exclusively by PIS
@@ -403,3 +410,56 @@ class TradingEngineEvaluationMixin:
 
             candidate_entries.append((sig, df))
         return candidate_entries
+
+    async def _sync_broker_protective_stop(self, symbol: str, stop_price: float) -> bool:
+        """Synchronize a monotonic PIS stop floor with broker-side protection.
+
+        PaperBroker stores the protective stop on the in-memory position and has
+        no replacement API, so the caller may update its lot directly.  The
+        hardened Alpaca adapter exposes ``replace_exit_leg``; in that path the
+        child stop order must be found and broker-verified before local state is
+        advanced.  A failed/ambiguous replacement leaves the old local floor in
+        place and retries on a later bar rather than claiming protection that
+        the broker has not confirmed.
+        """
+        broker = getattr(self, "broker", None)
+        replace_exit_leg = getattr(broker, "replace_exit_leg", None)
+        if not callable(replace_exit_leg):
+            # PaperBroker has no network replacement API; keep its authoritative
+            # simulated position synchronized so bracket checks use the same
+            # monotonic floor as the portfolio/PIS state.
+            simulated_positions = getattr(broker, "_positions", None)
+            simulated_position = simulated_positions.get(symbol.upper()) if simulated_positions is not None else None
+            if simulated_position is not None:
+                simulated_position.stop_loss = stop_price
+            return True
+        try:
+            open_orders = await broker.open_orders()
+            stop_orders = [
+                order for order in open_orders
+                if str(getattr(order, "symbol", "")).upper() == symbol.upper()
+                and str(getattr(order, "leg", "")).lower() == "stop"
+                and getattr(order, "status", None) not in {
+                    OrderStatus.CANCELED,
+                    OrderStatus.REJECTED,
+                    OrderStatus.FILLED,
+                }
+            ]
+            if not stop_orders:
+                applog.warning(
+                    "engine.exit",
+                    f"{symbol}: PIS stop floor {stop_price:.4f} not synchronized; no open broker stop leg found",
+                )
+                return False
+            for order in stop_orders:
+                replacement = await replace_exit_leg(str(order.id), stop_price=stop_price)
+                if replacement is not None:
+                    return True
+            applog.warning(
+                "engine.exit",
+                f"{symbol}: broker rejected or could not verify PIS stop replacement at {stop_price:.4f}",
+            )
+            return False
+        except Exception as exc:  # noqa: BLE001
+            applog.warning("engine.exit", f"{symbol}: protective stop synchronization failed: {exc}")
+            return False

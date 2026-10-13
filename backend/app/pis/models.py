@@ -301,6 +301,10 @@ class PISConfig:
     enable_early_invalidation: bool = True
     early_invalidation_min_bars: int = 2
     early_invalidation_max_bars: int = 5
+    # A discretionary thesis scratch requires more than one adverse print.
+    # Broker protection remains the hard loss boundary; this confirmation
+    # window prevents a single noisy candle from becoming a panic exit.
+    early_invalidation_confirmation_bars: int = 2
     early_invalidation_r_threshold: float = -0.55
     enable_trade_reasoning_narrative: bool = True
 
@@ -348,4 +352,9 @@ class PISConfig:
             raise ValueError(f"floor_tag_exit_ratio must be between 0 and 1, got {self.floor_tag_exit_ratio}")
         if self.runner_wide_atr_mult <= 0.0:
             raise ValueError(f"runner_wide_atr_mult must be > 0, got {self.runner_wide_atr_mult}")
+        if self.early_invalidation_confirmation_bars < 1:
+            raise ValueError(
+                "early_invalidation_confirmation_bars must be >= 1, "
+                f"got {self.early_invalidation_confirmation_bars}"
+            )
 

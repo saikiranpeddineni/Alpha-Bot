@@ -20,6 +20,7 @@ class BollingerBandSqueeze(Strategy):
     description = "Volume-confirmed breakout from a Bollinger Band squeeze"
 
     is_breakout = True
+    is_structural_breakout = True
     ml_threshold = 0.53
     evaluation_horizons = ["60m", "close"]
     regime_weights = {
