@@ -965,9 +965,31 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
                             if sig.symbol.upper() in {s.upper() for s in self._vix_symbols()}:
                                 applog.error("engine", f"Blocked non-tradable reference symbol at submission boundary: {sig.symbol}")
                                 continue
-                            # Attach risk_multiplier from SafetyDecision
+                            # =============================================================================
+                            # [MODIFIED 2026-10-14]: CR-19 - Regime-Aware Countertrend Risk Scaling
+                            # ORIGINAL INTENT: Attached static risk_multiplier from SafetyDecision.
+                            # REASON FOR CHANGE: Shorts were the biggest per-trade leak (-$7.6k/605).
+                            # Scale countertrend entries (shorts in TREND_UP, longs in TREND_DOWN) by
+                            # countertrend_mult (default 0.5) to protect capital while preserving valid setups.
+                            # SAFE ROLLBACK: The original code is preserved below as comments.
+                            # -----------------------------------------------------------------------------
+                            # [PREVIOUS CODE - PRESERVED]:
+                            # # Attach risk_multiplier from SafetyDecision
+                            # decision_safety = getattr(self, "last_safety_decision", None)
+                            # sig.risk_multiplier = decision_safety.risk_multiplier if decision_safety is not None else 1.0
+                            # -----------------------------------------------------------------------------
+                            # [NEW CODE]:
                             decision_safety = getattr(self, "last_safety_decision", None)
                             sig.risk_multiplier = decision_safety.risk_multiplier if decision_safety is not None else 1.0
+                            countertrend_mult = float(getattr(self.risk_config, "countertrend_mult", 0.5))
+                            sig_regime = getattr(sig, "regime", None) or getattr(self.pipeline, "last_regime", None)
+                            if sig_regime == Regime.TREND_UP and sig.action == SignalAction.ENTER_SHORT:
+                                sig.risk_multiplier = round(sig.risk_multiplier * countertrend_mult, 4)
+                                applog.info("engine.risk", f"{sig.symbol} {sig.strategy}: countertrend short in TREND_UP, scaled risk x{countertrend_mult:.2f}")
+                            elif sig_regime == Regime.TREND_DOWN and sig.action == SignalAction.ENTER_LONG:
+                                sig.risk_multiplier = round(sig.risk_multiplier * countertrend_mult, 4)
+                                applog.info("engine.risk", f"{sig.symbol} {sig.strategy}: countertrend long in TREND_DOWN, scaled risk x{countertrend_mult:.2f}")
+                            # =============================================================================
 
                             # Recent Performance Governor: scale size DOWN when this
                             # symbol / strategy / session-hour has measured negative
@@ -2967,12 +2989,33 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
                     qty = trade_data.get("qty", 0.0)
                     total_volume += abs(qty * entry_price)
 
+                # =============================================================================
+                # [MODIFIED 2026-10-14]: CR-18 - Morning Turnover Budget Split
+                # ORIGINAL INTENT: Single max_turnover threshold applied to the full session.
+                # REASON FOR CHANGE: Rapid morning churn could consume the entire 5.0x budget before
+                # afternoon trend opportunities materialize. Split into morning (before 12:00 ET)
+                # max 3.0x and full-day 5.0x.
+                # SAFE ROLLBACK: The original code is preserved below as comments.
+                # -----------------------------------------------------------------------------
+                # [PREVIOUS CODE - PRESERVED]:
+                # equity = self.portfolio.equity
+                # if equity > 0:
+                #     turnover = total_volume / equity
+                #     max_turnover = float(getattr(self.risk_config, "max_daily_turnover_multiple", 5.0))
+                #     if turnover > max_turnover:
+                #         return f"behavioral_loop_detector: high portfolio churn/turnover (turnover={turnover:.2f}x equity > {max_turnover:.2f}x)"
+                # -----------------------------------------------------------------------------
+                # [NEW CODE]:
                 equity = self.portfolio.equity
                 if equity > 0:
                     turnover = total_volume / equity
+                    max_morning = float(getattr(self.risk_config, "max_morning_turnover_multiple", 3.0))
+                    if _now_et.hour < 12 and turnover > max_morning:
+                        return f"behavioral_loop_detector: high morning portfolio churn/turnover (turnover={turnover:.2f}x equity > {max_morning:.2f}x)"
                     max_turnover = float(getattr(self.risk_config, "max_daily_turnover_multiple", 5.0))
                     if turnover > max_turnover:
                         return f"behavioral_loop_detector: high portfolio churn/turnover (turnover={turnover:.2f}x equity > {max_turnover:.2f}x)"
+                # =============================================================================
         except Exception as e:
             applog.error("engine.behavioral", f"Behavioral safety unavailable (fail-closed): {e}")
             return "behavioral_loop_detector: safety checks unavailable (fail-closed)"

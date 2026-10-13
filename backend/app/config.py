@@ -85,9 +85,23 @@ class RiskConfig(BaseModel):
     max_correlation_penalty: float = Field(0.5, ge=0.0, le=1.0)
     harvest_risk_multiplier: float = Field(3.0, ge=1.0, le=5.0)     # was 2.5 — bigger A+ sizing
     scanner_watchlist_ttl: int = Field(15, ge=1, le=30)             # was 3 — hold scanner symbols longer
-    # Behavioral loop detector: max 24h traded notional / equity before churn breaker fires.
-    # Calibrated to 5.0x to allow high-conviction full-session trading across morning and afternoon windows.
+    # =============================================================================
+    # [MODIFIED 2026-10-14]: CR-18 & CR-19 - Morning Turnover Split & Countertrend Risk Mult
+    # ORIGINAL INTENT: Single max_daily_turnover_multiple of 5.0x across whole day; no countertrend mult.
+    # REASON FOR CHANGE:
+    # 1. CR-18: Split turnover budget into morning (09:30-12:00) max 3.0x and full-day 5.0x so
+    #    morning churn does not consume afternoon trend opportunities.
+    # 2. CR-19: Countertrend sizing multiplier (0.5) to scale down shorts in TREND_UP or longs in TREND_DOWN.
+    # SAFE ROLLBACK: The original code is preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # max_daily_turnover_multiple: float = Field(5.0, ge=0.1, le=100.0)
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
     max_daily_turnover_multiple: float = Field(5.0, ge=0.1, le=100.0)
+    max_morning_turnover_multiple: float = Field(3.0, ge=0.1, le=100.0)
+    countertrend_mult: float = Field(0.5, ge=0.1, le=1.0)
+    # =============================================================================
     # Fast-replay only: minimum session-time seconds between full market-risk
     # family evaluations (live path always evaluates every tick). Bars arrive
     # at 60s cadence, so the default evaluates every other bar.

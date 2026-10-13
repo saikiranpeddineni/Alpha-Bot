@@ -155,10 +155,39 @@ class ExitPlanner:
         if trend_weakening:
             effective_scale_out_r = min(effective_scale_out_r, self.config.weak_trend_scale_out_r)
 
+        # =============================================================================
+        # [MODIFIED 2026-10-14]: CR-11 - Predicted-Ceiling Scale-Out Extension
+        # ORIGINAL INTENT: Scale-out triggered only at fixed 2.0R (or 1.0R in weak trend),
+        # target hit, exhaustion climax, or stagnation harvest.
+        # REASON FOR CHANGE: Average winner peak R is ~0.44-1.5R, so fixed 2.0R rarely arms.
+        # When predicted_max_r is available, trigger Stage-1 50% scale-out when position reaches
+        # >= 70% of predicted ceiling (min 1.0R) with fading momentum (score <= 0.45), banking
+        # profit at predicted capacity.
+        # SAFE ROLLBACK: The original code is preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # scale_out_triggered = False
+        # if getattr(self.config, "enable_scale_out", True) and not has_scaled_out:
+        #     if target_hit or peak_r >= effective_scale_out_r or exhaustion_climax or stagnation_harvest:
+        #         scale_out_triggered = True
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        predicted_ceiling_scale_out = (
+            predicted_max_r > 0
+            and peak_r >= max(1.0, 0.70 * predicted_max_r)
+            and health.momentum_score <= 0.45
+        )
         scale_out_triggered = False
         if getattr(self.config, "enable_scale_out", True) and not has_scaled_out:
-            if target_hit or peak_r >= effective_scale_out_r or exhaustion_climax or stagnation_harvest:
+            if (
+                target_hit
+                or peak_r >= effective_scale_out_r
+                or exhaustion_climax
+                or stagnation_harvest
+                or predicted_ceiling_scale_out
+            ):
                 scale_out_triggered = True
+        # =============================================================================
 
         if scale_out_triggered and not is_runner:
             is_runner = True

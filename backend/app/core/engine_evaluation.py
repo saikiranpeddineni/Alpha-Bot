@@ -410,12 +410,34 @@ class TradingEngineEvaluationMixin:
         # here ran against stale positions only and could contradict the
         # authoritative verdict; removed as redundant.
 
-        # Assign a unique candidate ID to all candidate entry signals first (shared UUID)
+        # =============================================================================
+        # [MODIFIED 2026-10-14]: CR-08 & CR-20 - Decision Bar Timestamp & Reconciliation Shadow Recording
+        # ORIGINAL INTENT: Generated candidate_id but left decision_bar_timestamp_utc NULL;
+        # dropped candidates during reconciliation failure with log warning only without shadow ledger record.
+        # REASON FOR CHANGE: Populate decision_bar_timestamp_utc for backtest/live forensics;
+        # record reconciliation rejections to shadow_ledger so no accepted pipeline candidate disappears without trace.
+        # SAFE ROLLBACK: The original code is preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # for sig in signals:
+        #     if sig.action != SignalAction.EXIT:
+        #         if getattr(sig, "candidate_id", None) is None:
+        #             prefix = f"{symbol}_{sig.strategy}_{now.strftime('%Y%m%d_%H%M%S')}"
+        #             sig.candidate_id = f"{prefix}_{uuid.uuid4().hex[:6]}".upper()
+        # ...
+        #     if getattr(self, "reconciliation_failed", False):
+        #         applog.warning("engine", f"{symbol}: entry signal {sig.strategy} rejected -- engine position/broker reconciliation state is uncertain")
+        #         continue
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
         for sig in signals:
             if sig.action != SignalAction.EXIT:
                 if getattr(sig, "candidate_id", None) is None:
                     prefix = f"{symbol}_{sig.strategy}_{now.strftime('%Y%m%d_%H%M%S')}"
                     sig.candidate_id = f"{prefix}_{uuid.uuid4().hex[:6]}".upper()
+                if getattr(sig, "decision_bar_timestamp_utc", None) is None and len(df) > 0:
+                    last_idx = df.index[-1]
+                    sig.decision_bar_timestamp_utc = pd.Timestamp(last_idx).to_pydatetime() if hasattr(last_idx, "to_pydatetime") else last_idx
 
         accepted, rejected = await asyncio.to_thread(
             partial(self.pipeline.process, symbol, df, signals, regime, sector_strength=rs_score)
@@ -452,9 +474,27 @@ class TradingEngineEvaluationMixin:
 
             if getattr(self, "reconciliation_failed", False):
                 applog.warning("engine", f"{symbol}: entry signal {sig.strategy} rejected -- engine position/broker reconciliation state is uncertain")
+                try:
+                    from app.core.shadow_ledger import shadow_ledger
+                    shadow_ledger.record(
+                        symbol=symbol,
+                        action=str(sig.action.value if hasattr(sig.action, "value") else sig.action),
+                        strategy=sig.strategy,
+                        gate="reconciliation",
+                        reason="engine position/broker reconciliation state is uncertain",
+                        price=sig.price,
+                        stop_loss=sig.stop_loss,
+                        take_profit=sig.take_profit,
+                        atr14=float(df["atr14"].iloc[-1]) if "atr14" in df.columns and len(df) else None,
+                        confidence=sig.confidence,
+                        sig=sig,
+                    )
+                except Exception:
+                    pass
                 continue
 
             candidate_entries.append((sig, df))
+        # =============================================================================
         return candidate_entries
 
     async def _sync_broker_protective_stop(self, symbol: str, stop_price: float) -> bool:
