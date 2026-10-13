@@ -281,33 +281,51 @@ class Settings(BaseSettings):
 
     def risk_config(self) -> RiskConfig:
         """Build the canonical boot RiskConfig without silently dropping fields."""
-        return RiskConfig(
-            entry_order_type=self.entry_order_type,
-            risk_per_trade_pct=self.risk_per_trade_pct,
-            max_position_pct=self.max_position_pct,
-            max_open_positions=self.max_open_positions,
-            max_daily_loss_pct=self.max_daily_loss_pct,
-            max_drawdown_pct=self.max_drawdown_pct,
-            symbol_cooldown_minutes=self.symbol_cooldown_minutes,
-            strategy_consecutive_loss_limit=self.strategy_consecutive_loss_limit,
-            strategy_cooldown_minutes=self.strategy_cooldown_minutes,
-            no_entry_minutes_before_close=self.no_entry_minutes_before_close,
-            flatten_minutes_before_close=self.flatten_minutes_before_close,
-            min_price=self.min_price,
-            min_avg_dollar_volume=self.min_avg_dollar_volume,
-            data_gap_threshold_secs=self.data_gap_threshold_secs,
-            ml_confidence_threshold=self.ml_confidence_threshold,
-            min_specialist_auc=self.min_specialist_auc,
-            min_stop_pct=self.min_stop_pct,
-            score_threshold_trend=self.score_threshold_trend,
-            score_threshold_range=self.score_threshold_range,
-            score_threshold_volatile=self.score_threshold_volatile,
-            score_threshold_event=self.score_threshold_event,
-            kelly_fraction_cap=self.kelly_fraction_cap,
-            max_positions_per_sector=self.max_positions_per_sector,
-            max_correlation_penalty=self.max_correlation_penalty,
-            harvest_risk_multiplier=self.harvest_risk_multiplier,
-        )
+        # =============================================================================
+        # [MODIFIED 2026-10-14]: L46 & GAP-23 - Prevent Dropping RiskConfig Fields
+        # ORIGINAL INTENT: Hand-enumerated ~25 fields, dropping 20+ fields (governor, vetoes,
+        # turnover multiples, notional caps) on reload.
+        # REASON FOR CHANGE: Automatically map all fields shared between Settings and RiskConfig,
+        # with fallback to RiskConfig defaults for any remaining unmapped fields.
+        # SAFE ROLLBACK: The original code is preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # return RiskConfig(
+        #     entry_order_type=self.entry_order_type,
+        #     risk_per_trade_pct=self.risk_per_trade_pct,
+        #     max_position_pct=self.max_position_pct,
+        #     max_open_positions=self.max_open_positions,
+        #     max_daily_loss_pct=self.max_daily_loss_pct,
+        #     max_drawdown_pct=self.max_drawdown_pct,
+        #     symbol_cooldown_minutes=self.symbol_cooldown_minutes,
+        #     strategy_consecutive_loss_limit=self.strategy_consecutive_loss_limit,
+        #     strategy_cooldown_minutes=self.strategy_cooldown_minutes,
+        #     no_entry_minutes_before_close=self.no_entry_minutes_before_close,
+        #     flatten_minutes_before_close=self.flatten_minutes_before_close,
+        #     min_price=self.min_price,
+        #     min_avg_dollar_volume=self.min_avg_dollar_volume,
+        #     data_gap_threshold_secs=self.data_gap_threshold_secs,
+        #     ml_confidence_threshold=self.ml_confidence_threshold,
+        #     min_specialist_auc=self.min_specialist_auc,
+        #     min_stop_pct=self.min_stop_pct,
+        #     score_threshold_trend=self.score_threshold_trend,
+        #     score_threshold_range=self.score_threshold_range,
+        #     score_threshold_volatile=self.score_threshold_volatile,
+        #     score_threshold_event=self.score_threshold_event,
+        #     kelly_fraction_cap=self.kelly_fraction_cap,
+        #     max_positions_per_sector=self.max_positions_per_sector,
+        #     max_correlation_penalty=self.max_correlation_penalty,
+        #     harvest_risk_multiplier=self.harvest_risk_multiplier,
+        # )
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        field_kwargs = {
+            f: getattr(self, f)
+            for f in RiskConfig.model_fields
+            if hasattr(self, f)
+        }
+        return RiskConfig(**field_kwargs)
+        # =============================================================================
 
     def trade_score_weights(self) -> tuple[float, float, float, float, float, float]:
         raw = [self.trade_score_w1, self.trade_score_w2, self.trade_score_w3, self.trade_score_w4, self.trade_score_w5, self.trade_score_w6]
