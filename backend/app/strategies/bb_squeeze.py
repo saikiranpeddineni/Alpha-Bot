@@ -34,8 +34,26 @@ class BollingerBandSqueeze(Strategy):
         "reward_risk": 2.0,
         "trailing_stop_atr_mult": 1.5,
         "use_trend_filter": True,
-        "min_minutes_since_open": 5,
+        # =============================================================================
+        # [MODIFIED 2026-10-14]: CR-04 — BB Squeeze min_minutes and new gates
+        # ORIGINAL INTENT: min_minutes_since_open=5; open-auction excluded for 5 bars.
+        # REASON FOR CHANGE: 5 minutes is not enough for a reliable VWAP/BB context.
+        #   Squeezes need an established intraday range (>=15 min) for the band width
+        #   percentile to be meaningful. Also adding:
+        #   - breakout_buffer_atr: bar must close >= bb_upper + 0.2*ATR to kill head-fake wick tags.
+        #   - volatile_squeeze_pct: VOLATILE regime allowed only when true extreme squeeze (<=0.10 pct) AND vol>=1.5.
+        #   - min_target_atr: economic gate — skip when target < 0.5*ATR (uneconomic R).
+        # SAFE ROLLBACK: Set min_minutes_since_open=5, breakout_buffer_atr=0.0,
+        #   volatile_squeeze_pct=None, min_target_atr=0.0
+        # [PREVIOUS CODE - PRESERVED]:
+        # "min_minutes_since_open": 5,
+        # [NEW CODE]:
+        "min_minutes_since_open": 15,          # CR-04: need established VWAP range
         "event_window_bars": EVENT_WINDOW_BARS,
+        "breakout_buffer_atr": 0.2,            # CR-04: kill head-fake wick tags (must clear bb_upper + 0.2*ATR)
+        "volatile_squeeze_pct": 0.10,          # CR-04: allow VOLATILE only if width_pct <= this extreme
+        "min_target_atr": 0.5,                 # CR-04: economic gate (target < 0.5*ATR = skip)
+        # =============================================================================
     }
 
     def __init__(self, params: dict | None = None, enabled: bool = True) -> None:
@@ -152,6 +170,23 @@ class BollingerBandSqueeze(Strategy):
         if confirmed_short and close > last["bb_mid"]:
             return None
 
+        # =============================================================================
+        # [ADDED 2026-10-14]: CR-04 — breakout_buffer_atr head-fake kill
+        # ORIGINAL INTENT: Only check close vs bb_mid; any close above bb_upper counted.
+        # REASON FOR CHANGE: Wick tags at exactly bb_upper trigger false confirmations.
+        #   Requiring close >= bb_upper + 0.2*ATR ensures the breakout bar body has
+        #   genuinely cleared the band, not just poked it with a wick.
+        # SAFE ROLLBACK: Set breakout_buffer_atr=0.0
+        bb_upper = float(last["bb_upper"])
+        bb_lower = float(last["bb_lower"])
+        buf_atr = float(p.get("breakout_buffer_atr", 0.2)) * atr
+        if buf_atr > 0:
+            if confirmed_long and close < (bb_upper + buf_atr):
+                return None
+            if confirmed_short and close > (bb_lower - buf_atr):
+                return None
+        # =============================================================================
+
         # Structural VWAP vs EMA20 trend filter (sibling-proven anchor) to
         # filter out false breakouts (head-fakes). After the first 30 minutes
         # the EMA20/session-VWAP relationship is reliable; before that, both
@@ -168,13 +203,48 @@ class BollingerBandSqueeze(Strategy):
                     return None
 
             from app.core.domain import Regime
+            # =============================================================================
+            # [MODIFIED 2026-10-14]: CR-04 — Intelligent VOLATILE regime handling for extreme squeezes
+            # ORIGINAL INTENT: Blanket VOLATILE reject regardless of squeeze quality.
+            # REASON FOR CHANGE: An extreme squeeze (width_pct <= volatile_squeeze_pct=0.10)
+            #   in a VOLATILE regime represents the coil before the spring — this is exactly
+            #   when BB squeeze has highest expected value. Blanket rejection throws away
+            #   the highest-quality setups. Allow when: extreme squeeze AND vol_z >= 1.5.
+            # SAFE ROLLBACK: Remove the condition; keep the original blanket VOLATILE reject.
+            # [PREVIOUS CODE - PRESERVED]:
+            # if ctx.regime == Regime.VOLATILE:
+            #     return None
+            # -----------------------------------------------------------------------------
+            # [NEW CODE]:
             if ctx.regime == Regime.VOLATILE:
-                return None
+                volatile_squeeze_pct = float(p.get("volatile_squeeze_pct", 0.10))
+                # Compute the current bar's width percentile
+                w_series = df["bb_width"].iloc[:-1].dropna()
+                lb = int(p["width_percentile_lookback"])
+                current_width_pct = (w_series.iloc[-lb:] <= float(last["bb_width"])).mean() if len(w_series) >= lb // 2 else 1.0
+                is_extreme_squeeze = current_width_pct <= volatile_squeeze_pct
+                high_vol = vol_z >= 1.5
+                if not (is_extreme_squeeze and high_vol):
+                    return None  # Still reject non-extreme VOLATILE
+            # =============================================================================
 
         confidence = min(0.85, 0.55 + 0.08 * max(0.0, vol_z))
 
         if confirmed_long:
             stop = close - p["atr_stop_mult"] * atr
+            risk = close - stop
+            target = close + p["reward_risk"] * risk
+            # =============================================================================
+            # [ADDED 2026-10-14]: CR-04 — Economic gate (min_target_atr)
+            # ORIGINAL INTENT: No target-size sanity check; all confirmed breakouts emitted.
+            # REASON FOR CHANGE: When ATR is very small, the reward (target - entry) can be
+            #   sub-ATR, making the trade uneconomic relative to spread + slippage costs.
+            #   Skip when target - entry < 0.5 * ATR (mirrors vwap_reversion.py:100-105).
+            # SAFE ROLLBACK: Set min_target_atr=0.0
+            min_t_atr = float(p.get("min_target_atr", 0.5))
+            if min_t_atr > 0 and risk > 0 and (target - close) < min_t_atr * atr:
+                return None
+            # =============================================================================
             return Signal(
                 symbol=symbol,
                 action=SignalAction.ENTER_LONG,
@@ -183,11 +253,17 @@ class BollingerBandSqueeze(Strategy):
                 reason=f"BB Squeeze breakout up confirmed (vol z {vol_z:.1f})",
                 price=close,
                 stop_loss=stop,
-                take_profit=close + p["reward_risk"] * (close - stop),
+                take_profit=target,
             )
 
         if confirmed_short:
             stop = close + p["atr_stop_mult"] * atr
+            risk = stop - close
+            target = close - p["reward_risk"] * risk
+            # Economic gate (same as long)
+            min_t_atr = float(p.get("min_target_atr", 0.5))
+            if min_t_atr > 0 and risk > 0 and (close - target) < min_t_atr * atr:
+                return None
             return Signal(
                 symbol=symbol,
                 action=SignalAction.ENTER_SHORT,
@@ -196,7 +272,7 @@ class BollingerBandSqueeze(Strategy):
                 reason=f"BB Squeeze breakout down confirmed (vol z {vol_z:.1f})",
                 price=close,
                 stop_loss=stop,
-                take_profit=close - p["reward_risk"] * (stop - close),
+                take_profit=target,
             )
 
         return None
