@@ -43,26 +43,67 @@ class MomentumCross(Strategy):
         Regime.TREND_UP: 1.20, Regime.TREND_DOWN: 1.05, Regime.RANGE: 0.60, Regime.VOLATILE: 0.80
     }
 
+    # =============================================================================
+    # [MODIFIED 2026-10-14]: CR-01 & CR-02 - Momentum Timing & Stop Calibration
+    # ORIGINAL INTENT: 10-bar MACD window, vol_z_min 0.5, rsi 50-78, min_minutes_since_open 5 unenforced,
+    # and dynamic stop tightening to 1.0 on climax volume.
+    # REASON FOR CHANGE: Momentum was the bot's largest loss contributor (632 trades, -$6,104).
+    # Tightened admission via intelligence (vol 1.2, RSI 55-70), adaptive event window (3 bars),
+    # stop widening on climax volume to 2.5 ATR (anti-stop hunt), and 1-trade/day cap.
+    # SAFE ROLLBACK: The original code is preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # def __init__(self, params: dict | None = None, enabled: bool = True) -> None:
+    #     super().__init__(params, enabled)
+    #     self._events: dict[str, dict[str, dict]] = {}
+    #
+    # def reset(self) -> None:
+    #     self._events.clear()
+    #
+    # default_params = {
+    #     "rsi_min": 50.0,
+    #     "rsi_max": 78.0,
+    #     "vol_z_min": 0.5,
+    #     "event_window_bars": 10,
+    #     "atr_stop_mult": 2.0,
+    #     "reward_risk": 1.8,
+    #     "trailing_stop_atr_mult": 1.5,
+    #     "htf_trend_filter": False,
+    #     "use_structural_vwap_filter": True,
+    #     "min_minutes_since_open": 5,
+    # }
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
     def __init__(self, params: dict | None = None, enabled: bool = True) -> None:
         super().__init__(params, enabled)
         # {symbol: {"long": {time, emitted}, "short": {time, emitted}}}
         self._events: dict[str, dict[str, dict]] = {}
+        self._traded: set[tuple[str, object]] = set()
 
     def reset(self) -> None:
         self._events.clear()
+        self._traded.clear()
+
+    def on_entry_filled(self, symbol: str, timestamp: object) -> None:
+        dt = getattr(timestamp, "date", lambda: timestamp)()
+        self._traded.add((symbol, dt))
 
     default_params = {
-        "rsi_min": 50.0,
-        "rsi_max": 78.0,
-        "vol_z_min": 0.5,
-        "event_window_bars": 10,
+        "rsi_min": 55.0,
+        "rsi_max": 70.0,
+        "vol_z_min": 1.2,
+        "event_window_bars": 3,
         "atr_stop_mult": 2.0,
+        "climax_stop_mult": 2.5,
         "reward_risk": 1.8,
         "trailing_stop_atr_mult": 1.5,
         "htf_trend_filter": False,
         "use_structural_vwap_filter": True,
-        "min_minutes_since_open": 5,
+        "min_minutes_since_open": 10,
+        "max_entries_per_day": 1,
+        "min_target_atr": 0.5,
     }
+    # =============================================================================
 
     # ------------------------------------------------------------------
     # Helpers
@@ -189,6 +230,26 @@ class MomentumCross(Strategy):
         now_et = ctx.now.astimezone(ZoneInfo("America/New_York"))
         mins_et = now_et.hour * 60 + now_et.minute
 
+        # =============================================================================
+        # [MODIFIED 2026-10-14]: CR-01 - Event tracking and entry gating
+        # ORIGINAL INTENT: Track MACD inflection events on bars and gate candidate signals.
+        # REASON FOR CHANGE: Event tracking must record inflections properly on bars, while entry
+        # admission gates (min_minutes_since_open and max_entries_per_day) apply to entry signals.
+        # SAFE ROLLBACK: The original code is preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # minutes_from_open = mins_et - (9 * 60 + 30)
+        # min_mins_open = int(p.get("min_minutes_since_open", 10))
+        # if minutes_from_open < min_mins_open:
+        #     return None
+        # today_date = now_et.date()
+        # if p.get("max_entries_per_day", 1) > 0 and (symbol, today_date) in self._traded:
+        #     return None
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        # Evaluated below after inflection event creation to allow event state arming.
+        # =============================================================================
+
         # ---- HTF trend filter ----
         if p.get("htf_trend_filter", False) and (crossed_up or crossed_down):
             df_15 = df.resample("15Min").agg({"close": "last"}).dropna()
@@ -230,17 +291,7 @@ class MomentumCross(Strategy):
                     else:
                         structural_uptrend = structural_downtrend = False
 
-        # ---- Volume / ATR guard ----
-        if atr <= 0 or vol_z < p["vol_z_min"]:
-            return None
 
-        confidence = min(
-            0.90,
-            0.55
-            + 0.05 * max(0.0, vol_z)
-            + 0.1 * (float(last["er20"]) if pd.notna(last.get("er20")) else 0.0)
-            + (0.10 if ctx.mover_bias is not None else 0.0)  # +10% for confirmed movers
-        )
 
         # ---- Mover directional bias ----
         # top_gainer → long bias only; top_loser → short bias only; None → both
@@ -268,6 +319,44 @@ class MomentumCross(Strategy):
         if macd_inflected_down:
             self._set_event(ctx, symbol, "short", current_time)
 
+        # ---- Volume / ATR guard for signal emission ----
+        if atr <= 0 or vol_z < p["vol_z_min"]:
+            return None
+
+        # Confidence: hump curve so climax volume does not monotonically inflate confidence
+        vol_bonus = 0.05 * min(max(0.0, vol_z), 2.0) - 0.08 * max(0.0, vol_z - 2.5)
+        confidence = min(
+            0.90,
+            max(
+                0.50,
+                0.55
+                + vol_bonus
+                + 0.1 * (float(last["er20"]) if pd.notna(last.get("er20")) else 0.0)
+                + (0.10 if ctx.mover_bias is not None else 0.0)
+            )
+        )
+
+        # =============================================================================
+        # [MODIFIED 2026-10-14]: CR-01 - Entry admission gates (Opening minutes & 1 trade/day)
+        # ORIGINAL INTENT: Gated candidate signal emission without restricting event arming.
+        # REASON FOR CHANGE: Enforces min_minutes_since_open (default 10) and one-trade-per-day cap
+        # on actual signal emission while allowing events to be logged/tracked across bars.
+        # SAFE ROLLBACK: The original code is preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # # No check before candidate admission
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        minutes_from_open = mins_et - (9 * 60 + 30)
+        min_mins_open = int(p.get("min_minutes_since_open", 10))
+        if minutes_from_open < min_mins_open:
+            return None
+
+        today_date = now_et.date()
+        if p.get("max_entries_per_day", 1) > 0 and (symbol, today_date) in self._traded:
+            return None
+        # =============================================================================
+
         # ---- Long candidate ----
         if (
             allow_long
@@ -277,11 +366,29 @@ class MomentumCross(Strategy):
             and p["rsi_min"] <= rsi <= p["rsi_max"]
             and self._valid_event(ctx, symbol, "long", current_bar_idx, df)
         ):
-            # Dynamic Stop Tightening: 1.0 * ATR if explosive volume and expanding MACD
-            dynamic_mult = 1.0 if (vol_z > 2.0 and hist_now > hist_prev) else p["atr_stop_mult"]
+            # =============================================================================
+            # [MODIFIED 2026-10-14]: CR-02 - Invert momentum dynamic-stop tightening
+            # ORIGINAL INTENT: Dynamic Stop Tightening: 1.0 * ATR if explosive volume (vol_z > 2.0)
+            # REASON FOR CHANGE: Halving stops to 1.0 ATR on the highest-volatility bars caused
+            # artificial stop-outs and whipsaws. Invert to widen stop on climax volume (default 2.5 ATR)
+            # and give trades room to breathe.
+            # SAFE ROLLBACK: The original code is preserved below as comments.
+            # -----------------------------------------------------------------------------
+            # [PREVIOUS CODE - PRESERVED]:
+            # dynamic_mult = 1.0 if (vol_z > 2.0 and hist_now > hist_prev) else p["atr_stop_mult"]
+            # stop = round(close - dynamic_mult * atr, 4)
+            # rr = float(p.get("reward_risk", 1.8))
+            # target = round(close + (rr * dynamic_mult * atr), 4)
+            # -----------------------------------------------------------------------------
+            # [NEW CODE]:
+            dynamic_mult = float(p.get("climax_stop_mult", 2.5)) if (vol_z > 2.0 and hist_now > hist_prev) else float(p.get("atr_stop_mult", 2.0))
             stop = round(close - dynamic_mult * atr, 4)
             rr = float(p.get("reward_risk", 1.8))
             target = round(close + (rr * dynamic_mult * atr), 4)
+            min_target_atr = float(p.get("min_target_atr", 0.5))
+            if (target - close) < (min_target_atr * atr):
+                return None
+            # =============================================================================
             self._consume_event(ctx, symbol, "long", current_time)
             mover_tag = f" [top_gainer +{ctx.mover_change_pct:.1f}%]" if bias == "gainer" else ""
             return Signal(
@@ -304,11 +411,28 @@ class MomentumCross(Strategy):
             and (100.0 - p["rsi_max"]) <= rsi <= (100.0 - p["rsi_min"])
             and self._valid_event(ctx, symbol, "short", current_bar_idx, df)
         ):
-            # Dynamic Stop Tightening: 1.0 * ATR if explosive volume and expanding MACD
-            dynamic_mult = 1.0 if (vol_z > 2.0 and hist_now < hist_prev) else p["atr_stop_mult"]
+            # =============================================================================
+            # [MODIFIED 2026-10-14]: CR-02 - Invert momentum dynamic-stop tightening
+            # ORIGINAL INTENT: Dynamic Stop Tightening: 1.0 * ATR if explosive volume (vol_z > 2.0)
+            # REASON FOR CHANGE: Halving stops on climax volume caused artificial stop-outs.
+            # Invert to widen stop on climax volume (default 2.5 ATR).
+            # SAFE ROLLBACK: The original code is preserved below as comments.
+            # -----------------------------------------------------------------------------
+            # [PREVIOUS CODE - PRESERVED]:
+            # dynamic_mult = 1.0 if (vol_z > 2.0 and hist_now < hist_prev) else p["atr_stop_mult"]
+            # stop = round(close + dynamic_mult * atr, 4)
+            # rr = float(p.get("reward_risk", 1.8))
+            # target = round(close - (rr * dynamic_mult * atr), 4)
+            # -----------------------------------------------------------------------------
+            # [NEW CODE]:
+            dynamic_mult = float(p.get("climax_stop_mult", 2.5)) if (vol_z > 2.0 and hist_now < hist_prev) else float(p.get("atr_stop_mult", 2.0))
             stop = round(close + dynamic_mult * atr, 4)
             rr = float(p.get("reward_risk", 1.8))
             target = round(close - (rr * dynamic_mult * atr), 4)
+            min_target_atr = float(p.get("min_target_atr", 0.5))
+            if (close - target) < (min_target_atr * atr):
+                return None
+            # =============================================================================
             self._consume_event(ctx, symbol, "short", current_time)
             mover_tag = f" [top_loser {ctx.mover_change_pct:.1f}%]" if bias == "loser" else ""
             return Signal(

@@ -86,18 +86,43 @@ class AdaptiveProtectionPlanner:
             wide_trail = obs.close - (side * trail_mult * obs.atr)
             candidate_floor = max(breakeven_floor, wide_trail) if side > 0 else min(breakeven_floor, wide_trail)
         elif peak_r < activation_r:
-            # Volatility-scaled trigger: on a name whose ATR is large relative to
-            # its risk unit, ensure effective_trigger cannot exceed 85% of activation_r
-            # so high ATR-to-risk names are never permanently disarmed.
+            # =============================================================================
+            # [MODIFIED 2026-10-14]: CR-10 - Adaptive Protection Arming (Strategy-Aware ATR Multiplier)
+            # ORIGINAL INTENT: Used flat breakeven_trigger_atr_mult (2.50) for all trades.
+            # REASON FOR CHANGE: Breakouts (momentum, orb, bb_squeeze) reverse fast and need earlier
+            # protection arming (1.5x ATR) than mean-reversion setups (2.5x ATR).
+            # SAFE ROLLBACK: The original code is preserved below as comments.
+            # -----------------------------------------------------------------------------
+            # [PREVIOUS CODE - PRESERVED]:
+            # atr_r = obs.atr / risk if risk > 1e-8 else 0.0
+            # cap_trig = getattr(self.config, "progressive_lock_cap_trigger_r", 0.85)
+            # effective_trigger = min(
+            #     cap_trig,
+            #     max(
+            #         self.config.breakeven_trigger_r,
+            #         getattr(self.config, "breakeven_trigger_atr_mult", 0.0) * atr_r,
+            #     ),
+            # )
+            # -----------------------------------------------------------------------------
+            # [NEW CODE]:
             atr_r = obs.atr / risk if risk > 1e-8 else 0.0
             cap_trig = getattr(self.config, "progressive_lock_cap_trigger_r", 0.85)
+            strat_name = str(getattr(obs, "strategy", "") or "").lower()
+            if any(s in strat_name for s in ("reversion", "sweep", "pullback")):
+                atr_mult = getattr(self.config, "breakeven_atr_mult_reversion", 2.50)
+            elif any(s in strat_name for s in ("momentum", "orb", "squeeze", "breakout", "gap")):
+                atr_mult = getattr(self.config, "breakeven_atr_mult_breakout", 1.50)
+            else:
+                atr_mult = getattr(self.config, "breakeven_trigger_atr_mult", 2.50)
+
             effective_trigger = min(
                 cap_trig,
                 max(
                     self.config.breakeven_trigger_r,
-                    getattr(self.config, "breakeven_trigger_atr_mult", 0.0) * atr_r,
+                    atr_mult * atr_r,
                 ),
             )
+            # =============================================================================
             if peak_r >= effective_trigger:
                 # Progressive profit lock: once a trade has shown real
                 # excursion, stop risking initial capital. Blend from

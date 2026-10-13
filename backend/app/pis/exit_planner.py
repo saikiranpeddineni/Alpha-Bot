@@ -163,14 +163,47 @@ class ExitPlanner:
         if scale_out_triggered and not is_runner:
             is_runner = True
 
-        # --- Profit giveback guard ---
-        # A trade that peaked and then surrendered most of its excursion while
-        # still green should bank partial profit NOW rather than hoping the
-        # trailing floor catches the reversal one bar later. This converts
-        # round-trips (peak +0.5R -> close -0.3R) into banked wins while never
-        # touching a position still making new highs. The surrendered amount
-        # must exceed a noise floor (ATR in R units) so ordinary churn on
-        # volatile names doesn't trigger it.
+        # =============================================================================
+        # [MODIFIED 2026-10-14]: CR-12 & CR-13 - Tiered Giveback Guard & DOA Stagnation Cut
+        # ORIGINAL INTENT: Flat 55% giveback guard for all peak >= 0.60R; stagnation harvest only on green trades.
+        # REASON FOR CHANGE: Excursions > 1R gave back 55% of gains. Tier giveback (40% for 1-2R, 30% for >=2R)
+        # to lock in proven moves. Dead-money losers (r <= -0.25 after 12-15 bars with peak < 0.30R)
+        # bled 30 bars to full -1R; DOA stagnation cut exits early to protect capital.
+        # SAFE ROLLBACK: The original code is preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # giveback_guard_triggered = False
+        # if (
+        #     getattr(self.config, "enable_profit_giveback_guard", True)
+        #     and not has_scaled_out
+        #     and not scale_out_triggered
+        #     and peak_r >= self.config.profit_guard_peak_r
+        #     and obs.r_multiple > 0.0
+        # ):
+        #     giveback = peak_r - obs.r_multiple
+        #     atr_r_buffer = (
+        #         getattr(self.config, "profit_guard_min_giveback_atr_r", 0.0)
+        #         * (obs.atr / obs.risk_per_share if obs.risk_per_share > 1e-8 else 0.0)
+        #     )
+        #     min_giveback = min(
+        #         peak_r * 0.50,
+        #         max(
+        #             self.config.profit_guard_max_giveback_pct * peak_r,
+        #             atr_r_buffer,
+        #         ),
+        #     )
+        #     if giveback >= min_giveback:
+        #         giveback_guard_triggered = True
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        # CR-13: DOA-stall harvest for underwater, zero-excursion dead money
+        doa_stall_triggered = False
+        if getattr(self.config, "enable_doa_stagnation_harvest", True):
+            doa_bars = getattr(self.config, "doa_stagnation_bars", 12)
+            doa_r_thresh = getattr(self.config, "doa_r_threshold", -0.25)
+            if history_len >= 15 and thesis.stagnation_bars >= doa_bars and peak_r < 0.30 and obs.r_multiple <= doa_r_thresh:
+                doa_stall_triggered = True
+
         giveback_guard_triggered = False
         if (
             getattr(self.config, "enable_profit_giveback_guard", True)
@@ -184,15 +217,24 @@ class ExitPlanner:
                 getattr(self.config, "profit_guard_min_giveback_atr_r", 0.0)
                 * (obs.atr / obs.risk_per_share if obs.risk_per_share > 1e-8 else 0.0)
             )
+            # CR-12 Tiered giveback threshold
+            if peak_r >= 2.0:
+                giveback_pct = getattr(self.config, "profit_guard_pct_tier3", 0.30)
+            elif peak_r >= 1.0:
+                giveback_pct = getattr(self.config, "profit_guard_pct_tier2", 0.40)
+            else:
+                giveback_pct = getattr(self.config, "profit_guard_pct_tier1", self.config.profit_guard_max_giveback_pct)
+
             min_giveback = min(
                 peak_r * 0.50,
                 max(
-                    self.config.profit_guard_max_giveback_pct * peak_r,
+                    giveback_pct * peak_r,
                     atr_r_buffer,
                 ),
             )
             if giveback >= min_giveback:
                 giveback_guard_triggered = True
+        # =============================================================================
 
         # Determine exit action
         # Floor-tag runner gate: thesis must be intact and health not collapsing.
@@ -206,10 +248,23 @@ class ExitPlanner:
             and not is_degraded_thesis(thesis)
         )
 
-        if early_invalidation_breach:
-            # Asymmetric Loss Reduction (Quadrant 2): Cut immediately at -0.25R to -0.35R
+        # =============================================================================
+        # [MODIFIED 2026-10-14]: CR-13 - Action determination with DOA stall harvest
+        # ORIGINAL INTENT: Early invalidation was the only negative-R fast harvest.
+        # REASON FOR CHANGE: Dead-money trades stuck at <= -0.25R with zero excursion for 12+ bars
+        # held all the way to 30 bars or -1R. Trigger FULL_EXIT on doa_stall_triggered.
+        # SAFE ROLLBACK: The original code is preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # if early_invalidation_breach:
+        #     action = ExitAction.FULL_EXIT
+        #     exit_ratio = 1.0
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        if early_invalidation_breach or doa_stall_triggered:
             action = ExitAction.FULL_EXIT
             exit_ratio = 1.0
+        # =============================================================================
         elif protection_breached or lifecycle == LifecycleState.EXIT_CANDIDATE:
             if floor_tag_runner and not has_scaled_out:
                 # Evidence-driven refinement: the floor was tagged but the trade
@@ -259,6 +314,8 @@ class ExitPlanner:
 
         if early_invalidation_breach:
             reasons.append(ReasonCode.EARLY_THESIS_INVALIDATED)
+        elif doa_stall_triggered:
+            reasons.append(ReasonCode.DOA_STAGNATION_HARVEST)
         elif floor_tag_runner and action == ExitAction.PARTIAL_EXIT:
             # Order matters: this must precede the plain PROTECTION_BREACH tag so
             # telemetry distinguishes "runner left behind" from "full cut".

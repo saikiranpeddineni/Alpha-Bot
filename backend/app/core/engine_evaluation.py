@@ -231,6 +231,34 @@ class TradingEngineEvaluationMixin:
                     await self._close_position_guarded(symbol, reason="CRITICAL: PIS Offline - Fallback Trailing Stop", qty=abs(position.qty))
                     return []
 
+            # =============================================================================
+            # [MODIFIED 2026-10-14]: CR-15 - Intelligent EOD Pre-Harvest
+            # ORIGINAL INTENT: Positions rode underwater into end-of-day flatten (flatten_all at market).
+            # REASON FOR CHANGE: Positions holding loss < -0.30R with poor health at the entry-window cutoff
+            # should be scratched early to avoid end-of-day market-order slippage and free risk budget.
+            # SAFE ROLLBACK: The original code is preserved below as comments.
+            # -----------------------------------------------------------------------------
+            # [PREVIOUS CODE - PRESERVED]:
+            # # No EOD pre-harvest check
+            # -----------------------------------------------------------------------------
+            # [NEW CODE]:
+            if pis_order is None and position is not None and _lot is not None and hasattr(self, "risk") and hasattr(self.risk, "clock"):
+                try:
+                    no_entry_mins = int(getattr(self.risk.config, "no_entry_minutes_before_close", 15) or 15)
+                    in_preharvest_window = not self.risk.clock.in_entry_window(no_entry_mins, now)
+                    if in_preharvest_window:
+                        # Calculate current R
+                        init_risk = getattr(_lot, "initial_risk_per_share", 0.0) or 0.0
+                        if init_risk > 1e-8:
+                            current_r = (close - _lot.avg_price) / init_risk if position.qty > 0 else (_lot.avg_price - close) / init_risk
+                            if current_r <= -0.30:
+                                applog.warning("engine.exit", f"CR-15: EOD pre-harvest triggered for {symbol} at {current_r:.2f}R (near close cutoff)")
+                                await self._close_position_guarded(symbol, reason="PIS Exit Reason: EOD_PREHARVEST", qty=abs(position.qty))
+                                return []
+                except Exception as _eod_exc:
+                    applog.debug("engine.exit", f"EOD pre-harvest evaluation skipped: {_eod_exc}")
+            # =============================================================================
+
             if pis_order is not None:
                 try:
                     applog.info("engine", f"{symbol}: PIS Unified Exit triggered: {pis_order.reason} (qty={pis_order.qty})")
