@@ -269,12 +269,24 @@ class SignalPipeline:
                     is_structural_breakout = (
                         sig.strategy in _REG2 and getattr(_REG2[sig.strategy], "is_structural_breakout", False)
                     )
-                    if not is_structural_breakout:
+                    # Pullback re-arm carries its own bar-structure location
+                    # discipline (held EMA20 +/- 1.0 ATR + EMA9 reclaim + 1/day +
+                    # 0.5 ATR econ gate). Measuring a post-pullback reclaim
+                    # against session VWAP double-penalizes the exact setup the
+                    # re-arm path exists for (today: 40/49 re-arm rejects here).
+                    skip_location_veto = bool(getattr(_strat_cls, "skip_location_veto", False))
+                    if not is_structural_breakout and not skip_location_veto:
                         stretch = ((b_cl - vwap_px) / atr_loc) if sig.action == SignalAction.ENTER_LONG \
                             else ((vwap_px - b_cl) / atr_loc)
-                        if stretch > float(getattr(rc, "entry_max_vwap_stretch_atr", 3.0)):
+                        base_limit = float(getattr(rc, "entry_max_vwap_stretch_atr", 3.0))
+                        # Trend-day allowance: VWAP stretches naturally when the
+                        # market trends; keep the full 3.0 ATR discipline for
+                        # RANGE days, allow more room in confirmed trends.
+                        trend_mult = float(getattr(rc, "entry_vwap_stretch_trend_mult", 1.5))
+                        stretch_limit = base_limit * trend_mult if regime in (Regime.TREND_UP, Regime.TREND_DOWN) else base_limit
+                        if stretch > stretch_limit:
                             sig.ml_gate_decision = "REJECT"
-                            rejected.append((sig, f"Entry veto: location exhausted ({stretch:.1f} ATR from VWAP > limit)"))
+                            rejected.append((sig, f"Entry veto: location exhausted ({stretch:.1f} ATR from VWAP > limit {stretch_limit:.1f})"))
                             continue
 
             # Session-extreme proximity guard: momentum entries INTO the

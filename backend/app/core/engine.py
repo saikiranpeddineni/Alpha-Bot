@@ -3026,22 +3026,34 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
                 return f"behavioral_loop_detector: duplicate pending order for symbol {symbol}"
 
         # 5. Strategy/thesis correlation clustering check (local data only — cannot fail closed)
+        # Blocks a new entry only when it is highly correlated with an open
+        # SAME-SIDE position (a hedge in the opposite direction is diversification,
+        # not clustering). Threshold is RiskConfig-tunable; 0.85 still blocks
+        # genuine clones/pairs while letting normal trend-day beta (0.7-0.85)
+        # through so breadth doesn't die on trend days.
         try:
             open_symbols = list(self.portfolio._lots.keys())
             if open_symbols:
+                cand_side = _norm_side(sig_side)
+                corr_limit = float(getattr(self.risk_config, "max_position_correlation", 0.85))
                 cand_df = self.data.frame(symbol, "1Min")
                 if cand_df is not None and not cand_df.empty:
                     cand_series = cand_df["close"].dropna()
                     for open_sym in open_symbols:
                         if open_sym == symbol:
                             continue
+                        open_lot = self.portfolio._lots.get(open_sym)
+                        open_qty = float(getattr(open_lot, "qty", 0.0) or 0.0)
+                        open_side = "long" if open_qty > 0 else ("short" if open_qty < 0 else "")
+                        if cand_side and open_side and open_side != cand_side:
+                            continue  # opposite-side hedge, not a cluster
                         open_df = self.data.frame(open_sym, "1Min")
                         if open_df is not None and not open_df.empty:
                             open_series = open_df["close"].dropna()
                             combined = pd.concat([cand_series, open_series], axis=1, join="inner")
                             if len(combined) > 5:
                                 corr = combined.corr().iloc[0, 1]
-                                if corr > 0.7:
+                                if corr > corr_limit:
                                     return f"behavioral_loop_detector: high correlation ({corr:.2f}) with open symbol {open_sym}"
         except Exception as e:
             applog.warning("engine.behavioral", f"Failed correlation clustering check: {e}")

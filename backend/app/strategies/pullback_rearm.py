@@ -27,6 +27,11 @@ class PullbackRearm(Strategy):
     is_breakout = False
     is_structural_breakout = False
     is_mean_reversion = False
+    # Re-arm carries its own bar-structure location discipline (held EMA20
+    # +/- 1.0 ATR + EMA9 reclaim + 0.5 ATR econ gate). Exempt from the
+    # pipeline session-VWAP stretch veto, which otherwise rejects the exact
+    # post-pullback reclaim this path exists for.
+    skip_location_veto = True
     ml_threshold = 0.53
     evaluation_horizons = ["30m", "60m", "close"]
     regime_weights = {

@@ -29,9 +29,11 @@ class RelativeStrength(Strategy):
         Regime.TREND_UP: 1.20, Regime.TREND_DOWN: 0.80, Regime.RANGE: 1.00, Regime.VOLATILE: 0.90
     }
     default_params = {
-        "rs_long_threshold": 0.75,    # 0.75 to 1.0 means strong outperformance vs SPY
-        "rs_short_threshold": 0.25,   # 0.0 to 0.25 means strong underperformance vs SPY
-        "vol_z_min": 1.2,             # Require volume conviction
+        "rs_long_threshold": 0.70,    # 0.70 to 1.0 means strong outperformance vs SPY (was 0.75;
+                                      # 0.75 coincided with local-high breakout so rarely that the
+                                      # trainer found zero lifetime candidate events)
+        "rs_short_threshold": 0.30,   # 0.0 to 0.30 means strong underperformance vs SPY (was 0.25)
+        "vol_z_min": 1.0,             # Require volume conviction (was 1.2)
         "reward_risk": 2.5,
     }
 

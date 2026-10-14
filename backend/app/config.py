@@ -144,6 +144,16 @@ class RiskConfig(BaseModel):
     # reward:risk). Sibling-bot evidence + our own 68% never-green entries.
     enable_entry_location_veto: bool = Field(True)
     entry_max_vwap_stretch_atr: float = Field(3.0, ge=0.5, le=20.0)
+    # Trend-day allowance: on TREND_UP/TREND_DOWN bars the whole market rides
+    # far from VWAP (today: momentum extensions 4-21 ATR). Scaling the limit
+    # by this multiplier on trend days keeps the RANGE-day protection intact
+    # while letting continuation + re-arm entries participate in trends.
+    entry_vwap_stretch_trend_mult: float = Field(1.5, ge=1.0, le=3.0)
+    # Correlation clustering gate: block a new entry only when its 1-minute
+    # close correlation with an open same-side position exceeds this.
+    # 0.70 blocked normal trend-day beta (0.81-0.97 across the board);
+    # 0.85 still blocks genuine clones/pairs while letting breadth through.
+    max_position_correlation: float = Field(0.85, ge=0.5, le=1.0)
     # Opening blackout: skip NEW entries in the first N minutes after the bell.
     # Measured on exact-path backtest: 0-5min entries were 6/6 losers (-$910);
     # all positive expectancy begins ~minute 11. Tightening only.

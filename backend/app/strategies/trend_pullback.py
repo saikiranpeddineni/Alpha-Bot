@@ -45,7 +45,10 @@ class TrendPullback(Strategy):
     # [NEW CODE]:
     default_params = {
         "min_er20": 0.35,             # Efficiency Ratio (Trend strength)
-        "max_vol_z": 0.5,             # Max volume z-score on the pullback (low volume dip)
+        "max_vol_z": 1.0,             # Max volume z-score on the pullback (quiet dip, not a dump).
+                                      # Was 0.5 (0.5 std below mean = vanishingly rare: 2-3 lifetime
+                                      # events). 1.0 keeps the low-vol-dip thesis while letting the
+                                      # strategy actually participate.
         "min_wick_ratio": 0.40,       # Rejection wick must be 40% of candle
         "reward_risk": 3.0,
         "min_risk_atr": 0.5,          # CR-07: Minimum EMA-gap risk distance to avoid degenerate setups

@@ -445,3 +445,13 @@ Rescue/re-arm state: `HIGH_AGREEMENT_RESCUE` ON but narrow (`pipeline.py:512-527
 
 Cross-cutting: Environment knobs `MOM_MIN_MINS_OPEN`, `MOM_EVENT_WINDOW`, `ENABLE_PULLBACK_REARM`, `ORB_END_TIME` are now fully wired and operational alongside pipeline-level knobs (`RESCUE_*`, `WARMUP_REDUCED_RISK_MULT`).
 
+### Participation fixes — 2026-10-15 (all strategies participate)
+Evidence (2026-10-14 session, `backend/data/shadow_ledger.db` 147 rows + `data/logs/app.log` 258 rejects, 13 entries): momentum 93 rejects (61 location + 25 chase → 0 entries), pullback_rearm 49 rejects (40 location → 1 entry), orb 66 rejects (42 meta → 5 entries), behavioral correlation filter 18 blocks (0.81-0.97 vs 0.70 limit), gap_and_go / trend_pullback / relative_strength 0 emissions (structural: mover-context only / 2-3 lifetime events / zero trainer events).
+- Location veto regime-adaptive: `entry_max_vwap_stretch_atr` stays 3.0, scaled by new `entry_vwap_stretch_trend_mult 1.5` on TREND_UP/DOWN days (`strategies/pipeline.py`, `config.py`). RANGE-day discipline unchanged.
+- `pullback_rearm.skip_location_veto = True`: own bar-structure discipline (held EMA20 +/- 1.0 ATR + EMA9 reclaim + econ gate) replaces the session-VWAP check that rejected 40/49 re-arms.
+- `trend_pullback.max_vol_z 0.5 → 1.0`: 0.5std-below-mean rarity caused 2-3 lifetime events; 1.0 keeps the quiet-dip thesis.
+- `relative_strength`: `rs_long 0.75 → 0.70`, `rs_short 0.25 → 0.30`, `vol_z_min 1.2 → 1.0` (trainer found zero events at old cutoffs). `rs_score None` still blocks (no blind firing).
+- Correlation clustering: hardcoded `0.7` → RiskConfig `max_position_correlation 0.85`, same-side only (opposite-side hedges no longer blocked) (`core/engine.py`, `config.py`).
+- gap_and_go thresholds untouched (data-dependent: needs 2%+ mover context; scanner flagged ~3 movers today) — participation lever is pre-open meta retrain timing (retrain landed 11:37 ET, after the 09:35-11:30 window), not entry logic.
+- No ML/meta/TradeScore threshold, sizing, or PIS changes. `test_cr146f_safety` correlation test still green (1.00 > 0.85, same-side).
+
