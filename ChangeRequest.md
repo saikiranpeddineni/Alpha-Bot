@@ -389,16 +389,16 @@ Method: file reads of the exact locations cited per CR. Verdicts below are code-
 
 ### P0 — Entry Intelligence
 
-- **CR-01 IMPLEMENTED** (`strategies/momentum.py`): enforced `min_minutes_since_open 10` with `MOM_MIN_MINS_OPEN` env support, `event_window_bars 3` with `MOM_EVENT_WINDOW` env support, `rsi 55/70 + vol_z 1.2`, `min_er20 0.25`, stacked-EMA filter, climax guards, `min_target_atr 0.5`, `min_reward_risk >= 1.0` economic gate, 1/day cap, confidence hump, and `htf_trend_filter` support.
+- **CR-01 IMPLEMENTED** (`strategies/momentum.py`): enforced `min_minutes_since_open 10` with `MOM_MIN_MINS_OPEN` env support, `event_window_bars 3` with `MOM_EVENT_WINDOW` env support, `rsi 55/70 + vol_z 1.2`, `min_er20 0.25`, stacked-EMA filter, climax guards, `min_target_atr 0.5`, `min_reward_risk 1.0` in `default_params` & economic gate check, 1/day cap, confidence hump, and `htf_trend_filter` support.
 - **CR-02 IMPLEMENTED**: `climax_stop_mult 2.5` / `atr_stop_mult 2.0`, `dynamic_mult = 2.5 if vol_z>2.0 else 2.0`, target = `rr * dynamic_mult * ATR`.
-- **CR-02b IMPLEMENTED**: NEW `strategies/pullback_rearm.py` registered, `lookback 30` / `vol_z_min 1.0` correct, `daily_sma20` + `ema20/vwap` + 3-bar pullback + EMA9 reclaim present; configurable `enable_pullback_rearm` knob added in `RiskConfig`, strategy `default_params`, and `ENABLE_PULLBACK_REARM` env variable.
-- **CR-03 IMPLEMENTED**: `orb.py` `end_time 15:00` with `ORB_END_TIME` env support, `acceptance_lowvol 0.60 if vol_z<2.0 else 0.50`, `min_range_atr 0.5`.
-- **CR-04 IMPLEMENTED**: `bb_squeeze.py` `min_minutes_since_open 15`, `breakout_buffer_atr 0.2`, `volatile_squeeze_pct 0.10` escape, `min_target_atr 0.5`.
+- **CR-02b IMPLEMENTED**: NEW `strategies/pullback_rearm.py` registered, `lookback 30` / `vol_z_min 1.0` correct, `daily_sma20` + `ema20/vwap` + 3-bar pullback + EMA9 reclaim present; configurable `enable_pullback_rearm` knob added in `RiskConfig`, strategy `default_params`, `ENABLE_PULLBACK_REARM` env variable, and wired into `engine_evaluation.py` strategy loop.
+- **CR-03 IMPLEMENTED**: `orb.py` `end_time 15:00` with `ORB_END_TIME` env support, `acceptance_lowvol 0.60 if vol_z<2.0 else 0.50`, `min_range_atr 0.5`, and `ctx.now` session date validation against stale bars.
+- **CR-04 IMPLEMENTED**: `bb_squeeze.py` `min_minutes_since_open 15`, `breakout_buffer_atr 0.2`, `volatile_squeeze_pct 0.10` escape, `volatile_min_vol_z 1.5` configurable parameter, `min_target_atr 0.5`.
 - **CR-05 IMPLEMENTED**: `gap_and_go.py` `max_gap_pct 8.0`, `exhaustion_atr 2.5 / exhaustion_pct 3.0` symmetric guards, 1/day + `MANDATORY_STRATEGIES` fail-close kept.
 - **CR-06 IMPLEMENTED**: `liquidity_sweep.py` `min_risk_atr 0.75` + `min_target_atr 0.5`, enforced both sides.
 - **CR-07 IMPLEMENTED**: regime ranking `pipeline.py` (`ranking_score = raw*configured_weight` -> `sig.score`), gate admission on tightening-only `admission_score = raw*effective_regime_weight` (`effective_regime_weight = min(1.0, weight)`). `trend_pullback.py` viability `min_risk_atr 0.5` + EMA-gap `0.5*ATR` done. `rsi2_reversion.py` unchanged by design with PIS-side ceiling harvest wired.
-- **CR-08 IMPLEMENTED**: scanner warmup prefetch `core/engine.py` done; backfill-before-`<15`-return `engine_evaluation.py` done; fail-soft `WARMUP_REDUCED` done; pre-pipeline overlap truncation resolved (all candidate entry signals flow directly to `SignalPipeline.process()` for TradeScore conflict resolution among approved entries); `signal_timestamp_utc` populated from `signal.ts` / `signal.timestamp` property; shadow ledger recording wired for all drops and rejections.
-- **CR-09 IMPLEMENTED**: bounded precompute pool + 900s wall + WFV 90/10/min-3 done; `MANDATORY_STRATEGIES` fail-close kept; rescue path done; specialist-fallback spike alert (>=10 in 15m) wired into `pipeline.py`.
+- **CR-08 IMPLEMENTED**: scanner warmup prefetch `core/engine.py` done; backfill-before-`<15`-return `engine_evaluation.py` done; fail-soft `WARMUP_REDUCED` done; gated-tick drops at both early-return sites recorded to `shadow_ledger` with `gate="gated_tick"`; strategy overlap block active recording dropped candidates with `gate="strategy_overlap"`; pipeline conflict losers tagged with `gate="strategy_overlap"`; `signal_timestamp_utc` populated from `signal.ts` / `signal.timestamp` property.
+- **CR-09 IMPLEMENTED**: bounded precompute pool + 900s wall + WFV 90/10/min-3 done; `MANDATORY_STRATEGIES` fail-close kept; rescue path done; specialist-fallback spike alert (>=10 in 15m) wired into `pipeline.py`; `model._meta_label_engine` restored in `pipeline.py:__init__` for `trainer.py` lifecycle compatibility.
 
 ### P1 — Peak-R Capture
 
@@ -407,7 +407,7 @@ Method: file reads of the exact locations cited per CR. Verdicts below are code-
 - **CR-12 IMPLEMENTED** (`pis/exit_planner.py:272-286`, `pis/models.py:325-328`): tiered `0.55 (peak<1R) / 0.40 (1-2R) / 0.30 (>=2R)`; `min(peak*0.50, max(...))` structure kept.
 - **CR-13 IMPLEMENTED** (`pis/exit_planner.py:252-257,316-318,369-370`, `pis/models.py:332-334`): `enable_doa_stagnation_harvest=True`, `doa_stagnation_bars 12`, `doa_r_threshold -0.25` → `FULL_EXIT` + `DOA_STAGNATION_HARVEST`.
 - **CR-14 IMPLEMENTED (no-change per spec)** (`pis/thesis_drift.py:73-91`, `pis/models.py:352-358`): `-0.55R`, bars 2-5, 2-bar confirmation untouched; wick `>=0.60` context only.
-- **CR-15 IMPLEMENTED** (`core/engine_evaluation.py:258-275`, `config.py:53-65`): `eod_preharvest_r` configurable in `RiskConfig` (default -0.30R), triggers pre-harvest at entry-window cutoff when `current_r <= threshold`, `health_score < 0.45`, and `not is_runner`.
+- **CR-15 IMPLEMENTED** (`core/engine_evaluation.py:258-275`, `config.py:53-65`): `eod_preharvest_r` configurable in `RiskConfig` (default -0.30R), triggers pre-harvest at entry-window cutoff when `current_r <= threshold`, `health.overall < 0.45`, and `lifecycle_state != LifecycleState.RUNNER` (and `runner_score < 0.70`).
 - **CR-16 IMPLEMENTED** (`portfolio/tracker.py:437-447`, `brokers/paper.py:334-351`, `brokers/base.py:88`): bare `"exit"` fallback eliminated → `stop_loss` classify else `unspecified_exit:<strategy>`; `close_position` default `"manual"` → `"manual close"`; test `test_exit_reason_never_bare` (`tests/test_portfolio.py:141`).
 
 ### P2 — Sizing / Portfolio
@@ -424,7 +424,7 @@ Method: file reads of the exact locations cited per CR. Verdicts below are code-
 
 ### P4 — Dead-Code Removal
 
-- **D1 MISSING**: 96 hits remain for `PREVIOUS IMPLEMENTATION|PREVIOUS CODE|HISTORICAL DISABLED` (acceptance = 0). Note: repo rule `dbdd680` and mandatory policy require code preservation — D1 conflicts with that rule until explicitly approved by operator.
+- **D1 PENDING OPERATOR APPROVAL**: Preserved-comment blocks remain deliberately preserved in accordance with repository rule `dbdd680` and the mandatory Code Modification & Historical Preservation Policy ("Never delete old code — comment it out"). Deletion of these blocks is on hold until explicitly authorized by the operator.
 - **D2 IMPLEMENTED**: `tools/` empty, 0 `apply_*.py` files.
 - **D3 IMPLEMENTED**: root has zero `*.json` dumps, no `Refer.txt`; `data/` holds only DBs/`replays/`/`reports/`.
 - **D4 PARTIAL**: allocator dead comment gone; `momentum.py:100,298` HTF branch still present (`False` default + guarded branch — optional path, not unreachable); `test_strategies` unused-field / frontend shim not verified.

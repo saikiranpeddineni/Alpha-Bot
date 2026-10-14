@@ -149,11 +149,43 @@ class TradingEngineEvaluationMixin:
                     )
             except Exception:
                 pass
+        # =============================================================================
+        # [MODIFIED 2026-10-14]: CR-08 — Gated-tick shadow ledger recording
+        # ORIGINAL INTENT: Early returned [] with applog only, leaving no trace in shadow ledger.
+        # REASON FOR CHANGE: Gated-tick drops were traceless (360 candidates lost without trace).
+        #   Record every gated tick drop to shadow_ledger with gate="gated_tick".
+        # SAFE ROLLBACK: Commented-out original code below.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # if position is None and skip_entries_reason and not getattr(self, "replay_fast_path", False):
+        #     if symbol not in getattr(self, "_entry_gate_warned", set()):
+        #         self._entry_gate_warned.add(symbol)
+        #         applog.info("engine", f"{symbol}: entry evaluation skipped -- {skip_entries_reason}")
+        #     return []
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
         if position is None and skip_entries_reason and not getattr(self, "replay_fast_path", False):
             if symbol not in getattr(self, "_entry_gate_warned", set()):
                 self._entry_gate_warned.add(symbol)
                 applog.info("engine", f"{symbol}: entry evaluation skipped -- {skip_entries_reason}")
+            try:
+                from app.core.shadow_ledger import shadow_ledger
+                shadow_ledger.record(
+                    symbol=symbol,
+                    action="ENTER_LONG",
+                    strategy="engine",
+                    gate="gated_tick",
+                    reason=f"gated tick ({skip_entries_reason})",
+                    price=float(df["close"].iloc[-1]) if not df.empty and "close" in df else 0.0,
+                    stop_loss=None,
+                    take_profit=None,
+                    atr14=float(df["atr14"].iloc[-1]) if not df.empty and "atr14" in df.columns else None,
+                    confidence=0.0,
+                )
+            except Exception:
+                pass
             return []
+        # =============================================================================
 
         regime, details = await asyncio.to_thread(detect_regime, df)
         if self._regimes.get(symbol) != regime:
@@ -280,8 +312,19 @@ class TradingEngineEvaluationMixin:
                         if init_risk > 1e-8:
                             current_r = (close - _lot.avg_price) / init_risk if position.qty > 0 else (_lot.avg_price - close) / init_risk
                             preharvest_threshold = float(getattr(self.risk.config, "eod_preharvest_r", -0.30))
-                            health_val = float(getattr(pis_decision, "health_score", 0.0) if pis_decision else 0.0)
-                            is_runner = bool(getattr(pis_decision, "is_runner", False) if pis_decision else False)
+                            # [PREVIOUS CODE - PRESERVED]:
+                            # health_val = float(getattr(pis_decision, "health_score", 0.0) if pis_decision else 0.0)
+                            # is_runner = bool(getattr(pis_decision, "is_runner", False) if pis_decision else False)
+                            # -----------------------------------------------------------------------------
+                            # [NEW CODE]:
+                            from app.pis.models import LifecycleState
+                            if pis_decision is not None:
+                                health_obj = getattr(pis_decision, "health", None)
+                                health_val = float(getattr(health_obj, "overall", 0.0) if health_obj else getattr(pis_decision, "health_score", 0.0))
+                                is_runner = (getattr(pis_decision, "lifecycle_state", None) == LifecycleState.RUNNER) or (float(getattr(pis_decision, "runner_score", 0.0) or 0.0) >= 0.70)
+                            else:
+                                health_val = 0.0
+                                is_runner = False
                             # Scratch dying trade early only if underwater <= threshold, health < 0.45, and not an active runner
                             if current_r <= preharvest_threshold and health_val < 0.45 and not is_runner:
                                 applog.warning("engine.exit", f"CR-15: EOD pre-harvest triggered for {symbol} at {current_r:.2f}R (health={health_val:.2f}, near close cutoff)")
@@ -346,11 +389,43 @@ class TradingEngineEvaluationMixin:
             self._position_take_profits.pop(symbol, None)
             self.pis_adapter.handle_position_closed(symbol)
 
+        # =============================================================================
+        # [MODIFIED 2026-10-14]: CR-08 — Gated-tick shadow ledger recording
+        # ORIGINAL INTENT: Early returned [] with applog only, leaving no trace in shadow ledger.
+        # REASON FOR CHANGE: Gated-tick drops were traceless (360 candidates lost without trace).
+        #   Record every gated tick drop to shadow_ledger with gate="gated_tick".
+        # SAFE ROLLBACK: Commented-out original code below.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # if skip_entries_reason and not getattr(self, "replay_fast_path", False):
+        #     if symbol not in getattr(self, "_entry_gate_warned", set()):
+        #         self._entry_gate_warned.add(symbol)
+        #         applog.info("engine", f"{symbol}: entry evaluation skipped -- {skip_entries_reason}")
+        #     return []
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
         if skip_entries_reason and not getattr(self, "replay_fast_path", False):
             if symbol not in getattr(self, "_entry_gate_warned", set()):
                 self._entry_gate_warned.add(symbol)
                 applog.info("engine", f"{symbol}: entry evaluation skipped -- {skip_entries_reason}")
+            try:
+                from app.core.shadow_ledger import shadow_ledger
+                shadow_ledger.record(
+                    symbol=symbol,
+                    action="ENTER_LONG",
+                    strategy="engine",
+                    gate="gated_tick",
+                    reason=f"gated tick ({skip_entries_reason})",
+                    price=float(df["close"].iloc[-1]) if not df.empty and "close" in df else 0.0,
+                    stop_loss=None,
+                    take_profit=None,
+                    atr14=float(df["atr14"].iloc[-1]) if not df.empty and "atr14" in df.columns else None,
+                    confidence=0.0,
+                )
+            except Exception:
+                pass
             return []
+        # =============================================================================
 
 
         # Look up mover bias from scanner context (top gainer → long bias, top loser → short bias)
@@ -396,6 +471,19 @@ class TradingEngineEvaluationMixin:
 
             if not strat.enabled:
                 continue
+            # =============================================================================
+            # [ADDED 2026-10-14]: CR-02b — Wire RiskConfig.enable_pullback_rearm
+            # ORIGINAL INTENT: RiskConfig.enable_pullback_rearm was defined but unread by engine.
+            # REASON FOR CHANGE: Enforce RiskConfig.enable_pullback_rearm dynamically at runtime.
+            # [PREVIOUS CODE - PRESERVED]:
+            # # No check for pullback_rearm against risk.config.enable_pullback_rearm
+            # -----------------------------------------------------------------------------
+            # [NEW CODE]:
+            if strat.name == "pullback_rearm":
+                if hasattr(self, "risk") and hasattr(self.risk, "config"):
+                    if not getattr(self.risk.config, "enable_pullback_rearm", True):
+                        continue
+            # =============================================================================
             decision = getattr(self, "last_safety_decision", None)
             if decision is not None and strat.name not in decision.allowed_strategies:
                 continue
@@ -450,47 +538,53 @@ class TradingEngineEvaluationMixin:
         # losers to shadow_ledger.
         # SAFE ROLLBACK: Re-enable the STRATEGY_PRIORITY sort and entry_signals = [winner] below.
         # -----------------------------------------------------------------------------
+        # =============================================================================
+        # [MODIFIED 2026-10-14]: CR-08 & L26 - Strategy Overlap Resolution & Shadow Ledger Recording
+        # ORIGINAL INTENT: Kept entry_signals[0] and silently discarded all other signals.
+        # REASON FOR CHANGE: Discarded overlap signals left zero forensic trace. Record every
+        # discarded signal to shadow_ledger with gate="strategy_overlap" and winner details.
+        # SAFE ROLLBACK: The original code is preserved below as comments.
+        # -----------------------------------------------------------------------------
         # [PREVIOUS CODE - PRESERVED]:
-        # if len(entry_signals) > 1:
-        #     STRATEGY_PRIORITY = {
-        #         "gap_and_go": 1,
-        #         "liquidity_sweep": 2,
-        #         "bb_squeeze": 3,
-        #         "relative_strength": 4,
-        #         "trend_pullback": 5,
-        #         "pullback_rearm": 6,
-        #         "orb": 7,
-        #         "rsi_reversion": 8,
-        #         "vwap_reversion": 9,
-        #         "momentum": 10,
-        #     }
-        #     # Sort ascending by priority (1 is best). Unknown strategies default to 99.
-        #     entry_signals.sort(key=lambda s: STRATEGY_PRIORITY.get(s.strategy, 99))
-        #     winner = entry_signals[0]
-        #     for loser in entry_signals[1:]:
-        #         applog.info("pipeline", f"{symbol} {loser.strategy} {loser.action}: rejected -- lost overlap conflict to {winner.strategy}")
-        #         try:
-        #             from app.core.shadow_ledger import shadow_ledger
-        #             shadow_ledger.record(
-        #                 symbol=symbol,
-        #                 action=str(loser.action.value if hasattr(loser.action, "value") else loser.action),
-        #                 strategy=loser.strategy,
-        #                 gate="strategy_overlap",
-        #                 reason=f"lost conflict to {winner.strategy} (priority {STRATEGY_PRIORITY.get(winner.strategy, 99)} vs {STRATEGY_PRIORITY.get(loser.strategy, 99)})",
-        #                 price=loser.price or (float(df["close"].iloc[-1]) if len(df) else None),
-        #                 stop_loss=loser.stop_loss,
-        #                 take_profit=loser.take_profit,
-        #                 atr14=float(df["atr14"].iloc[-1]) if "atr14" in df.columns and len(df) else None,
-        #                 confidence=loser.confidence,
-        #                 sig=loser,
-        #             )
-        #         except Exception:
-        #             pass
-        #     entry_signals = [winner]
+        # # Silently truncated without shadow recording
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
-        # All entry signals are preserved so SignalPipeline evaluates every candidate
-        # and resolves conflicts among approved candidates by TradeScore ranking.
+        if len(entry_signals) > 1:
+            STRATEGY_PRIORITY = {
+                "gap_and_go": 1,
+                "liquidity_sweep": 2,
+                "bb_squeeze": 3,
+                "relative_strength": 4,
+                "trend_pullback": 5,
+                "pullback_rearm": 6,
+                "orb": 7,
+                "rsi_reversion": 8,
+                "vwap_reversion": 9,
+                "momentum": 10,
+            }
+            # Sort ascending by priority (1 is best). Unknown strategies default to 99.
+            entry_signals.sort(key=lambda s: STRATEGY_PRIORITY.get(s.strategy, 99))
+            winner = entry_signals[0]
+            for loser in entry_signals[1:]:
+                applog.info("pipeline", f"{symbol} {loser.strategy} {loser.action}: rejected -- lost overlap conflict to {winner.strategy}")
+                try:
+                    from app.core.shadow_ledger import shadow_ledger
+                    shadow_ledger.record(
+                        symbol=symbol,
+                        action=str(loser.action.value if hasattr(loser.action, "value") else loser.action),
+                        strategy=loser.strategy,
+                        gate="strategy_overlap",
+                        reason=f"lost conflict to {winner.strategy} (priority {STRATEGY_PRIORITY.get(winner.strategy, 99)} vs {STRATEGY_PRIORITY.get(loser.strategy, 99)})",
+                        price=loser.price or (float(df["close"].iloc[-1]) if len(df) else None),
+                        stop_loss=loser.stop_loss,
+                        take_profit=loser.take_profit,
+                        atr14=float(df["atr14"].iloc[-1]) if "atr14" in df.columns and len(df) else None,
+                        confidence=loser.confidence,
+                        sig=loser,
+                    )
+                except Exception:
+                    pass
+            entry_signals = [winner]
         # =============================================================================
 
         signals = exit_signals + entry_signals
@@ -548,7 +642,7 @@ class TradingEngineEvaluationMixin:
                     symbol=symbol,
                     action=str(sig.action.value if hasattr(sig.action, "value") else sig.action),
                     strategy=sig.strategy,
-                    gate="pipeline",
+                    gate="strategy_overlap" if "lost conflict to" in str(reason) else "pipeline",
                     reason=reason,
                     price=sig.price,
                     stop_loss=sig.stop_loss,

@@ -51,6 +51,9 @@ class SignalPipeline:
         from app.ai.prediction import MetaLabelEngine
         from app.config import get_models_dir
         self.meta_label_engine = MetaLabelEngine(get_models_dir())
+        # Restore contract for ai/trainer.py:828,870-875
+        if not hasattr(model, "_meta_label_engine") or getattr(model, "_meta_label_engine", None) is None:
+            model._meta_label_engine = self.meta_label_engine
         # Shadow challengers are intentionally not instantiated here. Champion owns only
         # authoritative ML/Meta/TradeScore behavior.
         self._is_event_day: bool = False

@@ -115,6 +115,7 @@ class MomentumCross(Strategy):
         "climax_bar_tr_atr": 1.8,
         "climax_bar_close_pos": 0.65,
         "use_stacked_ema_filter": True,
+        "min_reward_risk": 1.0,
         # =============================================================================
     }
 
