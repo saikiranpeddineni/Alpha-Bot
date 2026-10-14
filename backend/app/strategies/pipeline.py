@@ -439,9 +439,17 @@ class SignalPipeline:
                 side=side_str,
                 adaptive_threshold=max(self.ml_threshold, strategy_meta_floor),
             )
-            if is_warmup_reduced and meta_pred.decision != "PASS":
+            # -----------------------------------------------------------------------------
+            # [PREVIOUS CODE - PRESERVED]:
+            # if is_warmup_reduced and meta_pred.decision != "PASS":
+            #     sig.ml_gate_decision = "REJECT"
+            #     rejected.append((sig, f"Warmup reduced evaluation requires meta PASS, got {meta_pred.decision} [{meta_pred.source}]"))
+            #     continue
+            # -----------------------------------------------------------------------------
+            # [NEW CODE]:
+            if is_warmup_reduced and not meta_pred.approved:
                 sig.ml_gate_decision = "REJECT"
-                rejected.append((sig, f"Warmup reduced evaluation requires meta PASS, got {meta_pred.decision} [{meta_pred.source}]"))
+                rejected.append((sig, f"Warmup reduced evaluation requires meta approval, got {meta_pred.decision} [{meta_pred.source}]"))
                 continue
             if not meta_pred.approved:
                 rejected.append((sig, f"Meta-label {meta_pred.decision} [{meta_pred.source}]: {meta_pred.reason}"))
@@ -479,27 +487,21 @@ class SignalPipeline:
             # configured_regime_weight = float(self.regime_weight(sig.strategy, regime))
             # effective_regime_weight = min(1.0, max(0.0, configured_regime_weight))
             # trade_score = min(100.0, max(0.0, raw_score * effective_regime_weight))
-            # sig.score = round(trade_score / 100.0, 4)
+            # ranking_score = min(100.0, max(0.0, raw_score * configured_regime_weight))
+            # sig.score = round(ranking_score / 100.0, 4)
             # approved, threshold = self.trade_score_engine.approve(trade_score, regime, is_event_day=self._is_event_day)
-            # if not approved:
-            #     effective_rr = exp_ret_pct / exp_dd_pct if exp_dd_pct > 0 else excursion.reward_risk
-            #     ml_str = f"{ml:.2f}" if ml is not None else "N/A"
-            #     rejected.append((sig, f"Trade Score {trade_score:.1f} < {threshold:.1f} (raw={raw_score:.1f}, regime_weight={effective_regime_weight:.2f}) [regime={regime}, ml={ml_str}, rr={effective_rr:.2f}]"))
-            # else:
-            #     if getattr(sig, "ml_gate_decision", None) == "GRAY_ZONE_EVALUATION":
-            #         sig.ml_gate_decision = "GRAY_ZONE_RESCUED"
-            #         applog.info("pipeline", f"{symbol}: GRAY_ZONE_RESCUED by Meta & TradeScore (prob={ml:.4f})")
-            #     entries.append(sig)
             # -----------------------------------------------------------------------------
             # [NEW CODE]:
             configured_regime_weight = float(self.regime_weight(sig.strategy, regime))
             effective_regime_weight = min(1.0, max(0.0, configured_regime_weight))
-            trade_score = min(100.0, max(0.0, raw_score * effective_regime_weight))
             # CR-07: Candidate ranking reflects configured regime weight for conflict prioritization
             ranking_score = min(100.0, max(0.0, raw_score * configured_regime_weight))
             sig.score = round(ranking_score / 100.0, 4)
 
-            approved, threshold = self.trade_score_engine.approve(trade_score, regime, is_event_day=self._is_event_day)
+            # Gate against raw_score: TradeScoreEngine.compute already weights the regime component,
+            # and gate_threshold is already regime-elevated (70.0 for RANGE, 65.0 for VOLATILE vs 55.0 for TREND).
+            # Ranking score is used to rank and prioritize winning candidates during conflict resolution.
+            approved, threshold = self.trade_score_engine.approve(raw_score, regime, is_event_day=self._is_event_day)
 
             # CR-09: High-agreement rescue path
             import os
@@ -507,22 +509,11 @@ class SignalPipeline:
             rescue_meta_min = float(os.environ.get("RESCUE_META_MIN", 0.80))
             rescue_risk_mult = float(os.environ.get("RESCUE_RISK_MULT", 0.75))
             meta_prob = meta_pred.prob_profitable if meta_pred is not None else 0.0
-            # -----------------------------------------------------------------------------
-            # [PREVIOUS CODE - PRESERVED]:
-            # is_high_agreement_rescue = (
-            #     not approved
-            #     and ml is not None
-            #     and ml >= rescue_ml_min
-            #     and meta_prob >= rescue_meta_min
-            #     and getattr(meta_pred, "passed", False)
-            # )
-            # -----------------------------------------------------------------------------
-            # [NEW CODE]:
             is_high_agreement_rescue = (
                 not approved
                 and ml is not None
                 and ml >= rescue_ml_min
-                and meta_prob >= rescue_meta_min
+                and (meta_prob >= rescue_meta_min or getattr(meta_pred, "decision", "") == "PASS")
                 and (getattr(meta_pred, "approved", False) or getattr(meta_pred, "decision", "") == "PASS")
             )
 
@@ -532,13 +523,13 @@ class SignalPipeline:
                 sig.ml_gate_decision = "HIGH_AGREEMENT_RESCUE"
                 applog.info(
                     "pipeline",
-                    f"{symbol} {sig.strategy}: HIGH_AGREEMENT_RESCUE (ml={ml:.4f}>={rescue_ml_min}, meta={meta_prob:.4f}>={rescue_meta_min}, ts={trade_score:.1f}<{threshold:.1f}, risk_mult={rescue_risk_mult})",
+                    f"{symbol} {sig.strategy}: HIGH_AGREEMENT_RESCUE (ml={ml:.4f}>={rescue_ml_min}, meta={meta_prob:.4f}, raw_score={raw_score:.1f}<{threshold:.1f}, risk_mult={rescue_risk_mult})",
                 )
 
             if not approved:
                 effective_rr = exp_ret_pct / exp_dd_pct if exp_dd_pct > 0 else excursion.reward_risk
                 ml_str = f"{ml:.2f}" if ml is not None else "N/A"
-                rejected.append((sig, f"Trade Score {trade_score:.1f} < {threshold:.1f} (raw={raw_score:.1f}, regime_weight={effective_regime_weight:.2f}) [regime={regime}, ml={ml_str}, rr={effective_rr:.2f}]"))
+                rejected.append((sig, f"Trade Score {raw_score:.1f} < {threshold:.1f} (ranking_score={ranking_score:.1f}, regime_weight={effective_regime_weight:.2f}) [regime={regime}, ml={ml_str}, rr={effective_rr:.2f}]"))
             else:
                 if is_warmup_reduced:
                     import os

@@ -99,8 +99,21 @@ class TradingEngineEvaluationMixin:
                 applog.info("engine", f"{symbol}: thin frame ({len(df)} bars) -- scheduling warmup backfill")
                 asyncio.create_task(_do_backfill())
 
-        if df.empty or len(df) < 30:
+        # =============================================================================
+        # [MODIFIED 2026-10-14]: CR-08 & L26 - Allow Fail-Soft Warmup Frame (>= 15 bars)
+        # ORIGINAL INTENT: Early return for df < 30 bars to ensure full feature calculation.
+        # REASON FOR CHANGE: Pipeline has a calibrated fail-soft warmup path for 15 <= len(df) < 30.
+        # Dropping frames at < 30 bars in engine_evaluation.py starved scanner-discovered candidates.
+        # SAFE ROLLBACK: The original code is preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # if df.empty or len(df) < 30:
+        #     return []
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        if df.empty or len(df) < 15:
             return []
+        # =============================================================================
 
         # ---- decision-input sanity gates (entries only; PIS exits below are
         # protective and must always run) ----
