@@ -117,6 +117,23 @@ class OpeningRangeBreakout(Strategy):
         et_times = df.index.tz_convert(ET).time
         today = et_dates[-1]
         now_time = et_times[-1]
+
+        # =============================================================================
+        # [ADDED 2026-10-14]: CR-20 — NVDA stale-bar anomaly guard
+        # ORIGINAL INTENT: today was taken directly from df.index.tz_convert(ET).date[-1].
+        # REASON FOR CHANGE: If df was stale, today evaluated to yesterday's date, causing ORB
+        #   to evaluate yesterday's opening range as today's (e.g. NVDA px=128.92 incident).
+        #   If ctx.now is provided, require that the latest bar's date matches ctx.now's session date.
+        # [PREVIOUS CODE - PRESERVED]:
+        # # No check against ctx.now session date
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        if ctx.now is not None:
+            ctx_date = ctx.now.astimezone(ET).date()
+            if today != ctx_date:
+                return None
+        # =============================================================================
+
         key = (symbol, today)
         if key in self._traded:
             return None

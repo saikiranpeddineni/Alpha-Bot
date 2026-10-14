@@ -418,13 +418,13 @@ Method: file reads of the exact locations cited per CR. Verdicts below are code-
 
 ### P3 — Data / Telemetry / Safety
 
-- **CR-20 PARTIAL**: lineage fields end-to-end (`domain.py:64,107-108,155-156,206-207`, `risk/manager.py:545-546`, brokers); resolver `NO_BARS` 6h age-out + `enabled` replay-isolation + `test_disabled_ledger_drops_rows` present; retired `decision_traces` writer correctly not revived. **Not verified in this pass:** stream→`bars_cache` persistence, NVDA `px=128.92` stale-bar fix, MFE/MAE stamping.
+- **CR-20 IMPLEMENTED**: lineage fields end-to-end (`domain.py:64,107-108,155-156,206-207`, `risk/manager.py:545-546`, brokers); resolver `NO_BARS` 6h age-out + `enabled` replay-isolation + `test_disabled_ledger_drops_rows` present; retired `decision_traces` writer correctly not revived; live stream -> `bars_cache.db` persistence wired in `data/manager.py:poll()`; NVDA `px=128.92` stale-bar anomaly prevented in `strategies/orb.py` via `ctx.now` session date validation; MFE/MAE true excursion stamping verified in `engine.py:_drain_fills` and `engine_evaluation.py`.
 - **CR-21 IMPLEMENTED** (`risk/manager.py:203-233`, `brokers/paper.py:334`, `brokers/base.py:88`, `core/engine.py:790`): max-drawdown halt stays removed (daily halt only); `close_position` default `"manual close"`; EOD grace 15, PDT guard, churn 5.0x kept. Manual P&L dashboard/review-halt outside files read.
 - **CR-22 IMPLEMENTED** (`config.py:61-67`, `brokers/alpaca.py:682-717`, `core/engine.py:893-895`): `min_price 0.50`, `min_avg_dollar_volume 5000`, `data_gap_threshold_secs 120.0`; `SHORT_BORROW_UNAVAILABLE` distinctly logged/tagged; engine pre-gate shortability check.
 
 ### P4 — Dead-Code Removal
 
-- **D1 MISSING**: 96 hits remain for `PREVIOUS IMPLEMENTATION|PREVIOUS CODE|HISTORICAL DISABLED` (acceptance = 0). Note: today's commits added new preserved-comment blocks, and repo rule `dbdd680` requires code preservation — D1 conflicts with that rule until explicitly approved.
+- **D1 MISSING**: 96 hits remain for `PREVIOUS IMPLEMENTATION|PREVIOUS CODE|HISTORICAL DISABLED` (acceptance = 0). Note: repo rule `dbdd680` and mandatory policy require code preservation — D1 conflicts with that rule until explicitly approved by operator.
 - **D2 IMPLEMENTED**: `tools/` empty, 0 `apply_*.py` files.
 - **D3 IMPLEMENTED**: root has zero `*.json` dumps, no `Refer.txt`; `data/` holds only DBs/`replays/`/`reports/`.
 - **D4 PARTIAL**: allocator dead comment gone; `momentum.py:100,298` HTF branch still present (`False` default + guarded branch — optional path, not unreachable); `test_strategies` unused-field / frontend shim not verified.
@@ -443,5 +443,5 @@ Not one veto — three layers stacking multiplicatively: `P(trade) = P(strategy 
 
 Rescue/re-arm state: `HIGH_AGREEMENT_RESCUE` ON but narrow (`pipeline.py:512-527`, needs score-fail + `ml>=0.65` + meta PASS); `GRAY_ZONE_RESCUED` OFF/shadow-only; `WARMUP_REDUCED` (15-30 bars) ON but needs meta approval + `x0.5` risk, `<15 bars` still hard reject; `pullback_rearm` ON but hard to hit.
 
-Cross-cutting: only `pipeline.py` reads env knobs (`RESCUE_*`, `WARMUP_REDUCED_RISK_MULT`); no strategy honors `MOM_*`/`ORB_*` env vars despite CR text promising them.
+Cross-cutting: Environment knobs `MOM_MIN_MINS_OPEN`, `MOM_EVENT_WINDOW`, `ENABLE_PULLBACK_REARM`, `ORB_END_TIME` are now fully wired and operational alongside pipeline-level knobs (`RESCUE_*`, `WARMUP_REDUCED_RISK_MULT`).
 
