@@ -135,7 +135,42 @@ class PISEngineAdapter:
         vol_px = max(0.0, _clean_px(vol_px, 0.0))
         atr_px = max(0.01, _clean_px(atr_px, 1.0))
 
-        # Build clean observation
+        # =============================================================================
+        # [MODIFIED 2026-10-14]: CR-07 - Pass Strategy & RSI2 Context to PIS
+        # ORIGINAL INTENT: PositionObservation lacked strategy name and rsi2 indicator value.
+        # REASON FOR CHANGE: Enable mean-reversion target hit recognition (RSI2 >= 70) in PIS exit planner.
+        # SAFE ROLLBACK: The original code is preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # obs = PositionObservation(
+        #     timestamp=eval_ts,
+        #     symbol=symbol,
+        #     side=side,
+        #     qty=abs(float(position.qty)),
+        #     entry_price=entry_px,
+        #     current_price=cur_px,
+        #     high=max(high_px, cur_px),
+        #     low=min(low_px, cur_px),
+        #     close=close_px,
+        #     volume=vol_px,
+        #     atr=atr_px,
+        #     initial_stop=initial_stop,
+        #     risk_per_share=risk_per_share,
+        #     current_stop=current_stop,
+        #     take_profit=take_profit,
+        #     r_multiple=r_multiple,
+        #     news_sentiment_score=news_sentiment,
+        # )
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        strat_name = str(getattr(position, "strategy", "") or "")
+        rsi2_val = None
+        try:
+            if "rsi2" in bar_df.columns and pd.notna(latest.get("rsi2")):
+                rsi2_val = float(latest["rsi2"])
+        except Exception:
+            rsi2_val = None
+
         obs = PositionObservation(
             timestamp=eval_ts,
             symbol=symbol,
@@ -154,7 +189,10 @@ class PISEngineAdapter:
             take_profit=take_profit,
             r_multiple=r_multiple,
             news_sentiment_score=news_sentiment,
+            strategy=strat_name,
+            rsi2=rsi2_val,
         )
+        # =============================================================================
 
         from app.db.database import Database
         from app.pis.profit_memory import ProfitMemoryState

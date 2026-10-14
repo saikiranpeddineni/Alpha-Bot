@@ -109,6 +109,20 @@ class PositionObservation:
     take_profit: float | None = None
     r_multiple: float = 0.0
     news_sentiment_score: float = 0.0
+    # =============================================================================
+    # [MODIFIED 2026-10-14]: CR-07 - Strategy & RSI2 Context for PIS Target Harvesting
+    # ORIGINAL INTENT: PositionObservation lacked strategy name and RSI2 indicator value.
+    # REASON FOR CHANGE: Enable mean-reversion target hit recognition (e.g., RSI2 >= 70)
+    # inside PIS exit planning without creating separate competing exit paths.
+    # SAFE ROLLBACK: Default values preserve existing behavior without regression.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # # No strategy or rsi2 fields
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    strategy: str = ""
+    rsi2: float | None = None
+    # =============================================================================
 
     def __post_init__(self) -> None:
         """Validate observation invariants fast."""
@@ -239,7 +253,19 @@ class PISConfig:
 
     history_max_len: int = 500
     activation_mfe_r: float = 1.50
-    runner_qualification_r: float = 3.0
+    # =============================================================================
+    # [MODIFIED 2026-10-14]: L37 & CR-11 - Runner Qualification Calibration
+    # ORIGINAL INTENT: Required peak >= 3.0R to qualify as runner.
+    # REASON FOR CHANGE: 3.0R peak is unreachable for standard intraday trades where winners average
+    # 0.44-1.83R peak. Calibrated to 2.0R to allow genuine trend runners to be nurtured.
+    # SAFE ROLLBACK: The original code is preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # runner_qualification_r: float = 3.0
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    runner_qualification_r: float = 2.0
+    # =============================================================================
     giveback_pct_runner: float = 0.35
     giveback_pct_hyper_runner_min: float = 0.10
     hyper_runner_decay_rate: float = 0.05

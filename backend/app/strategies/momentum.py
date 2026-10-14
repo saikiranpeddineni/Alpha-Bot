@@ -102,8 +102,21 @@ class MomentumCross(Strategy):
         "min_minutes_since_open": 10,
         "max_entries_per_day": 1,
         "min_target_atr": 0.5,
+        # =============================================================================
+        # [MODIFIED 2026-10-14]: CR-01 - Efficiency, Climax & Stacked EMA Intelligence
+        # ORIGINAL INTENT: No efficiency cutoff, no stacked EMA check, no climax distance check.
+        # REASON FOR CHANGE: Prevent entering low-efficiency chop (er20 < 0.25), fighting
+        # established 50 EMA trends, or buying exhausted bars > 2.0 ATR from EMA9.
+        # SAFE ROLLBACK: Set min_er20=0.0, use_stacked_ema_filter=False, max_climax_ema_dist_atr=99.0
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        "min_er20": 0.25,
+        "max_climax_ema_dist_atr": 2.0,
+        "climax_bar_tr_atr": 1.8,
+        "climax_bar_close_pos": 0.65,
+        "use_stacked_ema_filter": True,
+        # =============================================================================
     }
-    # =============================================================================
 
     # ------------------------------------------------------------------
     # Helpers
@@ -116,8 +129,38 @@ class MomentumCross(Strategy):
     def _sym_events(self, symbol: str) -> dict[str, dict]:
         return self._events.setdefault(symbol, {})
 
+    # =============================================================================
+    # [MODIFIED 2026-10-14]: L09 - Opposite-Direction Event Expiry
+    # ORIGINAL INTENT: Tracked 'long' and 'short' independently; opposing events coexisted.
+    # REASON FOR CHANGE: When MACD inflects down, an existing pending long event must be
+    # expired/cleared to prevent whipsawing opposite entries within the event window.
+    # SAFE ROLLBACK: The original code is preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # def _set_event(self, ctx: StrategyContext, symbol: str, direction: str, bar_time) -> None:
+    #     evt = self._sym_events(symbol)
+    #     existing = evt.get(direction)
+    #     if existing is None or existing.get("emitted", False):
+    #         evt[direction] = {"origin_time": bar_time, "latest_time": bar_time, "emitted": False}
+    #         self._debug(
+    #             ctx,
+    #             f"[momentum] MACD_EVENT_CREATED sym={symbol} dir={direction} event_ts={bar_time}",
+    #         )
+    #     else:
+    #         # Keep original inflection origin_time to prevent event age reset
+    #         existing["latest_time"] = bar_time
+    #         self._debug(
+    #             ctx,
+    #             f"[momentum] MACD_EVENT_UPDATED sym={symbol} dir={direction} origin_ts={existing.get('origin_time')} latest_ts={bar_time}",
+    #         )
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
     def _set_event(self, ctx: StrategyContext, symbol: str, direction: str, bar_time) -> None:
         evt = self._sym_events(symbol)
+        # L09 FIX: Clear opposing direction event on new inflection
+        opposing = "short" if direction == "long" else "long"
+        if opposing in evt:
+            self._expire_event(ctx, symbol, opposing, bar_time)
         existing = evt.get(direction)
         if existing is None or existing.get("emitted", False):
             evt[direction] = {"origin_time": bar_time, "latest_time": bar_time, "emitted": False}
@@ -132,6 +175,7 @@ class MomentumCross(Strategy):
                 ctx,
                 f"[momentum] MACD_EVENT_UPDATED sym={symbol} dir={direction} origin_ts={existing.get('origin_time')} latest_ts={bar_time}",
             )
+    # =============================================================================
 
     def _consume_event(self, ctx: StrategyContext, symbol: str, direction: str, candidate_time) -> None:
         evt = self._sym_events(symbol).get(direction, {})
@@ -357,10 +401,51 @@ class MomentumCross(Strategy):
             return None
         # =============================================================================
 
+        # =============================================================================
+        # [MODIFIED 2026-10-14]: CR-01 - Efficiency, Climax & Stacked EMA Intelligence
+        # ORIGINAL INTENT: Entered on EMA cross above VWAP without checking er20, distance to EMA9,
+        # or broader 50 EMA trend stack.
+        # REASON FOR CHANGE: Enforce er20 >= 0.25 (avoid churn), abs(close - ema9) <= 2.0*ATR (prevent climax chase),
+        # wide-bar climax rejection, and stacked EMA alignment (no longs into ema9<ema20<ema50).
+        # SAFE ROLLBACK: Set min_er20=0.0, use_stacked_ema_filter=False, max_climax_ema_dist_atr=99.0
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # # No er20 or stacked EMA check before candidate evaluation
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        if pd.notna(last.get("er20")) and float(last["er20"]) < float(p.get("min_er20", 0.25)):
+            return None
+
+        max_climax_ema = float(p.get("max_climax_ema_dist_atr", 2.0))
+        if atr > 0 and abs(close - float(last["ema9"])) > (max_climax_ema * atr):
+            return None
+
+        bar_range = float(last["high"]) - float(last["low"])
+        climax_tr_mult = float(p.get("climax_bar_tr_atr", 1.8))
+        climax_close_pos = float(p.get("climax_bar_close_pos", 0.65))
+        is_wide_bar = (bar_range / atr) >= climax_tr_mult if atr > 0 else False
+
+        ema50_val = float(last["ema50"]) if ("ema50" in last and pd.notna(last["ema50"])) else None
+        if p.get("use_stacked_ema_filter", True) and ema50_val is not None:
+            ema9_val = float(last["ema9"])
+            ema20_val = float(last["ema20"])
+            bearish_stack = ema9_val < ema20_val < ema50_val
+            bullish_stack = ema9_val > ema20_val > ema50_val
+        else:
+            bearish_stack = bullish_stack = False
+        # =============================================================================
+
         # ---- Long candidate ----
+        long_climax_reject = (
+            is_wide_bar
+            and bar_range > 0
+            and ((close - float(last["low"])) / bar_range) >= climax_close_pos
+        )
         if (
             allow_long
             and not structural_downtrend
+            and not bearish_stack
+            and not long_climax_reject
             and last["ema9"] > last["ema20"]
             and close > float(last["vwap"])
             and p["rsi_min"] <= rsi <= p["rsi_max"]
@@ -403,9 +488,16 @@ class MomentumCross(Strategy):
             )
 
         # ---- Short candidate ----
+        short_climax_reject = (
+            is_wide_bar
+            and bar_range > 0
+            and ((float(last["high"]) - close) / bar_range) >= climax_close_pos
+        )
         if (
             allow_short
             and not structural_uptrend
+            and not bullish_stack
+            and not short_climax_reject
             and last["ema9"] < last["ema20"]
             and close < float(last["vwap"])
             and (100.0 - p["rsi_max"]) <= rsi <= (100.0 - p["rsi_min"])

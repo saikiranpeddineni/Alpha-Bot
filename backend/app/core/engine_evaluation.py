@@ -383,6 +383,31 @@ class TradingEngineEvaluationMixin:
         entry_signals = [sig for sig in signals if sig.action != SignalAction.EXIT]
         exit_signals = [sig for sig in signals if sig.action == SignalAction.EXIT]
 
+        # =============================================================================
+        # [MODIFIED 2026-10-14]: CR-08 & L26 - Shadow Ledger Recording for Overlap Drops
+        # ORIGINAL INTENT: Kept entry_signals[0] and silently discarded all other signals.
+        # REASON FOR CHANGE: Discarded overlap signals left zero forensic trace. Record every
+        # discarded signal to shadow_ledger with gate="strategy_overlap" and winner details.
+        # SAFE ROLLBACK: The original code is preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # if len(entry_signals) > 1:
+        #     STRATEGY_PRIORITY = {
+        #         "gap_and_go": 1,
+        #         "liquidity_sweep": 2,
+        #         "bb_squeeze": 3,
+        #         "relative_strength": 4,
+        #         "trend_pullback": 5,
+        #         "orb": 6,
+        #         "rsi_reversion": 7,
+        #         "vwap_reversion": 8,
+        #         "momentum": 9,
+        #     }
+        #     # Sort ascending by priority (1 is best). Unknown strategies default to 99.
+        #     entry_signals.sort(key=lambda s: STRATEGY_PRIORITY.get(s.strategy, 99))
+        #     entry_signals = [entry_signals[0]] # Keep only the absolute best one
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
         if len(entry_signals) > 1:
             STRATEGY_PRIORITY = {
                 "gap_and_go": 1,
@@ -390,14 +415,36 @@ class TradingEngineEvaluationMixin:
                 "bb_squeeze": 3,
                 "relative_strength": 4,
                 "trend_pullback": 5,
-                "orb": 6,
-                "rsi_reversion": 7,
-                "vwap_reversion": 8,
-                "momentum": 9,
+                "pullback_rearm": 6,
+                "orb": 7,
+                "rsi_reversion": 8,
+                "vwap_reversion": 9,
+                "momentum": 10,
             }
             # Sort ascending by priority (1 is best). Unknown strategies default to 99.
             entry_signals.sort(key=lambda s: STRATEGY_PRIORITY.get(s.strategy, 99))
-            entry_signals = [entry_signals[0]] # Keep only the absolute best one
+            winner = entry_signals[0]
+            for loser in entry_signals[1:]:
+                applog.info("pipeline", f"{symbol} {loser.strategy} {loser.action}: rejected -- lost overlap conflict to {winner.strategy}")
+                try:
+                    from app.core.shadow_ledger import shadow_ledger
+                    shadow_ledger.record(
+                        symbol=symbol,
+                        action=str(loser.action.value if hasattr(loser.action, "value") else loser.action),
+                        strategy=loser.strategy,
+                        gate="strategy_overlap",
+                        reason=f"lost conflict to {winner.strategy} (priority {STRATEGY_PRIORITY.get(winner.strategy, 99)} vs {STRATEGY_PRIORITY.get(loser.strategy, 99)})",
+                        price=loser.price or (float(df["close"].iloc[-1]) if len(df) else None),
+                        stop_loss=loser.stop_loss,
+                        take_profit=loser.take_profit,
+                        atr14=float(df["atr14"].iloc[-1]) if "atr14" in df.columns and len(df) else None,
+                        confidence=loser.confidence,
+                        sig=loser,
+                    )
+                except Exception:
+                    pass
+            entry_signals = [winner]
+        # =============================================================================
 
         signals = exit_signals + entry_signals
 

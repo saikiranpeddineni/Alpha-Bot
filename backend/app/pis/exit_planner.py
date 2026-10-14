@@ -83,13 +83,36 @@ class ExitPlanner:
         elif target_stop > 0 and abs(target_stop - obs.initial_stop) > 1e-4:
             protection_updated = True
 
-        # Check profit target breach (with near-target climax tolerance when peak_r >= 1.50R)
+        # =============================================================================
+        # [MODIFIED 2026-10-14]: CR-07 - Wire RSI2 Normalization as Target Hit
+        # ORIGINAL INTENT: Target hit only evaluated static take_profit price boundary.
+        # REASON FOR CHANGE: For rsi2_reversion setups, reaching RSI2 >= 70 (long) or <= 30 (short)
+        # represents full thesis completion/normalization. Wire into target_hit as a Stage-1 trigger.
+        # SAFE ROLLBACK: The original code is preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # target_hit = False
+        # if obs.take_profit is not None and obs.take_profit > 0:
+        #     target_dist = (obs.take_profit - obs.high) if side > 0 else (obs.low - obs.take_profit)
+        #     target_tolerance = max(0.05, 0.20 * obs.atr)
+        #     if side > 0 and (obs.high >= obs.take_profit or (peak_r >= 1.50 and target_dist <= target_tolerance)) or side < 0 and (obs.low <= obs.take_profit or (peak_r >= 1.50 and target_dist <= target_tolerance)):
+        #         target_hit = True
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
         target_hit = False
         if obs.take_profit is not None and obs.take_profit > 0:
             target_dist = (obs.take_profit - obs.high) if side > 0 else (obs.low - obs.take_profit)
             target_tolerance = max(0.05, 0.20 * obs.atr)
             if side > 0 and (obs.high >= obs.take_profit or (peak_r >= 1.50 and target_dist <= target_tolerance)) or side < 0 and (obs.low <= obs.take_profit or (peak_r >= 1.50 and target_dist <= target_tolerance)):
                 target_hit = True
+
+        # CR-07: Mean reversion RSI2 target normalization
+        is_rsi2_strat = "rsi2" in str(getattr(obs, "strategy", "")).lower()
+        rsi2_val = getattr(obs, "rsi2", None)
+        if is_rsi2_strat and rsi2_val is not None:
+            if (side > 0 and rsi2_val >= 70.0) or (side < 0 and rsi2_val <= 30.0):
+                target_hit = True
+        # =============================================================================
 
         # Check Climax Reversal Exhaustion (On extreme extension >= 1.50R with wide-range blowoff wick)
         bar_range = obs.high - obs.low

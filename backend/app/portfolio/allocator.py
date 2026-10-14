@@ -260,7 +260,6 @@ def process_portfolio_allocations(
         # the kelly_override when sizing each entry — the hard stop-distance-based
         # position size is still the binding constraint, but Kelly provides the
         # equity fraction budget ceiling.
-        # F-03 FIX: was always mapping to None, making the entire Kelly computation dead code.
         alloc_results = portfolio_allocator.allocate(approved_candidates, available_capital, equity)
         for res in alloc_results:
             kelly_map[res.symbol] = res.kelly_fraction  # now flows to RiskManager.evaluate_entry()

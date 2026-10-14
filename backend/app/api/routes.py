@@ -436,10 +436,31 @@ async def run_trainer(request: Request) -> dict:
 
 # -------------------------------------------------------------- backtest --
 
+# =============================================================================
+# [MODIFIED 2026-10-14]: L50 - Pass BacktestBody starting_cash and slippage_bps to Replay
+# ORIGINAL INTENT: BacktestBody lacked slippage_bps, and starting_cash was not forwarded to run_replay_fast_async.
+# REASON FOR CHANGE: Ensure full contract compliance between API request and ReplayRuntime execution.
+# SAFE ROLLBACK: The original code is preserved below as comments.
+# -----------------------------------------------------------------------------
+# [PREVIOUS CODE - PRESERVED]:
+# class BacktestBody(BaseModel):
+#     symbols: list[str]
+#     days: int = Field(default=5, ge=1, le=90)
+#     starting_cash: float = Field(default=100_000.0, gt=0)
+#     use_ml_gate: bool = True
+#     use_dynamic_scanner: bool = False
+#     ignore_temporal_leakage: bool = False
+#     debug_mode: bool = False
+#     strategies: dict[str, dict] | None = None
+#     start_date: str | None = None
+#     end_date: str | None = None
+# -----------------------------------------------------------------------------
+# [NEW CODE]:
 class BacktestBody(BaseModel):
     symbols: list[str]
     days: int = Field(default=5, ge=1, le=90)
     starting_cash: float = Field(default=100_000.0, gt=0)
+    slippage_bps: float = Field(default=0.0, ge=0.0)
     use_ml_gate: bool = True
     use_dynamic_scanner: bool = False
     ignore_temporal_leakage: bool = False
@@ -447,6 +468,7 @@ class BacktestBody(BaseModel):
     strategies: dict[str, dict] | None = None
     start_date: str | None = None
     end_date: str | None = None
+# =============================================================================
 
 
 class ValidationBody(BaseModel):
@@ -488,12 +510,30 @@ async def post_backtest(body: BacktestBody, request: Request) -> dict:
         on_progress = lambda pct: hub.publish("backtest_progress", {"progress": round(pct / 100.0, 3)})  # noqa: E731
         runtime.session_manager.update_session = _wrap_progress(runtime.session_manager.update_session, on_progress)
 
+        # =============================================================================
+        # [MODIFIED 2026-10-14]: L50 - Pass starting_cash and slippage_bps to Replay Runtime
+        # ORIGINAL INTENT: Hardcoded arguments omitted starting_cash and slippage_bps.
+        # REASON FOR CHANGE: Ensure starting capital and slippage settings from request body bind to replay.
+        # SAFE ROLLBACK: The original code is preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # replay = await runtime.run_replay_fast_async(
+        #     start_date=start_date,
+        #     end_date=end_date,
+        #     symbols=[s.upper() for s in body.symbols] or None,
+        #     warmup_bars=600,
+        # )
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
         replay = await runtime.run_replay_fast_async(
             start_date=start_date,
             end_date=end_date,
             symbols=[s.upper() for s in body.symbols] or None,
             warmup_bars=600,
+            starting_cash=body.starting_cash,
+            slippage_bps=getattr(body, "slippage_bps", 0.0),
         )
+        # =============================================================================
 
         summary_in = replay.get("session", {})
         # Fast path returns day-shard results directly (validated byte-exact

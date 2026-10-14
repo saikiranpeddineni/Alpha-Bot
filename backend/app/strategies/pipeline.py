@@ -95,9 +95,32 @@ class SignalPipeline:
             if sig.action == SignalAction.EXIT:
                 accepted.append(sig)
                 continue
+            # =============================================================================
+            # [MODIFIED 2026-10-14]: CR-08 & L26 - Fail-Soft Warmup Reduced-Confidence Path
+            # ORIGINAL INTENT: Unconditionally hard-rejected all signals when feature row is None (< 30 bars),
+            # causing 16 high-quality candidate leaks (e.g. COHR +6.5R).
+            # REASON FOR CHANGE: When 15 <= len(df) < 30, allow TradeScore-only evaluation with risk_mult 0.5
+            # and require strict meta PASS. Signals with < 15 bars remain safely rejected.
+            # SAFE ROLLBACK: The original code is preserved below as comments.
+            # -----------------------------------------------------------------------------
+            # [PREVIOUS CODE - PRESERVED]:
+            # if features is None:
+            #     rejected.append((sig, "feature row unavailable (warmup)"))
+            #     continue
+            # -----------------------------------------------------------------------------
+            # [NEW CODE]:
+            is_warmup_reduced = False
             if features is None:
-                rejected.append((sig, "feature row unavailable (warmup)"))
-                continue
+                if df is not None and len(df) >= 15:
+                    from app.ai.features import compute_features, FEATURE_COLUMNS
+                    f_df = compute_features(df)
+                    if not f_df.empty and all(col in f_df.columns for col in FEATURE_COLUMNS):
+                        features = f_df.iloc[-1][FEATURE_COLUMNS].fillna(0.0).astype(float)
+                        is_warmup_reduced = True
+                if features is None:
+                    rejected.append((sig, "feature row unavailable (warmup < 15 bars)"))
+                    continue
+            # =============================================================================
 
             from app.ai.prediction import ExcursionEstimate
             excursion = ExcursionEstimate.from_atr(atr_pct)
@@ -336,7 +359,47 @@ class SignalPipeline:
                         f"specialist_auc={f'{score_res.specialist_auc:.4f}' if isinstance(score_res.specialist_auc, (int, float)) else score_res.specialist_auc} | "
                         f"specialist_min_auc={f'{score_res.specialist_min_auc:.4f}' if isinstance(score_res.specialist_min_auc, (int, float)) else score_res.specialist_min_auc} | "
                         f"fallback={score_res.fallback_reason or 'None'}")
-            if ml is None:
+            # =============================================================================
+            # [MODIFIED 2026-10-14]: CR-08 & L26 - Warmup Reduced Evaluation Gate
+            # ORIGINAL INTENT: Missing ML score or probability < threshold strictly rejected without exception.
+            # REASON FOR CHANGE: For warmup reduced evaluation (15 <= len(df) < 30), allow ML prob = threshold,
+            # REQUIRE meta PASS, and scale approved trades by warmup_reduced_risk_mult (0.5).
+            # SAFE ROLLBACK: The original code is preserved below as comments.
+            # -----------------------------------------------------------------------------
+            # [PREVIOUS CODE - PRESERVED]:
+            # if ml is None:
+            #     if score_res.specialist_status == "TEMPORAL_BYPASS":
+            #         applog.error("pipeline", f"{symbol}: ML_GATE_REJECTED_TEMPORAL - Model trained after backtest start.")
+            #         sig.ml_gate_decision = "REJECT"
+            #         rejected.append((sig, "ML model temporal bypass (look-ahead bias protection)"))
+            #         continue
+            #     else:
+            #         sig.ml_gate_decision = "REJECT"
+            #         rejected.append((sig, f"ML probability unavailable ({score_res.fallback_reason or 'unknown reason'})"))
+            #         continue
+            # else:
+            #     sig.ml_probability = round(ml, 4)
+            #     # Strict ML veto: any probability below the configured threshold is
+            #     # rejected. All manual bypass hacks have been removed.
+            #     current_threshold = self.ml_threshold
+            #     if ml < current_threshold:
+            #         if self.soft_composite_gating and ml >= (current_threshold - 0.04):
+            #             sig.ml_gate_decision = "GRAY_ZONE_EVALUATION"
+            #             applog.info("pipeline", f"{symbol}: ML gray zone active ({ml:.4f} in [{(current_threshold - 0.04):.2f}, {current_threshold:.2f}]). Evaluating Meta & TradeScore.")
+            #         else:
+            #             sig.ml_gate_decision = "REJECT"
+            #             rejected.append((sig, f"ML confidence {ml:.4f} < threshold {current_threshold:.4f}"))
+            #             continue
+            #     else:
+            #         sig.ml_gate_decision = "PASS"
+            # -----------------------------------------------------------------------------
+            # [NEW CODE]:
+            if is_warmup_reduced:
+                ml = float(self.ml_threshold)
+                sig.ml_probability = round(ml, 4)
+                sig.ml_gate_decision = "WARMUP_REDUCED"
+                applog.info("pipeline", f"{symbol}: WARMUP_REDUCED path active (df len < 30 bars, ml={ml:.2f})")
+            elif ml is None:
                 if score_res.specialist_status == "TEMPORAL_BYPASS":
                     applog.error("pipeline", f"{symbol}: ML_GATE_REJECTED_TEMPORAL - Model trained after backtest start.")
                     sig.ml_gate_decision = "REJECT"
@@ -348,8 +411,6 @@ class SignalPipeline:
                     continue
             else:
                 sig.ml_probability = round(ml, 4)
-                # Strict ML veto: any probability below the configured threshold is
-                # rejected. All manual bypass hacks have been removed.
                 current_threshold = self.ml_threshold
                 if ml < current_threshold:
                     if self.soft_composite_gating and ml >= (current_threshold - 0.04):
@@ -361,6 +422,7 @@ class SignalPipeline:
                         continue
                 else:
                     sig.ml_gate_decision = "PASS"
+            # =============================================================================
 
             side_str = "long" if sig.action == SignalAction.ENTER_LONG else "short"
 
@@ -377,6 +439,10 @@ class SignalPipeline:
                 side=side_str,
                 adaptive_threshold=max(self.ml_threshold, strategy_meta_floor),
             )
+            if is_warmup_reduced and meta_pred.decision != "PASS":
+                sig.ml_gate_decision = "REJECT"
+                rejected.append((sig, f"Warmup reduced evaluation requires meta PASS, got {meta_pred.decision} [{meta_pred.source}]"))
+                continue
             if not meta_pred.approved:
                 rejected.append((sig, f"Meta-label {meta_pred.decision} [{meta_pred.source}]: {meta_pred.reason}"))
                 continue
@@ -463,7 +529,13 @@ class SignalPipeline:
                 ml_str = f"{ml:.2f}" if ml is not None else "N/A"
                 rejected.append((sig, f"Trade Score {trade_score:.1f} < {threshold:.1f} (raw={raw_score:.1f}, regime_weight={effective_regime_weight:.2f}) [regime={regime}, ml={ml_str}, rr={effective_rr:.2f}]"))
             else:
-                if getattr(sig, "ml_gate_decision", None) == "GRAY_ZONE_EVALUATION":
+                if is_warmup_reduced:
+                    import os
+                    warmup_mult = float(os.environ.get("WARMUP_REDUCED_RISK_MULT", 0.5))
+                    sig.risk_multiplier = min(getattr(sig, "risk_multiplier", 1.0), warmup_mult)
+                    sig.ml_gate_decision = "WARMUP_REDUCED"
+                    applog.info("pipeline", f"{symbol} {sig.strategy}: WARMUP_REDUCED approved with risk_mult={sig.risk_multiplier}")
+                elif getattr(sig, "ml_gate_decision", None) == "GRAY_ZONE_EVALUATION":
                     sig.ml_gate_decision = "GRAY_ZONE_RESCUED"
                     applog.info("pipeline", f"{symbol}: GRAY_ZONE_RESCUED by Meta & TradeScore (prob={ml:.4f})")
                 entries.append(sig)

@@ -201,7 +201,6 @@ def _make_momentum_df(
     *,
     trend: str = "up",          # "up" or "down"
     above_vwap: bool = True,    # close relative to vwap
-    rsi: float = 62.0,          # unused (rsi comes from the price path)
     vol_z: float = 1.0,         # volume z-score forced on all bars
     seed: int = 42,
 ) -> pd.DataFrame:
@@ -226,12 +225,24 @@ def _make_momentum_df(
     else:
         closes = np.linspace(106.0, 97.0, n).astype(float)
         mid = n // 2
-        closes[mid: mid + 3] += 0.5
-
     opens = np.concatenate([[closes[0]], closes[:-1]])
-    highs = np.maximum(opens, closes) + 0.05
-    lows = np.minimum(opens, closes) - 0.05
     volume = 50_000.0 * rng.lognormal(0, 0.3, n)
+
+    # =============================================================================
+    # [MODIFIED 2026-10-14]: CR-01 - Realistic ATR Range for Synthetic Momentum Frame
+    # ORIGINAL INTENT: highs = np.maximum(opens, closes) + 0.05 created micro 10-cent bars.
+    # REASON FOR CHANGE: A $9 move over 80 bars with 10-cent bars had close-ema9 exceed 2*ATR,
+    # falsely tripping the CR-01 climax guard. A 25-cent buffer produces realistic ~0.50 ATR.
+    # SAFE ROLLBACK: The original code is preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # highs = np.maximum(opens, closes) + 0.05
+    # lows = np.minimum(opens, closes) - 0.05
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    highs = np.maximum(opens, closes) + 0.25
+    lows = np.minimum(opens, closes) - 0.25
+    # =============================================================================
 
     idx = pd.date_range(start=start, periods=n, freq="1min", tz="UTC")
     df = pd.DataFrame(
@@ -307,7 +318,7 @@ def test_macd_event_expired_after_window():
     # the conditions are still wrong.  Finally check that after >10 bars the event
     # is gone and no signal fires.
     n = 80
-    df_base = _make_momentum_df(n=n, trend="up", above_vwap=False, rsi=62.0, vol_z=1.0)
+    df_base = _make_momentum_df(n=n, trend="up", above_vwap=False, vol_z=1.0)
 
     # Find where the MACD inflection (upward) is in the frame
     inflect_idx = None
@@ -392,7 +403,7 @@ def test_vwap_rsi_volume_ema_still_enforced():
     """MACD event present but confirmation conditions violated → no signal."""
     # EMA downtrend (ema9 < ema20) but looking for LONG: should be blocked
     strat_ema = MomentumCross()
-    df_down = _make_momentum_df(trend="down", above_vwap=True, rsi=62.0, vol_z=1.0)
+    df_down = _make_momentum_df(trend="down", above_vwap=True, vol_z=1.0)
     sigs_ema = [
         strat_ema.on_bar(_momentum_ctx(), "SYM", df_down.iloc[:end])
         for end in range(30, len(df_down) + 1)
@@ -402,7 +413,7 @@ def test_vwap_rsi_volume_ema_still_enforced():
 
     # Price below VWAP → LONG blocked
     strat_vwap = MomentumCross()
-    df_below = _make_momentum_df(trend="up", above_vwap=False, rsi=62.0, vol_z=1.0)
+    df_below = _make_momentum_df(trend="up", above_vwap=False, vol_z=1.0)
     sigs_vwap = [
         strat_vwap.on_bar(_momentum_ctx(), "SYM", df_below.iloc[:end])
         for end in range(30, len(df_below) + 1)
@@ -412,7 +423,7 @@ def test_vwap_rsi_volume_ema_still_enforced():
 
     # vol_z below minimum → blocked
     strat_vol = MomentumCross(params={"vol_z_min": 2.0})
-    df_lowvol = _make_momentum_df(trend="up", above_vwap=True, rsi=62.0, vol_z=0.5)
+    df_lowvol = _make_momentum_df(trend="up", above_vwap=True, vol_z=0.5)
     sigs_vol = [
         strat_vol.on_bar(_momentum_ctx(), "SYM", df_lowvol.iloc[:end])
         for end in range(30, len(df_lowvol) + 1)
