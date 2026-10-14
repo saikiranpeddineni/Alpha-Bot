@@ -173,6 +173,11 @@ class RiskConfig(BaseModel):
     enable_entry_consensus: bool = Field(False)
     entry_consensus_rs_long_min: float = Field(50.0, ge=0.0, le=100.0)
     adaptive_model_weight: float = Field(0.30, ge=0.0, le=1.0)
+    # Manual-entry session budget: undisciplined discretionary taps cost
+    # -$3,909 across 6 manual trades (CR-21). Entries beyond this per-session
+    # count are rejected for operator review. Closes/flattens are NEVER
+    # blocked -- risk reduction always flows. 0 disables manual entries.
+    max_manual_entries_per_session: int = Field(3, ge=0, le=20)
     # =============================================================================
     # [ADDED 2026-10-14]: CR-02b - Pullback Re-Arm Global Toggle Knob
     # ORIGINAL INTENT: Registered strategy with no config-level enable flag.

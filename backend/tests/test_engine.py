@@ -110,6 +110,25 @@ async def test_engine_manual_flow(engine: TradingEngine):
     await engine.stop()
 
 
+async def test_manual_entry_session_budget(engine: TradingEngine):
+    """CR-21 review halt: entries past the session budget raise, closes flow."""
+    from app.core.domain import OrderRequest, OrderSide
+
+    engine.strategies = []
+    await engine.start("demo")
+    engine.risk_config.max_manual_entries_per_session = 1
+
+    first = await engine.manual_order(OrderRequest(symbol="SPY", side=OrderSide.BUY, qty=1))
+    assert first.status == "filled"
+    with pytest.raises(RuntimeError, match="budget exhausted"):
+        await engine.manual_order(OrderRequest(symbol="QQQ", side=OrderSide.BUY, qty=1))
+    # Reducing/closing is risk reduction: never gated by the entry budget.
+    closer = await engine.manual_order(OrderRequest(symbol="SPY", side=OrderSide.SELL, qty=1))
+    assert closer.status == "filled"
+
+    await engine.stop()
+
+
 async def test_tick_reuses_authoritative_positions_snapshot_for_broadcast(engine: TradingEngine):
     published_positions: list[list[dict]] = []
     engine.publish = lambda topic, payload: published_positions.append(payload) if topic == "positions" else None

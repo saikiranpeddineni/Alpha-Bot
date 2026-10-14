@@ -1888,6 +1888,30 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
 
         req.strategy = "manual"
 
+        # Owner control (CR-21): per-session manual-entry budget. Closes and
+        # position reductions always flow; only NEW discretionary entries
+        # count against the budget. Raises like other manual gates so the API
+        # surfaces it as HTTP 400 with the reason intact.
+        if is_entry:
+            if not hasattr(self, "_manual_entry_dates"):
+                self._manual_entry_dates = []
+            today_et = datetime.now(ZoneInfo("America/New_York")).date()
+            session_count = sum(1 for d in self._manual_entry_dates if d == today_et)
+            _rc = getattr(self, "risk_config", None)
+            budget = int(getattr(_rc, "max_manual_entries_per_session", 3) if _rc is not None else 3)
+            if session_count >= budget:
+                applog.warning(
+                    "engine",
+                    f"Manual entry BLOCKED for {req.symbol}: session budget exhausted "
+                    f"({session_count}/{budget}) -- operator review required",
+                )
+                raise RuntimeError(
+                    f"Manual entry budget exhausted ({session_count}/{budget} used this session) -- "
+                    f"operator review required. Closing/reducing positions is still allowed."
+                )
+            self._manual_entry_dates.append(today_et)
+            applog.info("engine", f"Manual entry {session_count + 1}/{budget} this session: {req.side} {req.qty} {req.symbol} ({req.reason})")
+
         # If this is a manual sell/cover (closing or reducing), add to pending-close guard so
         # strategies cannot immediately re-enter on the same/next tick before the fill drains.
         if not hasattr(self, "_pending_close_symbols"):
