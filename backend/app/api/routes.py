@@ -229,6 +229,7 @@ class ManualOrderBody(BaseModel):
     qty: float = Field(gt=0, le=100_000)
     order_type: OrderType = OrderType.MARKET
     limit_price: float | None = Field(default=None, gt=0)
+    reason: str | None = Field(default=None, description="Operator reason for manual order")
 
 
 @router.post("/orders")
@@ -236,6 +237,20 @@ async def submit_order(body: ManualOrderBody, request: Request) -> dict:
     engine = _engine(request)
     if body.order_type == OrderType.LIMIT and body.limit_price is None:
         raise HTTPException(status_code=400, detail="limit_price required for limit orders")
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # req = OrderRequest(
+    #     symbol=body.symbol.upper(),
+    #     side=body.side,
+    #     qty=body.qty,
+    #     order_type=body.order_type,
+    #     limit_price=body.limit_price,
+    #     strategy="manual",
+    #     reason="manual order",
+    # )
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    order_reason = f"manual order: {body.reason.strip()}" if body.reason and body.reason.strip() else "manual order"
     req = OrderRequest(
         symbol=body.symbol.upper(),
         side=body.side,
@@ -243,7 +258,7 @@ async def submit_order(body: ManualOrderBody, request: Request) -> dict:
         order_type=body.order_type,
         limit_price=body.limit_price,
         strategy="manual",
-        reason="manual order",
+        reason=order_reason,
     )
     try:
         order = await engine.manual_order(req)

@@ -510,6 +510,28 @@ class RiskManager:
 
         # ALL targets are handled exclusively by PIS. No native broker targets (per Phase 1 invariant).
         executable_target = None
+        # =============================================================================
+        # [MODIFIED 2026-10-14]: CR-20 - Decision-Bar Lineage Forwarding
+        # ORIGINAL INTENT: OrderRequest omitted signal_timestamp_utc and decision_bar_timestamp_utc,
+        # leaving them NULL in downstream Order/Fill records and replay artifacts.
+        # REASON FOR CHANGE: Populate decision_bar_timestamp_utc and signal_timestamp_utc on OrderRequest
+        # to ensure end-to-end auditability and trade forensics.
+        # SAFE ROLLBACK: The original code is preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # order = OrderRequest(
+        #     symbol=symbol,
+        #     side=side,
+        #     qty=qty,
+        #     order_type=order_type,
+        #     limit_price=limit_price,
+        #     stop_loss=executable_stop,
+        #     take_profit=executable_target,
+        #     strategy=signal.strategy,
+        #     reason=signal.reason,
+        # )
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
         order = OrderRequest(
             symbol=symbol,
             side=side,
@@ -520,7 +542,10 @@ class RiskManager:
             take_profit=executable_target,
             strategy=signal.strategy,
             reason=signal.reason,
+            signal_timestamp_utc=getattr(signal, "timestamp", None),
+            decision_bar_timestamp_utc=getattr(signal, "decision_bar_timestamp_utc", None),
         )
+        # =============================================================================
         risk_str = f"${risk_amount:,.0f}" if isinstance(risk_amount, (int, float)) else str(risk_amount)
         return RiskDecision(
             approved=True,

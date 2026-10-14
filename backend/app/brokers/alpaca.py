@@ -737,9 +737,18 @@ class AlpacaBroker(Broker):
         self._meta[str(raw.id)] = (req.strategy, req.reason)
         if req.strategy != "emergency_protection":
             self._symbol_strategies[req.symbol.upper()] = req.strategy
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # order = self._to_order(raw)
+        # order.stop_loss = req.stop_loss
+        # order.take_profit = req.take_profit
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
         order = self._to_order(raw)
         order.stop_loss = req.stop_loss
         order.take_profit = req.take_profit
+        order.signal_timestamp_utc = req.signal_timestamp_utc
+        order.decision_bar_timestamp_utc = req.decision_bar_timestamp_utc
         applog.trade("broker.alpaca", f"Submitted {req.side.upper()} {qty} {req.symbol} ({req.strategy})")
         return order
 
@@ -961,7 +970,14 @@ class AlpacaBroker(Broker):
         except Exception as exc:  # noqa: BLE001
             applog.warning("broker.alpaca", f"cancel_all failed: {exc}")
 
-    async def close_position(self, symbol: str, reason: str = "manual", qty: float | None = None) -> Order | None:
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # async def close_position(self, symbol: str, reason: str = "manual", qty: float | None = None) -> Order | None:
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    async def close_position(self, symbol: str, reason: str = "manual close", qty: float | None = None) -> Order | None:
+        if not reason or not reason.strip() or reason.strip().lower() in ("exit", "manual"):
+            reason = "manual close"
         try:
             # First, fetch and cancel any outstanding open orders for this symbol to release held quantities
             cancelled_ids: set[str] = set()
