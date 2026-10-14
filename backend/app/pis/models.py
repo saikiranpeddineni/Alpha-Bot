@@ -62,6 +62,8 @@ class ReasonCode(str, Enum):
     DISTRIBUTION_DETECTED = "DISTRIBUTION_DETECTED"
     PROTECTION_BREACH = "PROTECTION_BREACH"
     FLOOR_TAG_RUNNER = "FLOOR_TAG_RUNNER"
+    DOA_STAGNATION_HARVEST = "DOA_STAGNATION_HARVEST"
+    EOD_PREHARVEST = "EOD_PREHARVEST"
     MANUAL_OVERRIDE = "MANUAL_OVERRIDE"
     KILL_SWITCH_ACTIVE = "KILL_SWITCH_ACTIVE"
     EMERGENCY_STOP = "EMERGENCY_STOP"
@@ -107,6 +109,20 @@ class PositionObservation:
     take_profit: float | None = None
     r_multiple: float = 0.0
     news_sentiment_score: float = 0.0
+    # =============================================================================
+    # [MODIFIED 2026-10-14]: CR-07 - Strategy & RSI2 Context for PIS Target Harvesting
+    # ORIGINAL INTENT: PositionObservation lacked strategy name and RSI2 indicator value.
+    # REASON FOR CHANGE: Enable mean-reversion target hit recognition (e.g., RSI2 >= 70)
+    # inside PIS exit planning without creating separate competing exit paths.
+    # SAFE ROLLBACK: Default values preserve existing behavior without regression.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # # No strategy or rsi2 fields
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    strategy: str = ""
+    rsi2: float | None = None
+    # =============================================================================
 
     def __post_init__(self) -> None:
         """Validate observation invariants fast."""
@@ -237,7 +253,19 @@ class PISConfig:
 
     history_max_len: int = 500
     activation_mfe_r: float = 1.50
-    runner_qualification_r: float = 3.0
+    # =============================================================================
+    # [MODIFIED 2026-10-14]: L37 & CR-11 - Runner Qualification Calibration
+    # ORIGINAL INTENT: Required peak >= 3.0R to qualify as runner.
+    # REASON FOR CHANGE: 3.0R peak is unreachable for standard intraday trades where winners average
+    # 0.44-1.83R peak. Calibrated to 2.0R to allow genuine trend runners to be nurtured.
+    # SAFE ROLLBACK: The original code is preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # runner_qualification_r: float = 3.0
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    runner_qualification_r: float = 2.0
+    # =============================================================================
     giveback_pct_runner: float = 0.35
     giveback_pct_hyper_runner_min: float = 0.10
     hyper_runner_decay_rate: float = 0.05
@@ -260,29 +288,51 @@ class PISConfig:
     # Live winners average ~0.44R to 1.5R peaks. Sub-activation arms once peak reaches
     # breakeven_trigger_r (0.40R) and 2.5x ATR confirmation, capped at progressive_lock_cap_trigger_r (0.85R)
     # so high ATR names are never permanently disarmed. Locks a fraction of peak profit toward activation_mfe_r.
+    # =============================================================================
+    # [MODIFIED 2026-10-14]: CR-10, CR-12, CR-13 - Peak-R Protection & Tiered Giveback
+    # ORIGINAL INTENT: breakeven_trigger_atr_mult 2.50 flat, progressive_lock_end_frac 0.35,
+    # profit_guard_max_giveback_pct 0.55 flat across all excursion levels.
+    # REASON FOR CHANGE: Excursions peaked at 1.83R in live winners but gave back 55% down to 0.83R.
+    # Adaptive breakout breakeven trigger (1.5x ATR vs 2.5x ATR for reversion), higher lock fraction (0.45)
+    # for peak >= 1.0R, tiered giveback (40% for 1-2R, 30% for >=2R), and DOA stagnation cut at -0.25R.
+    # SAFE ROLLBACK: The original code is preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # breakeven_trigger_r: float = 0.40
+    # breakeven_trigger_atr_mult: float = 2.50
+    # progressive_lock_cap_trigger_r: float = 0.85
+    # progressive_lock_start_frac: float = 0.20
+    # progressive_lock_end_frac: float = 0.35
+    # progressive_lock_trail_atr_mult: float = 1.00
+    # enable_profit_giveback_guard: bool = True
+    # profit_guard_peak_r: float = 0.60
+    # profit_guard_max_giveback_pct: float = 0.55
+    # profit_guard_min_giveback_atr_r: float = 0.75
+    # profit_guard_exit_ratio: float = 0.50
+    # weak_trend_scale_out_r: float = 1.00
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
     breakeven_trigger_r: float = 0.40
     breakeven_trigger_atr_mult: float = 2.50
+    breakeven_atr_mult_breakout: float = 1.50
+    breakeven_atr_mult_reversion: float = 2.50
     progressive_lock_cap_trigger_r: float = 0.85
     progressive_lock_start_frac: float = 0.20
-    progressive_lock_end_frac: float = 0.35
-    # The locked floor may never trail closer than this many ATRs behind the
-    # peak -- banking profit is pointless if normal churn stops you out one
-    # bar later.
+    progressive_lock_end_frac: float = 0.45
     progressive_lock_trail_atr_mult: float = 1.00
-    # --- Profit giveback guard ---
-    # When a trade peaked above profit_guard_peak_r and then surrendered more
-    # than profit_guard_max_giveback_pct of that peak while still green, bank a
-    # partial immediately instead of waiting for the trailing floor.
     enable_profit_giveback_guard: bool = True
     profit_guard_peak_r: float = 0.60
     profit_guard_max_giveback_pct: float = 0.55
-    # A giveback smaller than this many ATRs is noise, not reversal.
+    profit_guard_pct_tier1: float = 0.55  # peak < 1.0R
+    profit_guard_pct_tier2: float = 0.40  # 1.0 <= peak < 2.0R
+    profit_guard_pct_tier3: float = 0.30  # peak >= 2.0R
     profit_guard_min_giveback_atr_r: float = 0.75
     profit_guard_exit_ratio: float = 0.50
-    # --- Trend-quality adaptive scale-out ---
-    # Strong trends keep the full scale_out_target_r; weakening trends bank at
-    # weak_trend_scale_out_r instead (1R) so soft runners don't round-trip.
     weak_trend_scale_out_r: float = 1.00
+    enable_doa_stagnation_harvest: bool = True
+    doa_stagnation_bars: int = 12
+    doa_r_threshold: float = -0.25
+    # =============================================================================
     weak_momentum_threshold: float = 0.45
     # --- Floor-tag runner (evidence-driven) ---
     # Measured on live history: winners average only ~0.44R peak, so the 2R

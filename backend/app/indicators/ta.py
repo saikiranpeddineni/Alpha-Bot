@@ -72,8 +72,18 @@ def bollinger(series: pd.Series, period: int = 20, num_std: float = 2.0) -> pd.D
     std = series.rolling(period, min_periods=period).std(ddof=0)
     upper = mid + num_std * std
     lower = mid - num_std * std
-    width = (upper - lower) / mid
-    # Position of price within the bands: 0 = lower band, 1 = upper band
+    # =============================================================================
+    # [MODIFIED 2026-10-14]: L48 - Bollinger Width Zero-Division Guard
+    # ORIGINAL INTENT: (upper - lower) / mid computed Bollinger band width without zero check.
+    # REASON FOR CHANGE: If mid == 0.0, division by zero raises warnings/inf.
+    # SAFE ROLLBACK: The original code is preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # width = (upper - lower) / mid
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    width = (upper - lower) / mid.replace(0.0, np.nan)
+    # =============================================================================
     span = (upper - lower).replace(0.0, np.nan)
     pos = (series - lower) / span
     return pd.DataFrame(
@@ -151,8 +161,22 @@ def opening_range_distance(df: pd.DataFrame, range_minutes: int = 15) -> pd.Seri
         post_or_mask = session_mask & (mins_et >= 570 + range_minutes)
         if post_or_mask.any():
             close = df.loc[post_or_mask, "close"].astype(float)
-            dist_up = (close - or_high) / or_high
-            dist_down = (or_low - close) / or_low
+            # =============================================================================
+            # [MODIFIED 2026-10-14]: L48 - Opening Range Zero-Division Guard
+            # ORIGINAL INTENT: (close - or_high) / or_high computed distance without zero check.
+            # REASON FOR CHANGE: If or_high or or_low is 0.0, division by zero raises warnings/inf.
+            # SAFE ROLLBACK: The original code is preserved below as comments.
+            # -----------------------------------------------------------------------------
+            # [PREVIOUS CODE - PRESERVED]:
+            # dist_up = (close - or_high) / or_high
+            # dist_down = (or_low - close) / or_low
+            # -----------------------------------------------------------------------------
+            # [NEW CODE]:
+            safe_or_high = or_high if abs(or_high) > 1e-9 else np.nan
+            safe_or_low = or_low if abs(or_low) > 1e-9 else np.nan
+            dist_up = (close - or_high) / safe_or_high
+            dist_down = (or_low - close) / safe_or_low
+            # =============================================================================
             out.loc[post_or_mask] = pd.concat([dist_up, dist_down], axis=1).max(axis=1) * 100.0
 
     # For bars before OR is established, fill with 0
@@ -183,7 +207,8 @@ def enrich(df: pd.DataFrame) -> pd.DataFrame:
     out["atr_ext"] = (close - out["ema9"]).abs() / out["atr14"].replace(0.0, 0.001)
     out = out.join(bollinger(close, 20, 2.0))
     out["vwap"] = session_vwap(out)
-    out["vwap_dist_pct"] = (close / out["vwap"] - 1.0) * 100.0
+    safe_vwap = out["vwap"].replace(0.0, np.nan)
+    out["vwap_dist_pct"] = (close / safe_vwap - 1.0) * 100.0
     out["vol_sma20"] = sma(out["volume"].astype(float), 20)
     out["vol_z"] = rolling_zscore(out["volume"].astype(float), 20)
     out["er20"] = efficiency_ratio(close, 20)

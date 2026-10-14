@@ -83,13 +83,36 @@ class ExitPlanner:
         elif target_stop > 0 and abs(target_stop - obs.initial_stop) > 1e-4:
             protection_updated = True
 
-        # Check profit target breach (with near-target climax tolerance when peak_r >= 1.50R)
+        # =============================================================================
+        # [MODIFIED 2026-10-14]: CR-07 - Wire RSI2 Normalization as Target Hit
+        # ORIGINAL INTENT: Target hit only evaluated static take_profit price boundary.
+        # REASON FOR CHANGE: For rsi2_reversion setups, reaching RSI2 >= 70 (long) or <= 30 (short)
+        # represents full thesis completion/normalization. Wire into target_hit as a Stage-1 trigger.
+        # SAFE ROLLBACK: The original code is preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # target_hit = False
+        # if obs.take_profit is not None and obs.take_profit > 0:
+        #     target_dist = (obs.take_profit - obs.high) if side > 0 else (obs.low - obs.take_profit)
+        #     target_tolerance = max(0.05, 0.20 * obs.atr)
+        #     if side > 0 and (obs.high >= obs.take_profit or (peak_r >= 1.50 and target_dist <= target_tolerance)) or side < 0 and (obs.low <= obs.take_profit or (peak_r >= 1.50 and target_dist <= target_tolerance)):
+        #         target_hit = True
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
         target_hit = False
         if obs.take_profit is not None and obs.take_profit > 0:
             target_dist = (obs.take_profit - obs.high) if side > 0 else (obs.low - obs.take_profit)
             target_tolerance = max(0.05, 0.20 * obs.atr)
             if side > 0 and (obs.high >= obs.take_profit or (peak_r >= 1.50 and target_dist <= target_tolerance)) or side < 0 and (obs.low <= obs.take_profit or (peak_r >= 1.50 and target_dist <= target_tolerance)):
                 target_hit = True
+
+        # CR-07: Mean reversion RSI2 target normalization
+        is_rsi2_strat = "rsi2" in str(getattr(obs, "strategy", "")).lower()
+        rsi2_val = getattr(obs, "rsi2", None)
+        if is_rsi2_strat and rsi2_val is not None:
+            if (side > 0 and rsi2_val >= 70.0) or (side < 0 and rsi2_val <= 30.0):
+                target_hit = True
+        # =============================================================================
 
         # Check Climax Reversal Exhaustion (On extreme extension >= 1.50R with wide-range blowoff wick)
         bar_range = obs.high - obs.low
@@ -155,22 +178,84 @@ class ExitPlanner:
         if trend_weakening:
             effective_scale_out_r = min(effective_scale_out_r, self.config.weak_trend_scale_out_r)
 
+        # =============================================================================
+        # [MODIFIED 2026-10-14]: CR-11 - Predicted-Ceiling Scale-Out Extension
+        # ORIGINAL INTENT: Scale-out triggered only at fixed 2.0R (or 1.0R in weak trend),
+        # target hit, exhaustion climax, or stagnation harvest.
+        # REASON FOR CHANGE: Average winner peak R is ~0.44-1.5R, so fixed 2.0R rarely arms.
+        # When predicted_max_r is available, trigger Stage-1 50% scale-out when position reaches
+        # >= 70% of predicted ceiling (min 1.0R) with fading momentum (score <= 0.45), banking
+        # profit at predicted capacity.
+        # SAFE ROLLBACK: The original code is preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # scale_out_triggered = False
+        # if getattr(self.config, "enable_scale_out", True) and not has_scaled_out:
+        #     if target_hit or peak_r >= effective_scale_out_r or exhaustion_climax or stagnation_harvest:
+        #         scale_out_triggered = True
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        predicted_ceiling_scale_out = (
+            predicted_max_r > 0
+            and peak_r >= max(1.0, 0.70 * predicted_max_r)
+            and health.momentum_score <= 0.45
+        )
         scale_out_triggered = False
         if getattr(self.config, "enable_scale_out", True) and not has_scaled_out:
-            if target_hit or peak_r >= effective_scale_out_r or exhaustion_climax or stagnation_harvest:
+            if (
+                target_hit
+                or peak_r >= effective_scale_out_r
+                or exhaustion_climax
+                or stagnation_harvest
+                or predicted_ceiling_scale_out
+            ):
                 scale_out_triggered = True
+        # =============================================================================
 
         if scale_out_triggered and not is_runner:
             is_runner = True
 
-        # --- Profit giveback guard ---
-        # A trade that peaked and then surrendered most of its excursion while
-        # still green should bank partial profit NOW rather than hoping the
-        # trailing floor catches the reversal one bar later. This converts
-        # round-trips (peak +0.5R -> close -0.3R) into banked wins while never
-        # touching a position still making new highs. The surrendered amount
-        # must exceed a noise floor (ATR in R units) so ordinary churn on
-        # volatile names doesn't trigger it.
+        # =============================================================================
+        # [MODIFIED 2026-10-14]: CR-12 & CR-13 - Tiered Giveback Guard & DOA Stagnation Cut
+        # ORIGINAL INTENT: Flat 55% giveback guard for all peak >= 0.60R; stagnation harvest only on green trades.
+        # REASON FOR CHANGE: Excursions > 1R gave back 55% of gains. Tier giveback (40% for 1-2R, 30% for >=2R)
+        # to lock in proven moves. Dead-money losers (r <= -0.25 after 12-15 bars with peak < 0.30R)
+        # bled 30 bars to full -1R; DOA stagnation cut exits early to protect capital.
+        # SAFE ROLLBACK: The original code is preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # giveback_guard_triggered = False
+        # if (
+        #     getattr(self.config, "enable_profit_giveback_guard", True)
+        #     and not has_scaled_out
+        #     and not scale_out_triggered
+        #     and peak_r >= self.config.profit_guard_peak_r
+        #     and obs.r_multiple > 0.0
+        # ):
+        #     giveback = peak_r - obs.r_multiple
+        #     atr_r_buffer = (
+        #         getattr(self.config, "profit_guard_min_giveback_atr_r", 0.0)
+        #         * (obs.atr / obs.risk_per_share if obs.risk_per_share > 1e-8 else 0.0)
+        #     )
+        #     min_giveback = min(
+        #         peak_r * 0.50,
+        #         max(
+        #             self.config.profit_guard_max_giveback_pct * peak_r,
+        #             atr_r_buffer,
+        #         ),
+        #     )
+        #     if giveback >= min_giveback:
+        #         giveback_guard_triggered = True
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        # CR-13: DOA-stall harvest for underwater, zero-excursion dead money
+        doa_stall_triggered = False
+        if getattr(self.config, "enable_doa_stagnation_harvest", True):
+            doa_bars = getattr(self.config, "doa_stagnation_bars", 12)
+            doa_r_thresh = getattr(self.config, "doa_r_threshold", -0.25)
+            if history_len >= 15 and thesis.stagnation_bars >= doa_bars and peak_r < 0.30 and obs.r_multiple <= doa_r_thresh:
+                doa_stall_triggered = True
+
         giveback_guard_triggered = False
         if (
             getattr(self.config, "enable_profit_giveback_guard", True)
@@ -184,15 +269,24 @@ class ExitPlanner:
                 getattr(self.config, "profit_guard_min_giveback_atr_r", 0.0)
                 * (obs.atr / obs.risk_per_share if obs.risk_per_share > 1e-8 else 0.0)
             )
+            # CR-12 Tiered giveback threshold
+            if peak_r >= 2.0:
+                giveback_pct = getattr(self.config, "profit_guard_pct_tier3", 0.30)
+            elif peak_r >= 1.0:
+                giveback_pct = getattr(self.config, "profit_guard_pct_tier2", 0.40)
+            else:
+                giveback_pct = getattr(self.config, "profit_guard_pct_tier1", self.config.profit_guard_max_giveback_pct)
+
             min_giveback = min(
                 peak_r * 0.50,
                 max(
-                    self.config.profit_guard_max_giveback_pct * peak_r,
+                    giveback_pct * peak_r,
                     atr_r_buffer,
                 ),
             )
             if giveback >= min_giveback:
                 giveback_guard_triggered = True
+        # =============================================================================
 
         # Determine exit action
         # Floor-tag runner gate: thesis must be intact and health not collapsing.
@@ -206,10 +300,23 @@ class ExitPlanner:
             and not is_degraded_thesis(thesis)
         )
 
-        if early_invalidation_breach:
-            # Asymmetric Loss Reduction (Quadrant 2): Cut immediately at -0.25R to -0.35R
+        # =============================================================================
+        # [MODIFIED 2026-10-14]: CR-13 - Action determination with DOA stall harvest
+        # ORIGINAL INTENT: Early invalidation was the only negative-R fast harvest.
+        # REASON FOR CHANGE: Dead-money trades stuck at <= -0.25R with zero excursion for 12+ bars
+        # held all the way to 30 bars or -1R. Trigger FULL_EXIT on doa_stall_triggered.
+        # SAFE ROLLBACK: The original code is preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # if early_invalidation_breach:
+        #     action = ExitAction.FULL_EXIT
+        #     exit_ratio = 1.0
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        if early_invalidation_breach or doa_stall_triggered:
             action = ExitAction.FULL_EXIT
             exit_ratio = 1.0
+        # =============================================================================
         elif protection_breached or lifecycle == LifecycleState.EXIT_CANDIDATE:
             if floor_tag_runner and not has_scaled_out:
                 # Evidence-driven refinement: the floor was tagged but the trade
@@ -259,6 +366,8 @@ class ExitPlanner:
 
         if early_invalidation_breach:
             reasons.append(ReasonCode.EARLY_THESIS_INVALIDATED)
+        elif doa_stall_triggered:
+            reasons.append(ReasonCode.DOA_STAGNATION_HARVEST)
         elif floor_tag_runner and action == ExitAction.PARTIAL_EXIT:
             # Order matters: this must precede the plain PROTECTION_BREACH tag so
             # telemetry distinguishes "runner left behind" from "full cut".

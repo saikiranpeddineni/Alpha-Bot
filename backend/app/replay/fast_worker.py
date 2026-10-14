@@ -55,13 +55,31 @@ async def _run_day_shard_async(payload: dict[str, Any]) -> dict[str, Any]:
     first_ts = replay_bars[0]["ts_dt"]
     clock = ReplayClock(first_ts, always_open=False)
     data = ReplayDataManager(bars)
+    # =============================================================================
+    # [MODIFIED 2026-10-14]: L50 - Dynamic Starting Cash Support in Replay Worker
+    # ORIGINAL INTENT: Hardcoded to getattr(settings, "paper_starting_cash", 100000.0).
+    # REASON FOR CHANGE: API backtest caller sends starting_cash in request payload, which was ignored.
+    # SAFE ROLLBACK: The original code is preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # broker = ReplayBroker(
+    #     float(getattr(settings, "paper_starting_cash", 100000.0)),
+    #     float(payload.get("slippage_bps", 0.0)),
+    #     payload.get("fill_model", "ohlc_touch"),
+    #     volume_constrained=bool(payload.get("volume_constrained", False)),
+    #     max_volume_pct=float(payload.get("max_volume_pct", 0.05)),
+    # )
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    initial_cash = float(payload.get("starting_cash") or getattr(settings, "paper_starting_cash", 100000.0))
     broker = ReplayBroker(
-        float(getattr(settings, "paper_starting_cash", 100000.0)),
+        initial_cash,
         float(payload.get("slippage_bps", 0.0)),
         payload.get("fill_model", "ohlc_touch"),
         volume_constrained=bool(payload.get("volume_constrained", False)),
         max_volume_pct=float(payload.get("max_volume_pct", 0.05)),
     )
+    # =============================================================================
 
     tmp = Path(tempfile.mkdtemp(prefix="alpha_shard_"))
     replay_db: Database | None = None

@@ -80,7 +80,12 @@ class Broker:
     async def cancel_all(self) -> None:  # pragma: no cover
         pass
 
-    async def close_position(self, symbol: str, reason: str = "manual", qty: float | None = None) -> Order | None:  # pragma: no cover
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # async def close_position(self, symbol: str, reason: str = "manual", qty: float | None = None) -> Order | None:  # pragma: no cover
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    async def close_position(self, symbol: str, reason: str = "manual close", qty: float | None = None) -> Order | None:  # pragma: no cover
         return None
 
     async def flatten_all(self, reason: str = "flatten") -> list[Order]:  # pragma: no cover

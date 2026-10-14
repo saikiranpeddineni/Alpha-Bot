@@ -74,6 +74,22 @@ class Signal(BaseModel):
     scanner_score: float | None = None
     scanner_auc: float | None = None
 
+    # =============================================================================
+    # [MODIFIED 2026-10-14]: CR-08 & CR-20 - Signal timestamp property alias
+    # ORIGINAL INTENT: Signal stored entry creation time in `ts`. Downstream components
+    # checking `signal.timestamp` received None, leaving signal_timestamp_utc unpopulated.
+    # REASON FOR CHANGE: Expose `timestamp` property returning `self.ts` for clean lineage.
+    # SAFE ROLLBACK: Remove property block.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # # No timestamp property alias
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    @property
+    def timestamp(self) -> datetime:
+        return self.ts
+    # =============================================================================
+
     @property
     def side(self) -> str:
         if self.action == SignalAction.ENTER_LONG:

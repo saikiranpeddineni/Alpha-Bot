@@ -49,6 +49,20 @@ class OpeningRangeBreakout(Strategy):
                                          # not a wick fake-out). Sibling-proven gate.
         "climax_atr_mult": 2.5,          # relaxed from 1.5: breakouts legitimately detach
                                          # from EMA9; acceptance+drift now carry quality.
+        # =============================================================================
+        # [ADDED 2026-10-14]: CR-03 — ORB late-day + acceptance tightening + range viability
+        # ORIGINAL INTENT: No time cutoff; all ORB entries until session close.
+        # REASON FOR CHANGE: Late-day ORB entries have the worst PnL (ride to EOD flatten
+        #   for full loss). ORB edge is a morning phenomenon. Adding:
+        #   - end_time: no NEW ORB entries after 15:00 ET; existing runners still PIS-managed.
+        #   - acceptance_lowvol: tighter acceptance (0.60 vs 0.50) when vol_z < 2.0 to filter wick fakeouts.
+        #   - min_range_atr: degenerate tiny ranges whose breakout is noise get skipped.
+        # SAFE ROLLBACK: Set end_time='15:59', acceptance_lowvol=0.50, min_range_atr=0.0
+        # [NEW CODE]:
+        "end_time": "15:00",             # CR-03: no new ORB after 15:00 ET; runners managed by PIS
+        "acceptance_lowvol": 0.60,       # CR-03: tighter acceptance when vol_z < 2.0 (wick fakeout guard)
+        "min_range_atr": 0.5,            # CR-03: skip degenerate ranges smaller than 0.5 ATR
+        # =============================================================================
     }
 
     def __init__(self, params: dict | None = None, enabled: bool = True) -> None:
@@ -100,10 +114,45 @@ class OpeningRangeBreakout(Strategy):
             return None
 
         et_dates = df.index.tz_convert(ET).date
+        et_times = df.index.tz_convert(ET).time
         today = et_dates[-1]
+        now_time = et_times[-1]
+
+        # =============================================================================
+        # [ADDED 2026-10-14]: CR-20 — NVDA stale-bar anomaly guard
+        # ORIGINAL INTENT: today was taken directly from df.index.tz_convert(ET).date[-1].
+        # REASON FOR CHANGE: If df was stale, today evaluated to yesterday's date, causing ORB
+        #   to evaluate yesterday's opening range as today's (e.g. NVDA px=128.92 incident).
+        #   If ctx.now is provided, require that the latest bar's date matches ctx.now's session date.
+        # [PREVIOUS CODE - PRESERVED]:
+        # # No check against ctx.now session date
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        if ctx.now is not None:
+            ctx_date = ctx.now.astimezone(ET).date()
+            if today != ctx_date:
+                return None
+        # =============================================================================
+
         key = (symbol, today)
         if key in self._traded:
             return None
+
+        # =============================================================================
+        # [ADDED 2026-10-14]: CR-03 — ORB end_time cutoff (no new ORB after 15:00 ET)
+        # ORIGINAL INTENT: No time upper bound — ORB entries allowed until session close.
+        # REASON FOR CHANGE: Late-day ORB entries (post-15:00) with insufficient PIS time
+        #   ride to EOD flatten for full -1R. ORB edge is strictly a morning phenomenon.
+        #   Existing runners after 15:00 are still managed by PIS (this only blocks new entries).
+        # [PREVIOUS CODE - PRESERVED]:
+        # end_time_str = p.get("end_time", "15:00")
+        import os
+        end_time_str = os.environ.get("ORB_END_TIME", p.get("end_time", "15:00"))
+        from datetime import time as dtime
+        end_t = dtime.fromisoformat(end_time_str)
+        if now_time > end_t:
+            return None
+        # =============================================================================
 
         pending_time = self._pending.get(key)
         if pending_time is not None:
@@ -128,6 +177,18 @@ class OpeningRangeBreakout(Strategy):
         if atr is None or atr <= 0:
             return None
 
+        # =============================================================================
+        # [ADDED 2026-10-14]: CR-03 — min_range_atr degenerate range filter
+        # ORIGINAL INTENT: No minimum opening-range size gate.
+        # REASON FOR CHANGE: Tiny ranges (< 0.5 ATR) produce sub-noise breakouts.
+        #   Stops on these would anyway hit the min_risk_atr floor making them uneconomic.
+        #   Skipping explicitly prevents pipeline from processing these signals at all.
+        # SAFE ROLLBACK: Set min_range_atr=0.0
+        min_range_atr_mult = float(p.get("min_range_atr", 0.5))
+        if min_range_atr_mult > 0.0 and (or_high - or_low) < min_range_atr_mult * atr:
+            return None
+        # =============================================================================
+
         if p.get("atr_buffer_mult", 0.0) > 0.0:
             buffer = 1.0 + (p["atr_buffer_mult"] * atr / close)
         else:
@@ -144,7 +205,22 @@ class OpeningRangeBreakout(Strategy):
         # Acceptance gate (sibling-proven): the breakout bar must CLOSE in its
         # directional extreme -- a body-dominant candle shows the range break
         # was accepted, not rejected with a wick.
-        min_acceptance = float(p.get("min_acceptance_ratio", 0.50))
+        # =============================================================================
+        # [MODIFIED 2026-10-14]: CR-03 — Vol-conditional acceptance tightening
+        # ORIGINAL INTENT: Fixed min_acceptance_ratio=0.50 for all entries.
+        # REASON FOR CHANGE: Low-vol entries (vol_z < 2.0) admit wick fake-outs.
+        #   When volume doesn't confirm the breakout, the bar is more likely a wick
+        #   probe than genuine acceptance. Tighten to acceptance_lowvol=0.60 in that case.
+        #   High-vol breakouts (vol_z >= 2.0) keep the standard 0.50 threshold.
+        # SAFE ROLLBACK: Remove vol_z condition; use min_acceptance unconditionally.
+        # [PREVIOUS CODE - PRESERVED]:
+        # min_acceptance = float(p.get("min_acceptance_ratio", 0.50))
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        min_acceptance_base = float(p.get("min_acceptance_ratio", 0.50))
+        min_acceptance_lowvol = float(p.get("acceptance_lowvol", 0.60))
+        min_acceptance = min_acceptance_lowvol if vol_z < 2.0 else min_acceptance_base
+        # =============================================================================
         bar_high = float(last["high"]); bar_low = float(last["low"])
         bar_range = max(1e-6, bar_high - bar_low)
         close_pos_in_bar = ((close - bar_low) / bar_range)

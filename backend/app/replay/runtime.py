@@ -50,6 +50,33 @@ class ReplayRuntime:
     # no PIS memory persistence. Days are INDEPENDENT (EOD flatten guarantee),
     # so shards run across processes and merge losslessly.
     # ------------------------------------------------------------------
+    # =============================================================================
+    # [MODIFIED 2026-10-14]: L50 - Dynamic Starting Cash Passthrough in Replay Runtime
+    # ORIGINAL INTENT: run_replay_fast_async did not accept starting_cash, defaulting to fixed setting.
+    # REASON FOR CHANGE: Caller starting_cash was ignored by replay engine.
+    # SAFE ROLLBACK: The original code is preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # async def run_replay_fast_async(self, start_date: str, end_date: str,
+    #                                 symbols: list[str] | None = None,
+    #                                 fill_model: str = "ohlc_touch",
+    #                                 slippage_bps: float = 0.0,
+    #                                 volume_constrained: bool = False,
+    #                                 max_volume_pct: float = 0.05,
+    #                                 warmup_bars: int = 600,
+    #                                 max_workers: int | None = None) -> dict[str, Any]:
+    #     import os
+    #     from concurrent.futures import ProcessPoolExecutor
+    #     from datetime import timedelta as _td
+    #
+    #     from app.replay.fast_worker import run_day_shard
+    #
+    #     config = {"start_date": start_date, "end_date": end_date, "symbols": symbols,
+    #               "fill_model": fill_model, "slippage_bps": slippage_bps,
+    #               "volume_constrained": volume_constrained, "max_volume_pct": max_volume_pct,
+    #               "warmup_bars": warmup_bars, "engine": "replay_fast"}
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
     async def run_replay_fast_async(self, start_date: str, end_date: str,
                                     symbols: list[str] | None = None,
                                     fill_model: str = "ohlc_touch",
@@ -57,6 +84,7 @@ class ReplayRuntime:
                                     volume_constrained: bool = False,
                                     max_volume_pct: float = 0.05,
                                     warmup_bars: int = 600,
+                                    starting_cash: float | None = None,
                                     max_workers: int | None = None) -> dict[str, Any]:
         import os
         from concurrent.futures import ProcessPoolExecutor
@@ -67,7 +95,8 @@ class ReplayRuntime:
         config = {"start_date": start_date, "end_date": end_date, "symbols": symbols,
                   "fill_model": fill_model, "slippage_bps": slippage_bps,
                   "volume_constrained": volume_constrained, "max_volume_pct": max_volume_pct,
-                  "warmup_bars": warmup_bars, "engine": "replay_fast"}
+                  "warmup_bars": warmup_bars, "starting_cash": starting_cash, "engine": "replay_fast"}
+    # =============================================================================
         self.session_manager.create_session(self.replay_id, start_date, end_date, config)
         self.session_manager.update_session(self.replay_id, status="RUNNING", progress_pct=1.0)
 
@@ -162,6 +191,7 @@ class ReplayRuntime:
                     "slippage_bps": slippage_bps,
                     "volume_constrained": volume_constrained,
                     "max_volume_pct": max_volume_pct,
+                    "starting_cash": starting_cash,
                 })
 
             workers = max_workers or min(len(day_payloads), os.cpu_count() or 4, 10)

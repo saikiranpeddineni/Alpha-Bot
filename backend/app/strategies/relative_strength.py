@@ -29,9 +29,11 @@ class RelativeStrength(Strategy):
         Regime.TREND_UP: 1.20, Regime.TREND_DOWN: 0.80, Regime.RANGE: 1.00, Regime.VOLATILE: 0.90
     }
     default_params = {
-        "rs_long_threshold": 0.75,    # 0.75 to 1.0 means strong outperformance vs SPY
-        "rs_short_threshold": 0.25,   # 0.0 to 0.25 means strong underperformance vs SPY
-        "vol_z_min": 1.2,             # Require volume conviction
+        "rs_long_threshold": 0.70,    # 0.70 to 1.0 means strong outperformance vs SPY (was 0.75;
+                                      # 0.75 coincided with local-high breakout so rarely that the
+                                      # trainer found zero lifetime candidate events)
+        "rs_short_threshold": 0.30,   # 0.0 to 0.30 means strong underperformance vs SPY (was 0.25)
+        "vol_z_min": 1.0,             # Require volume conviction (was 1.2)
         "reward_risk": 2.5,
     }
 
@@ -82,10 +84,53 @@ class RelativeStrength(Strategy):
         local_high = float(local_df["high"].max())
         local_low = float(local_df["low"].min())
 
+        # =============================================================================
+        # [MODIFIED 2026-10-14]: L21 & L22 - Native Stop/Target Geometry & Breakout Buffer
+        # ORIGINAL INTENT: Emitted Signal without stop_loss or take_profit; checked close_px > local_high
+        # without any ATR buffer, letting $0.01 nominal tag highs pass into generic excursion fills.
+        # REASON FOR CHANGE: Supply native ATR-based stop and target geometry (2.0 ATR stop, 2.5R target)
+        # and require a 0.1 ATR breakout buffer to prevent spread noise triggers.
+        # SAFE ROLLBACK: The original code is preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # # Long Setup (High Relative Strength)
+        # if ctx.rs_score >= p["rs_long_threshold"]:
+        #     if close_px > local_high:
+        #         confidence = min(0.90, 0.60 + 0.1 * (ctx.rs_score - p["rs_long_threshold"]))
+        #         return Signal(
+        #             symbol=symbol,
+        #             action=SignalAction.ENTER_LONG,
+        #             confidence=round(confidence, 4),
+        #             strategy=self.name,
+        #             reason=f"RS score {ctx.rs_score:.2f} > {p['rs_long_threshold']} and broke local high",
+        #             score=0.75,
+        #         )
+        #
+        # # Short Setup (High Relative Weakness)
+        # if ctx.rs_score <= p["rs_short_threshold"]:
+        #     if close_px < local_low:
+        #         confidence = min(0.90, 0.60 + 0.1 * (p["rs_short_threshold"] - ctx.rs_score))
+        #         return Signal(
+        #             symbol=symbol,
+        #             action=SignalAction.ENTER_SHORT,
+        #             confidence=round(confidence, 4),
+        #             strategy=self.name,
+        #             reason=f"RS score {ctx.rs_score:.2f} < {p['rs_short_threshold']} and broke local low",
+        #             score=0.75,
+        #         )
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        atr14 = float(last_row["atr14"]) if ("atr14" in last_row and not pd.isna(last_row["atr14"])) else (close_px * 0.015)
+        stop_dist = max(atr14 * 2.0, close_px * 0.005)
+        reward_risk = float(p.get("reward_risk", 2.5))
+        buffer = 0.1 * atr14
+
         # Long Setup (High Relative Strength)
         if ctx.rs_score >= p["rs_long_threshold"]:
-            if close_px > local_high:
+            if close_px >= (local_high + buffer):
                 confidence = min(0.90, 0.60 + 0.1 * (ctx.rs_score - p["rs_long_threshold"]))
+                stop_loss = round(close_px - stop_dist, 4)
+                take_profit = round(close_px + stop_dist * reward_risk, 4)
                 return Signal(
                     symbol=symbol,
                     action=SignalAction.ENTER_LONG,
@@ -93,12 +138,17 @@ class RelativeStrength(Strategy):
                     strategy=self.name,
                     reason=f"RS score {ctx.rs_score:.2f} > {p['rs_long_threshold']} and broke local high",
                     score=0.75,
+                    price=close_px,
+                    stop_loss=stop_loss,
+                    take_profit=take_profit,
                 )
 
         # Short Setup (High Relative Weakness)
         if ctx.rs_score <= p["rs_short_threshold"]:
-            if close_px < local_low:
+            if close_px <= (local_low - buffer):
                 confidence = min(0.90, 0.60 + 0.1 * (p["rs_short_threshold"] - ctx.rs_score))
+                stop_loss = round(close_px + stop_dist, 4)
+                take_profit = round(close_px - stop_dist * reward_risk, 4)
                 return Signal(
                     symbol=symbol,
                     action=SignalAction.ENTER_SHORT,
@@ -106,6 +156,10 @@ class RelativeStrength(Strategy):
                     strategy=self.name,
                     reason=f"RS score {ctx.rs_score:.2f} < {p['rs_short_threshold']} and broke local low",
                     score=0.75,
+                    price=close_px,
+                    stop_loss=stop_loss,
+                    take_profit=take_profit,
                 )
+        # =============================================================================
 
         return None

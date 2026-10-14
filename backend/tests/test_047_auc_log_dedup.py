@@ -44,7 +44,10 @@ def test_auc_warning_logged_only_once_per_session(tmp_path, caplog):
     model = SignalModel(tmp_path)
     features = pd.Series(np.ones(len(FEATURE_COLUMNS)) * 0.5, index=FEATURE_COLUMNS)
 
-    with caplog.at_level(logging.DEBUG):
+    # Must target the 'alphadesk' logger specifically — applog routes through
+    # logging.getLogger('alphadesk') and the root caplog handler alone does
+    # not lower the alphadesk logger's effective level to DEBUG.
+    with caplog.at_level(logging.DEBUG, logger='alphadesk'):
         result1 = model.score_action_detailed(features, SignalAction.ENTER_LONG, symbol='SOFI')
         result2 = model.score_action_detailed(features, SignalAction.ENTER_LONG, symbol='SOFI')
 
@@ -58,18 +61,24 @@ def test_auc_warning_logged_only_once_per_session(tmp_path, caplog):
 
 
 def test_auc_warn_set_resets_on_reload(tmp_path, caplog):
-    """After _load(), the dedup set resets so first call logs at INFO again."""
+    """After reload_specialists(), the dedup set resets so first call logs at INFO again.
+
+    Note: the public reload API is reload_specialists() which also resets
+    _auc_warned_symbols. There is no _load() method — that was an internal
+    implementation detail that no longer exists as a named callable.
+    """
     make_failing_specialist(tmp_path, 'MU')
     model = SignalModel(tmp_path)
     features = pd.Series(np.ones(len(FEATURE_COLUMNS)) * 0.5, index=FEATURE_COLUMNS)
 
-    with caplog.at_level(logging.DEBUG):
+    # Must target the 'alphadesk' logger specifically — see test above
+    with caplog.at_level(logging.DEBUG, logger='alphadesk'):
         model.score_action_detailed(features, SignalAction.ENTER_LONG, symbol='MU')
         # MU is now in warned set
         assert 'MU' in model._auc_warned_symbols
 
-        # Reload
-        model._load()
+        # Reload via the public API (reload_specialists resets _auc_warned_symbols)
+        model.reload_specialists()
         assert 'MU' not in model._auc_warned_symbols  # reset
 
         # Next call should log at INFO again

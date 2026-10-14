@@ -26,7 +26,7 @@ async def test_snapshot_warning_suppressed_after_threshold(alpaca_provider, capl
         return {'DEAD': snap}
 
     with patch.object(provider._client, 'get_stock_snapshot', side_effect=lambda req: make_failing_snapshot()):
-        with caplog.at_level(logging.DEBUG):
+        with caplog.at_level(logging.DEBUG, logger='alphadesk'):
             # Call 1 — should warn
             await provider.get_quotes(['DEAD'])
             # Call 2 — should warn

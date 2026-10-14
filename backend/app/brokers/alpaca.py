@@ -678,12 +678,46 @@ class AlpacaBroker(Broker):
                     "asset is not shortable" in err_msg
                     or "not shortable" in err_msg
                 )
+                # =============================================================================
+                # [MODIFIED 2026-10-14]: CR-22 - SHORT_BORROW_UNAVAILABLE Distinct Logging
+                # ORIGINAL INTENT: Marked rejected with generic f"{req.reason} | rejected: {exc}".
+                # REASON FOR CHANGE: Distinctly log and tag SHORT_BORROW_UNAVAILABLE so borrow rejections
+                # are not lumped into generic execution failures or bare exits.
+                # SAFE ROLLBACK: The original code is preserved below as comments.
+                # -----------------------------------------------------------------------------
+                # [PREVIOUS CODE - PRESERVED]:
+                # if account_short_denied:
+                #     self._shorting_enabled = False
+                #     self._shortable_cache[req.symbol.upper()] = False
+                # elif asset_not_shortable:
+                #     self._shortable_cache[req.symbol.upper()] = False
+                # applog.error("broker.alpaca", f"Order rejected {req.symbol} {req.side} {qty}: {exc}")
+                # return Order(
+                #     client_order_id=req.client_order_id,
+                #     symbol=req.symbol.upper(),
+                #     side=req.side,
+                #     qty=qty,
+                #     order_type=req.order_type,
+                #     limit_price=req.limit_price,
+                #     status=OrderStatus.REJECTED,
+                #     strategy=req.strategy,
+                #     reason=f"{req.reason} | rejected: {exc}",
+                # )
+                # -----------------------------------------------------------------------------
+                # [NEW CODE]:
+                rejection_reason = f"{req.reason} | rejected: {exc}"
                 if account_short_denied:
                     self._shorting_enabled = False
                     self._shortable_cache[req.symbol.upper()] = False
+                    rejection_reason = f"SHORT_BORROW_UNAVAILABLE (account shorting denied) | {exc}"
+                    applog.warning("broker.alpaca", f"SHORT_BORROW_UNAVAILABLE: account shorting disabled on {req.symbol}: {exc}")
                 elif asset_not_shortable:
                     self._shortable_cache[req.symbol.upper()] = False
-                applog.error("broker.alpaca", f"Order rejected {req.symbol} {req.side} {qty}: {exc}")
+                    rejection_reason = f"SHORT_BORROW_UNAVAILABLE ({req.symbol} not shortable/borrow unavailable) | {exc}"
+                    applog.warning("broker.alpaca", f"SHORT_BORROW_UNAVAILABLE: {req.symbol} borrow unavailable: {exc}")
+                else:
+                    applog.error("broker.alpaca", f"Order rejected {req.symbol} {req.side} {qty}: {exc}")
+
                 return Order(
                     client_order_id=req.client_order_id,
                     symbol=req.symbol.upper(),
@@ -693,8 +727,9 @@ class AlpacaBroker(Broker):
                     limit_price=req.limit_price,
                     status=OrderStatus.REJECTED,
                     strategy=req.strategy,
-                    reason=f"{req.reason} | rejected: {exc}",
+                    reason=rejection_reason,
                 )
+                # =============================================================================
             else:
                 msg = f"Ambiguous submission result for {req.symbol} ({req.client_order_id}): {exc}"
                 applog.error("broker.alpaca", msg)
@@ -702,9 +737,18 @@ class AlpacaBroker(Broker):
         self._meta[str(raw.id)] = (req.strategy, req.reason)
         if req.strategy != "emergency_protection":
             self._symbol_strategies[req.symbol.upper()] = req.strategy
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # order = self._to_order(raw)
+        # order.stop_loss = req.stop_loss
+        # order.take_profit = req.take_profit
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
         order = self._to_order(raw)
         order.stop_loss = req.stop_loss
         order.take_profit = req.take_profit
+        order.signal_timestamp_utc = req.signal_timestamp_utc
+        order.decision_bar_timestamp_utc = req.decision_bar_timestamp_utc
         applog.trade("broker.alpaca", f"Submitted {req.side.upper()} {qty} {req.symbol} ({req.strategy})")
         return order
 
@@ -926,7 +970,14 @@ class AlpacaBroker(Broker):
         except Exception as exc:  # noqa: BLE001
             applog.warning("broker.alpaca", f"cancel_all failed: {exc}")
 
-    async def close_position(self, symbol: str, reason: str = "manual", qty: float | None = None) -> Order | None:
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # async def close_position(self, symbol: str, reason: str = "manual", qty: float | None = None) -> Order | None:
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    async def close_position(self, symbol: str, reason: str = "manual close", qty: float | None = None) -> Order | None:
+        if not reason or not reason.strip() or reason.strip().lower() in ("exit", "manual"):
+            reason = "manual close"
         try:
             # First, fetch and cancel any outstanding open orders for this symbol to release held quantities
             cancelled_ids: set[str] = set()

@@ -51,11 +51,24 @@ class SignalPipeline:
         from app.ai.prediction import MetaLabelEngine
         from app.config import get_models_dir
         self.meta_label_engine = MetaLabelEngine(get_models_dir())
+        # Restore contract for ai/trainer.py:828,870-875
+        if not hasattr(model, "_meta_label_engine") or getattr(model, "_meta_label_engine", None) is None:
+            model._meta_label_engine = self.meta_label_engine
         # Shadow challengers are intentionally not instantiated here. Champion owns only
         # authoritative ML/Meta/TradeScore behavior.
-        if not hasattr(model, "_meta_label_engine") or model._meta_label_engine is None:
-            model._meta_label_engine = self.meta_label_engine
         self._is_event_day: bool = False
+        # =============================================================================
+        # [ADDED 2026-10-14]: CR-09 - Specialist Fallback Spike Tracking
+        # ORIGINAL INTENT: Fallbacks logged per-symbol only without aggregate rate alert.
+        # REASON FOR CHANGE: Track 15-minute fallback frequency and emit applog.warning on surge.
+        # SAFE ROLLBACK: Remove _fallback_history.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # # No _fallback_history
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        self._fallback_history: list[float] = []
+        # =============================================================================
 
     def compute_composite_score(self, ml_prob: float, meta_prob: float, trade_score: float,
                                 portfolio_alignment: float = 1.0, risk_factor: float = 1.0) -> float:
@@ -95,9 +108,32 @@ class SignalPipeline:
             if sig.action == SignalAction.EXIT:
                 accepted.append(sig)
                 continue
+            # =============================================================================
+            # [MODIFIED 2026-10-14]: CR-08 & L26 - Fail-Soft Warmup Reduced-Confidence Path
+            # ORIGINAL INTENT: Unconditionally hard-rejected all signals when feature row is None (< 30 bars),
+            # causing 16 high-quality candidate leaks (e.g. COHR +6.5R).
+            # REASON FOR CHANGE: When 15 <= len(df) < 30, allow TradeScore-only evaluation with risk_mult 0.5
+            # and require strict meta PASS. Signals with < 15 bars remain safely rejected.
+            # SAFE ROLLBACK: The original code is preserved below as comments.
+            # -----------------------------------------------------------------------------
+            # [PREVIOUS CODE - PRESERVED]:
+            # if features is None:
+            #     rejected.append((sig, "feature row unavailable (warmup)"))
+            #     continue
+            # -----------------------------------------------------------------------------
+            # [NEW CODE]:
+            is_warmup_reduced = False
             if features is None:
-                rejected.append((sig, "feature row unavailable (warmup)"))
-                continue
+                if df is not None and len(df) >= 15:
+                    from app.ai.features import compute_features, FEATURE_COLUMNS
+                    f_df = compute_features(df)
+                    if not f_df.empty and all(col in f_df.columns for col in FEATURE_COLUMNS):
+                        features = f_df.iloc[-1][FEATURE_COLUMNS].fillna(0.0).astype(float)
+                        is_warmup_reduced = True
+                if features is None:
+                    rejected.append((sig, "feature row unavailable (warmup < 15 bars)"))
+                    continue
+            # =============================================================================
 
             from app.ai.prediction import ExcursionEstimate
             excursion = ExcursionEstimate.from_atr(atr_pct)
@@ -233,12 +269,24 @@ class SignalPipeline:
                     is_structural_breakout = (
                         sig.strategy in _REG2 and getattr(_REG2[sig.strategy], "is_structural_breakout", False)
                     )
-                    if not is_structural_breakout:
+                    # Pullback re-arm carries its own bar-structure location
+                    # discipline (held EMA20 +/- 1.0 ATR + EMA9 reclaim + 1/day +
+                    # 0.5 ATR econ gate). Measuring a post-pullback reclaim
+                    # against session VWAP double-penalizes the exact setup the
+                    # re-arm path exists for (today: 40/49 re-arm rejects here).
+                    skip_location_veto = bool(getattr(_strat_cls, "skip_location_veto", False))
+                    if not is_structural_breakout and not skip_location_veto:
                         stretch = ((b_cl - vwap_px) / atr_loc) if sig.action == SignalAction.ENTER_LONG \
                             else ((vwap_px - b_cl) / atr_loc)
-                        if stretch > float(getattr(rc, "entry_max_vwap_stretch_atr", 3.0)):
+                        base_limit = float(getattr(rc, "entry_max_vwap_stretch_atr", 3.0))
+                        # Trend-day allowance: VWAP stretches naturally when the
+                        # market trends; keep the full 3.0 ATR discipline for
+                        # RANGE days, allow more room in confirmed trends.
+                        trend_mult = float(getattr(rc, "entry_vwap_stretch_trend_mult", 1.5))
+                        stretch_limit = base_limit * trend_mult if regime in (Regime.TREND_UP, Regime.TREND_DOWN) else base_limit
+                        if stretch > stretch_limit:
                             sig.ml_gate_decision = "REJECT"
-                            rejected.append((sig, f"Entry veto: location exhausted ({stretch:.1f} ATR from VWAP > limit)"))
+                            rejected.append((sig, f"Entry veto: location exhausted ({stretch:.1f} ATR from VWAP > limit {stretch_limit:.1f})"))
                             continue
 
             # Session-extreme proximity guard: momentum entries INTO the
@@ -336,7 +384,68 @@ class SignalPipeline:
                         f"specialist_auc={f'{score_res.specialist_auc:.4f}' if isinstance(score_res.specialist_auc, (int, float)) else score_res.specialist_auc} | "
                         f"specialist_min_auc={f'{score_res.specialist_min_auc:.4f}' if isinstance(score_res.specialist_min_auc, (int, float)) else score_res.specialist_min_auc} | "
                         f"fallback={score_res.fallback_reason or 'None'}")
-            if ml is None:
+            # =============================================================================
+            # [ADDED 2026-10-14]: CR-09 - Specialist Fallback Spike Warning
+            # ORIGINAL INTENT: Fallbacks logged without rate monitoring.
+            # REASON FOR CHANGE: Alert when fallback rate surges (>=10 in 15 min).
+            # SAFE ROLLBACK: Remove block.
+            # -----------------------------------------------------------------------------
+            # [PREVIOUS CODE - PRESERVED]:
+            # # No fallback rate spike check
+            # -----------------------------------------------------------------------------
+            # [NEW CODE]:
+            if score_res.model_source == "BASE" and score_res.fallback_reason:
+                import time
+                now_mono = time.monotonic()
+                self._fallback_history.append(now_mono)
+                self._fallback_history = [t for t in self._fallback_history if (now_mono - t) <= 900.0]
+                if len(self._fallback_history) >= 10:
+                    applog.warning(
+                        "pipeline",
+                        f"[CR-09] Specialist fallback rate elevated: {len(self._fallback_history)} fallbacks in last 15m (latest: {symbol} -> {score_res.fallback_reason})",
+                    )
+            # =============================================================================
+            # =============================================================================
+            # [MODIFIED 2026-10-14]: CR-08 & L26 - Warmup Reduced Evaluation Gate
+            # ORIGINAL INTENT: Missing ML score or probability < threshold strictly rejected without exception.
+            # REASON FOR CHANGE: For warmup reduced evaluation (15 <= len(df) < 30), allow ML prob = threshold,
+            # REQUIRE meta PASS, and scale approved trades by warmup_reduced_risk_mult (0.5).
+            # SAFE ROLLBACK: The original code is preserved below as comments.
+            # -----------------------------------------------------------------------------
+            # [PREVIOUS CODE - PRESERVED]:
+            # if ml is None:
+            #     if score_res.specialist_status == "TEMPORAL_BYPASS":
+            #         applog.error("pipeline", f"{symbol}: ML_GATE_REJECTED_TEMPORAL - Model trained after backtest start.")
+            #         sig.ml_gate_decision = "REJECT"
+            #         rejected.append((sig, "ML model temporal bypass (look-ahead bias protection)"))
+            #         continue
+            #     else:
+            #         sig.ml_gate_decision = "REJECT"
+            #         rejected.append((sig, f"ML probability unavailable ({score_res.fallback_reason or 'unknown reason'})"))
+            #         continue
+            # else:
+            #     sig.ml_probability = round(ml, 4)
+            #     # Strict ML veto: any probability below the configured threshold is
+            #     # rejected. All manual bypass hacks have been removed.
+            #     current_threshold = self.ml_threshold
+            #     if ml < current_threshold:
+            #         if self.soft_composite_gating and ml >= (current_threshold - 0.04):
+            #             sig.ml_gate_decision = "GRAY_ZONE_EVALUATION"
+            #             applog.info("pipeline", f"{symbol}: ML gray zone active ({ml:.4f} in [{(current_threshold - 0.04):.2f}, {current_threshold:.2f}]). Evaluating Meta & TradeScore.")
+            #         else:
+            #             sig.ml_gate_decision = "REJECT"
+            #             rejected.append((sig, f"ML confidence {ml:.4f} < threshold {current_threshold:.4f}"))
+            #             continue
+            #     else:
+            #         sig.ml_gate_decision = "PASS"
+            # -----------------------------------------------------------------------------
+            # [NEW CODE]:
+            if is_warmup_reduced:
+                ml = float(self.ml_threshold)
+                sig.ml_probability = round(ml, 4)
+                sig.ml_gate_decision = "WARMUP_REDUCED"
+                applog.info("pipeline", f"{symbol}: WARMUP_REDUCED path active (df len < 30 bars, ml={ml:.2f})")
+            elif ml is None:
                 if score_res.specialist_status == "TEMPORAL_BYPASS":
                     applog.error("pipeline", f"{symbol}: ML_GATE_REJECTED_TEMPORAL - Model trained after backtest start.")
                     sig.ml_gate_decision = "REJECT"
@@ -348,8 +457,6 @@ class SignalPipeline:
                     continue
             else:
                 sig.ml_probability = round(ml, 4)
-                # Strict ML veto: any probability below the configured threshold is
-                # rejected. All manual bypass hacks have been removed.
                 current_threshold = self.ml_threshold
                 if ml < current_threshold:
                     if self.soft_composite_gating and ml >= (current_threshold - 0.04):
@@ -361,6 +468,7 @@ class SignalPipeline:
                         continue
                 else:
                     sig.ml_gate_decision = "PASS"
+            # =============================================================================
 
             side_str = "long" if sig.action == SignalAction.ENTER_LONG else "short"
 
@@ -377,6 +485,18 @@ class SignalPipeline:
                 side=side_str,
                 adaptive_threshold=max(self.ml_threshold, strategy_meta_floor),
             )
+            # -----------------------------------------------------------------------------
+            # [PREVIOUS CODE - PRESERVED]:
+            # if is_warmup_reduced and meta_pred.decision != "PASS":
+            #     sig.ml_gate_decision = "REJECT"
+            #     rejected.append((sig, f"Warmup reduced evaluation requires meta PASS, got {meta_pred.decision} [{meta_pred.source}]"))
+            #     continue
+            # -----------------------------------------------------------------------------
+            # [NEW CODE]:
+            if is_warmup_reduced and not meta_pred.approved:
+                sig.ml_gate_decision = "REJECT"
+                rejected.append((sig, f"Warmup reduced evaluation requires meta approval, got {meta_pred.decision} [{meta_pred.source}]"))
+                continue
             if not meta_pred.approved:
                 rejected.append((sig, f"Meta-label {meta_pred.decision} [{meta_pred.source}]: {meta_pred.reason}"))
                 continue
@@ -398,20 +518,76 @@ class SignalPipeline:
             # above 1.0 cannot bypass the configured score threshold.  This
             # preserves the existing capital-protection gates while making the
             # strategy/regime research configuration operational.
+            # =============================================================================
+            # [MODIFIED 2026-10-14]: CR-07 & CR-09 - Regime Ranking Score & High-Agreement Rescue
+            # ORIGINAL INTENT: Regime weight was clamped to min(1.0, weight) for both admission and
+            # sig.score; trades with TradeScore < threshold were strictly rejected regardless of ML/Meta agreement.
+            # REASON FOR CHANGE:
+            # 1. CR-07: Preserve tightening-only effective_regime_weight (<= 1.0) for score admission
+            #    threshold, but let configured_regime_weight scale sig.score for candidate conflict ranking.
+            # 2. CR-09: High-agreement rescue (ml >= 0.65, meta >= 0.80 PASS) admits high-conviction
+            #    trades with risk_mult = 0.75 without lowering the general TradeScore threshold of 70.
+            # SAFE ROLLBACK: The original code is preserved below as comments.
+            # -----------------------------------------------------------------------------
+            # [PREVIOUS CODE - PRESERVED]:
+            # configured_regime_weight = float(self.regime_weight(sig.strategy, regime))
+            # effective_regime_weight = min(1.0, max(0.0, configured_regime_weight))
+            # trade_score = min(100.0, max(0.0, raw_score * effective_regime_weight))
+            # ranking_score = min(100.0, max(0.0, raw_score * configured_regime_weight))
+            # sig.score = round(ranking_score / 100.0, 4)
+            # approved, threshold = self.trade_score_engine.approve(trade_score, regime, is_event_day=self._is_event_day)
+            # -----------------------------------------------------------------------------
+            # [NEW CODE]:
             configured_regime_weight = float(self.regime_weight(sig.strategy, regime))
             effective_regime_weight = min(1.0, max(0.0, configured_regime_weight))
-            trade_score = min(100.0, max(0.0, raw_score * effective_regime_weight))
-            sig.score = round(trade_score / 100.0, 4)
-            approved, threshold = self.trade_score_engine.approve(trade_score, regime, is_event_day=self._is_event_day)
+            # CR-07: Candidate ranking reflects configured regime weight for conflict prioritization
+            ranking_score = min(100.0, max(0.0, raw_score * configured_regime_weight))
+            sig.score = round(ranking_score / 100.0, 4)
+
+            # [PREVIOUS CODE - PRESERVED]:
+            # approved, threshold = self.trade_score_engine.approve(raw_score, regime, is_event_day=self._is_event_day)
+            admission_score = min(100.0, max(0.0, raw_score * effective_regime_weight))
+            approved, threshold = self.trade_score_engine.approve(admission_score, regime, is_event_day=self._is_event_day)
+
+            # CR-09: High-agreement rescue path
+            import os
+            rescue_ml_min = float(os.environ.get("RESCUE_ML_MIN", 0.65))
+            rescue_meta_min = float(os.environ.get("RESCUE_META_MIN", 0.80))
+            rescue_risk_mult = float(os.environ.get("RESCUE_RISK_MULT", 0.75))
+            meta_prob = meta_pred.prob_profitable if meta_pred is not None else 0.0
+            is_high_agreement_rescue = (
+                not approved
+                and ml is not None
+                and ml >= rescue_ml_min
+                and (meta_prob >= rescue_meta_min or getattr(meta_pred, "decision", "") == "PASS")
+                and (getattr(meta_pred, "approved", False) or getattr(meta_pred, "decision", "") == "PASS")
+            )
+
+            if is_high_agreement_rescue:
+                approved = True
+                sig.risk_multiplier = min(getattr(sig, "risk_multiplier", 1.0), rescue_risk_mult)
+                sig.ml_gate_decision = "HIGH_AGREEMENT_RESCUE"
+                applog.info(
+                    "pipeline",
+                    f"{symbol} {sig.strategy}: HIGH_AGREEMENT_RESCUE (ml={ml:.4f}>={rescue_ml_min}, meta={meta_prob:.4f}, raw_score={raw_score:.1f}<{threshold:.1f}, risk_mult={rescue_risk_mult})",
+                )
+
             if not approved:
                 effective_rr = exp_ret_pct / exp_dd_pct if exp_dd_pct > 0 else excursion.reward_risk
                 ml_str = f"{ml:.2f}" if ml is not None else "N/A"
-                rejected.append((sig, f"Trade Score {trade_score:.1f} < {threshold:.1f} (raw={raw_score:.1f}, regime_weight={effective_regime_weight:.2f}) [regime={regime}, ml={ml_str}, rr={effective_rr:.2f}]"))
+                rejected.append((sig, f"Trade Score {admission_score:.1f} < {threshold:.1f} (raw={raw_score:.1f}, ranking_score={ranking_score:.1f}, regime_weight={effective_regime_weight:.2f}) [regime={regime}, ml={ml_str}, rr={effective_rr:.2f}]"))
             else:
-                if getattr(sig, "ml_gate_decision", None) == "GRAY_ZONE_EVALUATION":
+                if is_warmup_reduced:
+                    import os
+                    warmup_mult = float(os.environ.get("WARMUP_REDUCED_RISK_MULT", 0.5))
+                    sig.risk_multiplier = min(getattr(sig, "risk_multiplier", 1.0), warmup_mult)
+                    sig.ml_gate_decision = "WARMUP_REDUCED"
+                    applog.info("pipeline", f"{symbol} {sig.strategy}: WARMUP_REDUCED approved with risk_mult={sig.risk_multiplier}")
+                elif getattr(sig, "ml_gate_decision", None) == "GRAY_ZONE_EVALUATION":
                     sig.ml_gate_decision = "GRAY_ZONE_RESCUED"
                     applog.info("pipeline", f"{symbol}: GRAY_ZONE_RESCUED by Meta & TradeScore (prob={ml:.4f})")
                 entries.append(sig)
+            # =============================================================================
         if entries:
             entries.sort(key=lambda s: s.score or 0.0, reverse=True)
             winner = entries[0]

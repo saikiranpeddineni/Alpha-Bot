@@ -37,6 +37,17 @@ class LiquiditySweep(Strategy):
         "start_time": "10:15",        # Wait for the morning range to establish
         "end_time": "15:30",
         "reward_risk": 3.0,
+        # =============================================================================
+        # [ADDED 2026-10-14]: CR-06 — Liquidity Sweep degenerate-entry viability gates
+        # ORIGINAL INTENT: No floor on stop or target size; all sweeps passing wick/vol gate emitted.
+        # REASON FOR CHANGE: 0.30% tolerance + wick stop can be pennies on low-ATR names
+        #   → full -1R on noise. min_risk_atr=0.75 mirrors ORB's floor; min_target_atr=0.5
+        #   mirrors vwap_reversion.py:36 viability. Skips degenerate sweeps without changing
+        #   the sweep logic or thresholds.
+        # SAFE ROLLBACK: Set min_risk_atr=0.0, min_target_atr=0.0
+        "min_risk_atr": 0.75,         # CR-06: stop must be >= 0.75*ATR from entry
+        "min_target_atr": 0.5,        # CR-06: target must be >= 0.5*ATR from entry
+        # =============================================================================
     }
 
     def __init__(self, params: dict | None = None, enabled: bool = True) -> None:
@@ -110,6 +121,20 @@ class LiquiditySweep(Strategy):
                     risk = abs(stop - close_px)
                     rr = float(p.get("reward_risk", 3.0))
                     target = round(close_px - (rr * risk), 4)
+                    # =============================================================================
+                    # [ADDED 2026-10-14]: CR-06 — min_risk_atr and min_target_atr viability gates
+                    # ORIGINAL INTENT: No size floor; degenerate sweeps on low-ATR names emitted.
+                    # REASON FOR CHANGE: Wick stop on a 0.30% sweep can be pennies on low-ATR names,
+                    #   giving a full -1R on noise with no genuine risk edge. min_risk_atr=0.75
+                    #   (copy ORB) + min_target_atr=0.5 (copy vwap_reversion) skip these.
+                    # SAFE ROLLBACK: Set min_risk_atr=0.0, min_target_atr=0.0
+                    atr_px = float(last_row.get("atr14", 0.0)) if "atr14" in last_row.index else 0.0
+                    min_r_atr = float(p.get("min_risk_atr", 0.75))
+                    min_t_atr = float(p.get("min_target_atr", 0.5))
+                    if atr_px > 0:
+                        if risk < min_r_atr * atr_px or abs(close_px - target) < min_t_atr * atr_px:
+                            return None
+                    # =============================================================================
                     return Signal(
                         symbol=symbol,
                         action=SignalAction.ENTER_SHORT,
@@ -135,6 +160,15 @@ class LiquiditySweep(Strategy):
                     risk = abs(close_px - stop)
                     rr = float(p.get("reward_risk", 3.0))
                     target = round(close_px + (rr * risk), 4)
+                    # =============================================================================
+                    # [ADDED 2026-10-14]: CR-06 — min_risk_atr and min_target_atr (symmetric to short)
+                    atr_px = float(last_row.get("atr14", 0.0)) if "atr14" in last_row.index else 0.0
+                    min_r_atr = float(p.get("min_risk_atr", 0.75))
+                    min_t_atr = float(p.get("min_target_atr", 0.5))
+                    if atr_px > 0:
+                        if risk < min_r_atr * atr_px or abs(target - close_px) < min_t_atr * atr_px:
+                            return None
+                    # =============================================================================
                     return Signal(
                         symbol=symbol,
                         action=SignalAction.ENTER_LONG,

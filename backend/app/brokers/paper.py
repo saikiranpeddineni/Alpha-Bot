@@ -307,21 +307,49 @@ class PaperBroker(Broker):
             return True
         return False
 
-    async def close_position(self, symbol: str, reason: str = "manual", qty: float | None = None) -> Order | None:
+    # =============================================================================
+    # [MODIFIED 2026-10-14]: CR-16 & CR-21 - Explicit Close Position Attribution
+    # ORIGINAL INTENT: Used bare default reason="manual".
+    # REASON FOR CHANGE: Enforce explicit enumerated close reason and avoid bare 'exit' attribution.
+    # SAFE ROLLBACK: The original code is preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # async def close_position(self, symbol: str, reason: str = "manual", qty: float | None = None) -> Order | None:
+    #     symbol = symbol.upper()
+    #     pos = self._positions.get(symbol)
+    #     if pos is None or abs(pos.qty) < 1e-9:
+    #         return None
+    #     side = OrderSide.SELL if pos.qty > 0 else OrderSide.BUY
+    #     close_qty = min(abs(pos.qty), qty) if qty is not None and qty > 0 else abs(pos.qty)
+    #     req = OrderRequest(
+    #         symbol=symbol,
+    #         side=side,
+    #         qty=close_qty,
+    #         order_type=OrderType.MARKET,
+    #         strategy=pos.strategy,
+    #         reason=reason,
+    #     )
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    async def close_position(self, symbol: str, reason: str = "manual close", qty: float | None = None) -> Order | None:
         symbol = symbol.upper()
         pos = self._positions.get(symbol)
         if pos is None or abs(pos.qty) < 1e-9:
             return None
         side = OrderSide.SELL if pos.qty > 0 else OrderSide.BUY
         close_qty = min(abs(pos.qty), qty) if qty is not None and qty > 0 else abs(pos.qty)
+        clean_reason = (reason or "").strip()
+        if not clean_reason or clean_reason == "exit":
+            clean_reason = "manual close"
         req = OrderRequest(
             symbol=symbol,
             side=side,
             qty=close_qty,
             order_type=OrderType.MARKET,
             strategy=pos.strategy,
-            reason=reason,
+            reason=clean_reason,
         )
+    # =============================================================================
         # Position exits always fill immediately at the latest price, even in
         # next_open mode: stops/targets/flatten act on the observed bar.
         order = Order(

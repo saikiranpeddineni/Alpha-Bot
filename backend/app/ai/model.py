@@ -359,8 +359,20 @@ class _LegacySignalModel:
                 p_adaptive = float(predict_proba_safe(self._adaptive_short, x)[0, 1])
                 return w_global * p_global + w_adaptive * p_adaptive
             return p_global
-        # Fallback to complement of p_up for legacy models
-        return 1.0 - self.p_up(features)
+        # =============================================================================
+        # [MODIFIED 2026-10-14]: L27 - True Downward Heuristic instead of Inverted p_up
+        # ORIGINAL INTENT: Fallback to complement of p_up for legacy/cold-start models.
+        # REASON FOR CHANGE: 1.0 - p_up produces biased short estimates during strong trends.
+        # Use symmetric _heuristic_p_down logistic scorer.
+        # SAFE ROLLBACK: The original code is preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # # Fallback to complement of p_up for legacy models
+        # return 1.0 - self.p_up(features)
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        return self._heuristic_p_down(features)
+        # =============================================================================
 
     @staticmethod
     def _heuristic_p_up(f: pd.Series) -> float:
@@ -373,6 +385,26 @@ class _LegacySignalModel:
             + 0.3 * max(-1.0, min(1.0, float(f["vwap_dist_pct"]) / 0.5))
         )
         return _sigmoid(z)
+
+    # =============================================================================
+    # [MODIFIED 2026-10-14]: L27 - Dedicated Cold-Start Short Scorer
+    # ORIGINAL INTENT: No downward heuristic existed.
+    # REASON FOR CHANGE: Accurately estimate downward continuation probability without inverted long bias.
+    # SAFE ROLLBACK: Returns 0.50 if reverted.
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    @staticmethod
+    def _heuristic_p_down(f: pd.Series) -> float:
+        """Downward momentum / breakdown logistic score used before any model is trained."""
+        z = (
+            -0.9 * math.tanh(float(f["ret_5"]) * 300.0)
+            - 0.7 * math.tanh(float(f["ret_15"]) * 200.0)
+            - 0.5 * math.tanh(float(f["macd_hist_norm"]) * 1.5)
+            + 0.4 * max(-1.0, min(1.0, (50.0 - float(f["rsi14"])) / 30.0))
+            - 0.3 * max(-1.0, min(1.0, float(f["vwap_dist_pct"]) / 0.5))
+        )
+        return _sigmoid(z)
+    # =============================================================================
 
     def _make_validated_result(
         self,
@@ -904,37 +936,85 @@ class SignalModel(_LegacySignalModel):
         self._model_short = committed.short_model
         self.meta = dict(committed.meta)
 
+    # =============================================================================
+    # [MODIFIED 2026-10-14]: L27 - Configurable Blend Weight & Symmetric Downward Fallback
+    # ORIGINAL INTENT: Hardcoded 0.70 * p_global + 0.30 * p_adaptive and fell back to 1.0 - p_up.
+    # REASON FOR CHANGE: Honor configured adaptive_model_weight from Settings / RiskConfig
+    # and use dedicated _heuristic_p_down for short cold-start inference.
+    # SAFE ROLLBACK: The original code is preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # def p_up(self, features, regime_key=None) -> float:
+    #     snapshot = self._generation_store.current
+    #     global_long = snapshot.long_model if snapshot is not None else self._model_long
+    #     if global_long is None:
+    #         return self._heuristic_p_up(features)
+    #     x = pd.DataFrame([features[FEATURE_COLUMNS].to_numpy(dtype=float)], columns=FEATURE_COLUMNS)  # noqa: F405
+    #     p_global = float(predict_proba_safe(global_long, x)[0, 1])  # noqa: F405
+    #     reg_model = self._regime_adaptive_long.get(regime_key or "")
+    #     if reg_model is not None:
+    #         p_adaptive = float(predict_proba_safe(reg_model, x)[0, 1])  # noqa: F405
+    #         return 0.70 * p_global + 0.30 * p_adaptive
+    #     if self._adaptive_long is not None:
+    #         p_adaptive = float(predict_proba_safe(self._adaptive_long, x)[0, 1])  # noqa: F405
+    #         return 0.70 * p_global + 0.30 * p_adaptive
+    #     return p_global
+    #
+    # def p_down(self, features, regime_key=None) -> float:
+    #     snapshot = self._generation_store.current
+    #     global_short = snapshot.short_model if snapshot is not None else self._model_short
+    #     if global_short is None:
+    #         return 1.0 - self.p_up(features)
+    #     x = pd.DataFrame([features[FEATURE_COLUMNS].to_numpy(dtype=float)], columns=FEATURE_COLUMNS)  # noqa: F405
+    #     p_global = float(predict_proba_safe(global_short, x)[0, 1])  # noqa: F405
+    #     reg_model = self._regime_adaptive_short.get(regime_key or "")
+    #     if reg_model is not None:
+    #         p_adaptive = float(predict_proba_safe(reg_model, x)[0, 1])  # noqa: F405
+    #         return 0.70 * p_global + 0.30 * p_adaptive
+    #     if self._adaptive_short is not None:
+    #         p_adaptive = float(predict_proba_safe(self._adaptive_short, x)[0, 1])  # noqa: F405
+    #         return 0.70 * p_global + 0.30 * p_adaptive
+    #     return p_global
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
     def p_up(self, features, regime_key=None) -> float:
         snapshot = self._generation_store.current
         global_long = snapshot.long_model if snapshot is not None else self._model_long
         if global_long is None:
             return self._heuristic_p_up(features)
+        from app.config import get_settings
+        w_adaptive = getattr(get_settings().risk_config(), "adaptive_model_weight", 0.30)
+        w_global = 1.0 - w_adaptive
         x = pd.DataFrame([features[FEATURE_COLUMNS].to_numpy(dtype=float)], columns=FEATURE_COLUMNS)  # noqa: F405
         p_global = float(predict_proba_safe(global_long, x)[0, 1])  # noqa: F405
         reg_model = self._regime_adaptive_long.get(regime_key or "")
         if reg_model is not None:
             p_adaptive = float(predict_proba_safe(reg_model, x)[0, 1])  # noqa: F405
-            return 0.70 * p_global + 0.30 * p_adaptive
+            return w_global * p_global + w_adaptive * p_adaptive
         if self._adaptive_long is not None:
             p_adaptive = float(predict_proba_safe(self._adaptive_long, x)[0, 1])  # noqa: F405
-            return 0.70 * p_global + 0.30 * p_adaptive
+            return w_global * p_global + w_adaptive * p_adaptive
         return p_global
 
     def p_down(self, features, regime_key=None) -> float:
         snapshot = self._generation_store.current
         global_short = snapshot.short_model if snapshot is not None else self._model_short
         if global_short is None:
-            return 1.0 - self.p_up(features)
+            return self._heuristic_p_down(features)
+        from app.config import get_settings
+        w_adaptive = getattr(get_settings().risk_config(), "adaptive_model_weight", 0.30)
+        w_global = 1.0 - w_adaptive
         x = pd.DataFrame([features[FEATURE_COLUMNS].to_numpy(dtype=float)], columns=FEATURE_COLUMNS)  # noqa: F405
         p_global = float(predict_proba_safe(global_short, x)[0, 1])  # noqa: F405
         reg_model = self._regime_adaptive_short.get(regime_key or "")
         if reg_model is not None:
             p_adaptive = float(predict_proba_safe(reg_model, x)[0, 1])  # noqa: F405
-            return 0.70 * p_global + 0.30 * p_adaptive
+            return w_global * p_global + w_adaptive * p_adaptive
         if self._adaptive_short is not None:
             p_adaptive = float(predict_proba_safe(self._adaptive_short, x)[0, 1])  # noqa: F405
-            return 0.70 * p_global + 0.30 * p_adaptive
+            return w_global * p_global + w_adaptive * p_adaptive
         return p_global
+    # =============================================================================
 
     def train(self, *args, **kwargs) -> dict:
         with self._training_coordinator.claim_sync(f"manual:{id(self)}"):

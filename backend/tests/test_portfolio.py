@@ -13,9 +13,9 @@ from app.portfolio.tracker import PortfolioTracker
 T0 = datetime(2026, 1, 6, 15, 0, tzinfo=UTC)
 
 
-def fill(symbol="AAPL", side=OrderSide.BUY, qty=10.0, price=100.0, ts=T0, reason="") -> Fill:
+def fill(symbol="AAPL", side=OrderSide.BUY, qty=10.0, price=100.0, ts=T0, reason="", strategy="test") -> Fill:
     return Fill(order_id="o1", symbol=symbol, side=side, qty=qty, price=price, ts=ts,
-                strategy="test", reason=reason)
+                strategy=strategy, reason=reason)
 
 
 def test_round_trip_long_produces_trade():
@@ -136,3 +136,22 @@ def test_stats_and_equity_curve():
     stats = p.stats()
     assert stats["total_trades"] == 1
     assert stats["win_rate"] == 100.0
+
+
+def test_exit_reason_never_bare():
+    """CR-16: Ensure TradeRecord.exit_reason never emits the bare fallback 'exit'."""
+    p = PortfolioTracker()
+    p.on_fill(fill(symbol="MSFT", qty=10, price=200.0, strategy="momentum"), initial_stop=195.0)
+    # Closing fill with empty reason and below stop loss -> resolved to 'stop_loss'
+    trade = p.on_fill(fill(symbol="MSFT", side=OrderSide.SELL, qty=10, price=194.0, reason="", strategy="momentum"))
+    assert trade is not None
+    assert trade.exit_reason != "exit"
+    assert trade.exit_reason == "stop_loss"
+
+    # Closing fill with bare 'exit' string and no stop hit -> resolved to strategy-attributed exit
+    p.on_fill(fill(symbol="NVDA", qty=10, price=100.0, strategy="orb"), initial_stop=90.0)
+    trade2 = p.on_fill(fill(symbol="NVDA", side=OrderSide.SELL, qty=10, price=105.0, reason="exit", strategy="orb"))
+    assert trade2 is not None
+    assert trade2.exit_reason != "exit"
+    assert trade2.exit_reason == "unspecified_exit:orb"
+

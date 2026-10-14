@@ -174,6 +174,22 @@ class DataManager:
             if not fresh.empty:
                 self._last_closed_ts[symbol] = closed.index[-1]
                 new_closed[symbol] = fresh
+                # =============================================================================
+                # [ADDED 2026-10-14]: CR-20 — Live stream -> bars_cache.db persistence
+                # ORIGINAL INTENT: Stream bars stayed purely in-memory in self._frames.
+                # REASON FOR CHANGE: Gaps in bars_cache.db hindered offline forensics and forced
+                #   heavy on-demand repair from provider. Persisting newly closed bars guarantees
+                #   historical continuity without network overhead.
+                # [PREVIOUS CODE - PRESERVED]:
+                # # No persistence of fresh bars in poll()
+                # -----------------------------------------------------------------------------
+                # [NEW CODE]:
+                if not self.is_synthetic:
+                    try:
+                        self.cache.upsert(symbol, "1Min", fresh)
+                    except Exception as exc:
+                        applog.warning("data", f"{symbol}: failed persisting fresh bars to cache: {exc}")
+                # =============================================================================
         return new_closed
 
     def frame(self, symbol: str, timeframe: str = "1Min", limit: int | None = None) -> pd.DataFrame:

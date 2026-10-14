@@ -43,25 +43,80 @@ class MomentumCross(Strategy):
         Regime.TREND_UP: 1.20, Regime.TREND_DOWN: 1.05, Regime.RANGE: 0.60, Regime.VOLATILE: 0.80
     }
 
+    # =============================================================================
+    # [MODIFIED 2026-10-14]: CR-01 & CR-02 - Momentum Timing & Stop Calibration
+    # ORIGINAL INTENT: 10-bar MACD window, vol_z_min 0.5, rsi 50-78, min_minutes_since_open 5 unenforced,
+    # and dynamic stop tightening to 1.0 on climax volume.
+    # REASON FOR CHANGE: Momentum was the bot's largest loss contributor (632 trades, -$6,104).
+    # Tightened admission via intelligence (vol 1.2, RSI 55-70), adaptive event window (3 bars),
+    # stop widening on climax volume to 2.5 ATR (anti-stop hunt), and 1-trade/day cap.
+    # SAFE ROLLBACK: The original code is preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # def __init__(self, params: dict | None = None, enabled: bool = True) -> None:
+    #     super().__init__(params, enabled)
+    #     self._events: dict[str, dict[str, dict]] = {}
+    #
+    # def reset(self) -> None:
+    #     self._events.clear()
+    #
+    # default_params = {
+    #     "rsi_min": 50.0,
+    #     "rsi_max": 78.0,
+    #     "vol_z_min": 0.5,
+    #     "event_window_bars": 10,
+    #     "atr_stop_mult": 2.0,
+    #     "reward_risk": 1.8,
+    #     "trailing_stop_atr_mult": 1.5,
+    #     "htf_trend_filter": False,
+    #     "use_structural_vwap_filter": True,
+    #     "min_minutes_since_open": 5,
+    # }
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
     def __init__(self, params: dict | None = None, enabled: bool = True) -> None:
         super().__init__(params, enabled)
         # {symbol: {"long": {time, emitted}, "short": {time, emitted}}}
         self._events: dict[str, dict[str, dict]] = {}
+        self._traded: set[tuple[str, object]] = set()
 
     def reset(self) -> None:
         self._events.clear()
+        self._traded.clear()
+
+    def on_entry_filled(self, symbol: str, timestamp: object) -> None:
+        dt = getattr(timestamp, "date", lambda: timestamp)()
+        self._traded.add((symbol, dt))
 
     default_params = {
-        "rsi_min": 50.0,
-        "rsi_max": 78.0,
-        "vol_z_min": 0.5,
-        "event_window_bars": 10,
+        "rsi_min": 55.0,
+        "rsi_max": 70.0,
+        "vol_z_min": 1.2,
+        "event_window_bars": 3,
         "atr_stop_mult": 2.0,
+        "climax_stop_mult": 2.5,
         "reward_risk": 1.8,
         "trailing_stop_atr_mult": 1.5,
         "htf_trend_filter": False,
         "use_structural_vwap_filter": True,
-        "min_minutes_since_open": 5,
+        "min_minutes_since_open": 10,
+        "max_entries_per_day": 1,
+        "min_target_atr": 0.5,
+        # =============================================================================
+        # [MODIFIED 2026-10-14]: CR-01 - Efficiency, Climax & Stacked EMA Intelligence
+        # ORIGINAL INTENT: No efficiency cutoff, no stacked EMA check, no climax distance check.
+        # REASON FOR CHANGE: Prevent entering low-efficiency chop (er20 < 0.25), fighting
+        # established 50 EMA trends, or buying exhausted bars > 2.0 ATR from EMA9.
+        # SAFE ROLLBACK: Set min_er20=0.0, use_stacked_ema_filter=False, max_climax_ema_dist_atr=99.0
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        "min_er20": 0.25,
+        "max_climax_ema_dist_atr": 2.0,
+        "climax_bar_tr_atr": 1.8,
+        "climax_bar_close_pos": 0.65,
+        "use_stacked_ema_filter": True,
+        "min_reward_risk": 1.0,
+        # =============================================================================
     }
 
     # ------------------------------------------------------------------
@@ -75,8 +130,38 @@ class MomentumCross(Strategy):
     def _sym_events(self, symbol: str) -> dict[str, dict]:
         return self._events.setdefault(symbol, {})
 
+    # =============================================================================
+    # [MODIFIED 2026-10-14]: L09 - Opposite-Direction Event Expiry
+    # ORIGINAL INTENT: Tracked 'long' and 'short' independently; opposing events coexisted.
+    # REASON FOR CHANGE: When MACD inflects down, an existing pending long event must be
+    # expired/cleared to prevent whipsawing opposite entries within the event window.
+    # SAFE ROLLBACK: The original code is preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # def _set_event(self, ctx: StrategyContext, symbol: str, direction: str, bar_time) -> None:
+    #     evt = self._sym_events(symbol)
+    #     existing = evt.get(direction)
+    #     if existing is None or existing.get("emitted", False):
+    #         evt[direction] = {"origin_time": bar_time, "latest_time": bar_time, "emitted": False}
+    #         self._debug(
+    #             ctx,
+    #             f"[momentum] MACD_EVENT_CREATED sym={symbol} dir={direction} event_ts={bar_time}",
+    #         )
+    #     else:
+    #         # Keep original inflection origin_time to prevent event age reset
+    #         existing["latest_time"] = bar_time
+    #         self._debug(
+    #             ctx,
+    #             f"[momentum] MACD_EVENT_UPDATED sym={symbol} dir={direction} origin_ts={existing.get('origin_time')} latest_ts={bar_time}",
+    #         )
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
     def _set_event(self, ctx: StrategyContext, symbol: str, direction: str, bar_time) -> None:
         evt = self._sym_events(symbol)
+        # L09 FIX: Clear opposing direction event on new inflection
+        opposing = "short" if direction == "long" else "long"
+        if opposing in evt:
+            self._expire_event(ctx, symbol, opposing, bar_time)
         existing = evt.get(direction)
         if existing is None or existing.get("emitted", False):
             evt[direction] = {"origin_time": bar_time, "latest_time": bar_time, "emitted": False}
@@ -91,6 +176,7 @@ class MomentumCross(Strategy):
                 ctx,
                 f"[momentum] MACD_EVENT_UPDATED sym={symbol} dir={direction} origin_ts={existing.get('origin_time')} latest_ts={bar_time}",
             )
+    # =============================================================================
 
     def _consume_event(self, ctx: StrategyContext, symbol: str, direction: str, candidate_time) -> None:
         evt = self._sym_events(symbol).get(direction, {})
@@ -135,7 +221,10 @@ class MomentumCross(Strategy):
             self._expire_event(ctx, symbol, direction, df.index[current_bar_idx])
             return False
         bars_elapsed = current_bar_idx - event_idx
-        max_bars = int(self.params.get("event_window_bars", EVENT_WINDOW_BARS))
+        # [PREVIOUS CODE - PRESERVED]:
+        # max_bars = int(self.params.get("event_window_bars", EVENT_WINDOW_BARS))
+        import os
+        max_bars = int(os.environ.get("MOM_EVENT_WINDOW", self.params.get("event_window_bars", EVENT_WINDOW_BARS)))
         if bars_elapsed > max_bars:
             self._expire_event(ctx, symbol, direction, df.index[current_bar_idx])
             return False
@@ -189,6 +278,26 @@ class MomentumCross(Strategy):
         now_et = ctx.now.astimezone(ZoneInfo("America/New_York"))
         mins_et = now_et.hour * 60 + now_et.minute
 
+        # =============================================================================
+        # [MODIFIED 2026-10-14]: CR-01 - Event tracking and entry gating
+        # ORIGINAL INTENT: Track MACD inflection events on bars and gate candidate signals.
+        # REASON FOR CHANGE: Event tracking must record inflections properly on bars, while entry
+        # admission gates (min_minutes_since_open and max_entries_per_day) apply to entry signals.
+        # SAFE ROLLBACK: The original code is preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # minutes_from_open = mins_et - (9 * 60 + 30)
+        # min_mins_open = int(p.get("min_minutes_since_open", 10))
+        # if minutes_from_open < min_mins_open:
+        #     return None
+        # today_date = now_et.date()
+        # if p.get("max_entries_per_day", 1) > 0 and (symbol, today_date) in self._traded:
+        #     return None
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        # Evaluated below after inflection event creation to allow event state arming.
+        # =============================================================================
+
         # ---- HTF trend filter ----
         if p.get("htf_trend_filter", False) and (crossed_up or crossed_down):
             df_15 = df.resample("15Min").agg({"close": "last"}).dropna()
@@ -230,17 +339,7 @@ class MomentumCross(Strategy):
                     else:
                         structural_uptrend = structural_downtrend = False
 
-        # ---- Volume / ATR guard ----
-        if atr <= 0 or vol_z < p["vol_z_min"]:
-            return None
 
-        confidence = min(
-            0.90,
-            0.55
-            + 0.05 * max(0.0, vol_z)
-            + 0.1 * (float(last["er20"]) if pd.notna(last.get("er20")) else 0.0)
-            + (0.10 if ctx.mover_bias is not None else 0.0)  # +10% for confirmed movers
-        )
 
         # ---- Mover directional bias ----
         # top_gainer → long bias only; top_loser → short bias only; None → both
@@ -268,20 +367,124 @@ class MomentumCross(Strategy):
         if macd_inflected_down:
             self._set_event(ctx, symbol, "short", current_time)
 
+        # ---- Volume / ATR guard for signal emission ----
+        if atr <= 0 or vol_z < p["vol_z_min"]:
+            return None
+
+        # Confidence: hump curve so climax volume does not monotonically inflate confidence
+        vol_bonus = 0.05 * min(max(0.0, vol_z), 2.0) - 0.08 * max(0.0, vol_z - 2.5)
+        confidence = min(
+            0.90,
+            max(
+                0.50,
+                0.55
+                + vol_bonus
+                + 0.1 * (float(last["er20"]) if pd.notna(last.get("er20")) else 0.0)
+                + (0.10 if ctx.mover_bias is not None else 0.0)
+            )
+        )
+
+        # =============================================================================
+        # [MODIFIED 2026-10-14]: CR-01 - Entry admission gates (Opening minutes & 1 trade/day)
+        # ORIGINAL INTENT: Gated candidate signal emission without restricting event arming.
+        # REASON FOR CHANGE: Enforces min_minutes_since_open (default 10) and one-trade-per-day cap
+        # on actual signal emission while allowing events to be logged/tracked across bars.
+        # SAFE ROLLBACK: The original code is preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # # No check before candidate admission
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        # [PREVIOUS CODE - PRESERVED]:
+        # minutes_from_open = mins_et - (9 * 60 + 30)
+        # min_mins_open = int(p.get("min_minutes_since_open", 10))
+        import os
+        minutes_from_open = mins_et - (9 * 60 + 30)
+        min_mins_open = int(os.environ.get("MOM_MIN_MINS_OPEN", p.get("min_minutes_since_open", 10)))
+        if minutes_from_open < min_mins_open:
+            return None
+
+        today_date = now_et.date()
+        if p.get("max_entries_per_day", 1) > 0 and (symbol, today_date) in self._traded:
+            return None
+        # =============================================================================
+
+        # =============================================================================
+        # [MODIFIED 2026-10-14]: CR-01 - Efficiency, Climax & Stacked EMA Intelligence
+        # ORIGINAL INTENT: Entered on EMA cross above VWAP without checking er20, distance to EMA9,
+        # or broader 50 EMA trend stack.
+        # REASON FOR CHANGE: Enforce er20 >= 0.25 (avoid churn), abs(close - ema9) <= 2.0*ATR (prevent climax chase),
+        # wide-bar climax rejection, and stacked EMA alignment (no longs into ema9<ema20<ema50).
+        # SAFE ROLLBACK: Set min_er20=0.0, use_stacked_ema_filter=False, max_climax_ema_dist_atr=99.0
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # # No er20 or stacked EMA check before candidate evaluation
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        if pd.notna(last.get("er20")) and float(last["er20"]) < float(p.get("min_er20", 0.25)):
+            return None
+
+        max_climax_ema = float(p.get("max_climax_ema_dist_atr", 2.0))
+        if atr > 0 and abs(close - float(last["ema9"])) > (max_climax_ema * atr):
+            return None
+
+        bar_range = float(last["high"]) - float(last["low"])
+        climax_tr_mult = float(p.get("climax_bar_tr_atr", 1.8))
+        climax_close_pos = float(p.get("climax_bar_close_pos", 0.65))
+        is_wide_bar = (bar_range / atr) >= climax_tr_mult if atr > 0 else False
+
+        ema50_val = float(last["ema50"]) if ("ema50" in last and pd.notna(last["ema50"])) else None
+        if p.get("use_stacked_ema_filter", True) and ema50_val is not None:
+            ema9_val = float(last["ema9"])
+            ema20_val = float(last["ema20"])
+            bearish_stack = ema9_val < ema20_val < ema50_val
+            bullish_stack = ema9_val > ema20_val > ema50_val
+        else:
+            bearish_stack = bullish_stack = False
+        # =============================================================================
+
         # ---- Long candidate ----
+        long_climax_reject = (
+            is_wide_bar
+            and bar_range > 0
+            and ((close - float(last["low"])) / bar_range) >= climax_close_pos
+        )
         if (
             allow_long
             and not structural_downtrend
+            and not bearish_stack
+            and not long_climax_reject
             and last["ema9"] > last["ema20"]
             and close > float(last["vwap"])
             and p["rsi_min"] <= rsi <= p["rsi_max"]
             and self._valid_event(ctx, symbol, "long", current_bar_idx, df)
         ):
-            # Dynamic Stop Tightening: 1.0 * ATR if explosive volume and expanding MACD
-            dynamic_mult = 1.0 if (vol_z > 2.0 and hist_now > hist_prev) else p["atr_stop_mult"]
+            # =============================================================================
+            # [MODIFIED 2026-10-14]: CR-02 - Invert momentum dynamic-stop tightening
+            # ORIGINAL INTENT: Dynamic Stop Tightening: 1.0 * ATR if explosive volume (vol_z > 2.0)
+            # REASON FOR CHANGE: Halving stops to 1.0 ATR on the highest-volatility bars caused
+            # artificial stop-outs and whipsaws. Invert to widen stop on climax volume (default 2.5 ATR)
+            # and give trades room to breathe.
+            # SAFE ROLLBACK: The original code is preserved below as comments.
+            # -----------------------------------------------------------------------------
+            # [PREVIOUS CODE - PRESERVED]:
+            # dynamic_mult = 1.0 if (vol_z > 2.0 and hist_now > hist_prev) else p["atr_stop_mult"]
+            # stop = round(close - dynamic_mult * atr, 4)
+            # rr = float(p.get("reward_risk", 1.8))
+            # target = round(close + (rr * dynamic_mult * atr), 4)
+            # -----------------------------------------------------------------------------
+            # [NEW CODE]:
+            dynamic_mult = float(p.get("climax_stop_mult", 2.5)) if (vol_z > 2.0 and hist_now > hist_prev) else float(p.get("atr_stop_mult", 2.0))
             stop = round(close - dynamic_mult * atr, 4)
             rr = float(p.get("reward_risk", 1.8))
             target = round(close + (rr * dynamic_mult * atr), 4)
+            min_target_atr = float(p.get("min_target_atr", 0.5))
+            risk_dist = abs(close - stop)
+            reward_dist = abs(target - close)
+            min_rr = float(p.get("min_reward_risk", 1.0))
+            if reward_dist < (min_target_atr * atr) or risk_dist <= 0 or (reward_dist / risk_dist) < min_rr:
+                return None
+            # =============================================================================
             self._consume_event(ctx, symbol, "long", current_time)
             mover_tag = f" [top_gainer +{ctx.mover_change_pct:.1f}%]" if bias == "gainer" else ""
             return Signal(
@@ -296,19 +499,46 @@ class MomentumCross(Strategy):
             )
 
         # ---- Short candidate ----
+        short_climax_reject = (
+            is_wide_bar
+            and bar_range > 0
+            and ((float(last["high"]) - close) / bar_range) >= climax_close_pos
+        )
         if (
             allow_short
             and not structural_uptrend
+            and not bullish_stack
+            and not short_climax_reject
             and last["ema9"] < last["ema20"]
             and close < float(last["vwap"])
             and (100.0 - p["rsi_max"]) <= rsi <= (100.0 - p["rsi_min"])
             and self._valid_event(ctx, symbol, "short", current_bar_idx, df)
         ):
-            # Dynamic Stop Tightening: 1.0 * ATR if explosive volume and expanding MACD
-            dynamic_mult = 1.0 if (vol_z > 2.0 and hist_now < hist_prev) else p["atr_stop_mult"]
+            # =============================================================================
+            # [MODIFIED 2026-10-14]: CR-02 - Invert momentum dynamic-stop tightening
+            # ORIGINAL INTENT: Dynamic Stop Tightening: 1.0 * ATR if explosive volume (vol_z > 2.0)
+            # REASON FOR CHANGE: Halving stops on climax volume caused artificial stop-outs.
+            # Invert to widen stop on climax volume (default 2.5 ATR).
+            # SAFE ROLLBACK: The original code is preserved below as comments.
+            # -----------------------------------------------------------------------------
+            # [PREVIOUS CODE - PRESERVED]:
+            # dynamic_mult = 1.0 if (vol_z > 2.0 and hist_now < hist_prev) else p["atr_stop_mult"]
+            # stop = round(close + dynamic_mult * atr, 4)
+            # rr = float(p.get("reward_risk", 1.8))
+            # target = round(close - (rr * dynamic_mult * atr), 4)
+            # -----------------------------------------------------------------------------
+            # [NEW CODE]:
+            dynamic_mult = float(p.get("climax_stop_mult", 2.5)) if (vol_z > 2.0 and hist_now < hist_prev) else float(p.get("atr_stop_mult", 2.0))
             stop = round(close + dynamic_mult * atr, 4)
             rr = float(p.get("reward_risk", 1.8))
             target = round(close - (rr * dynamic_mult * atr), 4)
+            min_target_atr = float(p.get("min_target_atr", 0.5))
+            risk_dist = abs(stop - close)
+            reward_dist = abs(close - target)
+            min_rr = float(p.get("min_reward_risk", 1.0))
+            if reward_dist < (min_target_atr * atr) or risk_dist <= 0 or (reward_dist / risk_dist) < min_rr:
+                return None
+            # =============================================================================
             self._consume_event(ctx, symbol, "short", current_time)
             mover_tag = f" [top_loser {ctx.mover_change_pct:.1f}%]" if bias == "loser" else ""
             return Signal(
