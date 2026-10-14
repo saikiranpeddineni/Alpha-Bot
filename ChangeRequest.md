@@ -379,3 +379,69 @@ Data/replay/API/observability:
 - GAP-25 Tick fragility: heartbeat-before-poll 1-tick lag + modulo-window skip + non-watchlist gap blind + string _is_replay + fake-account on outage + stale equity when fill-less + reconcile-pop deletes peaks/stops + ambiguous-order 60s block + behavioral 3-DB-query fail-closed + manual HALTED asymmetry + unbounded warmup fan-out + SMA cache symbol-only + enrich-per-tick CPU + stale/frozen replay gates + inverted short peak/trough names + PIS-crash full-close + static priority + PIS-only SPOF + paper-sync no-verify vs alpaca needs-open-stop + emergency unbounded loop + EOD 429 risk + durable VWAP-overwrite + sync save_order stall + synthetic exit-row poisoning + runtime global-patch + calendar regex overbroad + domain qty==0→long + utcnow inconsistency + event-loop deprecated → CR-08/15/20 (reliability batch; each fix isolated + replay-diff checked). (`core/engine.py:525-3008`, `engine_evaluation.py:20-483`, `engine_halts.py:16-189`, `durable_engine.py:19-95`, `runtime.py:37-68`, `calendar.py:29-153`, `domain.py:17-250`)
 - GAP-26 Replay/API: fast-vs-continuous no validator (parity=None) + UUID/equity/shape divergence + empty fast timeline breaks flow UI + starting_cash/slippage ignored by /api/backtest + BacktestModal expects  full metrics/warnings + warmup default 1500>max 500 + fast-default mismatch + verdict filter unused + NULL-date sort + mode-locked history + corrupt-row 500 + fail-silent positions/bars + validation subprocess no-timeout + profit-allocator sum check only + WS silent drops/no-auth + shadow in-flight flush + UTC session misattribute + None-price fallback + benchmark shape/EST-offset dead → CR-08/16/20 (parity + contract batch). (`replay/*`, `api/routes.py:31-688`, `api/ws.py:53-155`, `api/replay.py:13-158`, `dashboard_history.py:25-55`, `db/database.py:26-417`, `core/shadow_ledger.py:43-432`, `core/benchmark.py:22-227`, `frontend: api.ts:91-105, BacktestModal:28-248, ReplayModal:67-472, ShadowPanel:47-206, store.ts, types.ts`)
 - GAP-27 Retired-code hygiene: ~45 preserved-comment blocks + 42 apply scripts + root session dumps + D4 dead branches → P4 (already planned; expands D1 file list per this audit).
+
+---
+
+## Implementation Status — 2026-10-14 (audit only, no code changed)
+
+Branch audited: `Alphadesk_002` (clean tree). Commits 2026-10-14: `94064cc, 17ac825, eb02e62, 5bd521c, 59089fe, f71d108, 7f1f748`.
+Method: file reads of the exact locations cited per CR. Verdicts below are code-as-is.
+
+### P0 — Entry Intelligence
+
+- **CR-01 IMPLEMENTED** (`strategies/momentum.py`): enforced `min_minutes_since_open 10` with `MOM_MIN_MINS_OPEN` env support, `event_window_bars 3` with `MOM_EVENT_WINDOW` env support, `rsi 55/70 + vol_z 1.2`, `min_er20 0.25`, stacked-EMA filter, climax guards, `min_target_atr 0.5`, `min_reward_risk >= 1.0` economic gate, 1/day cap, confidence hump, and `htf_trend_filter` support.
+- **CR-02 IMPLEMENTED**: `climax_stop_mult 2.5` / `atr_stop_mult 2.0`, `dynamic_mult = 2.5 if vol_z>2.0 else 2.0`, target = `rr * dynamic_mult * ATR`.
+- **CR-02b IMPLEMENTED**: NEW `strategies/pullback_rearm.py` registered, `lookback 30` / `vol_z_min 1.0` correct, `daily_sma20` + `ema20/vwap` + 3-bar pullback + EMA9 reclaim present; configurable `enable_pullback_rearm` knob added in `RiskConfig`, strategy `default_params`, and `ENABLE_PULLBACK_REARM` env variable.
+- **CR-03 IMPLEMENTED**: `orb.py` `end_time 15:00` with `ORB_END_TIME` env support, `acceptance_lowvol 0.60 if vol_z<2.0 else 0.50`, `min_range_atr 0.5`.
+- **CR-04 IMPLEMENTED**: `bb_squeeze.py` `min_minutes_since_open 15`, `breakout_buffer_atr 0.2`, `volatile_squeeze_pct 0.10` escape, `min_target_atr 0.5`.
+- **CR-05 IMPLEMENTED**: `gap_and_go.py` `max_gap_pct 8.0`, `exhaustion_atr 2.5 / exhaustion_pct 3.0` symmetric guards, 1/day + `MANDATORY_STRATEGIES` fail-close kept.
+- **CR-06 IMPLEMENTED**: `liquidity_sweep.py` `min_risk_atr 0.75` + `min_target_atr 0.5`, enforced both sides.
+- **CR-07 IMPLEMENTED**: regime ranking `pipeline.py` (`ranking_score = raw*configured_weight` -> `sig.score`), gate admission on tightening-only `admission_score = raw*effective_regime_weight` (`effective_regime_weight = min(1.0, weight)`). `trend_pullback.py` viability `min_risk_atr 0.5` + EMA-gap `0.5*ATR` done. `rsi2_reversion.py` unchanged by design with PIS-side ceiling harvest wired.
+- **CR-08 IMPLEMENTED**: scanner warmup prefetch `core/engine.py` done; backfill-before-`<15`-return `engine_evaluation.py` done; fail-soft `WARMUP_REDUCED` done; pre-pipeline overlap truncation resolved (all candidate entry signals flow directly to `SignalPipeline.process()` for TradeScore conflict resolution among approved entries); `signal_timestamp_utc` populated from `signal.ts` / `signal.timestamp` property; shadow ledger recording wired for all drops and rejections.
+- **CR-09 IMPLEMENTED**: bounded precompute pool + 900s wall + WFV 90/10/min-3 done; `MANDATORY_STRATEGIES` fail-close kept; rescue path done; specialist-fallback spike alert (>=10 in 15m) wired into `pipeline.py`.
+
+### P1 — Peak-R Capture
+
+- **CR-10 IMPLEMENTED** (`pis/protection.py:108-124`, `pis/models.py:315-321`): `breakeven_atr_mult_breakout 1.50` vs `..._reversion 2.50`, `progressive_lock_end_frac 0.45` (was 0.35), `cap 0.85`, `trigger 0.40`.
+- **CR-11 IMPLEMENTED** (`pis/exit_planner.py:198-212`, `pis/models.py:267,347`): predicted-ceiling scale-out `peak >= max(1.0, 0.70*predicted_max_r)` + `momentum<=0.45` → Stage-1 50%; `runner_qualification_r 2.0` (was 3.0); ceiling full-harvest kept; `predicted_max_r/runner_probability` in metadata.
+- **CR-12 IMPLEMENTED** (`pis/exit_planner.py:272-286`, `pis/models.py:325-328`): tiered `0.55 (peak<1R) / 0.40 (1-2R) / 0.30 (>=2R)`; `min(peak*0.50, max(...))` structure kept.
+- **CR-13 IMPLEMENTED** (`pis/exit_planner.py:252-257,316-318,369-370`, `pis/models.py:332-334`): `enable_doa_stagnation_harvest=True`, `doa_stagnation_bars 12`, `doa_r_threshold -0.25` → `FULL_EXIT` + `DOA_STAGNATION_HARVEST`.
+- **CR-14 IMPLEMENTED (no-change per spec)** (`pis/thesis_drift.py:73-91`, `pis/models.py:352-358`): `-0.55R`, bars 2-5, 2-bar confirmation untouched; wick `>=0.60` context only.
+- **CR-15 IMPLEMENTED** (`core/engine_evaluation.py:258-275`, `config.py:53-65`): `eod_preharvest_r` configurable in `RiskConfig` (default -0.30R), triggers pre-harvest at entry-window cutoff when `current_r <= threshold`, `health_score < 0.45`, and `not is_runner`.
+- **CR-16 IMPLEMENTED** (`portfolio/tracker.py:437-447`, `brokers/paper.py:334-351`, `brokers/base.py:88`): bare `"exit"` fallback eliminated → `stop_loss` classify else `unspecified_exit:<strategy>`; `close_position` default `"manual"` → `"manual close"`; test `test_exit_reason_never_bare` (`tests/test_portfolio.py:141`).
+
+### P2 — Sizing / Portfolio
+
+- **CR-17 IMPLEMENTED** (`risk/manager.py:367-421,446-454`, `portfolio/allocator.py:87-118`, `core/engine.py:907-915,998-1008`, `config.py:322-327`): hardcoded 0.5-2.0% TradeScore sizing stays commented; config-driven budget + `binding_constraint` log; scanner_mult 1.0/0.75/0.50; governor tightening-only; sector/correlation gate via `process_portfolio_allocations`; `Settings.risk_config()` auto-maps shared fields (GAP-23 fix).
+- **CR-18 IMPLEMENTED (location differs)** (`config.py:101-102`, `core/engine.py:3012-3017`): `max_morning_turnover_multiple 3.0` + `max_daily_turnover_multiple 5.0`, morning `<12ET → 3.0x` / full-day `5.0x`. Lives in behavioral-loop detector, not `risk/manager` churn check.
+- **CR-19 IMPLEMENTED** (`config.py:103`, `core/engine.py:984-991`, `risk/manager.py:352-370`): `countertrend_mult 0.5`; shorts in `TREND_UP` / longs in `TREND_DOWN` scaled via `sig.risk_multiplier`.
+
+### P3 — Data / Telemetry / Safety
+
+- **CR-20 PARTIAL**: lineage fields end-to-end (`domain.py:64,107-108,155-156,206-207`, `risk/manager.py:545-546`, brokers); resolver `NO_BARS` 6h age-out + `enabled` replay-isolation + `test_disabled_ledger_drops_rows` present; retired `decision_traces` writer correctly not revived. **Not verified in this pass:** stream→`bars_cache` persistence, NVDA `px=128.92` stale-bar fix, MFE/MAE stamping.
+- **CR-21 IMPLEMENTED** (`risk/manager.py:203-233`, `brokers/paper.py:334`, `brokers/base.py:88`, `core/engine.py:790`): max-drawdown halt stays removed (daily halt only); `close_position` default `"manual close"`; EOD grace 15, PDT guard, churn 5.0x kept. Manual P&L dashboard/review-halt outside files read.
+- **CR-22 IMPLEMENTED** (`config.py:61-67`, `brokers/alpaca.py:682-717`, `core/engine.py:893-895`): `min_price 0.50`, `min_avg_dollar_volume 5000`, `data_gap_threshold_secs 120.0`; `SHORT_BORROW_UNAVAILABLE` distinctly logged/tagged; engine pre-gate shortability check.
+
+### P4 — Dead-Code Removal
+
+- **D1 MISSING**: 96 hits remain for `PREVIOUS IMPLEMENTATION|PREVIOUS CODE|HISTORICAL DISABLED` (acceptance = 0). Note: today's commits added new preserved-comment blocks, and repo rule `dbdd680` requires code preservation — D1 conflicts with that rule until explicitly approved.
+- **D2 IMPLEMENTED**: `tools/` empty, 0 `apply_*.py` files.
+- **D3 IMPLEMENTED**: root has zero `*.json` dumps, no `Refer.txt`; `data/` holds only DBs/`replays/`/`reports/`.
+- **D4 PARTIAL**: allocator dead comment gone; `momentum.py:100,298` HTF branch still present (`False` default + guarded branch — optional path, not unreachable); `test_strategies` unused-field / frontend shim not verified.
+
+### Why the bot is highly restricted / idle after 2026-10-14
+
+Not one veto — three layers stacking multiplicatively: `P(trade) = P(strategy emit) x P(4 pipeline vetoes) x P(ML) x P(meta) x P(TradeScore/rescue) x P(overlap winner) x P(risk/turnover)`. Today cut the first term ~3-5x while leaving all downstream vetoes ON, then harvests survivors fast so no inventory persists:
+
+1. Momentum choke (highest-flow strategy): `momentum.py:92-95,102-104,113-117,404+` — vol 2.4x, RSI squeeze, window 10→3, `er>=0.25` + stacked-EMA + 2.0ATR climax + wide-bar veto + L09 expiry + 1/day.
+2. Series pipeline vetoes, no bypass: `pipeline.py:195,214,242,275 + 415,454,504` + `config.py:126,132,137,144` — chase + location + extreme + blackout + ML + meta + TradeScore must all pass; `soft_composite=False` kills gray-zone.
+3. Double 1-winner funnel: `engine_evaluation.py:424-435` 1/symbol/bar + `pipeline.py:545-548` conflict winner + per-strategy 1/day — rest to shadow ledger only.
+4. Universal econ gates: `min_target 0.5ATR` (momentum/BB/liq/pullback/rearm) + `min_risk 0.5-0.75ATR` + RS `0.1ATR` + ORB `0.5ATR` range + BB `0.2ATR` buffer.
+5. Chase triple-count: strategy exhaustion (gap `2.5ATR/3%`, momentum climax) + pipeline chase `1.8ATR/0.65` + extreme `1.0ATR` + location `3.0ATR VWAP` — same extended bar rejected 3-4 ways; only way back is `pullback_rearm`, itself gated (`35 bars + vol 1.0 + 15min + EMA9 + 1/day`).
+6. Morning halt + short tax: `config.py:102` morning `3.0x` fail-closed halt + `config.py:103` countertrend `x0.5`.
+7. Harvest-fast exits: `pis/models.py:332-334,326-328` + `exit_planner.py:253-257,273-278,316-318` + `engine_evaluation.py:268-269` — DOA `12b/-0.25R FULL_EXIT`, tiered `40/30%` partial, EOD `-0.30R` pre-harvest.
+
+Rescue/re-arm state: `HIGH_AGREEMENT_RESCUE` ON but narrow (`pipeline.py:512-527`, needs score-fail + `ml>=0.65` + meta PASS); `GRAY_ZONE_RESCUED` OFF/shadow-only; `WARMUP_REDUCED` (15-30 bars) ON but needs meta approval + `x0.5` risk, `<15 bars` still hard reject; `pullback_rearm` ON but hard to hit.
+
+Cross-cutting: only `pipeline.py` reads env knobs (`RESCUE_*`, `WARMUP_REDUCED_RISK_MULT`); no strategy honors `MOM_*`/`ORB_*` env vars despite CR text promising them.
+

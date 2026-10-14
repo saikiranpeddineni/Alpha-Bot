@@ -254,18 +254,37 @@ class TradingEngineEvaluationMixin:
             # [PREVIOUS CODE - PRESERVED]:
             # # No EOD pre-harvest check
             # -----------------------------------------------------------------------------
+            # [PREVIOUS CODE - PRESERVED]:
+            # if pis_order is None and position is not None and _lot is not None and hasattr(self, "risk") and hasattr(self.risk, "clock"):
+            #     try:
+            #         no_entry_mins = int(getattr(self.risk.config, "no_entry_minutes_before_close", 15) or 15)
+            #         in_preharvest_window = not self.risk.clock.in_entry_window(no_entry_mins, now)
+            #         if in_preharvest_window:
+            #             init_risk = getattr(_lot, "initial_risk_per_share", 0.0) or 0.0
+            #             if init_risk > 1e-8:
+            #                 current_r = (close - _lot.avg_price) / init_risk if position.qty > 0 else (_lot.avg_price - close) / init_risk
+            #                 if current_r <= -0.30:
+            #                     applog.warning("engine.exit", f"CR-15: EOD pre-harvest triggered for {symbol} at {current_r:.2f}R (near close cutoff)")
+            #                     await self._close_position_guarded(symbol, reason="PIS Exit Reason: EOD_PREHARVEST", qty=abs(position.qty))
+            #                     return []
+            #     except Exception as _eod_exc:
+            #         applog.debug("engine.exit", f"EOD pre-harvest evaluation skipped: {_eod_exc}")
+            # -----------------------------------------------------------------------------
             # [NEW CODE]:
             if pis_order is None and position is not None and _lot is not None and hasattr(self, "risk") and hasattr(self.risk, "clock"):
                 try:
                     no_entry_mins = int(getattr(self.risk.config, "no_entry_minutes_before_close", 15) or 15)
                     in_preharvest_window = not self.risk.clock.in_entry_window(no_entry_mins, now)
                     if in_preharvest_window:
-                        # Calculate current R
                         init_risk = getattr(_lot, "initial_risk_per_share", 0.0) or 0.0
                         if init_risk > 1e-8:
                             current_r = (close - _lot.avg_price) / init_risk if position.qty > 0 else (_lot.avg_price - close) / init_risk
-                            if current_r <= -0.30:
-                                applog.warning("engine.exit", f"CR-15: EOD pre-harvest triggered for {symbol} at {current_r:.2f}R (near close cutoff)")
+                            preharvest_threshold = float(getattr(self.risk.config, "eod_preharvest_r", -0.30))
+                            health_val = float(getattr(pis_decision, "health_score", 0.0) if pis_decision else 0.0)
+                            is_runner = bool(getattr(pis_decision, "is_runner", False) if pis_decision else False)
+                            # Scratch dying trade early only if underwater <= threshold, health < 0.45, and not an active runner
+                            if current_r <= preharvest_threshold and health_val < 0.45 and not is_runner:
+                                applog.warning("engine.exit", f"CR-15: EOD pre-harvest triggered for {symbol} at {current_r:.2f}R (health={health_val:.2f}, near close cutoff)")
                                 await self._close_position_guarded(symbol, reason="PIS Exit Reason: EOD_PREHARVEST", qty=abs(position.qty))
                                 return []
                 except Exception as _eod_exc:
@@ -420,43 +439,58 @@ class TradingEngineEvaluationMixin:
         #     entry_signals.sort(key=lambda s: STRATEGY_PRIORITY.get(s.strategy, 99))
         #     entry_signals = [entry_signals[0]] # Keep only the absolute best one
         # -----------------------------------------------------------------------------
+        # =============================================================================
+        # [MODIFIED 2026-10-14]: CR-08 & Gap-10 - Direct Pipeline Candidate Evaluation
+        # ORIGINAL INTENT: Truncated entry_signals to a single static priority winner before pipeline,
+        # which preempted valid breakout strategies with unvalidated continuation candidates that then
+        # failed location/chase vetoes, producing false negative drops (DPZ, HIMS).
+        # REASON FOR CHANGE: Let all candidate entry signals flow directly into SignalPipeline.process().
+        # The pipeline already evaluates every candidate against all risk, ML, and Meta gates, and
+        # resolves multi-candidate conflicts by TradeScore ranking among approved entries, recording
+        # losers to shadow_ledger.
+        # SAFE ROLLBACK: Re-enable the STRATEGY_PRIORITY sort and entry_signals = [winner] below.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # if len(entry_signals) > 1:
+        #     STRATEGY_PRIORITY = {
+        #         "gap_and_go": 1,
+        #         "liquidity_sweep": 2,
+        #         "bb_squeeze": 3,
+        #         "relative_strength": 4,
+        #         "trend_pullback": 5,
+        #         "pullback_rearm": 6,
+        #         "orb": 7,
+        #         "rsi_reversion": 8,
+        #         "vwap_reversion": 9,
+        #         "momentum": 10,
+        #     }
+        #     # Sort ascending by priority (1 is best). Unknown strategies default to 99.
+        #     entry_signals.sort(key=lambda s: STRATEGY_PRIORITY.get(s.strategy, 99))
+        #     winner = entry_signals[0]
+        #     for loser in entry_signals[1:]:
+        #         applog.info("pipeline", f"{symbol} {loser.strategy} {loser.action}: rejected -- lost overlap conflict to {winner.strategy}")
+        #         try:
+        #             from app.core.shadow_ledger import shadow_ledger
+        #             shadow_ledger.record(
+        #                 symbol=symbol,
+        #                 action=str(loser.action.value if hasattr(loser.action, "value") else loser.action),
+        #                 strategy=loser.strategy,
+        #                 gate="strategy_overlap",
+        #                 reason=f"lost conflict to {winner.strategy} (priority {STRATEGY_PRIORITY.get(winner.strategy, 99)} vs {STRATEGY_PRIORITY.get(loser.strategy, 99)})",
+        #                 price=loser.price or (float(df["close"].iloc[-1]) if len(df) else None),
+        #                 stop_loss=loser.stop_loss,
+        #                 take_profit=loser.take_profit,
+        #                 atr14=float(df["atr14"].iloc[-1]) if "atr14" in df.columns and len(df) else None,
+        #                 confidence=loser.confidence,
+        #                 sig=loser,
+        #             )
+        #         except Exception:
+        #             pass
+        #     entry_signals = [winner]
+        # -----------------------------------------------------------------------------
         # [NEW CODE]:
-        if len(entry_signals) > 1:
-            STRATEGY_PRIORITY = {
-                "gap_and_go": 1,
-                "liquidity_sweep": 2,
-                "bb_squeeze": 3,
-                "relative_strength": 4,
-                "trend_pullback": 5,
-                "pullback_rearm": 6,
-                "orb": 7,
-                "rsi_reversion": 8,
-                "vwap_reversion": 9,
-                "momentum": 10,
-            }
-            # Sort ascending by priority (1 is best). Unknown strategies default to 99.
-            entry_signals.sort(key=lambda s: STRATEGY_PRIORITY.get(s.strategy, 99))
-            winner = entry_signals[0]
-            for loser in entry_signals[1:]:
-                applog.info("pipeline", f"{symbol} {loser.strategy} {loser.action}: rejected -- lost overlap conflict to {winner.strategy}")
-                try:
-                    from app.core.shadow_ledger import shadow_ledger
-                    shadow_ledger.record(
-                        symbol=symbol,
-                        action=str(loser.action.value if hasattr(loser.action, "value") else loser.action),
-                        strategy=loser.strategy,
-                        gate="strategy_overlap",
-                        reason=f"lost conflict to {winner.strategy} (priority {STRATEGY_PRIORITY.get(winner.strategy, 99)} vs {STRATEGY_PRIORITY.get(loser.strategy, 99)})",
-                        price=loser.price or (float(df["close"].iloc[-1]) if len(df) else None),
-                        stop_loss=loser.stop_loss,
-                        take_profit=loser.take_profit,
-                        atr14=float(df["atr14"].iloc[-1]) if "atr14" in df.columns and len(df) else None,
-                        confidence=loser.confidence,
-                        sig=loser,
-                    )
-                except Exception:
-                    pass
-            entry_signals = [winner]
+        # All entry signals are preserved so SignalPipeline evaluates every candidate
+        # and resolves conflicts among approved candidates by TradeScore ranking.
         # =============================================================================
 
         signals = exit_signals + entry_signals

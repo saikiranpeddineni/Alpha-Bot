@@ -220,7 +220,10 @@ class MomentumCross(Strategy):
             self._expire_event(ctx, symbol, direction, df.index[current_bar_idx])
             return False
         bars_elapsed = current_bar_idx - event_idx
-        max_bars = int(self.params.get("event_window_bars", EVENT_WINDOW_BARS))
+        # [PREVIOUS CODE - PRESERVED]:
+        # max_bars = int(self.params.get("event_window_bars", EVENT_WINDOW_BARS))
+        import os
+        max_bars = int(os.environ.get("MOM_EVENT_WINDOW", self.params.get("event_window_bars", EVENT_WINDOW_BARS)))
         if bars_elapsed > max_bars:
             self._expire_event(ctx, symbol, direction, df.index[current_bar_idx])
             return False
@@ -391,8 +394,12 @@ class MomentumCross(Strategy):
         # # No check before candidate admission
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
+        # [PREVIOUS CODE - PRESERVED]:
+        # minutes_from_open = mins_et - (9 * 60 + 30)
+        # min_mins_open = int(p.get("min_minutes_since_open", 10))
+        import os
         minutes_from_open = mins_et - (9 * 60 + 30)
-        min_mins_open = int(p.get("min_minutes_since_open", 10))
+        min_mins_open = int(os.environ.get("MOM_MIN_MINS_OPEN", p.get("min_minutes_since_open", 10)))
         if minutes_from_open < min_mins_open:
             return None
 
@@ -471,7 +478,10 @@ class MomentumCross(Strategy):
             rr = float(p.get("reward_risk", 1.8))
             target = round(close + (rr * dynamic_mult * atr), 4)
             min_target_atr = float(p.get("min_target_atr", 0.5))
-            if (target - close) < (min_target_atr * atr):
+            risk_dist = abs(close - stop)
+            reward_dist = abs(target - close)
+            min_rr = float(p.get("min_reward_risk", 1.0))
+            if reward_dist < (min_target_atr * atr) or risk_dist <= 0 or (reward_dist / risk_dist) < min_rr:
                 return None
             # =============================================================================
             self._consume_event(ctx, symbol, "long", current_time)
@@ -522,7 +532,10 @@ class MomentumCross(Strategy):
             rr = float(p.get("reward_risk", 1.8))
             target = round(close - (rr * dynamic_mult * atr), 4)
             min_target_atr = float(p.get("min_target_atr", 0.5))
-            if (close - target) < (min_target_atr * atr):
+            risk_dist = abs(stop - close)
+            reward_dist = abs(close - target)
+            min_rr = float(p.get("min_reward_risk", 1.0))
+            if reward_dist < (min_target_atr * atr) or risk_dist <= 0 or (reward_dist / risk_dist) < min_rr:
                 return None
             # =============================================================================
             self._consume_event(ctx, symbol, "short", current_time)

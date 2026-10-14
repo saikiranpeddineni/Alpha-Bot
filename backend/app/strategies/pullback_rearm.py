@@ -46,6 +46,18 @@ class PullbackRearm(Strategy):
         "min_minutes_since_open": 15,
         "max_entries_per_day": 1,
         "min_target_atr": 0.5,
+        # =============================================================================
+        # [ADDED 2026-10-14]: CR-02b - enable_pullback_rearm knob
+        # ORIGINAL INTENT: Always-on strategy without explicit enable param.
+        # REASON FOR CHANGE: Expose configurable enable_pullback_rearm parameter and env support.
+        # SAFE ROLLBACK: Remove param.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # # No enable_pullback_rearm param in default_params
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        "enable_pullback_rearm": True,
+        # =============================================================================
     }
 
     def __init__(self, params: dict | None = None, enabled: bool = True) -> None:
@@ -61,6 +73,9 @@ class PullbackRearm(Strategy):
 
     def on_bar(self, ctx: StrategyContext, symbol: str, df: pd.DataFrame) -> Signal | None:
         p = self.params
+        import os
+        if not bool(p.get("enable_pullback_rearm", True)) or os.environ.get("ENABLE_PULLBACK_REARM", "1").lower() in ("0", "false", "no"):
+            return None
         if len(df) < 35:
             return None
 

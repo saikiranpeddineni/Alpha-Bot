@@ -50,6 +50,19 @@ class RiskConfig(BaseModel):
     # --- NEW IMPLEMENTATION ---
     # Minutes before market close when positions must be flattened.
     flatten_minutes_before_close: int = Field(5, ge=0, le=60)
+    # =============================================================================
+    # [ADDED 2026-10-14]: CR-15 - Intelligent EOD Pre-Harvest Loss Threshold
+    # ORIGINAL INTENT: Hardcoded -0.30R in engine_evaluation.py.
+    # REASON FOR CHANGE: Expose configurable eod_preharvest_r in RiskConfig so operator
+    # can tune pre-close scratch threshold without code edits.
+    # SAFE ROLLBACK: Remove field.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # # No eod_preharvest_r in RiskConfig
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    eod_preharvest_r: float = Field(-0.30, ge=-2.0, le=0.0)
+    # =============================================================================
     # --- PREVIOUS IMPLEMENTATION (Preserved for historical intent & audit) ---
     # min_price: float = Field(5.0, ge=0.0)
     # min_avg_dollar_volume: float = Field(100_000.0, ge=0.0)
@@ -149,8 +162,20 @@ class RiskConfig(BaseModel):
     # profitable). Kept as an opt-in experiment knob, default OFF.
     enable_entry_consensus: bool = Field(False)
     entry_consensus_rs_long_min: float = Field(50.0, ge=0.0, le=100.0)
-    entry_consensus_rs_short_max: float = Field(50.0, ge=0.0, le=100.0)
     adaptive_model_weight: float = Field(0.30, ge=0.0, le=1.0)
+    # =============================================================================
+    # [ADDED 2026-10-14]: CR-02b - Pullback Re-Arm Global Toggle Knob
+    # ORIGINAL INTENT: Registered strategy with no config-level enable flag.
+    # REASON FOR CHANGE: Expose configurable enable_pullback_rearm in RiskConfig so operator
+    # can cleanly enable/disable second-chance continuation entries.
+    # SAFE ROLLBACK: Remove field.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # # No enable_pullback_rearm in RiskConfig
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    enable_pullback_rearm: bool = Field(True)
+    # =============================================================================
 
 
 class Settings(BaseSettings):

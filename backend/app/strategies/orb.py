@@ -127,8 +127,10 @@ class OpeningRangeBreakout(Strategy):
         # REASON FOR CHANGE: Late-day ORB entries (post-15:00) with insufficient PIS time
         #   ride to EOD flatten for full -1R. ORB edge is strictly a morning phenomenon.
         #   Existing runners after 15:00 are still managed by PIS (this only blocks new entries).
-        # SAFE ROLLBACK: Remove this block or set end_time='15:59'
-        end_time_str = p.get("end_time", "15:00")
+        # [PREVIOUS CODE - PRESERVED]:
+        # end_time_str = p.get("end_time", "15:00")
+        import os
+        end_time_str = os.environ.get("ORB_END_TIME", p.get("end_time", "15:00"))
         from datetime import time as dtime
         end_t = dtime.fromisoformat(end_time_str)
         if now_time > end_t:

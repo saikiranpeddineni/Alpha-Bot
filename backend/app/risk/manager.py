@@ -541,8 +541,9 @@ class RiskManager:
             stop_loss=executable_stop,
             take_profit=executable_target,
             strategy=signal.strategy,
-            reason=signal.reason,
-            signal_timestamp_utc=getattr(signal, "timestamp", None),
+            # [PREVIOUS CODE - PRESERVED]:
+            # signal_timestamp_utc=getattr(signal, "timestamp", None),
+            signal_timestamp_utc=getattr(signal, "timestamp", None) or getattr(signal, "ts", None),
             decision_bar_timestamp_utc=getattr(signal, "decision_bar_timestamp_utc", None),
         )
         # =============================================================================

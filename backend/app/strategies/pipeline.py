@@ -53,9 +53,19 @@ class SignalPipeline:
         self.meta_label_engine = MetaLabelEngine(get_models_dir())
         # Shadow challengers are intentionally not instantiated here. Champion owns only
         # authoritative ML/Meta/TradeScore behavior.
-        if not hasattr(model, "_meta_label_engine") or model._meta_label_engine is None:
-            model._meta_label_engine = self.meta_label_engine
         self._is_event_day: bool = False
+        # =============================================================================
+        # [ADDED 2026-10-14]: CR-09 - Specialist Fallback Spike Tracking
+        # ORIGINAL INTENT: Fallbacks logged per-symbol only without aggregate rate alert.
+        # REASON FOR CHANGE: Track 15-minute fallback frequency and emit applog.warning on surge.
+        # SAFE ROLLBACK: Remove _fallback_history.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # # No _fallback_history
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        self._fallback_history: list[float] = []
+        # =============================================================================
 
     def compute_composite_score(self, ml_prob: float, meta_prob: float, trade_score: float,
                                 portfolio_alignment: float = 1.0, risk_factor: float = 1.0) -> float:
@@ -360,6 +370,27 @@ class SignalPipeline:
                         f"specialist_min_auc={f'{score_res.specialist_min_auc:.4f}' if isinstance(score_res.specialist_min_auc, (int, float)) else score_res.specialist_min_auc} | "
                         f"fallback={score_res.fallback_reason or 'None'}")
             # =============================================================================
+            # [ADDED 2026-10-14]: CR-09 - Specialist Fallback Spike Warning
+            # ORIGINAL INTENT: Fallbacks logged without rate monitoring.
+            # REASON FOR CHANGE: Alert when fallback rate surges (>=10 in 15 min).
+            # SAFE ROLLBACK: Remove block.
+            # -----------------------------------------------------------------------------
+            # [PREVIOUS CODE - PRESERVED]:
+            # # No fallback rate spike check
+            # -----------------------------------------------------------------------------
+            # [NEW CODE]:
+            if score_res.model_source == "BASE" and score_res.fallback_reason:
+                import time
+                now_mono = time.monotonic()
+                self._fallback_history.append(now_mono)
+                self._fallback_history = [t for t in self._fallback_history if (now_mono - t) <= 900.0]
+                if len(self._fallback_history) >= 10:
+                    applog.warning(
+                        "pipeline",
+                        f"[CR-09] Specialist fallback rate elevated: {len(self._fallback_history)} fallbacks in last 15m (latest: {symbol} -> {score_res.fallback_reason})",
+                    )
+            # =============================================================================
+            # =============================================================================
             # [MODIFIED 2026-10-14]: CR-08 & L26 - Warmup Reduced Evaluation Gate
             # ORIGINAL INTENT: Missing ML score or probability < threshold strictly rejected without exception.
             # REASON FOR CHANGE: For warmup reduced evaluation (15 <= len(df) < 30), allow ML prob = threshold,
@@ -498,10 +529,10 @@ class SignalPipeline:
             ranking_score = min(100.0, max(0.0, raw_score * configured_regime_weight))
             sig.score = round(ranking_score / 100.0, 4)
 
-            # Gate against raw_score: TradeScoreEngine.compute already weights the regime component,
-            # and gate_threshold is already regime-elevated (70.0 for RANGE, 65.0 for VOLATILE vs 55.0 for TREND).
-            # Ranking score is used to rank and prioritize winning candidates during conflict resolution.
-            approved, threshold = self.trade_score_engine.approve(raw_score, regime, is_event_day=self._is_event_day)
+            # [PREVIOUS CODE - PRESERVED]:
+            # approved, threshold = self.trade_score_engine.approve(raw_score, regime, is_event_day=self._is_event_day)
+            admission_score = min(100.0, max(0.0, raw_score * effective_regime_weight))
+            approved, threshold = self.trade_score_engine.approve(admission_score, regime, is_event_day=self._is_event_day)
 
             # CR-09: High-agreement rescue path
             import os
@@ -529,7 +560,7 @@ class SignalPipeline:
             if not approved:
                 effective_rr = exp_ret_pct / exp_dd_pct if exp_dd_pct > 0 else excursion.reward_risk
                 ml_str = f"{ml:.2f}" if ml is not None else "N/A"
-                rejected.append((sig, f"Trade Score {raw_score:.1f} < {threshold:.1f} (ranking_score={ranking_score:.1f}, regime_weight={effective_regime_weight:.2f}) [regime={regime}, ml={ml_str}, rr={effective_rr:.2f}]"))
+                rejected.append((sig, f"Trade Score {admission_score:.1f} < {threshold:.1f} (raw={raw_score:.1f}, ranking_score={ranking_score:.1f}, regime_weight={effective_regime_weight:.2f}) [regime={regime}, ml={ml_str}, rr={effective_rr:.2f}]"))
             else:
                 if is_warmup_reduced:
                     import os
