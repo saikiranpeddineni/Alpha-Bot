@@ -15,6 +15,16 @@ os.environ.setdefault(
     os.path.join(tempfile.mkdtemp(prefix="alphadesk_test_ledger_", dir=tempfile.gettempdir()), "shadow_ledger.db"),
 )
 
+# Same treatment for the stdlib file sink: engine fixtures call
+# configure_file_logging(), which defaults to the PRODUCTION log
+# (data/logs/app.log). Test engines then stamp HALTED / EMERGENCY /
+# DAILY-HALT lines into the prod forensic trail -- on 2026-10-15 this caused
+# a false "bot is dying" alarm during log review. Throwaway file per run.
+os.environ.setdefault(
+    "ALPHADESK_LOG_FILE",
+    os.path.join(tempfile.mkdtemp(prefix="alphadesk_test_logs_", dir=tempfile.gettempdir()), "app.log"),
+)
+
 import numpy as np
 import pandas as pd
 import pytest
