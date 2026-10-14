@@ -76,10 +76,7 @@ def bollinger(series: pd.Series, period: int = 20, num_std: float = 2.0) -> pd.D
     # [MODIFIED 2026-10-14]: L48 - Bollinger Width Zero-Division Guard
     # ORIGINAL INTENT: (upper - lower) / mid computed Bollinger band width without zero check.
     # REASON FOR CHANGE: If mid == 0.0, division by zero raises warnings/inf.
-    # SAFE ROLLBACK: The original code is preserved below as comments.
-    # -----------------------------------------------------------------------------
-    # [PREVIOUS CODE - PRESERVED]:
-    # width = (upper - lower) / mid
+    # SAFE ROLLBACK: The original code is removed; rollback via git history.
     # -----------------------------------------------------------------------------
     # [NEW CODE]:
     width = (upper - lower) / mid.replace(0.0, np.nan)
@@ -165,11 +162,7 @@ def opening_range_distance(df: pd.DataFrame, range_minutes: int = 15) -> pd.Seri
             # [MODIFIED 2026-10-14]: L48 - Opening Range Zero-Division Guard
             # ORIGINAL INTENT: (close - or_high) / or_high computed distance without zero check.
             # REASON FOR CHANGE: If or_high or or_low is 0.0, division by zero raises warnings/inf.
-            # SAFE ROLLBACK: The original code is preserved below as comments.
-            # -----------------------------------------------------------------------------
-            # [PREVIOUS CODE - PRESERVED]:
-            # dist_up = (close - or_high) / or_high
-            # dist_down = (or_low - close) / or_low
+            # SAFE ROLLBACK: The original code is removed; rollback via git history.
             # -----------------------------------------------------------------------------
             # [NEW CODE]:
             safe_or_high = or_high if abs(or_high) > 1e-9 else np.nan

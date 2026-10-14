@@ -88,15 +88,7 @@ class ExitPlanner:
         # ORIGINAL INTENT: Target hit only evaluated static take_profit price boundary.
         # REASON FOR CHANGE: For rsi2_reversion setups, reaching RSI2 >= 70 (long) or <= 30 (short)
         # represents full thesis completion/normalization. Wire into target_hit as a Stage-1 trigger.
-        # SAFE ROLLBACK: The original code is preserved below as comments.
-        # -----------------------------------------------------------------------------
-        # [PREVIOUS CODE - PRESERVED]:
-        # target_hit = False
-        # if obs.take_profit is not None and obs.take_profit > 0:
-        #     target_dist = (obs.take_profit - obs.high) if side > 0 else (obs.low - obs.take_profit)
-        #     target_tolerance = max(0.05, 0.20 * obs.atr)
-        #     if side > 0 and (obs.high >= obs.take_profit or (peak_r >= 1.50 and target_dist <= target_tolerance)) or side < 0 and (obs.low <= obs.take_profit or (peak_r >= 1.50 and target_dist <= target_tolerance)):
-        #         target_hit = True
+        # SAFE ROLLBACK: The original code is removed; rollback via git history.
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
         target_hit = False
@@ -186,13 +178,7 @@ class ExitPlanner:
         # When predicted_max_r is available, trigger Stage-1 50% scale-out when position reaches
         # >= 70% of predicted ceiling (min 1.0R) with fading momentum (score <= 0.45), banking
         # profit at predicted capacity.
-        # SAFE ROLLBACK: The original code is preserved below as comments.
-        # -----------------------------------------------------------------------------
-        # [PREVIOUS CODE - PRESERVED]:
-        # scale_out_triggered = False
-        # if getattr(self.config, "enable_scale_out", True) and not has_scaled_out:
-        #     if target_hit or peak_r >= effective_scale_out_r or exhaustion_climax or stagnation_harvest:
-        #         scale_out_triggered = True
+        # SAFE ROLLBACK: The original code is removed; rollback via git history.
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
         predicted_ceiling_scale_out = (
@@ -221,31 +207,7 @@ class ExitPlanner:
         # REASON FOR CHANGE: Excursions > 1R gave back 55% of gains. Tier giveback (40% for 1-2R, 30% for >=2R)
         # to lock in proven moves. Dead-money losers (r <= -0.25 after 12-15 bars with peak < 0.30R)
         # bled 30 bars to full -1R; DOA stagnation cut exits early to protect capital.
-        # SAFE ROLLBACK: The original code is preserved below as comments.
-        # -----------------------------------------------------------------------------
-        # [PREVIOUS CODE - PRESERVED]:
-        # giveback_guard_triggered = False
-        # if (
-        #     getattr(self.config, "enable_profit_giveback_guard", True)
-        #     and not has_scaled_out
-        #     and not scale_out_triggered
-        #     and peak_r >= self.config.profit_guard_peak_r
-        #     and obs.r_multiple > 0.0
-        # ):
-        #     giveback = peak_r - obs.r_multiple
-        #     atr_r_buffer = (
-        #         getattr(self.config, "profit_guard_min_giveback_atr_r", 0.0)
-        #         * (obs.atr / obs.risk_per_share if obs.risk_per_share > 1e-8 else 0.0)
-        #     )
-        #     min_giveback = min(
-        #         peak_r * 0.50,
-        #         max(
-        #             self.config.profit_guard_max_giveback_pct * peak_r,
-        #             atr_r_buffer,
-        #         ),
-        #     )
-        #     if giveback >= min_giveback:
-        #         giveback_guard_triggered = True
+        # SAFE ROLLBACK: The original code is removed; rollback via git history.
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
         # CR-13: DOA-stall harvest for underwater, zero-excursion dead money
@@ -305,12 +267,7 @@ class ExitPlanner:
         # ORIGINAL INTENT: Early invalidation was the only negative-R fast harvest.
         # REASON FOR CHANGE: Dead-money trades stuck at <= -0.25R with zero excursion for 12+ bars
         # held all the way to 30 bars or -1R. Trigger FULL_EXIT on doa_stall_triggered.
-        # SAFE ROLLBACK: The original code is preserved below as comments.
-        # -----------------------------------------------------------------------------
-        # [PREVIOUS CODE - PRESERVED]:
-        # if early_invalidation_breach:
-        #     action = ExitAction.FULL_EXIT
-        #     exit_ratio = 1.0
+        # SAFE ROLLBACK: The original code is removed; rollback via git history.
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
         if early_invalidation_breach or doa_stall_triggered:

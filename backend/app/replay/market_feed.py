@@ -263,9 +263,6 @@ class ReplayDataManager:
     # SAFE ROLLBACK: ReplayDataManager remains immutable; backfill() returns False
     #                without performing any network I/O or modifying preloaded frames.
     # -----------------------------------------------------------------------------
-    # [PREVIOUS CODE - PRESERVED]:
-    # (Method backfill was not present in ReplayDataManager)
-    # -----------------------------------------------------------------------------
     # [NEW CODE]:
     async def backfill(self, symbol: str, bars: int | None = None) -> bool:
         """No-op in replay: all historical bars are preloaded and immutable."""

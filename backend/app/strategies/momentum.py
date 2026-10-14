@@ -50,28 +50,7 @@ class MomentumCross(Strategy):
     # REASON FOR CHANGE: Momentum was the bot's largest loss contributor (632 trades, -$6,104).
     # Tightened admission via intelligence (vol 1.2, RSI 55-70), adaptive event window (3 bars),
     # stop widening on climax volume to 2.5 ATR (anti-stop hunt), and 1-trade/day cap.
-    # SAFE ROLLBACK: The original code is preserved below as comments.
-    # -----------------------------------------------------------------------------
-    # [PREVIOUS CODE - PRESERVED]:
-    # def __init__(self, params: dict | None = None, enabled: bool = True) -> None:
-    #     super().__init__(params, enabled)
-    #     self._events: dict[str, dict[str, dict]] = {}
-    #
-    # def reset(self) -> None:
-    #     self._events.clear()
-    #
-    # default_params = {
-    #     "rsi_min": 50.0,
-    #     "rsi_max": 78.0,
-    #     "vol_z_min": 0.5,
-    #     "event_window_bars": 10,
-    #     "atr_stop_mult": 2.0,
-    #     "reward_risk": 1.8,
-    #     "trailing_stop_atr_mult": 1.5,
-    #     "htf_trend_filter": False,
-    #     "use_structural_vwap_filter": True,
-    #     "min_minutes_since_open": 5,
-    # }
+    # SAFE ROLLBACK: The original code is removed; rollback via git history.
     # -----------------------------------------------------------------------------
     # [NEW CODE]:
     def __init__(self, params: dict | None = None, enabled: bool = True) -> None:
@@ -135,25 +114,7 @@ class MomentumCross(Strategy):
     # ORIGINAL INTENT: Tracked 'long' and 'short' independently; opposing events coexisted.
     # REASON FOR CHANGE: When MACD inflects down, an existing pending long event must be
     # expired/cleared to prevent whipsawing opposite entries within the event window.
-    # SAFE ROLLBACK: The original code is preserved below as comments.
-    # -----------------------------------------------------------------------------
-    # [PREVIOUS CODE - PRESERVED]:
-    # def _set_event(self, ctx: StrategyContext, symbol: str, direction: str, bar_time) -> None:
-    #     evt = self._sym_events(symbol)
-    #     existing = evt.get(direction)
-    #     if existing is None or existing.get("emitted", False):
-    #         evt[direction] = {"origin_time": bar_time, "latest_time": bar_time, "emitted": False}
-    #         self._debug(
-    #             ctx,
-    #             f"[momentum] MACD_EVENT_CREATED sym={symbol} dir={direction} event_ts={bar_time}",
-    #         )
-    #     else:
-    #         # Keep original inflection origin_time to prevent event age reset
-    #         existing["latest_time"] = bar_time
-    #         self._debug(
-    #             ctx,
-    #             f"[momentum] MACD_EVENT_UPDATED sym={symbol} dir={direction} origin_ts={existing.get('origin_time')} latest_ts={bar_time}",
-    #         )
+    # SAFE ROLLBACK: The original code is removed; rollback via git history.
     # -----------------------------------------------------------------------------
     # [NEW CODE]:
     def _set_event(self, ctx: StrategyContext, symbol: str, direction: str, bar_time) -> None:
@@ -221,8 +182,6 @@ class MomentumCross(Strategy):
             self._expire_event(ctx, symbol, direction, df.index[current_bar_idx])
             return False
         bars_elapsed = current_bar_idx - event_idx
-        # [PREVIOUS CODE - PRESERVED]:
-        # max_bars = int(self.params.get("event_window_bars", EVENT_WINDOW_BARS))
         import os
         max_bars = int(os.environ.get("MOM_EVENT_WINDOW", self.params.get("event_window_bars", EVENT_WINDOW_BARS)))
         if bars_elapsed > max_bars:
@@ -283,16 +242,7 @@ class MomentumCross(Strategy):
         # ORIGINAL INTENT: Track MACD inflection events on bars and gate candidate signals.
         # REASON FOR CHANGE: Event tracking must record inflections properly on bars, while entry
         # admission gates (min_minutes_since_open and max_entries_per_day) apply to entry signals.
-        # SAFE ROLLBACK: The original code is preserved below as comments.
-        # -----------------------------------------------------------------------------
-        # [PREVIOUS CODE - PRESERVED]:
-        # minutes_from_open = mins_et - (9 * 60 + 30)
-        # min_mins_open = int(p.get("min_minutes_since_open", 10))
-        # if minutes_from_open < min_mins_open:
-        #     return None
-        # today_date = now_et.date()
-        # if p.get("max_entries_per_day", 1) > 0 and (symbol, today_date) in self._traded:
-        #     return None
+        # SAFE ROLLBACK: The original code is removed; rollback via git history.
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
         # Evaluated below after inflection event creation to allow event state arming.
@@ -389,15 +339,9 @@ class MomentumCross(Strategy):
         # ORIGINAL INTENT: Gated candidate signal emission without restricting event arming.
         # REASON FOR CHANGE: Enforces min_minutes_since_open (default 10) and one-trade-per-day cap
         # on actual signal emission while allowing events to be logged/tracked across bars.
-        # SAFE ROLLBACK: The original code is preserved below as comments.
-        # -----------------------------------------------------------------------------
-        # [PREVIOUS CODE - PRESERVED]:
-        # # No check before candidate admission
+        # SAFE ROLLBACK: The original code is removed; rollback via git history.
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
-        # [PREVIOUS CODE - PRESERVED]:
-        # minutes_from_open = mins_et - (9 * 60 + 30)
-        # min_mins_open = int(p.get("min_minutes_since_open", 10))
         import os
         minutes_from_open = mins_et - (9 * 60 + 30)
         min_mins_open = int(os.environ.get("MOM_MIN_MINS_OPEN", p.get("min_minutes_since_open", 10)))
@@ -416,9 +360,6 @@ class MomentumCross(Strategy):
         # REASON FOR CHANGE: Enforce er20 >= 0.25 (avoid churn), abs(close - ema9) <= 2.0*ATR (prevent climax chase),
         # wide-bar climax rejection, and stacked EMA alignment (no longs into ema9<ema20<ema50).
         # SAFE ROLLBACK: Set min_er20=0.0, use_stacked_ema_filter=False, max_climax_ema_dist_atr=99.0
-        # -----------------------------------------------------------------------------
-        # [PREVIOUS CODE - PRESERVED]:
-        # # No er20 or stacked EMA check before candidate evaluation
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
         if pd.notna(last.get("er20")) and float(last["er20"]) < float(p.get("min_er20", 0.25)):
@@ -465,13 +406,7 @@ class MomentumCross(Strategy):
             # REASON FOR CHANGE: Halving stops to 1.0 ATR on the highest-volatility bars caused
             # artificial stop-outs and whipsaws. Invert to widen stop on climax volume (default 2.5 ATR)
             # and give trades room to breathe.
-            # SAFE ROLLBACK: The original code is preserved below as comments.
-            # -----------------------------------------------------------------------------
-            # [PREVIOUS CODE - PRESERVED]:
-            # dynamic_mult = 1.0 if (vol_z > 2.0 and hist_now > hist_prev) else p["atr_stop_mult"]
-            # stop = round(close - dynamic_mult * atr, 4)
-            # rr = float(p.get("reward_risk", 1.8))
-            # target = round(close + (rr * dynamic_mult * atr), 4)
+            # SAFE ROLLBACK: The original code is removed; rollback via git history.
             # -----------------------------------------------------------------------------
             # [NEW CODE]:
             dynamic_mult = float(p.get("climax_stop_mult", 2.5)) if (vol_z > 2.0 and hist_now > hist_prev) else float(p.get("atr_stop_mult", 2.0))
@@ -519,13 +454,7 @@ class MomentumCross(Strategy):
             # ORIGINAL INTENT: Dynamic Stop Tightening: 1.0 * ATR if explosive volume (vol_z > 2.0)
             # REASON FOR CHANGE: Halving stops on climax volume caused artificial stop-outs.
             # Invert to widen stop on climax volume (default 2.5 ATR).
-            # SAFE ROLLBACK: The original code is preserved below as comments.
-            # -----------------------------------------------------------------------------
-            # [PREVIOUS CODE - PRESERVED]:
-            # dynamic_mult = 1.0 if (vol_z > 2.0 and hist_now < hist_prev) else p["atr_stop_mult"]
-            # stop = round(close + dynamic_mult * atr, 4)
-            # rr = float(p.get("reward_risk", 1.8))
-            # target = round(close - (rr * dynamic_mult * atr), 4)
+            # SAFE ROLLBACK: The original code is removed; rollback via git history.
             # -----------------------------------------------------------------------------
             # [NEW CODE]:
             dynamic_mult = float(p.get("climax_stop_mult", 2.5)) if (vol_z > 2.0 and hist_now < hist_prev) else float(p.get("atr_stop_mult", 2.0))

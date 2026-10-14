@@ -59,16 +59,7 @@ async def _run_day_shard_async(payload: dict[str, Any]) -> dict[str, Any]:
     # [MODIFIED 2026-10-14]: L50 - Dynamic Starting Cash Support in Replay Worker
     # ORIGINAL INTENT: Hardcoded to getattr(settings, "paper_starting_cash", 100000.0).
     # REASON FOR CHANGE: API backtest caller sends starting_cash in request payload, which was ignored.
-    # SAFE ROLLBACK: The original code is preserved below as comments.
-    # -----------------------------------------------------------------------------
-    # [PREVIOUS CODE - PRESERVED]:
-    # broker = ReplayBroker(
-    #     float(getattr(settings, "paper_starting_cash", 100000.0)),
-    #     float(payload.get("slippage_bps", 0.0)),
-    #     payload.get("fill_model", "ohlc_touch"),
-    #     volume_constrained=bool(payload.get("volume_constrained", False)),
-    #     max_volume_pct=float(payload.get("max_volume_pct", 0.05)),
-    # )
+    # SAFE ROLLBACK: The original code is removed; rollback via git history.
     # -----------------------------------------------------------------------------
     # [NEW CODE]:
     initial_cash = float(payload.get("starting_cash") or getattr(settings, "paper_starting_cash", 100000.0))
@@ -154,10 +145,6 @@ async def _run_day_shard_async(payload: dict[str, Any]) -> dict[str, Any]:
             tick_start_ts = pre_window_ts[0] if pre_window_ts else min_window_ts
         by_ts: dict[datetime, list[dict[str, Any]]] = defaultdict(list)
         for bar in bars:
-            # --- PREVIOUS IMPLEMENTATION (Preserved for historical audit) ---
-            # by_ts[bar["ts_dt"]].append(bar)
-            # -----------------------------------------------------------------
-            # Tick only rolling warmup bars before the day window; historical reference bars remain in data._frames
             if bar.get("in_replay_window", False) or bar["ts_dt"] >= tick_start_ts:
                 by_ts[bar["ts_dt"]].append(bar)
 

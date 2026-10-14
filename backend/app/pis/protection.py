@@ -91,18 +91,7 @@ class AdaptiveProtectionPlanner:
             # ORIGINAL INTENT: Used flat breakeven_trigger_atr_mult (2.50) for all trades.
             # REASON FOR CHANGE: Breakouts (momentum, orb, bb_squeeze) reverse fast and need earlier
             # protection arming (1.5x ATR) than mean-reversion setups (2.5x ATR).
-            # SAFE ROLLBACK: The original code is preserved below as comments.
-            # -----------------------------------------------------------------------------
-            # [PREVIOUS CODE - PRESERVED]:
-            # atr_r = obs.atr / risk if risk > 1e-8 else 0.0
-            # cap_trig = getattr(self.config, "progressive_lock_cap_trigger_r", 0.85)
-            # effective_trigger = min(
-            #     cap_trig,
-            #     max(
-            #         self.config.breakeven_trigger_r,
-            #         getattr(self.config, "breakeven_trigger_atr_mult", 0.0) * atr_r,
-            #     ),
-            # )
+            # SAFE ROLLBACK: The original code is removed; rollback via git history.
             # -----------------------------------------------------------------------------
             # [NEW CODE]:
             atr_r = obs.atr / risk if risk > 1e-8 else 0.0

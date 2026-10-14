@@ -17,17 +17,7 @@ This rule is mandatory and must be strictly referenced and enforced on EVERY cod
   3. Write the new implementation directly adjacent to the commented-out legacy block.
 
 ### Example Format:
-```python
-# --- PREVIOUS IMPLEMENTATION (Preserved for historical intent & audit) ---
-# if condition_a:
-#     do_old_behavior()
-# --------------------------------------------------------------------------
-# --- NEW IMPLEMENTATION ---
-# [Detailed explanatory comments on why this was changed, what bug/limitation was resolved,
-# and how it improves execution while respecting original invariants]
-if condition_b:
-    do_new_behavior()
-```
+> Canonical example: commented-out previous block delineated by `PREVIOUS IMPLEMENTATION` / `NEW IMPLEMENTATION` markers with what/why/how comments (see git history for instances).
 
 ## 3. High-Standard Explanatory Comments on New Code
 * Every change must include detailed, institutional-grade comments directly above or alongside the new code:

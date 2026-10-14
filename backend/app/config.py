@@ -44,9 +44,6 @@ class RiskConfig(BaseModel):
     strategy_consecutive_loss_limit: int = Field(3, ge=1, le=20)            # was 3
     strategy_cooldown_minutes: int = Field(30, ge=0, le=390)                # was 30
     no_entry_minutes_before_close: int = Field(30, ge=0, le=180)     # was 30 — more trading time
-    # --- PREVIOUS IMPLEMENTATION (Preserved for historical intent & audit) ---
-    # (flatten_minutes_before_close was only in Settings, causing AttributeError on RiskConfig)
-    # --------------------------------------------------------------------------
     # --- NEW IMPLEMENTATION ---
     # Minutes before market close when positions must be flattened.
     flatten_minutes_before_close: int = Field(5, ge=0, le=60)
@@ -57,16 +54,9 @@ class RiskConfig(BaseModel):
     # can tune pre-close scratch threshold without code edits.
     # SAFE ROLLBACK: Remove field.
     # -----------------------------------------------------------------------------
-    # [PREVIOUS CODE - PRESERVED]:
-    # # No eod_preharvest_r in RiskConfig
-    # -----------------------------------------------------------------------------
     # [NEW CODE]:
     eod_preharvest_r: float = Field(-0.30, ge=-2.0, le=0.0)
     # =============================================================================
-    # --- PREVIOUS IMPLEMENTATION (Preserved for historical intent & audit) ---
-    # min_price: float = Field(5.0, ge=0.0)
-    # min_avg_dollar_volume: float = Field(100_000.0, ge=0.0)
-    # --------------------------------------------------------------------------
     # --- NEW IMPLEMENTATION ---
     # Calibrated to permit penny stock trading ($0.50+), allowing the bot to capture
     # volatile sub-$5.00 small-cap momentum runners and breakouts while maintaining
@@ -105,10 +95,7 @@ class RiskConfig(BaseModel):
     # 1. CR-18: Split turnover budget into morning (09:30-12:00) max 3.0x and full-day 5.0x so
     #    morning churn does not consume afternoon trend opportunities.
     # 2. CR-19: Countertrend sizing multiplier (0.5) to scale down shorts in TREND_UP or longs in TREND_DOWN.
-    # SAFE ROLLBACK: The original code is preserved below as comments.
-    # -----------------------------------------------------------------------------
-    # [PREVIOUS CODE - PRESERVED]:
-    # max_daily_turnover_multiple: float = Field(5.0, ge=0.1, le=100.0)
+    # SAFE ROLLBACK: The original code is removed; rollback via git history.
     # -----------------------------------------------------------------------------
     # [NEW CODE]:
     max_daily_turnover_multiple: float = Field(5.0, ge=0.1, le=100.0)
@@ -145,15 +132,17 @@ class RiskConfig(BaseModel):
     enable_entry_location_veto: bool = Field(True)
     entry_max_vwap_stretch_atr: float = Field(3.0, ge=0.5, le=20.0)
     # Trend-day allowance: on TREND_UP/TREND_DOWN bars the whole market rides
-    # far from VWAP (today: momentum extensions 4-21 ATR). Scaling the limit
-    # by this multiplier on trend days keeps the RANGE-day protection intact
-    # while letting continuation + re-arm entries participate in trends.
-    entry_vwap_stretch_trend_mult: float = Field(1.5, ge=1.0, le=3.0)
+    # far from VWAP. Owner verdict 2026-10-15: default 1.0 (OFF) -- momentum is
+    # -$1,890/32 on recent paper and stretched entries are measured negative-EV,
+    # so the loosening ships as a research knob only, Champion behavior unchanged.
+    entry_vwap_stretch_trend_mult: float = Field(1.0, ge=1.0, le=3.0)
     # Correlation clustering gate: block a new entry only when its 1-minute
     # close correlation with an open same-side position exceeds this.
-    # 0.70 blocked normal trend-day beta (0.81-0.97 across the board);
-    # 0.85 still blocks genuine clones/pairs while letting breadth through.
-    max_position_correlation: float = Field(0.85, ge=0.5, le=1.0)
+    # Owner verdict 2026-10-15: default back to 0.70 -- the 18 same-day blocks
+    # were genuine same-side clusters, and breadth is not worth cluster risk
+    # without profit evidence. Same-side scoping (hedges exempt) is retained:
+    # a hedge is diversification, not clustering, at any threshold.
+    max_position_correlation: float = Field(0.70, ge=0.5, le=1.0)
     # Opening blackout: skip NEW entries in the first N minutes after the bell.
     # Measured on exact-path backtest: 0-5min entries were 6/6 losers (-$910);
     # all positive expectancy begins ~minute 11. Tightening only.
@@ -184,9 +173,6 @@ class RiskConfig(BaseModel):
     # REASON FOR CHANGE: Expose configurable enable_pullback_rearm in RiskConfig so operator
     # can cleanly enable/disable second-chance continuation entries.
     # SAFE ROLLBACK: Remove field.
-    # -----------------------------------------------------------------------------
-    # [PREVIOUS CODE - PRESERVED]:
-    # # No enable_pullback_rearm in RiskConfig
     # -----------------------------------------------------------------------------
     # [NEW CODE]:
     enable_pullback_rearm: bool = Field(True)
@@ -236,10 +222,6 @@ class Settings(BaseSettings):
     strategy_cooldown_minutes: int = Field(10, validation_alias="STRATEGY_COOLDOWN_MINUTES")
     no_entry_minutes_before_close: int = Field(15, validation_alias="NO_ENTRY_MINUTES_BEFORE_CLOSE")  # was 30
     flatten_minutes_before_close: int = Field(5, validation_alias="FLATTEN_MINUTES_BEFORE_CLOSE")
-    # --- PREVIOUS IMPLEMENTATION (Preserved for historical intent & audit) ---
-    # min_price: float = Field(5.0, validation_alias="MIN_PRICE")
-    # min_avg_dollar_volume: float = Field(100_000.0, validation_alias="MIN_AVG_DOLLAR_VOLUME")
-    # --------------------------------------------------------------------------
     # --- NEW IMPLEMENTATION ---
     # Calibrated to permit penny stock trading ($0.50+) and small-cap momentum runners.
     min_price: float = Field(0.50, validation_alias="MIN_PRICE")
@@ -327,36 +309,7 @@ class Settings(BaseSettings):
         # turnover multiples, notional caps) on reload.
         # REASON FOR CHANGE: Automatically map all fields shared between Settings and RiskConfig,
         # with fallback to RiskConfig defaults for any remaining unmapped fields.
-        # SAFE ROLLBACK: The original code is preserved below as comments.
-        # -----------------------------------------------------------------------------
-        # [PREVIOUS CODE - PRESERVED]:
-        # return RiskConfig(
-        #     entry_order_type=self.entry_order_type,
-        #     risk_per_trade_pct=self.risk_per_trade_pct,
-        #     max_position_pct=self.max_position_pct,
-        #     max_open_positions=self.max_open_positions,
-        #     max_daily_loss_pct=self.max_daily_loss_pct,
-        #     max_drawdown_pct=self.max_drawdown_pct,
-        #     symbol_cooldown_minutes=self.symbol_cooldown_minutes,
-        #     strategy_consecutive_loss_limit=self.strategy_consecutive_loss_limit,
-        #     strategy_cooldown_minutes=self.strategy_cooldown_minutes,
-        #     no_entry_minutes_before_close=self.no_entry_minutes_before_close,
-        #     flatten_minutes_before_close=self.flatten_minutes_before_close,
-        #     min_price=self.min_price,
-        #     min_avg_dollar_volume=self.min_avg_dollar_volume,
-        #     data_gap_threshold_secs=self.data_gap_threshold_secs,
-        #     ml_confidence_threshold=self.ml_confidence_threshold,
-        #     min_specialist_auc=self.min_specialist_auc,
-        #     min_stop_pct=self.min_stop_pct,
-        #     score_threshold_trend=self.score_threshold_trend,
-        #     score_threshold_range=self.score_threshold_range,
-        #     score_threshold_volatile=self.score_threshold_volatile,
-        #     score_threshold_event=self.score_threshold_event,
-        #     kelly_fraction_cap=self.kelly_fraction_cap,
-        #     max_positions_per_sector=self.max_positions_per_sector,
-        #     max_correlation_penalty=self.max_correlation_penalty,
-        #     harvest_risk_multiplier=self.harvest_risk_multiplier,
-        # )
+        # SAFE ROLLBACK: The original code is removed; rollback via git history.
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
         field_kwargs = {

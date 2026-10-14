@@ -68,9 +68,6 @@ class TradingEngineEvaluationMixin:
         # SAFE ROLLBACK: Live trading continues to trigger backfill for non-synthetic/non-replay
         #                providers when hasattr(self.data, "backfill") is True.
         # -----------------------------------------------------------------------------
-        # [PREVIOUS CODE - PRESERVED]:
-        # if len(df) < 120 and not getattr(getattr(self.data, "provider", None), "name", "") == "synthetic":
-        # -----------------------------------------------------------------------------
         # [NEW CODE]:
         if (
             len(df) < 120
@@ -104,11 +101,7 @@ class TradingEngineEvaluationMixin:
         # ORIGINAL INTENT: Early return for df < 30 bars to ensure full feature calculation.
         # REASON FOR CHANGE: Pipeline has a calibrated fail-soft warmup path for 15 <= len(df) < 30.
         # Dropping frames at < 30 bars in engine_evaluation.py starved scanner-discovered candidates.
-        # SAFE ROLLBACK: The original code is preserved below as comments.
-        # -----------------------------------------------------------------------------
-        # [PREVIOUS CODE - PRESERVED]:
-        # if df.empty or len(df) < 30:
-        #     return []
+        # SAFE ROLLBACK: The original code is removed; rollback via git history.
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
         if df.empty or len(df) < 15:
@@ -156,13 +149,6 @@ class TradingEngineEvaluationMixin:
         #   Record every gated tick drop to shadow_ledger with gate="gated_tick".
         # SAFE ROLLBACK: Commented-out original code below.
         # -----------------------------------------------------------------------------
-        # [PREVIOUS CODE - PRESERVED]:
-        # if position is None and skip_entries_reason and not getattr(self, "replay_fast_path", False):
-        #     if symbol not in getattr(self, "_entry_gate_warned", set()):
-        #         self._entry_gate_warned.add(symbol)
-        #         applog.info("engine", f"{symbol}: entry evaluation skipped -- {skip_entries_reason}")
-        #     return []
-        # -----------------------------------------------------------------------------
         # [NEW CODE]:
         if position is None and skip_entries_reason and not getattr(self, "replay_fast_path", False):
             if symbol not in getattr(self, "_entry_gate_warned", set()):
@@ -201,9 +187,6 @@ class TradingEngineEvaluationMixin:
             if symbol not in self._position_peaks:
                 self._position_peaks[symbol] = position.avg_entry_price
                 self._position_troughs[symbol] = position.avg_entry_price
-                # --- PREVIOUS IMPLEMENTATION (Preserved for historical intent & audit) ---
-                # self._position_initial_stops[symbol] = position.stop_loss
-                # --------------------------------------------------------------------------
                 # --- NEW IMPLEMENTATION ---
                 # Broker Position objects (e.g. from Alpaca) do not expose a native stop_loss attribute.
                 # Query the portfolio tracker's internal lot memory (_lot.initial_stop_loss or _lot.stop_loss)
@@ -281,26 +264,7 @@ class TradingEngineEvaluationMixin:
             # ORIGINAL INTENT: Positions rode underwater into end-of-day flatten (flatten_all at market).
             # REASON FOR CHANGE: Positions holding loss < -0.30R with poor health at the entry-window cutoff
             # should be scratched early to avoid end-of-day market-order slippage and free risk budget.
-            # SAFE ROLLBACK: The original code is preserved below as comments.
-            # -----------------------------------------------------------------------------
-            # [PREVIOUS CODE - PRESERVED]:
-            # # No EOD pre-harvest check
-            # -----------------------------------------------------------------------------
-            # [PREVIOUS CODE - PRESERVED]:
-            # if pis_order is None and position is not None and _lot is not None and hasattr(self, "risk") and hasattr(self.risk, "clock"):
-            #     try:
-            #         no_entry_mins = int(getattr(self.risk.config, "no_entry_minutes_before_close", 15) or 15)
-            #         in_preharvest_window = not self.risk.clock.in_entry_window(no_entry_mins, now)
-            #         if in_preharvest_window:
-            #             init_risk = getattr(_lot, "initial_risk_per_share", 0.0) or 0.0
-            #             if init_risk > 1e-8:
-            #                 current_r = (close - _lot.avg_price) / init_risk if position.qty > 0 else (_lot.avg_price - close) / init_risk
-            #                 if current_r <= -0.30:
-            #                     applog.warning("engine.exit", f"CR-15: EOD pre-harvest triggered for {symbol} at {current_r:.2f}R (near close cutoff)")
-            #                     await self._close_position_guarded(symbol, reason="PIS Exit Reason: EOD_PREHARVEST", qty=abs(position.qty))
-            #                     return []
-            #     except Exception as _eod_exc:
-            #         applog.debug("engine.exit", f"EOD pre-harvest evaluation skipped: {_eod_exc}")
+            # SAFE ROLLBACK: The original code is removed; rollback via git history.
             # -----------------------------------------------------------------------------
             # [NEW CODE]:
             if pis_order is None and position is not None and _lot is not None and hasattr(self, "risk") and hasattr(self.risk, "clock"):
@@ -312,10 +276,6 @@ class TradingEngineEvaluationMixin:
                         if init_risk > 1e-8:
                             current_r = (close - _lot.avg_price) / init_risk if position.qty > 0 else (_lot.avg_price - close) / init_risk
                             preharvest_threshold = float(getattr(self.risk.config, "eod_preharvest_r", -0.30))
-                            # [PREVIOUS CODE - PRESERVED]:
-                            # health_val = float(getattr(pis_decision, "health_score", 0.0) if pis_decision else 0.0)
-                            # is_runner = bool(getattr(pis_decision, "is_runner", False) if pis_decision else False)
-                            # -----------------------------------------------------------------------------
                             # [NEW CODE]:
                             from app.pis.models import LifecycleState
                             if pis_decision is not None:
@@ -396,13 +356,6 @@ class TradingEngineEvaluationMixin:
         #   Record every gated tick drop to shadow_ledger with gate="gated_tick".
         # SAFE ROLLBACK: Commented-out original code below.
         # -----------------------------------------------------------------------------
-        # [PREVIOUS CODE - PRESERVED]:
-        # if skip_entries_reason and not getattr(self, "replay_fast_path", False):
-        #     if symbol not in getattr(self, "_entry_gate_warned", set()):
-        #         self._entry_gate_warned.add(symbol)
-        #         applog.info("engine", f"{symbol}: entry evaluation skipped -- {skip_entries_reason}")
-        #     return []
-        # -----------------------------------------------------------------------------
         # [NEW CODE]:
         if skip_entries_reason and not getattr(self, "replay_fast_path", False):
             if symbol not in getattr(self, "_entry_gate_warned", set()):
@@ -475,9 +428,6 @@ class TradingEngineEvaluationMixin:
             # [ADDED 2026-10-14]: CR-02b — Wire RiskConfig.enable_pullback_rearm
             # ORIGINAL INTENT: RiskConfig.enable_pullback_rearm was defined but unread by engine.
             # REASON FOR CHANGE: Enforce RiskConfig.enable_pullback_rearm dynamically at runtime.
-            # [PREVIOUS CODE - PRESERVED]:
-            # # No check for pullback_rearm against risk.config.enable_pullback_rearm
-            # -----------------------------------------------------------------------------
             # [NEW CODE]:
             if strat.name == "pullback_rearm":
                 if hasattr(self, "risk") and hasattr(self.risk, "config"):
@@ -508,45 +458,7 @@ class TradingEngineEvaluationMixin:
         # ORIGINAL INTENT: Kept entry_signals[0] and silently discarded all other signals.
         # REASON FOR CHANGE: Discarded overlap signals left zero forensic trace. Record every
         # discarded signal to shadow_ledger with gate="strategy_overlap" and winner details.
-        # SAFE ROLLBACK: The original code is preserved below as comments.
-        # -----------------------------------------------------------------------------
-        # [PREVIOUS CODE - PRESERVED]:
-        # if len(entry_signals) > 1:
-        #     STRATEGY_PRIORITY = {
-        #         "gap_and_go": 1,
-        #         "liquidity_sweep": 2,
-        #         "bb_squeeze": 3,
-        #         "relative_strength": 4,
-        #         "trend_pullback": 5,
-        #         "orb": 6,
-        #         "rsi_reversion": 7,
-        #         "vwap_reversion": 8,
-        #         "momentum": 9,
-        #     }
-        #     # Sort ascending by priority (1 is best). Unknown strategies default to 99.
-        #     entry_signals.sort(key=lambda s: STRATEGY_PRIORITY.get(s.strategy, 99))
-        #     entry_signals = [entry_signals[0]] # Keep only the absolute best one
-        # -----------------------------------------------------------------------------
-        # =============================================================================
-        # [MODIFIED 2026-10-14]: CR-08 & Gap-10 - Direct Pipeline Candidate Evaluation
-        # ORIGINAL INTENT: Truncated entry_signals to a single static priority winner before pipeline,
-        # which preempted valid breakout strategies with unvalidated continuation candidates that then
-        # failed location/chase vetoes, producing false negative drops (DPZ, HIMS).
-        # REASON FOR CHANGE: Let all candidate entry signals flow directly into SignalPipeline.process().
-        # The pipeline already evaluates every candidate against all risk, ML, and Meta gates, and
-        # resolves multi-candidate conflicts by TradeScore ranking among approved entries, recording
-        # losers to shadow_ledger.
-        # SAFE ROLLBACK: Re-enable the STRATEGY_PRIORITY sort and entry_signals = [winner] below.
-        # -----------------------------------------------------------------------------
-        # =============================================================================
-        # [MODIFIED 2026-10-14]: CR-08 & L26 - Strategy Overlap Resolution & Shadow Ledger Recording
-        # ORIGINAL INTENT: Kept entry_signals[0] and silently discarded all other signals.
-        # REASON FOR CHANGE: Discarded overlap signals left zero forensic trace. Record every
-        # discarded signal to shadow_ledger with gate="strategy_overlap" and winner details.
-        # SAFE ROLLBACK: The original code is preserved below as comments.
-        # -----------------------------------------------------------------------------
-        # [PREVIOUS CODE - PRESERVED]:
-        # # Silently truncated without shadow recording
+        # SAFE ROLLBACK: The original code is removed; rollback via git history.
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
         if len(entry_signals) > 1:
@@ -604,18 +516,7 @@ class TradingEngineEvaluationMixin:
         # dropped candidates during reconciliation failure with log warning only without shadow ledger record.
         # REASON FOR CHANGE: Populate decision_bar_timestamp_utc for backtest/live forensics;
         # record reconciliation rejections to shadow_ledger so no accepted pipeline candidate disappears without trace.
-        # SAFE ROLLBACK: The original code is preserved below as comments.
-        # -----------------------------------------------------------------------------
-        # [PREVIOUS CODE - PRESERVED]:
-        # for sig in signals:
-        #     if sig.action != SignalAction.EXIT:
-        #         if getattr(sig, "candidate_id", None) is None:
-        #             prefix = f"{symbol}_{sig.strategy}_{now.strftime('%Y%m%d_%H%M%S')}"
-        #             sig.candidate_id = f"{prefix}_{uuid.uuid4().hex[:6]}".upper()
-        # ...
-        #     if getattr(self, "reconciliation_failed", False):
-        #         applog.warning("engine", f"{symbol}: entry signal {sig.strategy} rejected -- engine position/broker reconciliation state is uncertain")
-        #         continue
+        # SAFE ROLLBACK: The original code is removed; rollback via git history.
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
         for sig in signals:

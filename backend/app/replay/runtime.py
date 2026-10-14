@@ -54,27 +54,7 @@ class ReplayRuntime:
     # [MODIFIED 2026-10-14]: L50 - Dynamic Starting Cash Passthrough in Replay Runtime
     # ORIGINAL INTENT: run_replay_fast_async did not accept starting_cash, defaulting to fixed setting.
     # REASON FOR CHANGE: Caller starting_cash was ignored by replay engine.
-    # SAFE ROLLBACK: The original code is preserved below as comments.
-    # -----------------------------------------------------------------------------
-    # [PREVIOUS CODE - PRESERVED]:
-    # async def run_replay_fast_async(self, start_date: str, end_date: str,
-    #                                 symbols: list[str] | None = None,
-    #                                 fill_model: str = "ohlc_touch",
-    #                                 slippage_bps: float = 0.0,
-    #                                 volume_constrained: bool = False,
-    #                                 max_volume_pct: float = 0.05,
-    #                                 warmup_bars: int = 600,
-    #                                 max_workers: int | None = None) -> dict[str, Any]:
-    #     import os
-    #     from concurrent.futures import ProcessPoolExecutor
-    #     from datetime import timedelta as _td
-    #
-    #     from app.replay.fast_worker import run_day_shard
-    #
-    #     config = {"start_date": start_date, "end_date": end_date, "symbols": symbols,
-    #               "fill_model": fill_model, "slippage_bps": slippage_bps,
-    #               "volume_constrained": volume_constrained, "max_volume_pct": max_volume_pct,
-    #               "warmup_bars": warmup_bars, "engine": "replay_fast"}
+    # SAFE ROLLBACK: The original code is removed; rollback via git history.
     # -----------------------------------------------------------------------------
     # [NEW CODE]:
     async def run_replay_fast_async(self, start_date: str, end_date: str,
@@ -123,10 +103,6 @@ class ReplayRuntime:
             for sym, sb in by_sym.items():
                 sb.sort(key=lambda x: x["ts_dt"])
                 first_w = next((i for i, b in enumerate(sb) if b["in_replay_window"]), len(sb))
-                # --- PREVIOUS IMPLEMENTATION (Preserved for historical audit) ---
-                # start_idx = max(0, first_w - int(warmup_bars))
-                # -----------------------------------------------------------------
-                # Market risk calculation (e.g. SPY/QQQ ATR percentile) requires >= 20 hourly bars (multi-week history).
                 start_idx = 0 if sym in {"SPY", "QQQ", "VIX", "^VIX"} else max(0, first_w - int(warmup_bars))
                 filtered.extend(sb[start_idx:])
             bars = sorted(filtered, key=lambda b: (b["ts_dt"], b["symbol"]))
@@ -171,9 +147,6 @@ class ReplayRuntime:
                 kept: list[dict[str, Any]] = []
                 for b in reversed(warm):
                     c = per_sym[b["symbol"]]
-                    # --- PREVIOUS IMPLEMENTATION (Preserved for historical audit) ---
-                    # if c < warmup_bars:
-                    # -----------------------------------------------------------------
                     if b["symbol"] in {"SPY", "QQQ", "VIX", "^VIX"} or c < warmup_bars:
                         kept.append(b)
                         per_sym[b["symbol"]] += 1
@@ -305,10 +278,6 @@ class ReplayRuntime:
             for sym, sym_bars in by_sym.items():
                 sym_bars.sort(key=lambda x: x["ts_dt"])
                 first_in_window = next((i for i, b in enumerate(sym_bars) if b["in_replay_window"]), len(sym_bars))
-                # --- PREVIOUS IMPLEMENTATION (Preserved for historical audit) ---
-                # start_idx = max(0, first_in_window - warmup_bars)
-                # -----------------------------------------------------------------
-                # Market risk calculation (e.g. SPY/QQQ ATR percentile) requires >= 20 hourly bars (multi-week history).
                 start_idx = 0 if sym in {"SPY", "QQQ", "VIX", "^VIX"} else max(0, first_in_window - warmup_bars)
                 filtered_bars.extend(sym_bars[start_idx:])
 
@@ -433,10 +402,6 @@ class ReplayRuntime:
                 engine.model = SignalModel(replay_models)
                 await self._initialize_engine(engine, clock, broker, data, ledger, replay_models)
             by_ts: dict[datetime, list[dict[str, Any]]] = defaultdict(list)
-            # --- PREVIOUS IMPLEMENTATION (Preserved for historical audit) ---
-            # for bar in bars: by_ts[bar["ts_dt"]].append(bar)
-            # -----------------------------------------------------------------
-            # Tick only rolling warmup bars before the replay window; historical reference bars remain in data._frames
             window_timestamps = {bar["ts_dt"] for bar in bars if bar.get("in_replay_window", False)}
             min_window_ts = min(window_timestamps) if window_timestamps else min(b["ts_dt"] for b in bars)
             pre_window_ts = sorted({b["ts_dt"] for b in bars if b["ts_dt"] < min_window_ts})

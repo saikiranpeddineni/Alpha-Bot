@@ -88,16 +88,7 @@ Whenever you review, refactor, optimize, fix, or modify ANY code file in this re
 * **DO NOT DELETE existing or legacy code outright when modifying or replacing it.**
 * When altering logic, refactoring an algorithm, adjusting a calculation, or replacing a function, **comment out the previous code in place** instead of deleting it.
 * Clearly delineate the previous implementation so future developers, agents, and auditors can immediately inspect what was previously running:
-  ```python
-  # --- PREVIOUS IMPLEMENTATION (Preserved for historical intent & audit) ---
-  # if condition_a:
-  #     do_old_behavior()
-  # --------------------------------------------------------------------------
-  # --- NEW IMPLEMENTATION ---
-  # [Detailed comment explaining why the change was made, what was improved, and what bug was resolved]
-  if condition_b:
-      do_new_behavior()
-  ```
+  > Canonical example: commented-out previous block delineated by `PREVIOUS IMPLEMENTATION` / `NEW IMPLEMENTATION` markers with what/why/how comments (see git history for instances).
 
 ## 3. High-Standard Explanatory Comments on New Code
 * Every change must include detailed, high-standard comments directly above or alongside the new code:

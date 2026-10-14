@@ -124,9 +124,6 @@ class OpeningRangeBreakout(Strategy):
         # REASON FOR CHANGE: If df was stale, today evaluated to yesterday's date, causing ORB
         #   to evaluate yesterday's opening range as today's (e.g. NVDA px=128.92 incident).
         #   If ctx.now is provided, require that the latest bar's date matches ctx.now's session date.
-        # [PREVIOUS CODE - PRESERVED]:
-        # # No check against ctx.now session date
-        # -----------------------------------------------------------------------------
         # [NEW CODE]:
         if ctx.now is not None:
             ctx_date = ctx.now.astimezone(ET).date()
@@ -144,8 +141,6 @@ class OpeningRangeBreakout(Strategy):
         # REASON FOR CHANGE: Late-day ORB entries (post-15:00) with insufficient PIS time
         #   ride to EOD flatten for full -1R. ORB edge is strictly a morning phenomenon.
         #   Existing runners after 15:00 are still managed by PIS (this only blocks new entries).
-        # [PREVIOUS CODE - PRESERVED]:
-        # end_time_str = p.get("end_time", "15:00")
         import os
         end_time_str = os.environ.get("ORB_END_TIME", p.get("end_time", "15:00"))
         from datetime import time as dtime
@@ -213,9 +208,6 @@ class OpeningRangeBreakout(Strategy):
         #   probe than genuine acceptance. Tighten to acceptance_lowvol=0.60 in that case.
         #   High-vol breakouts (vol_z >= 2.0) keep the standard 0.50 threshold.
         # SAFE ROLLBACK: Remove vol_z condition; use min_acceptance unconditionally.
-        # [PREVIOUS CODE - PRESERVED]:
-        # min_acceptance = float(p.get("min_acceptance_ratio", 0.50))
-        # -----------------------------------------------------------------------------
         # [NEW CODE]:
         min_acceptance_base = float(p.get("min_acceptance_ratio", 0.50))
         min_acceptance_lowvol = float(p.get("acceptance_lowvol", 0.60))

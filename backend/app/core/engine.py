@@ -971,12 +971,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
                             # REASON FOR CHANGE: Shorts were the biggest per-trade leak (-$7.6k/605).
                             # Scale countertrend entries (shorts in TREND_UP, longs in TREND_DOWN) by
                             # countertrend_mult (default 0.5) to protect capital while preserving valid setups.
-                            # SAFE ROLLBACK: The original code is preserved below as comments.
-                            # -----------------------------------------------------------------------------
-                            # [PREVIOUS CODE - PRESERVED]:
-                            # # Attach risk_multiplier from SafetyDecision
-                            # decision_safety = getattr(self, "last_safety_decision", None)
-                            # sig.risk_multiplier = decision_safety.risk_multiplier if decision_safety is not None else 1.0
+                            # SAFE ROLLBACK: The original code is removed; rollback via git history.
                             # -----------------------------------------------------------------------------
                             # [NEW CODE]:
                             decision_safety = getattr(self, "last_safety_decision", None)
@@ -1087,16 +1082,6 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
                                     self.pending_reconciliation_orders[client_order_id]["broker_order_id"] = getattr(order, "id", None)
                                 await asyncio.to_thread(self.db.set_setting, "pending_reconciliation_orders", self.pending_reconciliation_orders)
                                 self.recent_orders.appendleft(order)
-                                # --- PREVIOUS IMPLEMENTATION (Preserved for historical intent & audit) ---
-                                # await asyncio.to_thread(self.db.save_order, order, self.mode)
-                                # _entry_tp = getattr(order, "take_profit", None)
-                                # if _entry_tp:
-                                #     self._position_take_profits[order.symbol.upper()] = float(_entry_tp)
-                                # --------------------------------------------------------------------------
-                                # Persist a target-bearing state copy for restart/PIS recovery while keeping
-                                # the broker-owned Order object target-free (no duplicate native target).
-                                # The broker order remains the execution truth; this copy is only the
-                                # deterministic strategy/PIS metadata needed after a restart.
                                 persisted_order = (
                                     order.model_copy(update={"take_profit": float(entry_target)})
                                     if entry_target is not None and float(entry_target) > 0
@@ -1985,35 +1970,13 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
         # [MODIFIED 2026-10-06]: Remove 30 watchlist cap
         # ORIGINAL INTENT: The 30 cap was a hard limit to prevent excessive watchlist growth.
         # REASON FOR CHANGE: User directive: remove the 30 watchlist cap and always allow addition from UI without any errors.
-        # SAFE ROLLBACK: The original cap check is preserved below as comments.
-        # -----------------------------------------------------------------------------
-        # [PREVIOUS CODE - PRESERVED]:
-        # if len(cleaned) > 30:
-        #     raise ValueError("Watchlist is capped at 30 symbols")
+        # SAFE ROLLBACK: The original cap check was removed; rollback via git history.
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
         # Watchlist cap removed: any number of symbols can be added from the UI.
         # =============================================================================
 
         current_active = set(self.watchlist)
-        # --- PREVIOUS IMPLEMENTATION (Preserved for historical intent & audit) ---
-        # additions = new_active - current_active
-        # for sym in additions:
-        #     if sym not in self.user_watchlist:
-        #         self.user_watchlist.append(sym)
-        #
-        # removals = current_active - new_active
-        # for sym in removals:
-        #     if sym in self.user_watchlist:
-        #         self.user_watchlist.remove(sym)
-        #     if sym in self.scanned_watchlist:
-        #         self.scanned_watchlist.remove(sym)
-        #
-        # self.user_watchlist = sorted(list(set(self.user_watchlist)))
-        # self.scanned_watchlist = sorted(list(set(self.scanned_watchlist)))
-        # self.watchlist = sorted(list(set(self.user_watchlist + self.scanned_watchlist)))
-        # self.core_watchlist = list(self.user_watchlist)
-        # --------------------------------------------------------------------------
         # --- NEW IMPLEMENTATION ---
         # When user explicitly sets watchlist, user_watchlist becomes exactly cleaned.
         # Any symbol previously in scanned_watchlist promoted by user is removed from temporary scanner pool.
@@ -2032,10 +1995,6 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
         # any network/data exception as an unhandled error to the API route.
         # REASON FOR CHANGE: Always allow addition from UI without any errors.
         # SAFE ROLLBACK: Previous code preserved below.
-        # -----------------------------------------------------------------------------
-        # [PREVIOUS CODE - PRESERVED]:
-        # if self.data is not None and additions:
-        #     await self.data.warmup(list(additions))
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
         if self.data is not None and additions:
@@ -2106,9 +2065,6 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
     # REASON FOR CHANGE: Backtest replay needs to pass simulated as_of time.
     # SAFE ROLLBACK: Defaults to None (resolves to clock.now_utc()).
     # -----------------------------------------------------------------------------
-    # [PREVIOUS CODE - PRESERVED]:
-    # async def run_market_scanner(self, is_intraday: bool = False) -> list[str]:
-    # -----------------------------------------------------------------------------
     # [NEW CODE]:
     async def run_market_scanner(self, is_intraday: bool = False, as_of: datetime | None = None) -> list[str]:
     # =============================================================================
@@ -2123,9 +2079,6 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
         from zoneinfo import ZoneInfo
         effective_now = as_of or (self.clock.now_utc() if hasattr(self, "clock") else utcnow())
         self._last_scan_date = effective_now.astimezone(ZoneInfo("America/New_York")).date()
-        # --- PREVIOUS IMPLEMENTATION (Preserved for historical audit) ---
-        # outcome, new_watchlist = await scanner.run()
-        # -----------------------------------------------------------------
         outcome, new_watchlist = await scanner.run(as_of=effective_now)
         if outcome == ScannerOutcome.FAILED:
             applog.error("engine", "Market scanner failed; preserving the existing watchlist")
@@ -2133,9 +2086,6 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
         if outcome == ScannerOutcome.SUCCESS_EMPTY:
             new_watchlist = []
 
-        # --- PREVIOUS IMPLEMENTATION (Preserved for historical audit) ---
-        # now_utc = utcnow()
-        # -----------------------------------------------------------------
         now_utc = effective_now
         ttl_minutes = max(1, int(getattr(self.risk_config, "scanner_watchlist_ttl_minutes", 120)))
         expires_at_scan = now_utc + timedelta(minutes=ttl_minutes)
@@ -2238,9 +2188,6 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
                 # Only retrain model on the morning scan (30-day history)
                 applog.info("engine", "Pre-market scan complete. Starting targeted warm-start training...")
                 try:
-                    # --- PREVIOUS IMPLEMENTATION (Preserved for historical audit) ---
-                    # end = utcnow()
-                    # -----------------------------------------------------------------
                     end = effective_now
                     start = end - timedelta(days=30)
 
@@ -3019,15 +2966,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
                 # REASON FOR CHANGE: Rapid morning churn could consume the entire 5.0x budget before
                 # afternoon trend opportunities materialize. Split into morning (before 12:00 ET)
                 # max 3.0x and full-day 5.0x.
-                # SAFE ROLLBACK: The original code is preserved below as comments.
-                # -----------------------------------------------------------------------------
-                # [PREVIOUS CODE - PRESERVED]:
-                # equity = self.portfolio.equity
-                # if equity > 0:
-                #     turnover = total_volume / equity
-                #     max_turnover = float(getattr(self.risk_config, "max_daily_turnover_multiple", 5.0))
-                #     if turnover > max_turnover:
-                #         return f"behavioral_loop_detector: high portfolio churn/turnover (turnover={turnover:.2f}x equity > {max_turnover:.2f}x)"
+                # SAFE ROLLBACK: The original code is removed; rollback via git history.
                 # -----------------------------------------------------------------------------
                 # [NEW CODE]:
                 equity = self.portfolio.equity
@@ -3052,14 +2991,12 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
         # 5. Strategy/thesis correlation clustering check (local data only — cannot fail closed)
         # Blocks a new entry only when it is highly correlated with an open
         # SAME-SIDE position (a hedge in the opposite direction is diversification,
-        # not clustering). Threshold is RiskConfig-tunable; 0.85 still blocks
-        # genuine clones/pairs while letting normal trend-day beta (0.7-0.85)
-        # through so breadth doesn't die on trend days.
+        # not clustering). Threshold is RiskConfig-tunable (default 0.70).
         try:
             open_symbols = list(self.portfolio._lots.keys())
             if open_symbols:
                 cand_side = _norm_side(sig_side)
-                corr_limit = float(getattr(self.risk_config, "max_position_correlation", 0.85))
+                corr_limit = float(getattr(self.risk_config, "max_position_correlation", 0.70))
                 cand_df = self.data.frame(symbol, "1Min")
                 if cand_df is not None and not cand_df.empty:
                     cand_series = cand_df["close"].dropna()

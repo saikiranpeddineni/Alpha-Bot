@@ -46,9 +46,6 @@ _PREMARKET_FETCH_CONCURRENCY = 5      # was 10 — reduced to share Alpaca rate 
 class PreMarketGapScanner:
     """Discovers pre-market gap movers + intraday top gainers/losers."""
 
-    # --- PREVIOUS IMPLEMENTATION (Preserved for historical intent & audit) ---
-    # def __init__(self, data_manager: DataManager, min_price: float = 5.0) -> None:
-    # --------------------------------------------------------------------------
     # --- NEW IMPLEMENTATION ---
     # Default min_price = 0.50 allows pre-market gap discovery on high-momentum penny stocks
     def __init__(self, data_manager: DataManager, min_price: float = 0.50) -> None:
@@ -88,27 +85,7 @@ class PreMarketGapScanner:
         # and did not record change_pct for premarket gap movers.
         # REASON FOR CHANGE: Add 15-minute TTL to allow intraday gainers/losers to refresh,
         # and store change_pct on gap mover context for downstream strategy awareness.
-        # SAFE ROLLBACK: The original code is preserved below as comments.
-        # -----------------------------------------------------------------------------
-        # [PREVIOUS CODE - PRESERVED]:
-        # today = self._today()
-        # if self._cache_date == today and self._cache:
-        #     return list(self._cache)
-        #
-        # # Fetch all three sources concurrently
-        # gap_task = asyncio.create_task(self._fetch_gap_movers())
-        # movers_task = asyncio.create_task(self._fetch_top_movers())
-        # gap_movers, top_movers_result = await asyncio.gather(gap_task, movers_task)
-        #
-        # # Build combined deduped symbol list
-        # all_symbols: set[str] = set(gap_movers)
-        # all_symbols.update(top_movers_result.gainers)
-        # all_symbols.update(top_movers_result.losers)
-        #
-        # # Build/update mover context for direction tagging
-        # new_context: dict[str, dict] = {}
-        # for sym in gap_movers:
-        #     new_context[sym] = new_context.get(sym, {"source": "gap", "direction": "gainer"})
+        # SAFE ROLLBACK: The original code is removed; rollback via git history.
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
         today = self._today()
@@ -170,17 +147,6 @@ class PreMarketGapScanner:
             return TopMoversResult(source="empty")
 
     # -----------------------------------------------------------------------------
-    # [PREVIOUS CODE - PRESERVED]:
-    # async def _fetch_gap_movers(self) -> list[str]:
-    #     try:
-    #         provider = self.data.provider
-    #         if hasattr(provider, "get_snapshots"):
-    #             return await self._fetch_via_snapshots(provider)
-    #         return await self._fetch_via_bars()
-    #     except Exception as exc:
-    #         log.warning(f"[GapScanner] Pre-market fetch failed ({exc}). Returning empty list.")
-    #         return []
-    # -----------------------------------------------------------------------------
     # [NEW CODE]:
     async def _fetch_gap_movers(self) -> dict[str, float]:
         """Fetch and score pre-market gap movers using available price data."""
@@ -239,9 +205,6 @@ class PreMarketGapScanner:
 
         movers.sort(key=lambda x: x[1], reverse=True)
         # -----------------------------------------------------------------------------
-        # [PREVIOUS CODE - PRESERVED]:
-        # return [sym for sym, _ in movers[:_GAP_MAX_RESULTS]]
-        # -----------------------------------------------------------------------------
         # [NEW CODE]:
         return {sym: pct for sym, pct in movers[:_GAP_MAX_RESULTS]}
 
@@ -291,9 +254,6 @@ class PreMarketGapScanner:
         results = await asyncio.gather(*[_check(sym) for sym in sorted(CANDIDATE_POOL)])
         movers = [r for r in results if r is not None]
         movers.sort(key=lambda x: x[1], reverse=True)
-        # -----------------------------------------------------------------------------
-        # [PREVIOUS CODE - PRESERVED]:
-        # return [sym for sym, _ in movers[:_GAP_MAX_RESULTS]]
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
         return {sym: pct for sym, pct in movers[:_GAP_MAX_RESULTS]}

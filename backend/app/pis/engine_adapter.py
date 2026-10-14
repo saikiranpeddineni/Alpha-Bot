@@ -100,11 +100,6 @@ class PISEngineAdapter:
         if initial_stop is None or math.isnan(initial_stop) or initial_stop <= 0:
             initial_stop = entry_px - (side * 2.0 * atr_px)
 
-        # --- PREVIOUS IMPLEMENTATION (Preserved for historical intent & audit) ---
-        # risk_per_share = abs(entry_px - initial_stop)
-        # if risk_per_share <= 1e-8 or math.isnan(risk_per_share):
-        #     risk_per_share = max(0.01, atr_px)
-        # --------------------------------------------------------------------------
         # --- NEW IMPLEMENTATION ---
         # When evaluating high-priced stocks (e.g. AVGO at $363) during low-volatility windows,
         # atr_px can be as low as $0.20-$0.25, collapsing risk_per_share to $0.50.
@@ -139,28 +134,7 @@ class PISEngineAdapter:
         # [MODIFIED 2026-10-14]: CR-07 - Pass Strategy & RSI2 Context to PIS
         # ORIGINAL INTENT: PositionObservation lacked strategy name and rsi2 indicator value.
         # REASON FOR CHANGE: Enable mean-reversion target hit recognition (RSI2 >= 70) in PIS exit planner.
-        # SAFE ROLLBACK: The original code is preserved below as comments.
-        # -----------------------------------------------------------------------------
-        # [PREVIOUS CODE - PRESERVED]:
-        # obs = PositionObservation(
-        #     timestamp=eval_ts,
-        #     symbol=symbol,
-        #     side=side,
-        #     qty=abs(float(position.qty)),
-        #     entry_price=entry_px,
-        #     current_price=cur_px,
-        #     high=max(high_px, cur_px),
-        #     low=min(low_px, cur_px),
-        #     close=close_px,
-        #     volume=vol_px,
-        #     atr=atr_px,
-        #     initial_stop=initial_stop,
-        #     risk_per_share=risk_per_share,
-        #     current_stop=current_stop,
-        #     take_profit=take_profit,
-        #     r_multiple=r_multiple,
-        #     news_sentiment_score=news_sentiment,
-        # )
+        # SAFE ROLLBACK: The original code is removed; rollback via git history.
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
         strat_name = str(getattr(position, "strategy", "") or "")

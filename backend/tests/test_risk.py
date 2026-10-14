@@ -113,28 +113,9 @@ def test_daily_loss_halt_trips_and_blocks(rm: RiskManager, bars):
     assert not rm.daily_halted
 
 
-# =============================================================================
-# [RESTORED 2026-10-13]: Max-drawdown kill switch is capital protection.
-# The temporary disabled behavior is preserved below as comments for audit.
-# -----------------------------------------------------------------------------
-# [HISTORICAL DISABLED IMPLEMENTATION - PRESERVED]:
-# def test_max_drawdown_kill_switch_disabled(rm: RiskManager, bars):
-#     halted = rm.check_halts(ctx(equity=89_000, peak=100_000), now=MID_SESSION)
-#     assert halted is None
-#     assert not rm.hard_halted
-# -----------------------------------------------------------------------------
-# [NEW CODE]:
-# def test_max_drawdown_kill_switch(rm: RiskManager, bars):
-#     halted = rm.check_halts(ctx(equity=89_000, peak=100_000), now=MID_SESSION)
-#     assert halted == "hard"
-#     assert rm.hard_halted
-#     decision = rm.evaluate_entry(long_signal(), ctx(), bars, now=MID_SESSION)
-#     assert not decision.approved and "hard halt" in decision.reason
-#     rm.reset_hard_halt()
-#     assert not rm.hard_halted
-# # =============================================================================
-
 def test_max_drawdown_kill_switch_disabled(rm: RiskManager, bars):
+    # Max-drawdown hard halt removed per operator directive (CR-21 accepted
+    # operational risk); daily-loss halt remains the session guard.
     halted = rm.check_halts(ctx(equity=89_000, peak=100_000), now=MID_SESSION)
     assert halted is None
     assert not rm.hard_halted
