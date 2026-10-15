@@ -500,7 +500,8 @@ class SignalPipeline:
             rescue_ml_min = float(os.environ.get("RESCUE_ML_MIN", 0.65))
             rescue_meta_min = float(os.environ.get("RESCUE_META_MIN", 0.80))
             rescue_risk_mult = float(os.environ.get("RESCUE_RISK_MULT", 0.75))
-            meta_prob = meta_pred.prob_profitable if meta_pred is not None else 0.0
+            meta_prob_raw = meta_pred.prob_profitable if meta_pred is not None else None
+            meta_prob = meta_prob_raw if meta_prob_raw is not None else 0.0
             is_high_agreement_rescue = (
                 not approved
                 and ml is not None
