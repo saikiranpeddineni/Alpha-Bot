@@ -39,6 +39,15 @@ class RiskConfig(BaseModel):
     max_position_pct: float = Field(20.0, ge=1.0, le=100.0)
     max_open_positions: int = Field(8, ge=1, le=50)                  # was 4 — 2× concurrent exposure
     max_daily_loss_pct: float = Field(2.0, ge=0.1, le=25.0)         # was 2.0 — room for higher position count
+    # DAILY PROFIT LOCK 2026-10-16 (operator demand: bank green days).
+    # When day P&L reaches +lock_pct, engine flattens and blocks new entries
+    # for the session — symmetric to the daily loss halt. 0.0 disables.
+    # Rollback: 0.0. Env DAILY_PROFIT_LOCK_PCT.
+    daily_profit_lock_pct: float = Field(1.0, ge=0.0, le=25.0)
+    # PROFIT-LOCK DEFEND 2026-10-16: bank-and-ride mode lets winners run after
+    # the lock; if the day then slips to this level, full-flatten to protect
+    # the floor. 0.0 disables the defend (ride into close/EOD as usual).
+    daily_profit_defend_pct: float = Field(0.5, ge=0.0, le=25.0)
     max_drawdown_pct: float = Field(10.0, ge=1.0, le=50.0)
     symbol_cooldown_minutes: int = Field(30, ge=0, le=390)                  # was 30
     strategy_consecutive_loss_limit: int = Field(3, ge=1, le=20)            # was 3
@@ -216,6 +225,8 @@ class Settings(BaseSettings):
     max_position_pct: float = Field(20.0, validation_alias="MAX_POSITION_PCT")
     max_open_positions: int = Field(8, validation_alias="MAX_OPEN_POSITIONS")                # was 4
     max_daily_loss_pct: float = Field(3.0, validation_alias="MAX_DAILY_LOSS_PCT")            # was 2.0
+    daily_profit_lock_pct: float = Field(1.0, validation_alias="DAILY_PROFIT_LOCK_PCT")
+    daily_profit_defend_pct: float = Field(0.5, validation_alias="DAILY_PROFIT_DEFEND_PCT")
     max_drawdown_pct: float = Field(10.0, validation_alias="MAX_DRAWDOWN_PCT")
     symbol_cooldown_minutes: int = Field(10, validation_alias="COOLDOWN_MINUTES")                   # was 30
     strategy_consecutive_loss_limit: int = Field(4, validation_alias="CONSECUTIVE_LOSS_LIMIT")        # was 3

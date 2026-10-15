@@ -333,6 +333,8 @@ class RiskConfigUpdateBody(BaseModel):
     max_position_pct: float | None = None
     max_open_positions: int | None = None
     max_daily_loss_pct: float | None = None
+    daily_profit_lock_pct: float | None = None
+    daily_profit_defend_pct: float | None = None
     max_drawdown_pct: float | None = None
     symbol_cooldown_minutes: int | None = None
     strategy_consecutive_loss_limit: int | None = None

@@ -113,6 +113,26 @@ def test_daily_loss_halt_trips_and_blocks(rm: RiskManager, bars):
     assert not rm.daily_halted
 
 
+def test_daily_profit_lock_trips_flattens_and_blocks(rm: RiskManager, bars):
+    # Operator demand 2026-10-16: bank green days at +daily_profit_lock_pct (default 1.0%).
+    assert rm.config.daily_profit_lock_pct == 1.0
+    halted = rm.check_halts(ctx(equity=101_100, day_pnl=+1_100), now=MID_SESSION)
+    assert halted == "profit"
+    assert rm.profit_locked
+    decision = rm.evaluate_entry(long_signal(), ctx(), bars, now=MID_SESSION)
+    assert not decision.approved and "profit" in decision.reason
+    # Below threshold: no trip
+    rm2_halt = rm.check_halts(ctx(equity=100_500, day_pnl=+500), now=MID_SESSION)
+    assert rm2_halt is None or rm.profit_locked  # already locked stays locked
+    # New session clears it
+    rm.roll_session(datetime(2026, 1, 7).date())
+    assert not rm.profit_locked
+    # Disabled at 0.0
+    rm.config.daily_profit_lock_pct = 0.0
+    rm.profit_locked = False
+    assert rm.check_halts(ctx(equity=105_000, day_pnl=+5_000), now=MID_SESSION) is None
+
+
 def test_max_drawdown_kill_switch_disabled(rm: RiskManager, bars):
     # Max-drawdown hard halt removed per operator directive (CR-21 accepted
     # operational risk); daily-loss halt remains the session guard.

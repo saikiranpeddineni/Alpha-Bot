@@ -88,6 +88,9 @@ class RiskManager:
         self.hard_halt_reason: str = ""
         self.daily_halted: bool = False
         self.daily_halt_date: date | None = None
+        # DAILY PROFIT LOCK 2026-10-16: bank green days like the loss halt banks red ones.
+        self.profit_locked: bool = False
+        self.profit_lock_date: date | None = None
         self.consecutive_losses: int = 0
         self.cooldown_until: datetime | None = None
         self.strategy_consecutive_losses: dict[str, int] = {}
@@ -108,6 +111,8 @@ class RiskManager:
             "hard_halt_reason": self.hard_halt_reason,
             "daily_halted": self.daily_halted,
             "daily_halt_date": self.daily_halt_date.isoformat() if self.daily_halt_date else None,
+            "profit_locked": self.profit_locked,
+            "profit_lock_date": self.profit_lock_date.isoformat() if self.profit_lock_date else None,
         }
 
     def restore_risk_state(self, data: dict) -> None:
@@ -142,7 +147,13 @@ class RiskManager:
                 self.daily_halt_date = date.fromisoformat(halt_date)
             except (TypeError, ValueError):
                 self.daily_halt_date = None
-
+        self.profit_locked = bool(data.get("profit_locked", False))
+        profit_date = data.get("profit_lock_date")
+        if profit_date:
+            try:
+                self.profit_lock_date = date.fromisoformat(profit_date)
+            except (TypeError, ValueError):
+                self.profit_lock_date = None
     # ---- lifecycle hooks ----
 
     def on_trade_closed(self, trade: TradeRecord, now: datetime | None = None) -> None:
@@ -185,6 +196,10 @@ class RiskManager:
             self.daily_halted = False
             self.daily_halt_date = None
             applog.info("risk", "New session -- daily loss halt cleared")
+        if self.profit_locked and self.profit_lock_date is not None and session_date > self.profit_lock_date:
+            self.profit_locked = False
+            self.profit_lock_date = None
+            applog.info("risk", "New session -- daily profit lock cleared")
         self.cooldown_until = None
         self.consecutive_losses = 0
         self.strategy_consecutive_losses.clear()
@@ -199,7 +214,7 @@ class RiskManager:
     # ---- halt checks (engine calls every tick) ----
 
     def check_halts(self, ctx: AccountContext, now: datetime | None = None) -> str | None:
-        """Returns 'daily' or 'hard' when a halt newly trips this tick."""
+        """Returns 'daily', 'profit', or 'hard' when a halt newly trips this tick."""
         # =============================================================================
         # [MODIFIED 2026-10-13]: Max drawdown kill switch removed per operator directive
         # ORIGINAL INTENT: Hard halt the system if account equity peak drawdown exceeds max_drawdown_pct.
@@ -219,6 +234,21 @@ class RiskManager:
                     "-- flattening and stopping for the session",
                 )
                 return "daily"
+        # DAILY PROFIT LOCK 2026-10-16: bank the day at +lock_pct the same way
+        # the loss halt banks red days. 0.0 disables. Never triggers on a
+        # non-positive session start, same guard as the loss halt.
+        lock_pct = float(getattr(self.config, "daily_profit_lock_pct", 0.0) or 0.0)
+        if lock_pct > 0 and not self.profit_locked and ctx.session_start_equity > 0:
+            gain_pct = ctx.day_pnl / ctx.session_start_equity * 100.0
+            if gain_pct >= lock_pct:
+                self.profit_locked = True
+                self.profit_lock_date = self.clock.session_date(now)
+                applog.warning(
+                    "risk",
+                    f"PROFIT LOCK: day gain {gain_pct:.2f}% >= {lock_pct:.2f}% "
+                    "-- flattening and banking the session",
+                )
+                return "profit"
         return None
 
     def in_cooldown(self, now: datetime | None = None) -> bool:
@@ -248,6 +278,8 @@ class RiskManager:
             return RiskDecision(False, f"hard halt active: {self.hard_halt_reason}")
         if self.daily_halted:
             return RiskDecision(False, "daily loss halt active")
+        if self.profit_locked:
+            return RiskDecision(False, "daily profit lock active -- day banked")
         if self.is_strategy_in_cooldown(strategy, now):
             return RiskDecision(False, "loss-streak cooldown active")
         cooldown_until = self.symbol_cooldowns.get(symbol)
@@ -482,6 +514,7 @@ class RiskManager:
             "hard_halted": self.hard_halted,
             "hard_halt_reason": self.hard_halt_reason,
             "daily_halted": self.daily_halted,
+            "profit_locked": self.profit_locked,
             "consecutive_losses": self.consecutive_losses,
             "cooldown_until": self.cooldown_until.isoformat() if self.cooldown_until else None,
             "config": self.config.model_dump(),
