@@ -253,12 +253,48 @@ class ShadowLedger:
                 # ~600 bars, so rows older than that (server restart, weekend)
                 # could NEVER resolve and stuck unresolved forever. Pull the
                 # decision window from cache-backed history instead.
+                #
+                # ASYNC BUG 2026-10-16: history() is a coroutine, but _fetch is
+                # sync (runs via to_thread). Returning it un-awaited handed a
+                # coroutine object back as "df", which always tested empty —
+                # all 7,412 historical rows died as NO_BARS with zero real
+                # verdicts. Drive it to completion here (worker thread has no
+                # running loop), else fall to the raw cache read below.
                 try:
-                    return data_manager.history(
+                    import asyncio as _aio
+
+                    _coro = data_manager.history(
                         symbol.upper(), "1Min",
                         target - timedelta(minutes=30), target + timedelta(minutes=90),
                     )
+                    try:
+                        _aio.get_running_loop()
+                        _has_loop = True
+                    except RuntimeError:
+                        _has_loop = False
+                    if _has_loop:
+                        _coro.close()
+                        raise RuntimeError("history needs a loop; using raw cache")
+                    return _aio.run(_coro)
                 except Exception:
+                    # RESOLVER REPAIR 2026-10-16: history() enforces session
+                    # coverage validation, which rejects partial/intraday
+                    # sessions. Forensics is read-only: bypass the
+                    # trading-path coverage gate and read raw cached bars
+                    # directly. Partial windows still resolve (px_at clamps
+                    # to the last available bar).
+                    try:
+                        cache = getattr(data_manager, "cache", None)
+                        if cache is not None:
+                            raw = cache.query(
+                                symbol.upper(), "1Min",
+                                target - timedelta(minutes=30),
+                                target + timedelta(minutes=90),
+                            )
+                            if raw is not None and not getattr(raw, "empty", True):
+                                return raw
+                    except Exception:
+                        pass
                     return df
             except Exception:
                 return None
