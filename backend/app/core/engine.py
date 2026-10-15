@@ -129,6 +129,11 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
         self._last_intraday_scan_min: int | None = None  # Feature 1: 30-min intraday refresh
         self._flattened_sessions: set = set()
         self._eod_flatten_started_sessions: set = set()
+        # STALE-POSITION GUARD 2026-10-16: server death between close and EOD
+        # flatten strands positions overnight (2026-10-15: 3 paper positions
+        # survived, one with no broker stop leg). start() sets this when broker
+        # holds positions while the market is closed; _tick flattens once open.
+        self._flatten_at_open: bool = False
         self._task: asyncio.Task | None = None
         self._tick_count = 0
         self._consec_errors = 0
@@ -377,6 +382,18 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
         try:
             positions = await self.broker.positions()
             self._reconcile_positions(positions)
+            # STALE-POSITION GUARD 2026-10-16: positions alive while the market
+            # is closed survived an unmanaged close (crash between close and
+            # EOD flatten). Never market-order into the closed market here;
+            # flag for flatten at the next open (handled in _tick).
+            if positions and mode != "demo" and not self.clock.is_open():
+                self._flatten_at_open = True
+                stale = sorted({p.symbol for p in positions})
+                applog.warning(
+                    "engine",
+                    f"STALE POSITIONS at startup (market closed): {stale} — "
+                    "will flatten at next open before any new entries",
+                )
         except Exception as exc:
             self.reconciliation_failed = True
             applog.error("engine", f"Failed to restore and reconcile active positions: {exc}")
@@ -549,6 +566,16 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
         await self._check_system_heartbeat(now)
         if self.state == EngineState.HALTED:
             return
+
+        # STALE-POSITION GUARD 2026-10-16: flatten stranded overnight positions
+        # once the market opens, before any new entries. One-shot by design.
+        if getattr(self, "_flatten_at_open", False) and self.clock.is_open():
+            self._flatten_at_open = False
+            try:
+                await self.flatten()
+                applog.warning("engine", "STALE-POSITION GUARD: stranded positions flattened at open")
+            except Exception as exc:
+                applog.error("engine", f"STALE-POSITION GUARD flatten failed: {exc}")
 
         # Synchronize ML gate threshold with assessed market risk regime with dynamic scale
         # Synchronize ML gate threshold with assessed market risk regime with dynamic scale
@@ -777,6 +804,28 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
                     f"Trading paused until the next session (day P&L {ctx.day_pnl:+,.2f}).",
                     severity="danger",
                 )
+        elif halt == "profit" or (self.risk.profit_locked and not self.risk.hard_halted):
+            # DAILY PROFIT LOCK 2026-10-16 (bank-and-ride, operator demand):
+            # on trip, scratch underwater positions and let green runners ride
+            # under PIS (upside open). If the banked day then slips to the
+            # defend line, full-flatten to protect the floor.
+            if halt == "profit":
+                await self._bank_profit_lock(now)
+                self.insights.on_risk_event(
+                    "Daily profit locked",
+                    f"Day banked at {ctx.day_pnl:+,.2f}; losers scratched, winners ride, no new entries.",
+                    severity="info",
+                )
+            else:
+                defend_pct = float(getattr(self.risk.config, "daily_profit_defend_pct", 0.5) or 0.0)
+                if defend_pct > 0 and ctx.session_start_equity > 0:
+                    day_pct = ctx.day_pnl / ctx.session_start_equity * 100.0
+                    if day_pct <= defend_pct:
+                        applog.warning(
+                            "engine",
+                            f"PROFIT LOCK defend: day slipped to {day_pct:.2f}% <= {defend_pct:.2f}% -- full flatten",
+                        )
+                        await self._reconcile_daily_halt_liquidation(now)
 
         # 4. end-of-day flatten. Completion is latched only after an
         # authoritative broker post-condition proves no positions or open orders.

@@ -621,11 +621,68 @@ class TradingEngineEvaluationMixin:
                 }
             ]
             if not stop_orders:
+                # STOP-LEG REPAIR 2026-10-16: entries are broker-request
+                # target-free by design (PIS owns exits), so positions opened
+                # without a bracket often have NO broker stop leg at all —
+                # then this warned every minute while the position rode naked
+                # (2026-10-15 LRCX: floor 273.86, no leg, server died before
+                # EOD). Repair instead of only warning: submit a standalone
+                # STOP at the PIS floor. Later ratchets use replace_exit_leg.
+                # Throttled to one attempt per symbol per 60s so a persistent
+                # rejection cannot spam the broker.
+                import time as _time
+
+                from app.core.domain import OrderRequest, OrderSide, OrderType
+
+                now_ts = _time.time()
+                last_try = getattr(self, "_stop_leg_submit_ts", {}).get(symbol.upper(), 0.0)
+                if now_ts - last_try < 60.0:
+                    return False
+                try:
+                    broker_positions = await broker.positions()
+                except Exception:
+                    broker_positions = []
+                pos = next(
+                    (p for p in broker_positions if str(getattr(p, "symbol", "")).upper() == symbol.upper()),
+                    None,
+                )
+                if pos is None or not abs(float(getattr(pos, "qty", 0.0) or 0.0)) > 0:
+                    applog.warning(
+                        "engine.exit",
+                        f"{symbol}: PIS stop floor {stop_price:.4f} not synchronized; no open broker stop leg found",
+                    )
+                    return False
+                if not hasattr(self, "_stop_leg_submit_ts") or not isinstance(self._stop_leg_submit_ts, dict):
+                    self._stop_leg_submit_ts = {}
+                self._stop_leg_submit_ts[symbol.upper()] = now_ts
+                qty = abs(float(pos.qty))
+                side = OrderSide.SELL if float(pos.qty) > 0 else OrderSide.BUY
+                try:
+                    repair = await broker.submit(
+                        OrderRequest(
+                            symbol=symbol.upper(),
+                            side=side,
+                            qty=qty,
+                            order_type=OrderType.STOP,
+                            stop_price=float(stop_price),
+                            strategy="pis_protection",
+                            reason=f"PIS protective stop repair @ {stop_price:.4f}",
+                        )
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    applog.warning("engine.exit", f"{symbol}: protective stop repair submit failed: {exc}")
+                    return False
+                if getattr(repair, "status", None) == OrderStatus.REJECTED:
+                    applog.warning(
+                        "engine.exit",
+                        f"{symbol}: protective stop repair rejected: {getattr(repair, 'reason', '')}",
+                    )
+                    return False
                 applog.warning(
                     "engine.exit",
-                    f"{symbol}: PIS stop floor {stop_price:.4f} not synchronized; no open broker stop leg found",
+                    f"{symbol}: submitted missing broker STOP leg @ {stop_price:.4f} (PIS floor repair)",
                 )
-                return False
+                return True
             for order in stop_orders:
                 replacement = await replace_exit_leg(str(order.id), stop_price=stop_price)
                 if replacement is not None:
