@@ -1,5 +1,59 @@
 # ⚡ AlphaDesk — Adaptive AI Day Trading & Research Platform
 
+## Rebuild from scratch
+
+The supported runtime is **Python 3.12.10**, pinned in `.python-version`.
+The lockfile is `requirements.lock` and contains the runtime and development
+dependencies used by the reproducible test environment.
+
+### Local setup
+
+```bash
+git clone <repository-url> alphadesk
+cd alphadesk
+python3.12 -m venv .venv
+. .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install --requirement requirements.lock
+cp .env.example .env
+```
+
+On Windows PowerShell, activate with `.venv\\Scripts\\Activate.ps1` instead.
+Keep broker credentials only in `.env` or the environment; never commit them.
+
+### Test
+
+Run the single supported test command from the repository root:
+
+```bash
+python -m pytest
+```
+
+### Run locally
+
+Demo mode is offline and uses synthetic data:
+
+```bash
+python backend/run_server.py
+```
+
+The server listens on `http://127.0.0.1:8742` by default. Set
+`ALPHADESK_HOST=0.0.0.0` when exposing it from a container.
+
+### Docker
+
+```bash
+docker build --tag alphadesk:local .
+docker run --rm --name alphadesk \
+  --env-file .env \
+  --publish 8742:8742 \
+  --volume alphadesk-data:/app/data \
+  alphadesk:local
+```
+
+The container does not include local databases, models, credentials, or logs.
+Mount data separately when those assets are intentionally part of a deployment.
+
 AlphaDesk is a local-first automated day-trading and quantitative research platform for U.S. stocks and ETFs. It combines an asynchronous trading engine, multiple intraday strategies, machine-learning signal filters, portfolio/risk controls, broker reconciliation, event-driven backtesting, shadow evaluation, Champion/Challenger experimentation, contextual performance memory, and a real-time React trading terminal.
 
 > **Start safely in Demo mode with no broker account or API keys.** AlphaDesk includes a deterministic synthetic market so the full engine can run offline before connecting real market data or brokerage services.

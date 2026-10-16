@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from pathlib import Path
 import sys
 import asyncio
 from datetime import datetime, timezone
@@ -249,8 +250,9 @@ def run_executed_trades_replay(conn_alpha: sqlite3.Connection, conn_bars: sqlite
 
 
 def run_production_v3_replay() -> None:
-    conn_alpha = sqlite3.connect(r"C:\Users\peddi\Desktop\Bots\Alpha-Bot Master\data\alphadesk.db")
-    conn_bars = sqlite3.connect(r"C:\Users\peddi\Desktop\Bots\Alpha-Bot Master\data\bars_cache.db")
+    data_dir = Path(__file__).resolve().parents[2] / "data"
+    conn_alpha = sqlite3.connect(data_dir / "alphadesk.db")
+    conn_bars = sqlite3.connect(data_dir / "bars_cache.db")
 
     run_executed_trades_replay(conn_alpha, conn_bars)
 
