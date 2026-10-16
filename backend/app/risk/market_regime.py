@@ -274,7 +274,31 @@ class MarketRiskAggregator:
             )
         ]
 
-        if panic_votes:
+# =============================================================================
+# [MODIFIED 2026-10-16]: Multi-Signal Confirmation for MarketRiskState.PANIC
+# ORIGINAL INTENT: Any single family voting PANIC immediately escalated the whole system to PANIC.
+# REASON FOR CHANGE: QQQ experiencing high ATR percentile (earnings/tech volatility) while SPY was
+# NORMAL (0.90), breadth was NORMAL, and data health was 1.00 falsely triggered PANIC, causing
+# scanner to purge 36 high-alpha equities and restrict the universe to 5 low-volatility ETFs.
+# SAFE ROLLBACK: The original aggregation logic is preserved below.
+# -----------------------------------------------------------------------------
+# [PREVIOUS CODE - PRESERVED]:
+#        if panic_votes:
+#            state = MarketRiskState.PANIC
+#        elif len(stress_votes) >= 2:
+#            state = MarketRiskState.STRESS
+#        elif stress_votes or caution_votes:
+#            state = MarketRiskState.CAUTION
+#        else:
+#            state = MarketRiskState.NORMAL
+# -----------------------------------------------------------------------------
+# [NEW CODE]:
+        broad_market_panic = any(
+            v.family == "broad_market" and v.state is MarketRiskState.PANIC
+            for v in market_votes
+        )
+
+        if broad_market_panic or len(panic_votes) >= 2:
             state = MarketRiskState.PANIC
         elif len(stress_votes) >= 2:
             state = MarketRiskState.STRESS
@@ -282,6 +306,7 @@ class MarketRiskAggregator:
             state = MarketRiskState.CAUTION
         else:
             state = MarketRiskState.NORMAL
+# =============================================================================
 
         market_reason_codes = [
             f"{v.family}:{v.state.value}({v.health.confidence:.2f})"
