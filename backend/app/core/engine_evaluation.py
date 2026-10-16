@@ -451,6 +451,42 @@ class TradingEngineEvaluationMixin:
         if not signals:
             return []
 
+        # Opportunity economics are evaluated before the admission firewall.
+        # This layer only removes candidates whose modeled reward cannot cover
+        # configured round-trip costs; sizing, portfolio gates, ML, and broker
+        # execution remain authoritative downstream.
+        try:
+            from app.config import get_settings
+            from app.opportunities.engine import OpportunityEngine
+            from app.opportunities.models import OpportunityContext
+            opportunity_cfg = get_settings().opportunity_config()
+            if opportunity_cfg.enabled:
+                evaluator = OpportunityEngine()
+                economic_signals = []
+                for sig in signals:
+                    if sig.action == SignalAction.EXIT:
+                        economic_signals.append(sig)
+                        continue
+                    candidate = evaluator.evaluate(
+                        sig,
+                        df,
+                        OpportunityContext(
+                            min_net_edge_bps=opportunity_cfg.min_net_edge_bps,
+                            min_reward_risk=opportunity_cfg.min_reward_risk,
+                            estimated_round_trip_cost_bps=opportunity_cfg.round_trip_cost_bps,
+                        ),
+                    )
+                    if candidate is not None:
+                        economic_signals.append(sig)
+                    else:
+                        applog.info("opportunity", f"{symbol} {sig.strategy}: rejected by cost-aware opportunity economics")
+                signals = economic_signals
+        except Exception as exc:  # defensive telemetry must not break exits
+            applog.warning("opportunity", f"cost-aware opportunity evaluation unavailable: {exc}")
+
+        if not signals:
+            return []
+
         # Resolve strategy overlap: If multiple entry signals trigger on the same bar,
         # pick the one with the highest priority to prevent signal correlation and AI confusion.
         entry_signals = [sig for sig in signals if sig.action != SignalAction.EXIT]
