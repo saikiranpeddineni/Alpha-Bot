@@ -46,6 +46,7 @@ The server listens on `http://127.0.0.1:8742` by default. Set
 docker build --tag alphadesk:local .
 docker run --rm --name alphadesk \
   --env-file .env \
+  --env ALPHADESK_HOST=0.0.0.0 \
   --publish 8742:8742 \
   --volume alphadesk-data:/app/data \
   alphadesk:local

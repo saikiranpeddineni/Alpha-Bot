@@ -2,7 +2,8 @@ FROM python:3.12.10-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PYTHONPATH=/app/backend
+    PYTHONPATH=/app/backend \
+    ALPHADESK_HOST=0.0.0.0
 
 WORKDIR /app
 
