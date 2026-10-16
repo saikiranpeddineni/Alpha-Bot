@@ -647,12 +647,24 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
                 else:
                     applog.info("engine", "Intraday scanner skipped: previous scanner task still running")
             if is_trading_day and self.trainer and self._last_train_date != today_date and et_mins >= 16 * 60 + 15:
-                self._last_train_date = today_date
-                applog.info("engine", "Post-market trainer trigger time reached (>= 16:15 ET)")
-                if self._trainer_task is None or self._trainer_task.done():
-                    self._trainer_task = asyncio.create_task(
-                        self.trainer.trigger(list(self.watchlist)), name="post-market-trainer"
-                    )
+                # POST-MARKET TRAIN GATE 2026-10-16: three overnight server
+                # deaths correlate with post-market training (spawn pools +
+                # native fits in-server). ALPHADESK_POSTMARKET_TRAIN=0 defers
+                # retraining to manual / offline runs until the native crash
+                # is diagnosed. Models stay valid; WFV gates still enforced.
+                import os as _os
+
+                if _os.environ.get("ALPHADESK_POSTMARKET_TRAIN", "1") != "1":
+                    if self._last_train_date != today_date:
+                        applog.info("engine", "Post-market trainer deferred (ALPHADESK_POSTMARKET_TRAIN=0)")
+                    self._last_train_date = today_date
+                else:
+                    self._last_train_date = today_date
+                    applog.info("engine", "Post-market trainer trigger time reached (>= 16:15 ET)")
+                    if self._trainer_task is None or self._trainer_task.done():
+                        self._trainer_task = asyncio.create_task(
+                            self.trainer.trigger(list(self.watchlist)), name="post-market-trainer"
+                        )
             if (
                 not getattr(self, "replay_fast_path", False)
                 and 9 * 60 + 30 <= et_mins <= 16 * 60
