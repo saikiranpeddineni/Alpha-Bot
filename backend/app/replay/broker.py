@@ -12,11 +12,14 @@ class ReplayBroker(Broker):
 
     def __init__(self, starting_cash: float = 100_000.0, slippage_bps: float = 0.0,
                  fill_model: str = "ohlc_touch", allow_partial_fills: bool = False,
-                 volume_constrained: bool = False, max_volume_pct: float = 0.05) -> None:
+                 volume_constrained: bool = False, max_volume_pct: float = 0.05,
+                 commission_per_share: float = 0.0, minimum_commission: float = 0.0) -> None:
         if fill_model not in {"immediate", "next_open", "ohlc_touch"}: raise ValueError(f"Unsupported fill model {fill_model}")
         self.starting_cash = self.cash = float(starting_cash); self.slippage = float(slippage_bps) / 10_000.0
         self.fill_model, self.allow_partial_fills = fill_model, bool(allow_partial_fills)
         self.volume_constrained, self.max_volume_pct = bool(volume_constrained), float(max_volume_pct)
+        self.commission_per_share = max(0.0, float(commission_per_share))
+        self.minimum_commission = max(0.0, float(minimum_commission))
         self._positions: dict[str, Position] = {}; self._orders: dict[str, Order] = {}; self._resting: list[str] = []
         self._fills: list[Fill] = []; self._last_price: dict[str, float] = {}; self._now = datetime(1970,1,1,tzinfo=UTC)
         self._seq = 0; self._ledger = None
@@ -119,7 +122,13 @@ class ReplayBroker(Broker):
                   signal_timestamp_utc=order.signal_timestamp_utc,decision_bar_timestamp_utc=order.decision_bar_timestamp_utc,
                   broker_fill_key=f"{order.id}:{new_filled:.8f}",cumulative_qty=new_filled,broker_mode="replay")
         self._fills.append(fill)
+        commission = max(self.minimum_commission, qty * self.commission_per_share) if qty > 0 else 0.0
+        self.cash -= commission
         if self._ledger:self._ledger.record_event("FILL_EXECUTED",self._now,order.symbol,{"order_id":order.id,"side":str(order.side),"qty":qty,"price":price,"strategy":order.strategy,"reason":order.reason})
+        if self._ledger and commission:
+            self._ledger.record_event("COMMISSION_CHARGED", self._now, order.symbol, {
+                "order_id": order.id, "qty": qty, "commission": commission,
+            })
         sym=order.symbol; pos=self._positions.get(sym); signed=qty if order.side==OrderSide.BUY else -qty
         old_qty=pos.qty if pos else 0.0; new_qty=old_qty+signed
         if pos is None or abs(old_qty)<=1e-12:
