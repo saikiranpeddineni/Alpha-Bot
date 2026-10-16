@@ -32,6 +32,16 @@ VALID_PROVIDERS = ("auto", "synthetic", "yahoo", "alpaca")
 VALID_BROKERS = ("paper_sim", "alpaca")
 
 
+class OpportunityConfig(BaseModel):
+    """Cost-aware opportunity controls; never overrides risk or execution gates."""
+    enabled: bool = True
+    min_net_edge_bps: float = Field(15.0, ge=0.0, le=10_000.0)
+    min_reward_risk: float = Field(1.25, ge=0.1, le=100.0)
+    round_trip_cost_bps: float = Field(8.0, ge=0.0, le=10_000.0)
+    overnight_enabled: bool = False
+    overnight_max_allocation_pct: float = Field(15.0, ge=0.0, le=100.0)
+
+
 class RiskConfig(BaseModel):
     """Runtime-tunable risk parameters. Tuned for active capital utilization (4% daily target)."""
     entry_order_type: str = Field("market", pattern="^(market|limit)$")
@@ -252,6 +262,12 @@ class Settings(BaseSettings):
     paper_starting_cash: float = Field(100_000.0, validation_alias="PAPER_STARTING_CASH")
     paper_slippage_bps: float = Field(2.0, validation_alias="PAPER_SLIPPAGE_BPS")
     paper_commission_per_share: float = Field(0.0, validation_alias="PAPER_COMMISSION_PER_SHARE")
+    opportunity_enabled: bool = Field(True, validation_alias="OPPORTUNITY_ENABLED")
+    opportunity_min_net_edge_bps: float = Field(15.0, validation_alias="OPPORTUNITY_MIN_NET_EDGE_BPS")
+    opportunity_min_reward_risk: float = Field(1.25, validation_alias="OPPORTUNITY_MIN_REWARD_RISK")
+    opportunity_round_trip_cost_bps: float = Field(8.0, validation_alias="OPPORTUNITY_ROUND_TRIP_COST_BPS")
+    overnight_enabled: bool = Field(False, validation_alias="OVERNIGHT_ENABLED")
+    overnight_max_allocation_pct: float = Field(15.0, validation_alias="OVERNIGHT_MAX_ALLOCATION_PCT")
     poll_interval_sec: float = Field(5.0, validation_alias="POLL_INTERVAL_SEC")
     demo_bar_seconds: float = Field(5.0, validation_alias="DEMO_BAR_SECONDS")
     default_watchlist: str = Field("SPY,QQQ,AAPL,NVDA,TSLA,MSFT,AMD,META,AMZN,AVGO,BABA,PLTR,ARM", validation_alias="DEFAULT_WATCHLIST")
@@ -329,6 +345,16 @@ class Settings(BaseSettings):
             if hasattr(self, f)
         }
         return RiskConfig(**field_kwargs)
+
+    def opportunity_config(self) -> OpportunityConfig:
+        return OpportunityConfig(
+            enabled=self.opportunity_enabled,
+            min_net_edge_bps=self.opportunity_min_net_edge_bps,
+            min_reward_risk=self.opportunity_min_reward_risk,
+            round_trip_cost_bps=self.opportunity_round_trip_cost_bps,
+            overnight_enabled=self.overnight_enabled,
+            overnight_max_allocation_pct=self.overnight_max_allocation_pct,
+        )
         # =============================================================================
 
     def trade_score_weights(self) -> tuple[float, float, float, float, float, float]:

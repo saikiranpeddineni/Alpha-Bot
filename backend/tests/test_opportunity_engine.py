@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
+from app.config import Settings
 from app.core.domain import Signal, SignalAction
 from app.opportunities.engine import OpportunityEngine
 from app.opportunities.models import OpportunityContext, OpportunitySession
@@ -49,3 +50,13 @@ def test_engine_does_not_evaluate_exits_as_new_opportunities():
     assert OpportunityEngine().evaluate(
         _signal(action=SignalAction.EXIT), pd.DataFrame({"close": [100.0]}), OpportunityContext()
     ) is None
+
+
+def test_opportunity_thresholds_are_configurable_and_overnight_is_off_by_default(monkeypatch):
+    monkeypatch.setenv("OPPORTUNITY_MIN_NET_EDGE_BPS", "25")
+    monkeypatch.setenv("OPPORTUNITY_MIN_REWARD_RISK", "1.8")
+    settings = Settings(_env_file=None)
+    config = settings.opportunity_config()
+    assert config.min_net_edge_bps == 25
+    assert config.min_reward_risk == 1.8
+    assert config.overnight_enabled is False
