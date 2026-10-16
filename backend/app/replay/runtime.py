@@ -75,7 +75,10 @@ class ReplayRuntime:
         config = {"start_date": start_date, "end_date": end_date, "symbols": symbols,
                   "fill_model": fill_model, "slippage_bps": slippage_bps,
                   "volume_constrained": volume_constrained, "max_volume_pct": max_volume_pct,
-                  "warmup_bars": warmup_bars, "starting_cash": starting_cash, "engine": "replay_fast"}
+                  "warmup_bars": warmup_bars, "starting_cash": starting_cash,
+                  "commission_per_share": float(getattr(self.settings, "paper_commission_per_share", 0.0)),
+                  "minimum_commission": float(getattr(self.settings, "paper_minimum_commission", 0.0)),
+                  "engine": "replay_fast"}
     # =============================================================================
         self.session_manager.create_session(self.replay_id, start_date, end_date, config)
         self.session_manager.update_session(self.replay_id, status="RUNNING", progress_pct=1.0)
@@ -165,6 +168,8 @@ class ReplayRuntime:
                     "volume_constrained": volume_constrained,
                     "max_volume_pct": max_volume_pct,
                     "starting_cash": starting_cash,
+                    "commission_per_share": config["commission_per_share"],
+                    "minimum_commission": config["minimum_commission"],
                 })
 
             workers = max_workers or min(len(day_payloads), os.cpu_count() or 4, 10)

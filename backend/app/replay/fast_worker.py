@@ -69,6 +69,8 @@ async def _run_day_shard_async(payload: dict[str, Any]) -> dict[str, Any]:
         payload.get("fill_model", "ohlc_touch"),
         volume_constrained=bool(payload.get("volume_constrained", False)),
         max_volume_pct=float(payload.get("max_volume_pct", 0.05)),
+        commission_per_share=float(payload.get("commission_per_share", getattr(settings, "paper_commission_per_share", 0.0))),
+        minimum_commission=float(payload.get("minimum_commission", getattr(settings, "paper_minimum_commission", 0.0))),
     )
     # =============================================================================
 
