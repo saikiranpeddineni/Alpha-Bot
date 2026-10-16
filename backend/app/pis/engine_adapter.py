@@ -16,6 +16,7 @@ import math
 from datetime import UTC, datetime
 from typing import Any
 
+import pandas as pd
 from app.core.domain import OrderRequest, Position
 from app.pis.execution import PISExecutionAdapter
 from app.pis.models import PISConfig, PISDecision, PositionObservation

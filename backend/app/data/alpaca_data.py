@@ -272,38 +272,99 @@ class AlpacaDataProvider(DataProvider):
                 break
         return empty_bars()
 
+    # =============================================================================
+    # [MODIFIED 2026-10-16]: Non-blocking News Sentiment to eliminate tick evaluation latency
+    # ORIGINAL INTENT: Fetched Alpaca news on cache miss with synchronous requests.get in
+    # asyncio.to_thread with 5s timeout.
+    # REASON FOR CHANGE: Waiting on external REST HTTP in the position evaluation tick loop
+    # causes latency spikes (up to 5s) during critical trailing stop evaluations.
+    # SAFE ROLLBACK: The original code is preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # async def get_news_sentiment(self, symbol: str) -> float:
+    #     """Fetches recent news for a symbol and returns a sentiment score, caching for 5 minutes."""
+    #     if not self._sentiment_analyzer:
+    #         return 0.0
+    #
+    #     now = datetime.now(UTC)
+    #     if symbol in self._news_cache:
+    #         score, cached_time = self._news_cache[symbol]
+    #         if (now - cached_time).total_seconds() < 300:  # 5 minute cache
+    #             return score
+    #
+    #     def fetch():
+    #         import requests
+    #         url = f"https://data.alpaca.markets/v1beta1/news?symbols={symbol}&limit=5"
+    #         headers = {
+    #             "APCA-API-KEY-ID": self._client._api_key,
+    #             "APCA-API-SECRET-KEY": self._client._secret_key
+    #         }
+    #         try:
+    #             resp = requests.get(url, headers=headers, timeout=5.0)
+    #             if resp.status_code == 200:
+    #                 data = resp.json()
+    #                 news = data.get('news', [])
+    #                 return [n['headline'] for n in news]
+    #         except Exception as e:
+    #             applog.error("data.alpaca", f"News fetch failed for {symbol}: {e}")
+    #         return []
+    #
+    #     headlines = await asyncio.to_thread(fetch)
+    #     score = self._sentiment_analyzer.analyze_headlines(headlines)
+    #     self._news_cache[symbol] = (score, now)
+    #     return score
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
     async def get_news_sentiment(self, symbol: str) -> float:
-        """Fetches recent news for a symbol and returns a sentiment score, caching for 5 minutes."""
+        """Non-blocking news sentiment query. Returns cached score immediately (0ms tick latency).
+        
+        Refreshes expired cache asynchronously in the background so the core trading engine
+        evaluation loop is never stalled by external network HTTP calls.
+        """
         if not self._sentiment_analyzer:
             return 0.0
 
         now = datetime.now(UTC)
+        score = 0.0
+        needs_refresh = True
+
         if symbol in self._news_cache:
             score, cached_time = self._news_cache[symbol]
             if (now - cached_time).total_seconds() < 300:  # 5 minute cache
-                return score
+                needs_refresh = False
 
-        def fetch():
-            import requests
-            url = f"https://data.alpaca.markets/v1beta1/news?symbols={symbol}&limit=5"
-            headers = {
-                "APCA-API-KEY-ID": self._client._api_key,
-                "APCA-API-SECRET-KEY": self._client._secret_key
-            }
-            try:
-                resp = requests.get(url, headers=headers, timeout=5.0)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    news = data.get('news', [])
-                    return [n['headline'] for n in news]
-            except Exception as e:
-                applog.error("data.alpaca", f"News fetch failed for {symbol}: {e}")
-            return []
+        if needs_refresh:
+            # Trigger non-blocking background fetch
+            async def _bg_fetch(sym: str) -> None:
+                def _do_req() -> list[str]:
+                    import requests
+                    url = f"https://data.alpaca.markets/v1beta1/news?symbols={sym}&limit=5"
+                    headers = {
+                        "APCA-API-KEY-ID": self._client._api_key,
+                        "APCA-API-SECRET-KEY": self._client._secret_key,
+                    }
+                    try:
+                        resp = requests.get(url, headers=headers, timeout=2.0)
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            news = data.get("news", [])
+                            return [n["headline"] for n in news]
+                    except Exception as e:
+                        applog.debug("data.alpaca", f"Background news fetch failed for {sym}: {e}")
+                    return []
 
-        headlines = await asyncio.to_thread(fetch)
-        score = self._sentiment_analyzer.analyze_headlines(headlines)
-        self._news_cache[symbol] = (score, now)
+                try:
+                    headlines = await asyncio.to_thread(_do_req)
+                    if self._sentiment_analyzer:
+                        new_score = self._sentiment_analyzer.analyze_headlines(headlines)
+                        self._news_cache[sym] = (new_score, datetime.now(UTC))
+                except Exception:
+                    pass
+
+            asyncio.create_task(_bg_fetch(symbol))
+
         return score
+    # =============================================================================
 
     async def discover_assets(self) -> tuple[DiscoverableAsset, ...]:
         """Fetch Alpaca's active US-equity asset metadata for bounded discovery.
