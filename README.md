@@ -9,7 +9,8 @@ dependencies used by the reproducible test environment.
 ### Local setup
 
 ```bash
-git clone <repository-url> alphadesk
+git clone --branch rewrite/atra-opportunity-engine --single-branch \
+  https://github.com/saikiranpeddineni/Alpha-Bot.git alphadesk
 cd alphadesk
 python3.12 -m venv .venv
 . .venv/bin/activate
