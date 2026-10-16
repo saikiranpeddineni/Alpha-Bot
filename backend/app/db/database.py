@@ -381,9 +381,21 @@ class Database:
         payload = self.get_latest_entry_order_payload(symbol, mode)
         return payload.get("strategy") if payload else None
 
+    # =============================================================================
+    # [MODIFIED 2026-10-16]: Clean up duplicate get_latest_order_strategy implementation
+    # ORIGINAL INTENT: Duplicate copy-paste of get_latest_entry_order_strategy.
+    # REASON FOR CHANGE: Eliminate duplicate logic; delegate cleanly.
+    # SAFE ROLLBACK: Preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # def get_latest_order_strategy(self, symbol: str, mode: str) -> str | None:
+    #     payload = self.get_latest_entry_order_payload(symbol, mode)
+    #     return payload.get("strategy") if payload else None
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
     def get_latest_order_strategy(self, symbol: str, mode: str) -> str | None:
-        payload = self.get_latest_entry_order_payload(symbol, mode)
-        return payload.get("strategy") if payload else None
+        return self.get_latest_entry_order_strategy(symbol, mode)
+    # =============================================================================
 
     def get_latest_order_payload(self, symbol: str, mode: str) -> dict | None:
         with self._session() as s:

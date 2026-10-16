@@ -350,34 +350,37 @@ class TradingEngineEvaluationMixin:
             self.pis_adapter.handle_position_closed(symbol)
 
         # =============================================================================
-        # [MODIFIED 2026-10-14]: CR-08 — Gated-tick shadow ledger recording
-        # ORIGINAL INTENT: Early returned [] with applog only, leaving no trace in shadow ledger.
-        # REASON FOR CHANGE: Gated-tick drops were traceless (360 candidates lost without trace).
-        #   Record every gated tick drop to shadow_ledger with gate="gated_tick".
-        # SAFE ROLLBACK: Commented-out original code below.
+        # [MODIFIED 2026-10-16]: Remove redundant duplicate gated-tick check
+        # ORIGINAL INTENT: Duplicate check of skip_entries_reason after position exits.
+        # REASON FOR CHANGE: Unreachable code. Lines 153-174 already handle this when position is None.
+        # When position is not None, skip_entries_reason is never set.
+        # SAFE ROLLBACK: Preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # if skip_entries_reason and not getattr(self, "replay_fast_path", False):
+        #     if symbol not in getattr(self, "_entry_gate_warned", set()):
+        #         self._entry_gate_warned.add(symbol)
+        #         applog.info("engine", f"{symbol}: entry evaluation skipped -- {skip_entries_reason}")
+        #     try:
+        #         from app.core.shadow_ledger import shadow_ledger
+        #         shadow_ledger.record(
+        #             symbol=symbol,
+        #             action="ENTER_LONG",
+        #             strategy="engine",
+        #             gate="gated_tick",
+        #             reason=f"gated tick ({skip_entries_reason})",
+        #             price=float(df["close"].iloc[-1]) if not df.empty and "close" in df else 0.0,
+        #             stop_loss=None,
+        #             take_profit=None,
+        #             atr14=float(df["atr14"].iloc[-1]) if not df.empty and "atr14" in df.columns else None,
+        #             confidence=0.0,
+        #         )
+        #     except Exception:
+        #         pass
+        #     return []
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
-        if skip_entries_reason and not getattr(self, "replay_fast_path", False):
-            if symbol not in getattr(self, "_entry_gate_warned", set()):
-                self._entry_gate_warned.add(symbol)
-                applog.info("engine", f"{symbol}: entry evaluation skipped -- {skip_entries_reason}")
-            try:
-                from app.core.shadow_ledger import shadow_ledger
-                shadow_ledger.record(
-                    symbol=symbol,
-                    action="ENTER_LONG",
-                    strategy="engine",
-                    gate="gated_tick",
-                    reason=f"gated tick ({skip_entries_reason})",
-                    price=float(df["close"].iloc[-1]) if not df.empty and "close" in df else 0.0,
-                    stop_loss=None,
-                    take_profit=None,
-                    atr14=float(df["atr14"].iloc[-1]) if not df.empty and "atr14" in df.columns else None,
-                    confidence=0.0,
-                )
-            except Exception:
-                pass
-            return []
+        # (Redundant duplicate omitted; authoritative check executes at lines 153-174)
         # =============================================================================
 
 
