@@ -48,7 +48,6 @@ class ReplayMarketFeed:
 
         from app.config import get_settings
         from app.core.applog import applog
-        from app.data.alpaca_data import AlpacaDataProvider
 
         # Check if fallback scratch file should be copied to establish initial cache
         if not self.data_path.exists() and not self._explicit_data_path:
@@ -85,10 +84,32 @@ class ReplayMarketFeed:
         if not needed_dates:
             return
 
-        missing_symbols = []
+        requested_symbols = []
         for symbol in symbols:
-            symbol_avail = avail_dates.get(symbol, set())
-            if any(date not in symbol_avail for date in needed_dates):
+            normalized = str(symbol).upper()
+            requested_symbols.append("^VIX" if normalized == "VIX" else normalized)
+        required_symbols = list(dict.fromkeys([
+            *requested_symbols,
+            "SPY",
+            "QQQ",
+            "^VIX",
+        ]))
+        missing_symbols = []
+        for symbol in required_symbols:
+            # ReplayDataManager treats VIX and ^VIX as aliases. Count either
+            # spelling as coverage so a cache does not download a duplicate
+            # risk series merely because its source used another spelling.
+            if symbol in {"VIX", "^VIX"}:
+                symbol_avail = avail_dates.get("VIX", set()) | avail_dates.get("^VIX", set())
+                # Yahoo only exposes a short 1-minute history. A risk series
+                # present somewhere in the requested range is therefore the
+                # useful repair criterion; requiring every warmup date would
+                # redownload the same bounded Yahoo window on every replay.
+                has_coverage = any(start_date <= date <= end_date for date in symbol_avail)
+            else:
+                symbol_avail = avail_dates.get(symbol, set())
+                has_coverage = all(date in symbol_avail for date in needed_dates)
+            if not has_coverage:
                 missing_symbols.append(symbol)
 
         if not missing_symbols:
@@ -97,20 +118,43 @@ class ReplayMarketFeed:
         applog.info("replay.feed", f"Downloading missing historical data for {len(missing_symbols)} symbols: {start_date} to {end_date}")
 
         settings = get_settings()
-        try:
-            provider = AlpacaDataProvider(api_key=settings.alpaca_api_key, api_secret=settings.alpaca_api_secret)
-        except RuntimeError:
-            applog.error("replay.feed", "Alpaca API credentials missing. Cannot fetch missing replay data.")
-            return
 
         start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=UTC)
         end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=UTC, hour=23, minute=59, second=59)
+
+        # Production uses Yahoo for VIX while equity bars come from Alpaca.
+        # Replay must build the same market-risk context instead of attempting
+        # to fetch ^VIX through the stock-bars client (which returns no data).
+        alpaca_provider = None
+        yahoo_provider = None
+        if any(symbol not in {"VIX", "^VIX"} for symbol in missing_symbols):
+            try:
+                from app.data.alpaca_data import AlpacaDataProvider
+
+                alpaca_provider = AlpacaDataProvider(
+                    api_key=settings.alpaca_api_key,
+                    api_secret=settings.alpaca_api_secret,
+                )
+            except RuntimeError as exc:
+                applog.error("replay.feed", f"Alpaca replay repair unavailable: {exc}")
+
+        if any(symbol in {"VIX", "^VIX"} for symbol in missing_symbols):
+            try:
+                from app.data.yahoo import YahooProvider
+
+                yahoo_provider = YahooProvider()
+            except RuntimeError as exc:
+                applog.error("replay.feed", f"Yahoo VIX replay repair unavailable: {exc}")
 
         # Open in append mode so we don't corrupt existing cache.
         # load_bars() correctly sorts by timestamp, so appended out-of-order data is completely fine.
         with self.data_path.open("a", encoding="utf-8") as handle:
             for symbol in missing_symbols:
                 applog.info("replay.feed", f"Fetching 1Min bars for {symbol}...")
+                provider = yahoo_provider if symbol in {"VIX", "^VIX"} else alpaca_provider
+                if provider is None:
+                    applog.warning("replay.feed", f"No provider available for {symbol}; leaving replay input incomplete")
+                    continue
                 df = await provider.get_bars(symbol, "1Min", start=start_dt, end=end_dt)
                 if df.empty:
                     applog.warning("replay.feed", f"No data returned for {symbol}")

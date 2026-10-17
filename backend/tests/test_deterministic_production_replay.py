@@ -2,7 +2,9 @@
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 
 from app.config import Settings
@@ -88,6 +90,62 @@ def test_symbol_filter_does_not_remove_production_context(tmp_path: Path):
     bars = feed.load_bars("2026-07-24", "2026-07-24", symbols=["NVDA"])
     present = {row["symbol"] for row in bars}
     assert {"NVDA", "SPY", "QQQ", "^VIX"}.issubset(present)
+
+
+@pytest.mark.asyncio
+async def test_replay_data_repair_fetches_required_market_context(tmp_path: Path, monkeypatch):
+    data_path = tmp_path / "bars.jsonl"
+    data_path.write_text(
+        json.dumps({
+            "kind": "bar",
+            "symbol": "SPY",
+            "ts": "2026-07-27T13:00:00+00:00",
+            "open": 630.0,
+            "high": 630.2,
+            "low": 629.8,
+            "close": 630.1,
+            "volume": 100000,
+        }) + "\n",
+        encoding="utf-8",
+    )
+    calls: list[tuple[str, str]] = []
+
+    def frame() -> pd.DataFrame:
+        return pd.DataFrame(
+            {"open": [1.0], "high": [1.1], "low": [0.9], "close": [1.0], "volume": [10.0]},
+            index=pd.DatetimeIndex([datetime(2026, 7, 27, 13, 0, tzinfo=timezone.utc)]),
+        )
+
+    class FakeAlpaca:
+        def __init__(self, api_key: str, api_secret: str) -> None:
+            assert api_key and api_secret
+
+        async def get_bars(self, symbol: str, *args, **kwargs):  # noqa: ANN002, ANN003
+            calls.append(("alpaca", symbol))
+            return frame()
+
+    class FakeYahoo:
+        async def get_bars(self, symbol: str, *args, **kwargs):  # noqa: ANN002, ANN003
+            calls.append(("yahoo", symbol))
+            return frame()
+
+    monkeypatch.setattr("app.config.get_settings", lambda: SimpleNamespace(
+        alpaca_api_key="test-key",
+        alpaca_api_secret="test-secret",
+    ))
+    monkeypatch.setattr("app.data.alpaca_data.AlpacaDataProvider", FakeAlpaca)
+    monkeypatch.setattr("app.data.yahoo.YahooProvider", FakeYahoo)
+
+    await ReplayMarketFeed(data_path).ensure_data("2026-07-27", "2026-07-27", ["SPY"])
+
+    assert ("alpaca", "QQQ") in calls
+    assert ("yahoo", "^VIX") in calls
+    rows = [json.loads(line) for line in data_path.read_text(encoding="utf-8").splitlines()]
+    assert {row["symbol"] for row in rows} == {"SPY", "QQQ", "^VIX"}
+
+    calls.clear()
+    await ReplayMarketFeed(data_path).ensure_data("2026-07-27", "2026-07-27", ["SPY"])
+    assert calls == []
 
 
 @pytest.mark.asyncio
