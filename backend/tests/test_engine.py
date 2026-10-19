@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
-from unittest.mock import AsyncMock
+from datetime import UTC, datetime
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
+import pandas as pd
 import pytest
 
 from app.config import Settings
-from app.core.domain import EngineState
+from app.core.domain import EngineState, SafetyDecision, Signal, SignalAction
 from app.core.engine import TradingEngine
 from app.db.database import Database
+from app.portfolio.allocator import PortfolioDecision
 
 
 @pytest.fixture
@@ -62,6 +66,130 @@ async def test_engine_ticks_and_streams(engine: TradingEngine):
 
     await engine.stop()
     assert engine.state == EngineState.STOPPED
+
+
+async def _run_safety_candidate_tick(
+    engine: TradingEngine,
+    signal: Signal,
+    safety_decision: SafetyDecision | None,
+    monkeypatch,
+) -> dict:
+    """Run one isolated candidate pass and return allocator call arguments."""
+    await engine.start("demo")
+    if engine._task is not None:
+        engine._task.cancel()
+        with suppress(asyncio.CancelledError):
+            await engine._task
+        engine._task = None
+
+    bars = pd.DataFrame(
+        {
+            "open": [100.0],
+            "high": [101.0],
+            "low": [99.0],
+            "close": [100.0],
+            "volume": [100_000.0],
+        },
+        index=[datetime.now(UTC)],
+    )
+    engine.replay_fast_path = True
+    engine.last_safety_decision = safety_decision
+    engine._check_system_heartbeat = AsyncMock()
+    engine._reconcile_pending_submissions = AsyncMock()
+    engine.data.poll = AsyncMock(return_value={signal.symbol: bars})
+    engine._evaluate_symbol = AsyncMock(return_value=[(signal, bars)])
+    engine.risk.check_halts = MagicMock(return_value=None)
+    engine.risk.should_flatten = MagicMock(return_value=False)
+    engine.risk.is_entry_permitted = MagicMock(
+        return_value=SimpleNamespace(approved=True, reason="permitted")
+    )
+    engine.insights.on_signal = MagicMock(
+        return_value=SimpleNamespace(model_dump=MagicMock(return_value={}))
+    )
+    engine.publish = MagicMock()
+
+    captured: dict = {}
+
+    def capture_allocation(**kwargs):
+        captured.update(kwargs)
+        return PortfolioDecision(approved_entries=[], gated_entries=[])
+
+    monkeypatch.setattr(
+        "app.portfolio.allocator.process_portfolio_allocations",
+        capture_allocation,
+    )
+    await engine._tick()
+    return captured
+
+
+def _safety_signal(strategy: str) -> Signal:
+    return Signal(
+        symbol="SPY",
+        action=SignalAction.ENTER_LONG,
+        confidence=0.9,
+        strategy=strategy,
+        reason="safety gate regression",
+        price=100.0,
+        stop_loss=98.0,
+        take_profit=104.0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_tick_rejects_entry_strategy_outside_heartbeat_allowlist(engine: TradingEngine, monkeypatch):
+    decision = SafetyDecision(
+        system_state="NORMAL",
+        market_risk_state="DEFENSIVE",
+        allow_new_entries=True,
+        risk_multiplier=0.5,
+        allowed_strategies=["mean_reversion"],
+        require_exit_only=False,
+    )
+    signal = _safety_signal("momentum")
+
+    captured = await _run_safety_candidate_tick(engine, signal, decision, monkeypatch)
+
+    assert captured["signals"] == []
+    engine.risk.is_entry_permitted.assert_not_called()
+    rejection_reason = engine.insights.on_signal.call_args.kwargs["gate_reason"]
+    assert "strategy not allowed" in rejection_reason
+    assert "momentum" in rejection_reason
+    assert "DEFENSIVE" in rejection_reason
+
+
+@pytest.mark.asyncio
+async def test_tick_accepts_entry_strategy_in_heartbeat_allowlist(engine: TradingEngine, monkeypatch):
+    decision = SafetyDecision(
+        system_state="NORMAL",
+        market_risk_state="CAUTION",
+        allow_new_entries=True,
+        risk_multiplier=0.75,
+        allowed_strategies=["mean_reversion"],
+        require_exit_only=False,
+    )
+    signal = _safety_signal("mean_reversion")
+
+    captured = await _run_safety_candidate_tick(engine, signal, decision, monkeypatch)
+
+    assert captured["signals"] == [signal]
+    engine.risk.is_entry_permitted.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_tick_passes_market_risk_state_to_portfolio_allocator(engine: TradingEngine, monkeypatch):
+    decision = SafetyDecision(
+        system_state="NORMAL",
+        market_risk_state="DEFENSIVE",
+        allow_new_entries=True,
+        risk_multiplier=0.5,
+        allowed_strategies=["mean_reversion"],
+        require_exit_only=False,
+    )
+    signal = _safety_signal("mean_reversion")
+
+    captured = await _run_safety_candidate_tick(engine, signal, decision, monkeypatch)
+
+    assert captured["market_state"] == "DEFENSIVE"
 
 
 async def test_tick_reuses_authoritative_positions_snapshot_for_broadcast(engine: TradingEngine, monkeypatch):

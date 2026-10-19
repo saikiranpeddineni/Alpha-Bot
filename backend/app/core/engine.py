@@ -936,8 +936,30 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
                 # Pre-filter candidates via RiskManager before allocation
                 alloc_signals = []
                 pre_gated_entries = []
+                safety_decision = getattr(self, "last_safety_decision", None)
+                allowed_strategies = getattr(safety_decision, "allowed_strategies", None)
                 for sig, _ in candidates:
                     sym_upper = sig.symbol.upper()
+
+                    # Heartbeat strategy restrictions apply to new entries only.
+                    # Existing-position exits are protective and must remain
+                    # available even when defensive/survival policy narrows the
+                    # entry strategy set.
+                    if (
+                        sig.action != SignalAction.EXIT
+                        and safety_decision is not None
+                        and allowed_strategies is not None
+                        and sig.strategy not in allowed_strategies
+                    ):
+                        market_risk_state = getattr(safety_decision, "market_risk_state", None)
+                        pre_gated_entries.append(
+                            (
+                                sig,
+                                "strategy not allowed by safety decision: "
+                                f"{sig.strategy} (market_risk_state={market_risk_state})",
+                            )
+                        )
+                        continue
 
                     # Prevent budget starvation for symbols we already hold
                     if sym_upper in pos_by_symbol:
@@ -972,7 +994,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
                     equity=account.equity,
                     portfolio_gate=self.portfolio_gate,
                     portfolio_allocator=self.portfolio_allocator,
-                    market_state=getattr(self.last_safety_decision, "market_state", None) if hasattr(self, "last_safety_decision") and self.last_safety_decision else None,
+                    market_state=getattr(safety_decision, "market_risk_state", None),
                 )
 
                 # Re-inject pre-filtered rejections so they are properly mirrored and logged
