@@ -16,6 +16,8 @@ All weights and thresholds are configurable via Settings / RiskConfig.
 """
 from __future__ import annotations
 
+import math
+
 import pandas as pd
 
 from app.ai.features import latest_feature_row
@@ -481,8 +483,10 @@ class SignalPipeline:
             # REASON FOR CHANGE:
             # 1. CR-07: Preserve tightening-only effective_regime_weight (<= 1.0) for score admission
             #    threshold, but let configured_regime_weight scale sig.score for candidate conflict ranking.
-            # 2. CR-09: High-agreement rescue (ml >= 0.65, meta >= 0.80 PASS) admits high-conviction
-            #    trades with risk_mult = 0.75 without lowering the general TradeScore threshold of 70.
+            # 2. CR-09: High-agreement rescue (ml >= 0.65, meta >= 0.80 PASS) may
+            #    recover a candidate whose regime weight pulled admission below
+            #    the threshold, but it cannot waive the unweighted TradeScore
+            #    floor or accept contradictory/non-numeric model outputs.
             # SAFE ROLLBACK: The original code is removed; rollback via git history.
             # -----------------------------------------------------------------------------
             # [NEW CODE]:
@@ -501,13 +505,35 @@ class SignalPipeline:
             rescue_meta_min = float(os.environ.get("RESCUE_META_MIN", 0.80))
             rescue_risk_mult = float(os.environ.get("RESCUE_RISK_MULT", 0.75))
             meta_prob_raw = meta_pred.prob_profitable if meta_pred is not None else None
-            meta_prob = meta_prob_raw if meta_prob_raw is not None else 0.0
+            try:
+                meta_prob = None if isinstance(meta_prob_raw, bool) or meta_prob_raw is None else float(meta_prob_raw)
+            except (TypeError, ValueError):
+                meta_prob = None
+            if meta_prob is not None and not math.isfinite(meta_prob):
+                meta_prob = None
+            raw_score_floor_met = (
+                math.isfinite(raw_score)
+                and 0.0 <= raw_score <= 100.0
+                and raw_score >= threshold
+            )
+            admission_score_below_floor = (
+                math.isfinite(admission_score)
+                and math.isfinite(threshold)
+                and admission_score < threshold
+            )
             is_high_agreement_rescue = (
                 not approved
+                and admission_score_below_floor
+                and raw_score_floor_met
+                and math.isfinite(effective_regime_weight)
+                and effective_regime_weight > 0.0
                 and ml is not None
                 and ml >= rescue_ml_min
-                and (meta_prob >= rescue_meta_min or getattr(meta_pred, "decision", "") == "PASS")
-                and (getattr(meta_pred, "approved", False) or getattr(meta_pred, "decision", "") == "PASS")
+                and meta_prob is not None
+                and 0.0 <= meta_prob <= 1.0
+                and meta_prob >= rescue_meta_min
+                and getattr(meta_pred, "approved", False) is True
+                and getattr(meta_pred, "decision", "") == "PASS"
             )
 
             if is_high_agreement_rescue:
@@ -516,7 +542,7 @@ class SignalPipeline:
                 sig.ml_gate_decision = "HIGH_AGREEMENT_RESCUE"
                 applog.info(
                     "pipeline",
-                    f"{symbol} {sig.strategy}: HIGH_AGREEMENT_RESCUE (ml={ml:.4f}>={rescue_ml_min}, meta={meta_prob:.4f}, raw_score={raw_score:.1f}<{threshold:.1f}, risk_mult={rescue_risk_mult})",
+                    f"{symbol} {sig.strategy}: HIGH_AGREEMENT_RESCUE (ml={ml:.4f}>={rescue_ml_min}, meta={meta_prob:.4f}>={rescue_meta_min}, raw_score={raw_score:.1f}>={threshold:.1f}, admission_score={admission_score:.1f}<{threshold:.1f}, risk_mult={rescue_risk_mult})",
                 )
 
             if not approved:

@@ -215,14 +215,20 @@ class RiskManager:
 
     def check_halts(self, ctx: AccountContext, now: datetime | None = None) -> str | None:
         """Returns 'daily', 'profit', or 'hard' when a halt newly trips this tick."""
-        # =============================================================================
-        # [MODIFIED 2026-10-13]: Max drawdown kill switch removed per operator directive
-        # ORIGINAL INTENT: Hard halt the system if account equity peak drawdown exceeds max_drawdown_pct.
-        # REASON FOR CHANGE: Operator directed to completely remove max drawdown kill switch and unhalt bot.
-        # SAFE ROLLBACK: The original code is removed; rollback via git history.
-        # -----------------------------------------------------------------------------
-        # [NEW CODE]: Max drawdown check removed. Daily loss halt remains active below.
-        # =============================================================================
+        # Max drawdown is account-wide peak-to-current equity protection.  It is
+        # deliberately checked before the session-only guards so a breach cannot
+        # be softened into a daily halt or cleared by the next session roll.
+        if not self.hard_halted and ctx.peak_equity > 0:
+            drawdown_pct = (ctx.peak_equity - ctx.equity) / ctx.peak_equity * 100.0
+            if drawdown_pct >= self.config.max_drawdown_pct:
+                self.hard_halted = True
+                self.hard_halt_reason = (
+                    f"MAX DRAWDOWN HALT: peak-to-equity drawdown {drawdown_pct:.2f}% "
+                    f">= configured limit {self.config.max_drawdown_pct:.2f}%"
+                )
+                applog.error("risk", f"{self.hard_halt_reason} -- flattening and stopping until manual reset")
+                return "hard"
+
         if not self.daily_halted and ctx.session_start_equity > 0:
             loss_pct = -ctx.day_pnl / ctx.session_start_equity * 100.0
             if loss_pct >= self.config.max_daily_loss_pct:
