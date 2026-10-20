@@ -149,6 +149,13 @@ class TestWalkForwardValidator:
         # summary may be empty if not enough windows, but result must exist
         assert isinstance(result.summary, dict)
         assert result.side == "long"
+        assert isinstance(result.window_metrics, dict)
+        assert result.fallback_used is False
+
+    def test_empty_run_is_marked_as_fallback(self):
+        result = self.wfv.run(frames={}, side="long")
+        assert result.windows_evaluated == 0
+        assert result.fallback_used is True
 
     def test_short_span_adapts_window_sizes_not_zero_windows(self):
         """31 usable sessions vs the 90+10x3 plan used to yield "Only 0 windows"

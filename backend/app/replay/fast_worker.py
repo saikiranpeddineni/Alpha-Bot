@@ -2,7 +2,7 @@
 
 Runs in a separate process (spawn-safe: module-level entrypoint). Each shard
 executes ONE trading day through the authoritative TradingEngine._tick with:
-  - no ledger event recording (publish -> no-op)
+   - scanner ledger events are recorded; other live-ops events remain disabled
   - no heartbeat ops monitors / no equity persistence (replay_fast_path)
   - no PIS profit-memory persistence
   - deterministic datetime/uuid bindings identical to the full runtime
@@ -38,6 +38,7 @@ async def _run_day_shard_async(payload: dict[str, Any]) -> dict[str, Any]:
     from app.replay.clock import ReplayClock
     from app.replay.determinism import DeterministicUUIDProxy
     from app.replay.market_feed import ReplayDataManager
+    from app.replay.ledger import ReplayLedger
 
     # Shard processes are short-lived; keep rejection forensics out of the
     # production shadow ledger (same isolation as the continuous runtime).
@@ -103,7 +104,13 @@ async def _run_day_shard_async(payload: dict[str, Any]) -> dict[str, Any]:
 
         engine = TradingEngine(settings, replay_db, runtime=TradingRuntime(clock=clock, broker=broker, data=data))
         engine.replay_fast_path = True
+        engine.replay_scanner_enabled = bool(payload.get("use_dynamic_scanner", False))
         engine._skip_broadcast = True
+        engine.runtime_ledger = ReplayLedger(
+            f"{payload['day']}|shard",
+            start_date=payload["day"],
+            end_date=payload["day"],
+        )
         if hasattr(engine, "pis_adapter"):
             engine.pis_adapter.persist_profit_memory = False
 
@@ -215,7 +222,14 @@ async def _run_day_shard_async(payload: dict[str, Any]) -> dict[str, Any]:
             details.setdefault("symbol", symbol)
             trades_out.append(details)
 
-        return {"day": payload["day"], "trades": trades_out, "equity_curve": equity_out, "ticks": ticks, "flat_ok": flat_ok}
+        return {
+            "day": payload["day"],
+            "trades": trades_out,
+            "equity_curve": equity_out,
+            "ticks": ticks,
+            "flat_ok": flat_ok,
+            "scanner": engine.runtime_ledger.to_payload(),
+        }
     finally:
         import app.db.database as db_module
         db_module._ACTIVE_DATABASE = None

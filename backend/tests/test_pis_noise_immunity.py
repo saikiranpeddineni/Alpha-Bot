@@ -98,6 +98,30 @@ def test_opening_pullback_does_not_shake_out():
     assert brain.has_scaled_out is True
 
 
+def test_underwater_trade_does_not_time_decay_into_panic_exit():
+    """A moving -0.40R/-0.45R trade is not structural failure by elapsed bars alone."""
+    brain = PositionBrain("TEST", _make_obs(price=100.0, close=100.0, t_offset_sec=0))
+
+    decision = None
+    for i in range(1, 21):
+        # Keep the trade underwater but moving so this is not the separate
+        # dead-on-arrival stagnation case.
+        price = 99.55 if i % 2 else 99.60
+        decision = brain.observe(
+            _make_obs(
+                price=price,
+                close=price,
+                high=price + 0.05,
+                low=price - 0.05,
+                t_offset_sec=i * 60,
+            )
+        )
+
+    assert decision is not None
+    assert decision.action != ExitAction.FULL_EXIT
+    assert decision.lifecycle_state != LifecycleState.EXIT_CANDIDATE
+
+
 def test_single_bar_wick_does_not_cause_shakeout():
     """A 1-minute candlestick upper wick during an uptrend should not trigger exit."""
     cfg = PISConfig()

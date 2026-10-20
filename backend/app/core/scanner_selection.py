@@ -24,12 +24,14 @@ def select_sector_diverse_momentum(
 
     selected: list[str] = []
     bucket_counts: dict[str, int] = {}
+    seen_symbols: set[str] = set()
     for candidate in candidates:
         if len(selected) >= max_symbols:
             break
         symbol = str(candidate.get("symbol", "")).strip().upper()
-        if not symbol:
+        if not symbol or symbol in seen_symbols:
             continue
+        seen_symbols.add(symbol)
         sector_value = candidate.get("sector")
         sector = str(sector_value).strip().lower() if sector_value is not None else ""
         bucket = sector if sector and sector != "unknown" else f"unknown:{symbol}"

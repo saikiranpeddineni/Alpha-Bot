@@ -39,6 +39,19 @@ class ReplayRuntime:
         self.session_manager = session_manager or ReplaySessionManager()
         self.feed = ReplayMarketFeed(data_path=data_path)
 
+    @staticmethod
+    def _expand_dynamic_scanner_symbols(
+        symbols: list[str],
+        enabled: bool,
+    ) -> list[str]:
+        """Return the causal symbol surface required by fast replay scanning."""
+        normalized = {str(symbol).upper() for symbol in symbols if str(symbol).strip()}
+        if enabled:
+            from app.core.scanner import CANDIDATE_POOL
+
+            normalized.update(CANDIDATE_POOL)
+        return sorted(normalized)
+
     def run_replay(self, start_date: str, end_date: str, symbols: list[str] | None = None,
                    fill_model: str = "ohlc_touch", slippage_bps: float = 0.0, verify_parity_pass: bool = True,
                    volume_constrained: bool = False, max_volume_pct: float = 0.05, warmup_bars: int = 0) -> dict[str, Any]:
@@ -61,11 +74,12 @@ class ReplayRuntime:
                                     symbols: list[str] | None = None,
                                     fill_model: str = "ohlc_touch",
                                     slippage_bps: float = 0.0,
-                                    volume_constrained: bool = False,
-                                    max_volume_pct: float = 0.05,
-                                    warmup_bars: int = 600,
-                                    starting_cash: float | None = None,
-                                    max_workers: int | None = None) -> dict[str, Any]:
+                                     volume_constrained: bool = False,
+                                     max_volume_pct: float = 0.05,
+                                     warmup_bars: int = 600,
+                                     starting_cash: float | None = None,
+                                     use_dynamic_scanner: bool = False,
+                                     max_workers: int | None = None) -> dict[str, Any]:
         import os
         from concurrent.futures import ProcessPoolExecutor
         from datetime import timedelta as _td
@@ -74,9 +88,10 @@ class ReplayRuntime:
 
         config = {"start_date": start_date, "end_date": end_date, "symbols": symbols,
                   "fill_model": fill_model, "slippage_bps": slippage_bps,
-                  "volume_constrained": volume_constrained, "max_volume_pct": max_volume_pct,
-                  "warmup_bars": warmup_bars, "starting_cash": starting_cash,
-                  "commission_per_share": float(getattr(self.settings, "paper_commission_per_share", 0.0)),
+                   "volume_constrained": volume_constrained, "max_volume_pct": max_volume_pct,
+                   "warmup_bars": warmup_bars, "starting_cash": starting_cash,
+                   "use_dynamic_scanner": use_dynamic_scanner,
+                   "commission_per_share": float(getattr(self.settings, "paper_commission_per_share", 0.0)),
                   "minimum_commission": float(getattr(self.settings, "paper_minimum_commission", 0.0)),
                   "engine": "replay_fast"}
     # =============================================================================
@@ -90,6 +105,15 @@ class ReplayRuntime:
             else:
                 target_symbols = [s.upper() for s in
                                   (self.source_db.get_setting("watchlist") or self.settings.watchlist_symbols())]
+
+            # The scanner's historical surface is the static candidate pool.
+            # Load that pool into the replay input so dynamic scanner work can
+            # discover causal candidates instead of seeing only the user's
+            # initial watchlist plus forced SPY/QQQ/VIX context bars.
+            target_symbols = self._expand_dynamic_scanner_symbols(
+                target_symbols,
+                use_dynamic_scanner,
+            )
 
             from datetime import timedelta
             history_start = start_date if self.feed._explicit_data_path else (datetime.fromisoformat(start_date).date() - timedelta(days=60)).isoformat()
@@ -167,44 +191,90 @@ class ReplayRuntime:
                     "slippage_bps": slippage_bps,
                     "volume_constrained": volume_constrained,
                     "max_volume_pct": max_volume_pct,
-                    "starting_cash": starting_cash,
-                    "commission_per_share": config["commission_per_share"],
+                     "starting_cash": starting_cash,
+                     "use_dynamic_scanner": use_dynamic_scanner,
+                     "commission_per_share": config["commission_per_share"],
                     "minimum_commission": config["minimum_commission"],
                 })
 
-            workers = max_workers or min(len(day_payloads), os.cpu_count() or 4, 10)
+            # ``max_workers=0`` is the API-safe Windows mode. TestClient and
+            # some desktop launchers invoke the async route from a worker
+            # thread; spawning a ProcessPool from that context can terminate
+            # the interpreter with an access violation. Run one shard at a
+            # time in a dedicated thread instead. The CLI can still request
+            # process parallelism explicitly.
+            sequential = max_workers == 0
+            workers = 1 if sequential else (max_workers or min(len(day_payloads), os.cpu_count() or 4, 10))
             trades: list[dict[str, Any]] = []
             equity: list[list[Any]] = []
+            scanner_events: list[dict[str, Any]] = []
             shard_results: dict[str, dict[str, Any]] = {}
             ticks_total = 0
             all_flat = True
             done = 0
             loop = asyncio.get_running_loop()
-            with ProcessPoolExecutor(max_workers=workers) as pool:
-                futures = {loop.run_in_executor(pool, run_day_shard, p): p["day"] for p in day_payloads}
-                for fut in asyncio.as_completed(list(futures.keys())):
-                    res = await fut
+            if sequential:
+                for payload in day_payloads:
+                    res = await asyncio.to_thread(run_day_shard, payload)
                     shard_results[res["day"]] = res
                     done += 1
                     ticks_total += res.get("ticks", 0)
                     all_flat = all_flat and res.get("flat_ok", True)
                     trades.extend(res.get("trades", []))
+                    scanner_events.extend(
+                        (res.get("scanner") or {}).get("timeline", [])
+                    )
                     self.session_manager.update_session(
                         self.replay_id, progress_pct=min(99.0, 5.0 + 94.0 * done / max(1, len(day_payloads)))
                     )
+            else:
+                with ProcessPoolExecutor(max_workers=workers) as pool:
+                    futures = {loop.run_in_executor(pool, run_day_shard, p): p["day"] for p in day_payloads}
+                    for fut in asyncio.as_completed(list(futures.keys())):
+                        res = await fut
+                        shard_results[res["day"]] = res
+                        done += 1
+                        ticks_total += res.get("ticks", 0)
+                        all_flat = all_flat and res.get("flat_ok", True)
+                        trades.extend(res.get("trades", []))
+                        scanner_events.extend(
+                            (res.get("scanner") or {}).get("timeline", [])
+                        )
+                        self.session_manager.update_session(
+                            self.replay_id, progress_pct=min(99.0, 5.0 + 94.0 * done / max(1, len(day_payloads)))
+                        )
 
             # Workers intentionally start from starting_cash. Rebase each day's
             # marked equity by prior realized P&L before merging; otherwise the
             # last day's equity silently replaces the account equity.
-            carry = float(getattr(self.settings, "paper_starting_cash", 100000.0))
+            base_starting_cash = float(starting_cash or getattr(self.settings, "paper_starting_cash", 100000.0))
+            carry = base_starting_cash
             for day in sorted(shard_results):
                 res = shard_results[day]
                 day_trades = res.get("trades", [])
                 for point in res.get("equity_curve", []):
-                    equity.append([point[0], float(point[1]) + carry - getattr(self.settings, "paper_starting_cash", 100000.0)])
+                    equity.append([point[0], float(point[1]) + carry - base_starting_cash])
                 carry += sum(float(t.get("pnl") or 0.0) for t in day_trades)
             trades.sort(key=lambda t: str(t.get("exit_at", "")))
             equity.sort(key=lambda e: e[0])
+            scanner_events.sort(key=lambda event: str(event.get("timestamp", "")))
+            scanner_ledger = ReplayLedger(
+                f"{self.replay_id}:scanner",
+                start_date=days[0] if days else start_date,
+                end_date=days[-1] if days else end_date,
+            )
+            for event in scanner_events:
+                try:
+                    timestamp = datetime.fromisoformat(str(event["timestamp"]))
+                    scanner_ledger.record_event(
+                        str(event.get("event_type", "")),
+                        timestamp,
+                        str(event.get("symbol", "")),
+                        dict(event.get("details") or {}),
+                    )
+                except (KeyError, TypeError, ValueError):
+                    continue
+            scanner_payload = scanner_ledger.to_payload()
             if not all_flat:
                 applog.error("replay_runtime", f"Replay {self.replay_id}: at least one shard ended NON-FLAT")
             summary = {
@@ -212,14 +282,26 @@ class ReplayRuntime:
                 "production_ticks": ticks_total, "total_trades": len(trades),
                 "days_sharded": len(day_payloads), "workers": workers,
                 "all_days_flat": all_flat, "parity_verdict": "SHARDED_EXACT",
+                "scanner_enabled": use_dynamic_scanner,
                 "final_equity": equity[-1][1] if equity else 100000.0,
             }
             manifest = {"config_hash": hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest(),
-                        "decision_path": "TradingEngine._tick", "engine": "replay_fast",
-                        "model_policy": "immutable_asof_snapshot", "days": days}
+                         "decision_path": "TradingEngine._tick", "engine": "replay_fast",
+                         "model_policy": "immutable_asof_snapshot", "days": days,
+                         "scanner_enabled": use_dynamic_scanner}
             self.session_manager.update_session(self.replay_id, status="COMPLETED", progress_pct=100.0,
                                                 manifest=manifest, summary=summary)
-            return {"session": summary, "manifest": manifest, "trades": trades, "equity_curve": equity}
+            return {
+                "session": summary,
+                "manifest": manifest,
+                "trades": trades,
+                "equity_curve": equity,
+                "scanner": {
+                    "timeline": scanner_payload["timeline"],
+                    "candidates": scanner_payload["candidates"],
+                    "stage_hashes": scanner_payload["stage_hashes"],
+                },
+            }
         except Exception as exc:
             applog.error("replay_runtime", f"Fast replay {self.replay_id} failed: {exc}")
             self.session_manager.update_session(self.replay_id, status="FAILED",

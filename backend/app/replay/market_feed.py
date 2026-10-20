@@ -290,6 +290,11 @@ class ReplayDataManager:
                 self._alias["^VIX"] = "VIX"
 
     @property
+    def available_symbols(self) -> frozenset[str]:
+        """Symbols with historical bars in this immutable replay input."""
+        return frozenset(self._bars)
+
+    @property
     def is_synthetic(self) -> bool:
         return False
 

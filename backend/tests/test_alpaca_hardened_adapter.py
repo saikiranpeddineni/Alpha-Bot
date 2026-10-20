@@ -160,6 +160,27 @@ def test_to_order_classifies_oto_stop_child_as_stop():
     ) is False
 
 
+def test_to_order_classifies_flat_oto_stop_child_as_stop():
+    """Alpaca may flatten an OTO child without parent/leg metadata."""
+    broker = _broker_without_client_init()
+    child = _raw_order(
+        "flat-oto-stop-1",
+        order_type="stop",
+        order_class="oto",
+        stop_price=95.0,
+        side="sell",
+    )
+
+    order = broker._to_order(child)
+
+    assert order.leg == "stop"
+    assert order.parent_id is None
+    assert is_entry_order(
+        order,
+        [Position(symbol="AAPL", qty=10.0, avg_entry_price=100.0, market_price=100.0)],
+    ) is False
+
+
 def test_to_order_classifies_bracket_parent_and_children():
     """Bracket parent metadata is entry-owned while stop/target children remain exits."""
     broker = _broker_without_client_init()

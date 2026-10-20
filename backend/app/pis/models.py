@@ -63,6 +63,7 @@ class ReasonCode(str, Enum):
     PROTECTION_BREACH = "PROTECTION_BREACH"
     FLOOR_TAG_RUNNER = "FLOOR_TAG_RUNNER"
     DOA_STAGNATION_HARVEST = "DOA_STAGNATION_HARVEST"
+    CAUSAL_PEAK_REVERSAL = "CAUSAL_PEAK_REVERSAL"
     EOD_PREHARVEST = "EOD_PREHARVEST"
     MANUAL_OVERRIDE = "MANUAL_OVERRIDE"
     KILL_SWITCH_ACTIVE = "KILL_SWITCH_ACTIVE"
@@ -312,6 +313,15 @@ class PISConfig:
     enable_doa_stagnation_harvest: bool = True
     doa_stagnation_bars: int = 12
     doa_r_threshold: float = -0.25
+    # Causal peak capture: after a runner has demonstrated a material high-water
+    # excursion, require completed-bar reversal confirmation and a meaningful
+    # giveback before harvesting the remaining quantity.  This deliberately does
+    # not use a session's eventual high or any future bar.
+    enable_causal_peak_capture: bool = True
+    causal_peak_capture_confirmation_bars: int = 2
+    causal_peak_capture_min_peak_r: float = 1.00
+    causal_peak_capture_min_giveback_r: float = 0.50
+    causal_peak_capture_giveback_pct: float = 0.25
     # =============================================================================
     weak_momentum_threshold: float = 0.45
     # --- Floor-tag runner (evidence-driven) ---
@@ -386,5 +396,25 @@ class PISConfig:
             raise ValueError(
                 "early_invalidation_confirmation_bars must be >= 1, "
                 f"got {self.early_invalidation_confirmation_bars}"
+            )
+        if self.causal_peak_capture_confirmation_bars < 1:
+            raise ValueError(
+                "causal_peak_capture_confirmation_bars must be >= 1, "
+                f"got {self.causal_peak_capture_confirmation_bars}"
+            )
+        if self.causal_peak_capture_min_peak_r <= 0.0:
+            raise ValueError(
+                "causal_peak_capture_min_peak_r must be > 0, "
+                f"got {self.causal_peak_capture_min_peak_r}"
+            )
+        if self.causal_peak_capture_min_giveback_r <= 0.0:
+            raise ValueError(
+                "causal_peak_capture_min_giveback_r must be > 0, "
+                f"got {self.causal_peak_capture_min_giveback_r}"
+            )
+        if not (0.0 < self.causal_peak_capture_giveback_pct < 1.0):
+            raise ValueError(
+                "causal_peak_capture_giveback_pct must be between 0 and 1, "
+                f"got {self.causal_peak_capture_giveback_pct}"
             )
 

@@ -90,7 +90,7 @@ class PreMarketGapScanner:
         # [NEW CODE]:
         today = self._today()
         now_ts = datetime.now(UTC).timestamp()
-        if self._cache_date == today and self._cache and (now_ts - getattr(self, "_cache_ts", 0)) < 900:
+        if self._cache_date == today and (now_ts - getattr(self, "_cache_ts", 0)) < 900:
             return list(self._cache)
 
         # Fetch all three sources concurrently
@@ -127,6 +127,10 @@ class PreMarketGapScanner:
                 "change_pct": entry.change_pct if entry else 0.0,
             }
         combined = sorted(all_symbols)
+        # The engine reads this property after the scan to bias strategy
+        # evaluation. Building the map without publishing it made the entire
+        # gainer/loser integration a silent no-op.
+        self.mover_context = new_context
         self._cache = combined
         self._cache_date = today
         self._cache_ts = now_ts
@@ -174,28 +178,55 @@ class PreMarketGapScanner:
             return {}
 
         movers: list[tuple[str, float]] = []
+
+        def _field(value, *names, default=None):
+            for name in names:
+                if isinstance(value, dict):
+                    candidate = value.get(name)
+                else:
+                    candidate = getattr(value, name, None)
+                if candidate is not None:
+                    return candidate
+            return default
+
+        def _number(value, *names, default=0.0) -> float:
+            raw = _field(value, *names, default=default)
+            try:
+                return float(raw or default)
+            except (TypeError, ValueError):
+                return float(default)
+
         for symbol, snap in snaps.items():
             try:
                 if snap is None:
                     continue
-                prev_close = getattr(snap, "prev_daily_bar", None)
-                daily_bar = getattr(snap, "daily_bar", None)
-                minute_bar = getattr(snap, "minute_bar", None)
+                prev_close = _field(snap, "prev_daily_bar", "previous_daily_bar")
+                daily_bar = _field(snap, "daily_bar")
+                minute_bar = _field(snap, "minute_bar")
+                latest_trade = _field(snap, "latest_trade")
                 if prev_close is None or daily_bar is None:
                     continue
-                prior_close = float(getattr(prev_close, "c", 0.0) or 0.0)
-                today_open = float(getattr(daily_bar, "o", 0.0) or 0.0)
-                current_price = float(
-                    getattr(minute_bar, "c", today_open) if minute_bar else today_open
+                prior_close = _number(prev_close, "c", "close")
+                today_open = _number(daily_bar, "o", "open")
+                current_price = _number(
+                    minute_bar,
+                    "c",
+                    "close",
+                    default=_number(latest_trade, "p", "price", default=today_open),
+                ) if minute_bar is not None else _number(
+                    latest_trade,
+                    "p",
+                    "price",
+                    default=today_open,
                 )
                 if prior_close <= 0 or today_open <= 0:
                     continue
                 if current_price < self.min_price:
                     continue
-                gap_pct = abs(today_open / prior_close - 1.0) * 100.0
-                if gap_pct < _GAP_MIN_PCT:
+                gap_pct = (today_open / prior_close - 1.0) * 100.0
+                if abs(gap_pct) < _GAP_MIN_PCT:
                     continue
-                vol = float(getattr(daily_bar, "v", 0.0) or 0.0)
+                vol = _number(daily_bar, "v", "volume")
                 dollar_vol = vol * current_price
                 if dollar_vol < _GAP_MIN_DOLLAR_VOLUME:
                     continue
@@ -203,7 +234,7 @@ class PreMarketGapScanner:
             except Exception:
                 continue
 
-        movers.sort(key=lambda x: x[1], reverse=True)
+        movers.sort(key=lambda x: abs(x[1]), reverse=True)
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
         return {sym: pct for sym, pct in movers[:_GAP_MAX_RESULTS]}
@@ -212,13 +243,14 @@ class PreMarketGapScanner:
         """Fallback: use recent daily bars to compute gap from prior close to today's open."""
         from app.core.scanner import CANDIDATE_POOL
 
+        symbols = sorted(set(CANDIDATE_POOL).union(_FREQUENT_MOVERS))
         now = datetime.now(UTC)
         start = now - timedelta(days=5)
 
         res_1d = {}
         if hasattr(self.data, "multi_history"):
             try:
-                batched = await self.data.multi_history(CANDIDATE_POOL, "1Day", start, now, prefer_cache=False)
+                batched = await self.data.multi_history(symbols, "1Day", start, now, prefer_cache=False)
                 if isinstance(batched, dict):
                     res_1d = batched
             except Exception as exc:
@@ -241,8 +273,8 @@ class PreMarketGapScanner:
                     price = float(df["close"].iloc[-1])
                     if prior_close <= 0 or today_open <= 0 or price < self.min_price:
                         return None
-                    gap_pct = abs(today_open / prior_close - 1.0) * 100.0
-                    if gap_pct < _GAP_MIN_PCT:
+                    gap_pct = (today_open / prior_close - 1.0) * 100.0
+                    if abs(gap_pct) < _GAP_MIN_PCT:
                         return None
                     avg_vol = float(df["volume"].tail(5).mean())
                     if avg_vol * price < _GAP_MIN_DOLLAR_VOLUME:
@@ -251,9 +283,9 @@ class PreMarketGapScanner:
                 except Exception:
                     return None
 
-        results = await asyncio.gather(*[_check(sym) for sym in sorted(CANDIDATE_POOL)])
+        results = await asyncio.gather(*[_check(sym) for sym in symbols])
         movers = [r for r in results if r is not None]
-        movers.sort(key=lambda x: x[1], reverse=True)
+        movers.sort(key=lambda x: abs(x[1]), reverse=True)
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
         return {sym: pct for sym, pct in movers[:_GAP_MAX_RESULTS]}

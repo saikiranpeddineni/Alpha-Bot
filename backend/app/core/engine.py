@@ -123,6 +123,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
         from app.portfolio.recent_performance import RecentPerformanceGovernor
         self._perf_governor = RecentPerformanceGovernor(db, lambda: self.risk_config)
         self._last_scan_date = None
+        self._scanner_retry_after: datetime | None = None
         self._last_train_date = None
         self._last_event_monitor_min = None
         self._event_monitor_task: asyncio.Task | None = None
@@ -160,7 +161,20 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
         self._trainer_task: asyncio.Task | None = None
         # Cached scanner instance so strategy evaluation can read live mover context.
         self._scanner = None
+        self._scanner_data = None
+        self.runtime_ledger = None
         self.scanner_context: dict[str, dict] = {}
+        self.scanner_status: dict[str, Any] = {
+            "status": "never_run",
+            "outcome": None,
+            "last_started_at": None,
+            "last_completed_at": None,
+            "last_error": None,
+            "last_watchlist_count": 0,
+            "is_intraday": None,
+            "as_of": None,
+            "discovery": None,
+        }
 
         # Feature 4: Economic calendar / event guard
         from app.core.calendar import EventCalendar
@@ -177,6 +191,11 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
         # (heartbeat monitors, equity persistence, hourly sector scans) that has
         # zero influence on decisions. Decision gates ALWAYS run.
         self.replay_fast_path = False
+        # Day-sharded fast replay keeps scanner work opt-in because a full
+        # three-stage ML scan is intentionally expensive. When enabled, the
+        # replay scheduler awaits it so scanner decisions are causal and
+        # ledger-visible rather than leaving a task behind at shard shutdown.
+        self.replay_scanner_enabled = False
         self.reconciliation_mismatch = False
         self._position_reconciliation_mismatch_streak = 0
         self._order_reconciliation_mismatch_streak = 0
@@ -418,6 +437,20 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
         self._regimes.clear()
         self._flattened_sessions.clear()
         self._last_scan_date = None
+        self._scanner_retry_after = None
+        self.scanner_status.update(
+            {
+                "status": "never_run",
+                "outcome": None,
+                "last_started_at": None,
+                "last_completed_at": None,
+                "last_error": None,
+                "last_watchlist_count": 0,
+                "is_intraday": None,
+                "as_of": None,
+                "discovery": None,
+            }
+        )
         self._tick_count = 0
         self._consec_errors = 0
         self.last_error = ""
@@ -538,6 +571,36 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
     # ------------------------------------------------------------------
     # the tick
     # ------------------------------------------------------------------
+    async def _flatten_stale_positions_at_open(self) -> bool:
+        """Flatten overnight exposure and wait for broker-confirmed flatness.
+
+        A broker ``close_all_positions`` response only acknowledges the
+        liquidation request; it does not prove that positions and their
+        protective orders are gone. Keep the startup latch set until both
+        broker post-conditions are empty so the same tick cannot route stale
+        exposure through PIS before the close fills settle.
+        """
+        try:
+            await self.flatten()
+            positions = await self.broker.positions()
+            open_orders = await self.broker.open_orders()
+        except Exception as exc:  # noqa: BLE001
+            self._flatten_at_open = True
+            applog.error("engine", f"STALE-POSITION GUARD flatten verification failed: {exc}")
+            return False
+
+        if positions or open_orders:
+            self._flatten_at_open = True
+            applog.warning(
+                "engine",
+                "STALE-POSITION GUARD: flatten request not yet broker-flat "
+                f"(positions={len(positions)}, open_orders={len(open_orders)}); skipping this tick",
+            )
+            return False
+
+        self._flatten_at_open = False
+        applog.warning("engine", "STALE-POSITION GUARD: stranded positions flattened at open")
+        return True
 
     async def _tick(self) -> None:
         assert self.data and self.broker and self.risk and self.portfolio and self.pipeline
@@ -570,12 +633,8 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
         # STALE-POSITION GUARD 2026-10-16: flatten stranded overnight positions
         # once the market opens, before any new entries. One-shot by design.
         if getattr(self, "_flatten_at_open", False) and self.clock.is_open():
-            self._flatten_at_open = False
-            try:
-                await self.flatten()
-                applog.warning("engine", "STALE-POSITION GUARD: stranded positions flattened at open")
-            except Exception as exc:
-                applog.error("engine", f"STALE-POSITION GUARD flatten failed: {exc}")
+            if not await self._flatten_stale_positions_at_open():
+                return
 
         # Synchronize ML gate threshold with assessed market risk regime with dynamic scale
         # Synchronize ML gate threshold with assessed market risk regime with dynamic scale
@@ -617,23 +676,40 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
         # Run post-market trainer (>= 16:15 ET) once per day
         # Run event monitor every 5 minutes during active trading session (9:30 AM to 4:00 PM ET)
         if self.state == EngineState.RUNNING:
-            if self._last_scan_date != today_date and et_mins >= 9 * 60:
-                self._last_scan_date = today_date
-
+            scanner_enabled = (
+                not getattr(self, "replay_fast_path", False)
+                or getattr(self, "replay_scanner_enabled", False)
+            )
+            scanner_inline = type(self.clock).__name__ == "ReplayClock"
+            if (
+                scanner_enabled
+                and self._last_scan_date != today_date
+                and et_mins >= 9 * 60
+                and (
+                    self._scanner_retry_after is None
+                    or now >= self._scanner_retry_after
+                )
+            ):
                 if is_trading_day:
                     applog.info("engine", "Pre-market scanner trigger time reached (>= 09:00 ET)")
-                    # Detached task: the morning scan performs per-symbol history
-                    # fetches + adaptive training and must never hold the tick
-                    # hostage across the 09:30 open.
                     if self._scanner_task is None or self._scanner_task.done():
-                        self._scanner_task = asyncio.create_task(
-                            self.run_market_scanner(is_intraday=False), name="market-scanner-premarket"
-                        )
+                        if scanner_inline:
+                            # Replay must finish the scan before the tick advances;
+                            # otherwise the task is cancelled at the end of a
+                            # shard and no scanner decision reaches the ledger.
+                            await self.run_market_scanner(is_intraday=False)
+                        else:
+                            # Live scans remain detached so provider latency cannot
+                            # hold the market-data/execution tick hostage.
+                            self._scanner_task = asyncio.create_task(
+                                self.run_market_scanner(is_intraday=False), name="market-scanner-premarket"
+                            )
                     else:
                         applog.info("engine", "Pre-market scanner skipped: previous scanner task still running")
             # Intraday watchlist refresh every 15 min during session (was 30 min)
             elif (
-                is_trading_day
+                scanner_enabled
+                and is_trading_day
                 and 9 * 60 + 30 <= et_mins <= 15 * 60 + 45  # 9:30 AM – 3:45 PM ET (was 3:30 PM)
                 and et_mins % 15 == 0  # every 15 min (was every 30 min)
                 and self._last_intraday_scan_min != et_mins
@@ -641,9 +717,12 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
                 self._last_intraday_scan_min = et_mins
                 applog.info("engine", f"Intraday watchlist refresh triggered at {et_mins} ET mins")
                 if self._scanner_task is None or self._scanner_task.done():
-                    self._scanner_task = asyncio.create_task(
-                        self.run_market_scanner(is_intraday=True), name="market-scanner-intraday"
-                    )
+                    if scanner_inline:
+                        await self._run_scanner_inline(is_intraday=True)
+                    else:
+                        self._scanner_task = asyncio.create_task(
+                            self.run_market_scanner(is_intraday=True), name="market-scanner-intraday"
+                        )
                 else:
                     applog.info("engine", "Intraday scanner skipped: previous scanner task still running")
             if is_trading_day and self.trainer and self._last_train_date != today_date and et_mins >= 16 * 60 + 15:
@@ -1322,6 +1401,25 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
                         resolved = None
                 fill.strategy = resolved or "engine"
 
+            # Broker fill polling can lose the in-memory ``_meta`` tuple after
+            # a restart and emit an otherwise valid fill with an empty/bare
+            # reason.  The durable close order is authoritative for a known
+            # PIS execution; carry its reason into the Fill before portfolio
+            # attribution so the final runner trade is not synthesized as
+            # ``unspecified_exit``.
+            if order is not None:
+                order_reason = str(getattr(order, "reason", "") or "").strip()
+                fill_reason = str(getattr(fill, "reason", "") or "").strip()
+                if order_reason and (
+                    fill_reason.lower() in {"", "exit", "manual", "manual close", "broker fill"}
+                    or fill_reason.lower().startswith("unspecified_exit")
+                ):
+                    fill.reason = order_reason
+                if not getattr(fill, "signal_timestamp_utc", None) and getattr(order, "signal_timestamp_utc", None):
+                    fill.signal_timestamp_utc = order.signal_timestamp_utc
+                if not getattr(fill, "decision_bar_timestamp_utc", None) and getattr(order, "decision_bar_timestamp_utc", None):
+                    fill.decision_bar_timestamp_utc = order.decision_bar_timestamp_utc
+
             try:
                 trade = self.portfolio.on_fill(
                     fill, peak_price=peak, trough_price=trough, initial_stop=init_stop,
@@ -1633,10 +1731,27 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
             # Per-symbol scanner validation (tech score + walk-forward AUC) for
             # dynamically added watchlist symbols -- surfaced as the UI ML tag.
             "scanner_context": getattr(self, "scanner_context", {}),
+            "scanner": dict(getattr(self, "scanner_status", {})),
         }
 
-    async def _close_position_guarded(self, symbol: str, reason: str, qty: float | None = None) -> None:
-        """Close a position, skipping if a close order is already in-flight for this symbol."""
+    async def _close_position_guarded(
+        self,
+        symbol: str,
+        reason: str,
+        qty: float | None = None,
+        strategy: str | None = None,
+    ) -> bool:
+        """Close a position once and report whether the broker accepted the close.
+
+        ``True`` means a close order with a usable identifier was accepted by
+        the broker (it may still be waiting to fill).  ``False`` means the
+        broker returned no order or explicitly rejected it.  A broker
+        exception is re-raised after releasing the latch because that is an
+        ambiguous result.  A duplicate call is treated as ``True`` because
+        the existing in-flight close already owns the symbol's close intent;
+        this preserves the idempotent close latch without reverting PIS state
+        for a request that was never submitted.
+        """
         if not hasattr(self, "_pending_close_symbols"):
             self._pending_close_symbols = set()
         if not hasattr(self, "_pending_close_order_ids"):
@@ -1653,7 +1768,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
         # fix(#45): also guard against concurrent per-tick flatten submissions
         if symbol in self._pending_close_symbols or symbol in self._flattening_symbols:
             applog.debug("engine", f"{symbol}: skipping duplicate close — close already in-flight (#45)")
-            return
+            return True
         self._flattening_symbols.add(symbol)
         self._pending_close_symbols.add(symbol)
         try:
@@ -1661,38 +1776,65 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
             # Signature inspection (not try/except TypeError) so a TypeError
             # raised INSIDE broker logic can never silently convert a targeted
             # partial close into a full-position close.
-            accepts_qty = "qty" in inspect.signature(self.broker.close_position).parameters
-            if qty is not None and accepts_qty:
-                order = await self.broker.close_position(symbol, reason=reason, qty=qty)
-            else:
-                order = await self.broker.close_position(symbol, reason=reason)
+            close_parameters = inspect.signature(self.broker.close_position).parameters
+            close_kwargs = {"reason": reason}
+            if qty is not None and "qty" in close_parameters:
+                close_kwargs["qty"] = qty
+            if strategy and "strategy" in close_parameters:
+                close_kwargs["strategy"] = strategy
+            order = await self.broker.close_position(symbol, **close_kwargs)
             if order is None:
                 # Close failed immediately (no broker position) — release so retries work.
-                self._pending_close_symbols.discard(symbol)
-                self._get_pending_close_order_ids().pop(symbol, None)
-                self._pending_close_qtys.pop(symbol, None)
-                self._pending_close_submitted_at.pop(symbol, None)
-            else:
-                # Track the close order id; _drain_fills releases the guard when
-                # this order reaches a terminal state. A partial fill no longer
-                # latches the guard until the whole lot is gone.
-                self._get_pending_close_order_ids()[symbol] = str(order.id)
-                self._pending_close_qtys[symbol] = float(qty) if qty is not None else None
-                self._pending_close_submitted_at[symbol] = utcnow()
-                # Register the close order so fill-drain can resolve it by id.
-                # Broker-initiated closes never pass through submit(), and an
-                # unresolvable tracked id used to wedge the guard permanently.
-                self.recent_orders.appendleft(order)
-                hook = getattr(self, "_persist_submitted_close_order", None)
-                if hook is not None and asyncio.iscoroutinefunction(hook):
-                    await hook(order)
-        except Exception:
-            # Submission itself failed — nothing is in flight. Release both guards
-            # so a later tick can retry instead of wedging exits permanently.
-            self._pending_close_symbols.discard(symbol)
-            self._get_pending_close_order_ids().pop(symbol, None)
-            self._pending_close_qtys.pop(symbol, None)
-            self._pending_close_submitted_at.pop(symbol, None)
+                self._release_pending_close(symbol, "close returned no order")
+                return False
+
+            status = getattr(getattr(order, "status", None), "value", getattr(order, "status", None))
+            status_value = str(status).split(".")[-1].lower()
+            if status_value in {OrderStatus.REJECTED.value, OrderStatus.CANCELED.value}:
+                # A rejected/canceled order is not an in-flight close.
+                # Releasing now is important because PIS must be able to retry
+                # on the next bar.
+                self._release_pending_close(symbol, f"close {status_value}")
+                return False
+
+            order_id = getattr(order, "id", None)
+            if not order_id:
+                # Without an order id the fill-drain path cannot bind execution
+                # truth to this latch, so do not claim that the close succeeded.
+                self._release_pending_close(symbol, "close returned no order id")
+                return False
+
+            # Preserve the caller's execution attribution on broker-generated
+            # close orders.  PIS closes do not pass through submit(), so this is
+            # the last durable metadata boundary before the fill is observed.
+            if strategy:
+                order.strategy = strategy
+            if reason:
+                order.reason = reason
+
+            # Track the close order id; _drain_fills releases the guard when
+            # this order reaches a terminal state. A partial fill no longer
+            # latches the guard until the whole lot is gone.
+            self._get_pending_close_order_ids()[symbol] = str(order_id)
+            self._pending_close_qtys[symbol] = float(qty) if qty is not None else None
+            self._pending_close_submitted_at[symbol] = utcnow()
+            # Register the close order so fill-drain can resolve it by id.
+            # Broker-initiated closes never pass through submit(), and an
+            # unresolvable tracked id used to wedge the guard permanently.
+            self.recent_orders.appendleft(order)
+            hook = getattr(self, "_persist_submitted_close_order", None)
+            if hook is not None and asyncio.iscoroutinefunction(hook):
+                await hook(order)
+            return True
+        except Exception as exc:
+            # Submission itself failed or its result became ambiguous. Release
+            # both guards so a later tick can retry instead of wedging exits;
+            # callers receive the broker exception rather than treating the
+            # request as filled.  The PIS evaluation boundary catches this,
+            # reverts decision-time scale-out state, and returns to the tick
+            # without masking the ambiguity.
+            self._release_pending_close(symbol, f"close submission ambiguous: {exc}")
+            applog.warning("engine", f"{symbol}: close submission failed or is ambiguous: {exc}")
             raise
         finally:
             self._flattening_symbols.discard(symbol)
@@ -2149,35 +2291,164 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
     # SAFE ROLLBACK: Defaults to None (resolves to clock.now_utc()).
     # -----------------------------------------------------------------------------
     # [NEW CODE]:
+    async def _run_scanner_inline(self, *, is_intraday: bool) -> list[str]:
+        """Run a replay scanner to completion before advancing the replay clock."""
+        return await self.run_market_scanner(is_intraday=is_intraday)
+
+    def _record_scanner_forensics(
+        self,
+        *,
+        timestamp: datetime,
+        outcome: Any,
+        watchlist: list[str],
+        scan_rows: list[dict],
+    ) -> None:
+        """Persist scanner decisions into a replay ledger when one is attached."""
+        ledger = getattr(self, "runtime_ledger", None)
+        record_event = getattr(ledger, "record_event", None)
+        if ledger is None or not callable(record_event):
+            return
+
+        outcome_value = getattr(outcome, "value", str(outcome))
+        selected = {str(symbol).upper() for symbol in watchlist}
+        try:
+            record_event(
+                "SCANNER_RUN",
+                timestamp,
+                "",
+                {
+                    "outcome": outcome_value,
+                    "selected_count": len(selected),
+                    "candidate_count": len(scan_rows),
+                },
+            )
+            seen: set[str] = set()
+            for row in scan_rows:
+                if not isinstance(row, dict):
+                    continue
+                symbol = str(row.get("symbol", "")).strip().upper()
+                if not symbol:
+                    continue
+                details = dict(row)
+                details["selected"] = symbol in selected
+                details["outcome"] = outcome_value
+                record_event("SCANNER_CANDIDATE", timestamp, symbol, details)
+                seen.add(symbol)
+
+            # Defensive watchlists do not have Stage-3 rows, but they are still
+            # an explicit scanner decision and must be visible in replay evidence.
+            for symbol in sorted(selected - seen):
+                record_event(
+                    "SCANNER_CANDIDATE",
+                    timestamp,
+                    symbol,
+                    {"selected": True, "outcome": outcome_value, "defensive": True},
+                )
+        except Exception as exc:  # pragma: no cover - ledger is an observer
+            applog.warning("engine", f"Failed to record scanner forensic event: {exc}")
+
     async def run_market_scanner(self, is_intraday: bool = False, as_of: datetime | None = None) -> list[str]:
     # =============================================================================
         from app.core.scanner import MarketScanner, ScannerOutcome
-        scanner = MarketScanner(self.data, self.user_watchlist, risk_config=self.risk_config)
-        # Cache the instance so strategy evaluation can consume live mover context
-        # (gainer/loser bias) instead of reading an attribute that never existed.
-        self._scanner = scanner
+        scanner = getattr(self, "_scanner", None)
+        if scanner is None or getattr(self, "_scanner_data", None) is not self.data:
+            scanner = MarketScanner(self.data, self.user_watchlist, risk_config=self.risk_config)
+            # Cache the instance so strategy evaluation can consume live mover
+            # context and so the mover cache survives scanner refreshes.
+            self._scanner = scanner
+            self._scanner_data = self.data
+        else:
+            # Risk settings and the user watchlist can change while the engine is
+            # running; keep the cached scanner's inputs current without throwing
+            # away its bounded discovery/mover caches.
+            scanner.core_watchlist = self.user_watchlist
+            scanner.risk_config = self.risk_config
+            if hasattr(scanner, "_gap_scanner"):
+                scanner._gap_scanner.min_price = getattr(
+                    self.risk_config,
+                    "min_price",
+                    scanner._gap_scanner.min_price,
+                )
         scan_label = "Intraday refresh" if is_intraday else "Pre-market"
         applog.info("engine", f"Starting autonomous market scanner ({scan_label} scan)...")
-        # Mark scanner as run so Monitor 6 doesn't report scanner_never_run (covers manual triggers too)
         from zoneinfo import ZoneInfo
         effective_now = as_of or (self.clock.now_utc() if hasattr(self, "clock") else utcnow())
-        self._last_scan_date = effective_now.astimezone(ZoneInfo("America/New_York")).date()
-        outcome, new_watchlist = await scanner.run(as_of=effective_now)
-        if outcome == ScannerOutcome.FAILED:
-            applog.error("engine", "Market scanner failed; preserving the existing watchlist")
-            return []
+        replay_scan = (
+            as_of is not None
+            or type(self.clock).__name__ == "ReplayClock"
+            or getattr(self, "replay_fast_path", False)
+        )
+        scan_as_of = effective_now if replay_scan else None
+        self.scanner_status.update(
+            {
+                "status": "running",
+                "outcome": None,
+                "last_started_at": effective_now.isoformat(),
+                "last_error": None,
+                "is_intraday": is_intraday,
+                "as_of": scan_as_of.isoformat() if scan_as_of is not None else None,
+            }
+        )
+        try:
+            outcome, new_watchlist = await scanner.run(as_of=scan_as_of)
+        except Exception as exc:  # scanner normally fails closed, but keep the engine safe
+            outcome, new_watchlist = ScannerOutcome.FAILED, []
+            applog.error("engine", f"Market scanner raised unexpectedly: {exc}")
+
+        try:
+            scan_rows = list(scanner.get_last_scans() or [])
+        except Exception:
+            scan_rows = []
+        discovery_telemetry = getattr(scanner, "_last_discovery_telemetry", None)
+        self.scanner_status["discovery"] = (
+            dict(discovery_telemetry) if isinstance(discovery_telemetry, dict) else None
+        )
         if outcome == ScannerOutcome.SUCCESS_EMPTY:
             new_watchlist = []
+        outcome_value = getattr(outcome, "value", str(outcome))
+        self._record_scanner_forensics(
+            timestamp=effective_now,
+            outcome=outcome,
+            watchlist=list(new_watchlist or []),
+            scan_rows=scan_rows,
+        )
+        if outcome == ScannerOutcome.FAILED:
+            self._scanner_retry_after = effective_now + timedelta(minutes=5)
+            self.scanner_status.update(
+                {
+                    "status": "failed",
+                    "outcome": outcome_value,
+                    "last_completed_at": effective_now.isoformat(),
+                    "last_error": "scanner pipeline failed",
+                    "last_watchlist_count": 0,
+                }
+            )
+            applog.error("engine", "Market scanner failed; preserving the existing watchlist")
+            return []
 
         now_utc = effective_now
-        ttl_minutes = max(1, int(getattr(self.risk_config, "scanner_watchlist_ttl_minutes", 120)))
+        try:
+            ttl_minutes = max(1, int(getattr(self.risk_config, "scanner_watchlist_ttl", 15)))
+        except (TypeError, ValueError):
+            ttl_minutes = 15
         expires_at_scan = now_utc + timedelta(minutes=ttl_minutes)
+        self._last_scan_date = effective_now.astimezone(ZoneInfo("America/New_York")).date()
+        self._scanner_retry_after = None
+        self.scanner_status.update(
+            {
+                "status": "success",
+                "outcome": outcome_value,
+                "last_completed_at": effective_now.isoformat(),
+                "last_error": None,
+                "last_watchlist_count": len(new_watchlist),
+            }
+        )
 
         # Persist scanner candidate context only for symbols in current scan outcome
         if not hasattr(self, "scanner_context"):
             self.scanner_context = {}
         current_symbols = {s.upper() for s in new_watchlist}
-        for item in scanner.get_last_scans():
+        for item in scan_rows:
             sym = str(item.get("symbol", "")).upper()
             if sym and sym in current_symbols:
                 self.scanner_context[sym] = {
@@ -2587,7 +2858,10 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
             is_past_scan_time = (now_et.hour * 60 + now_et.minute) >= 9 * 60 + 15
 
             is_stale = False
-            if self._last_scan_date is None:
+            scanner_status = getattr(self, "scanner_status", {})
+            if scanner_status.get("status") == "failed" or scanner_status.get("outcome") == "FAILED":
+                is_stale = True
+            elif self._last_scan_date is None:
                 is_stale = True
             elif self._last_scan_date != today_date:
                 # In unit tests today_date might be simulated (e.g. 2026-01-06) while _last_scan_date is real-time.

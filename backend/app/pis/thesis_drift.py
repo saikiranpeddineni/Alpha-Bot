@@ -83,15 +83,18 @@ class ThesisDriftEvaluator:
 
         # Structural invalidation:
         # 1. Early thesis failure within entry window (Quadrant 2)
-        # 2. Time-Decay Loss Harvesting: prolonged bleed without recovery (>= 15 bars at <= -0.4R)
-        # 3. Severe adverse excursion approaching hard risk boundary (>= 0.90R)
-        # 4. Complete momentum stagnation (>= max_bars)
-        # 5. Composite drift score exceeding critical structural threshold (>= 0.70)
-        time_decay_bleed = (history_len >= 15 and obs.r_multiple <= -0.40)
-
+        # 2. Severe adverse excursion approaching hard risk boundary (>= 0.90R)
+        # 3. Complete momentum stagnation (>= max_bars)
+        # 4. Composite drift score exceeding critical structural threshold (>= 0.70)
+        #
+        # Do not turn a merely underwater 15-minute trade into a discretionary
+        # panic exit. The former ``history_len >= 15 and R <= -0.40`` rule was
+        # firing on ordinary live pullbacks (QQQ/SPY/CRWV on 2026-10-16) and
+        # then the lifecycle persistence gate converted it into FULL_EXIT.
+        # DOA_STAGNATION_HARVEST in ExitPlanner already handles genuinely dead
+        # money, while the broker stop remains the hard loss boundary.
         is_degraded = (
             early_invalidation
-            or time_decay_bleed
             or drift_score >= 0.70
             or stagnation_bars >= max_bars
             or adverse_r >= 0.90

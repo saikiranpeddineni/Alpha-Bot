@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { fmtDateTime } from "../format";
 import { useStore } from "../store";
 
@@ -26,9 +26,18 @@ function shortHash(value?: string) {
 }
 
 function fmtTs(value?: string) {
-  if (!value) return "—";
-  const d = new Date(value);
-  return Number.isNaN(d.getTime()) ? value : d.toLocaleString();
+  return fmtDateTime(value);
+}
+
+function etDateInput(date: Date): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
 }
 
 function eventTone(type?: string) {
@@ -44,7 +53,7 @@ export function ReplayModal({
   const storeWatchlist = useStore((s) => s.status?.watchlist);
   const activeWatchlist = storeWatchlist && storeWatchlist.length > 0 ? storeWatchlist : watchlist;
 
-  const today = new Date().toISOString().split("T")[0];
+  const today = etDateInput(new Date());
   const [startDate, setStartDate] = useState(today);
   const [endDate, setEndDate] = useState(today);
   const [selectedSymbols, setSelectedSymbols] = useState<string[]>([]);
@@ -53,9 +62,12 @@ export function ReplayModal({
   const [volumeConstrained, setVolumeConstrained] = useState(true);
   const [maxVolumePct, setMaxVolumePct] = useState("5");
   const [warmupBars, setWarmupBars] = useState("1500");
-  const [fastMode, setFastMode] = useState(true);
+  const [fastMode, setFastMode] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [activeReplayId, setActiveReplayId] = useState<string | null>(null);
+  const cancelRequestedRef = useRef(false);
   const [replayData, setReplayData] = useState<any>(null);
   const [history, setHistory] = useState<any[]>([]);
 
@@ -64,12 +76,13 @@ export function ReplayModal({
   const [query, setQuery] = useState("");
 
   const refreshHistory = () => {
+    setHistoryError(null);
     fetch("/api/replay")
       .then((res) => res.json())
       .then((data) => {
         if (Array.isArray(data)) setHistory(data);
       })
-      .catch(() => {});
+      .catch((err: unknown) => setHistoryError(err instanceof Error ? err.message : "Unable to load replay history."));
   };
 
   useEffect(() => {
@@ -85,6 +98,7 @@ export function ReplayModal({
     setError(null);
     setReplayData(null);
     setActiveTab("flow");
+    cancelRequestedRef.current = false;
     try {
       const res = await fetch("/api/replay/run", {
         method: "POST",
@@ -99,19 +113,53 @@ export function ReplayModal({
           max_volume_pct: (Number(maxVolumePct) || 5) / 100,
           warmup_bars: Number(warmupBars) || 0,
           fast_mode: fastMode,
-          async_mode: false
+          async_mode: true
         })
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         throw new Error(data?.detail || data?.message || `Replay failed: HTTP ${res.status}`);
       }
-      setReplayData(data);
+      if (data?.status !== "LAUNCHED" || !data?.replay_id) {
+        throw new Error("Replay did not start correctly.");
+      }
+      setActiveReplayId(data.replay_id);
+      for (;;) {
+        await new Promise((resolve) => window.setTimeout(resolve, 1000));
+        if (cancelRequestedRef.current) break;
+        const statusRes = await fetch(`/api/replay/${data.replay_id}/status`);
+        const replayStatus = await statusRes.json().catch(() => ({}));
+        if (!statusRes.ok) throw new Error(replayStatus?.detail || "Unable to read replay status.");
+        if (replayStatus.status === "COMPLETED") {
+          await handleLoadReplay(data.replay_id);
+          break;
+        }
+        if (replayStatus.status === "FAILED" || replayStatus.status === "CANCELLED") {
+          throw new Error(`Replay ${String(replayStatus.status).toLowerCase()}.`);
+        }
+      }
       refreshHistory();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Replay failed");
     } finally {
       setLoading(false);
+      setActiveReplayId(null);
+    }
+  }
+
+  async function handleCancelReplay() {
+    if (!activeReplayId) return;
+    try {
+      const res = await fetch(`/api/replay/${activeReplayId}/cancel`, { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.detail || "Unable to cancel replay.");
+      setError("Replay cancellation requested.");
+      cancelRequestedRef.current = true;
+      setLoading(false);
+      setActiveReplayId(null);
+      refreshHistory();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to cancel replay.");
     }
   }
 
@@ -160,6 +208,7 @@ export function ReplayModal({
   const trades: ReplayEvent[] = ledger.trades || [];
   const manifest = replayData?.manifest || {};
   const session = replayData?.session || {};
+  const summaryOnly = manifest.engine === "replay_fast" || session.engine === "replay_fast";
 
   const stageCounts = useMemo(() => {
     return timeline.reduce((acc: Record<string, number>, e) => {
@@ -182,7 +231,7 @@ export function ReplayModal({
       className="replay-backdrop"
       role="presentation"
       onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onClose();
+        if (e.target === e.currentTarget && !loading) onClose();
       }}
     >
       <section className="replay-cockpit" role="dialog" aria-modal="true" aria-label="Production Replay Command Center">
@@ -197,7 +246,7 @@ export function ReplayModal({
           </div>
           <div className="replay-head-actions">
             {session.replay_id && <span className="replay-id mono">{session.replay_id}</span>}
-            <button className="replay-close" onClick={onClose} aria-label="Close replay">
+            <button className="replay-close" onClick={onClose} disabled={loading} aria-label={loading ? "Cancel the replay before closing" : "Close replay"}>
               ×
             </button>
           </div>
@@ -207,12 +256,16 @@ export function ReplayModal({
           <aside className="replay-sidebar">
             <div className="replay-sidebar-title">Replay History</div>
             <div className="replay-sidebar-list">
-              {history.length === 0 ? <div className="replay-no-rows">No past replays.</div> : null}
+               {historyError && <div className="replay-no-rows replay-history-error">{historyError}<button className="btn sm" onClick={refreshHistory}>Retry</button></div>}
+               {!historyError && history.length === 0 ? <div className="replay-no-rows">No past replays.</div> : null}
               {history.map((h, i) => (
                 <div
                   className={`replay-history-item ${session.replay_id === h.replay_id ? "active" : ""}`}
                   key={h.replay_id || i}
                   onClick={() => handleLoadReplay(h.replay_id)}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); void handleLoadReplay(h.replay_id); } }}
                 >
                   <div className="replay-history-head">
                     <strong>
@@ -323,7 +376,7 @@ export function ReplayModal({
                   onChange={(e) => setFastMode(e.target.checked)}
                   style={{ width: "auto", cursor: "pointer" }}
                 />
-                <span>Fast</span>
+                    <span>Fast summary</span>
               </label>
               <div className="replay-run-wrap">
                 <button className="btn primary replay-run" onClick={handleRunReplay} disabled={loading}>
@@ -335,6 +388,7 @@ export function ReplayModal({
                     "▶ Run new replay"
                   )}
                 </button>
+                {loading && activeReplayId && <button className="btn danger replay-cancel" onClick={() => void handleCancelReplay}>Cancel</button>}
               </div>
             </div>
 
@@ -394,7 +448,7 @@ export function ReplayModal({
                   </div>
                   <p>
                     {fastMode
-                      ? "Day-sharded fast engine: each session runs the production tick path in parallel. No live broker orders are sent."
+                       ? "Summary mode: day-sharded production ticks without a per-event timeline. No live broker orders are sent."
                       : "Full-parity continuous replay with decision timeline. No live broker orders are sent."}
                   </p>
                 </div>
@@ -474,7 +528,9 @@ export function ReplayModal({
                   </nav>
 
                   {activeTab === "flow" && (
-                    <div className="replay-flow-grid">
+                    <div>
+                      {summaryOnly && <div className="replay-alert replay-summary-note">Fast summary mode does not persist per-event decision flow. Run with Fast summary off to inspect the full timeline.</div>}
+                      <div className="replay-flow-grid">
                       {STAGES.map(([type, name, sub], index) => (
                         <div className="replay-stage-wrap" key={type}>
                           <div className={`replay-stage ${stageCounts[type] ? "active" : "quiet"}`}>
@@ -491,11 +547,13 @@ export function ReplayModal({
                           {index < STAGES.length - 1 && <span className="replay-stage-arrow">→</span>}
                         </div>
                       ))}
+                      </div>
                     </div>
                   )}
 
                   {activeTab === "timeline" && (
                     <div className="replay-panel">
+                      {summaryOnly && <div className="replay-alert replay-summary-note">Fast summary mode does not persist timeline events.</div>}
                       <div className="replay-toolbar">
                         <select value={eventFilter} onChange={(e) => setEventFilter(e.target.value)}>
                           <option value="ALL">All events</option>

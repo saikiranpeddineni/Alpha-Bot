@@ -464,13 +464,10 @@ class AlpacaBroker(Broker):
         # legs for metadata, so price presence must not identify the parent as a
         # protective leg.  Trust explicit broker leg metadata first; otherwise
         # use a parent identifier (including the nested-ID map above) to classify
-        # real children, and treat an advanced order class without a parent as
-        # the entry container.  Standalone STOP/STOP_LIMIT orders retain their
-        # historical stop classification.
+        # real children.  A flat STOP/STOP_LIMIT remains a protective stop even
+        # when Alpaca labels it with an advanced order class.
         if broker_leg is not None:
             leg = broker_leg
-        elif is_group_parent:
-            leg = "entry"
         elif is_child_order:
             if order_type in (OrderType.STOP, OrderType.STOP_LIMIT) or (
                 stop_price is not None and limit_price is None
@@ -481,7 +478,15 @@ class AlpacaBroker(Broker):
             else:
                 leg = "entry"
         elif order_type in (OrderType.STOP, OrderType.STOP_LIMIT):
+            # Alpaca can return an OTO protective child as a flat order with
+            # ``order_class=oto`` but without parent_order_id/leg metadata.
+            # The order type is still authoritative: treating it as an OTO
+            # group parent hides the live stop from PIS floor synchronization,
+            # which then submits a duplicate stop and gets a held-quantity
+            # rejection from Alpaca.
             leg = "stop"
+        elif is_group_parent:
+            leg = "entry"
         else:
             leg = "entry"
 
@@ -885,7 +890,13 @@ class AlpacaBroker(Broker):
 
     # -----------------------------------------------------------------------------
     # [NEW CODE]:
-    async def close_position(self, symbol: str, reason: str = "manual close", qty: float | None = None) -> Order | None:
+    async def close_position(
+        self,
+        symbol: str,
+        reason: str = "manual close",
+        qty: float | None = None,
+        strategy: str | None = None,
+    ) -> Order | None:
         if not reason or not reason.strip() or reason.strip().lower() in ("exit", "manual"):
             reason = "manual close"
         try:
@@ -962,7 +973,13 @@ class AlpacaBroker(Broker):
                 )
             else:
                 raw = await _call(self._client.close_position, symbol.upper(), label=f"close_position/{symbol}")
-            self._meta[str(raw.id)] = ("engine", reason)
+            # Broker-generated closes bypass submit(), so use the symbol's
+            # owning entry strategy when the close fill is later polled.  The
+            # engine persists the PIS exit reason separately; keeping the
+            # strategy here prevents a restart/fill poll from downgrading the
+            # execution to the generic broker label.
+            close_strategy = strategy or self._symbol_strategies.get(symbol.upper(), "engine")
+            self._meta[str(raw.id)] = (close_strategy, reason)
             applog.trade("broker.alpaca", f"Closing {symbol} ({reason}{f', qty={qty}' if qty else ''})")
             return self._to_order(raw)
         except BrokerTimeoutError:

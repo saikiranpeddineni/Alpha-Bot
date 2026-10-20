@@ -8,6 +8,10 @@ Usage (from repo root):
     .venv\\Scripts\\python backend\\scripts\\run_exact_backtest.py \
         --start 2026-08-10 --end 2026-08-21 \
         --symbols SPY,QQQ,AAPL,NVDA [--warmup 600]
+
+An alternate replay JSONL input can be supplied with ``--data-path``. This is
+useful for validating a locally exported date range without modifying the
+canonical replay cache.
 """
 import argparse
 import asyncio
@@ -37,6 +41,9 @@ async def amain() -> None:
     ap.add_argument("--end", required=True)
     ap.add_argument("--symbols", default="")
     ap.add_argument("--warmup", type=int, default=600)
+    ap.add_argument("--data-path", default="", help="optional replay JSONL input path")
+    ap.add_argument("--max-workers", type=int, default=None, help="optional replay shard worker limit")
+    ap.add_argument("--slippage-bps", type=float, default=0.0)
     ap.add_argument("--out", default="", help="optional path to write the full trades JSON")
     args = ap.parse_args()
 
@@ -44,13 +51,16 @@ async def amain() -> None:
     db = Database(settings.resolved_db_path)
     symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()] or None
 
-    rt = ReplayRuntime(settings, db)
+    data_path = Path(args.data_path) if args.data_path else None
+    rt = ReplayRuntime(settings, db, data_path=data_path)
     t0 = time.perf_counter()
     result = await rt.run_replay_fast_async(
         start_date=args.start,
         end_date=args.end,
         symbols=symbols,
         warmup_bars=args.warmup,
+        max_workers=args.max_workers,
+        slippage_bps=args.slippage_bps,
     )
     elapsed = time.perf_counter() - t0
 

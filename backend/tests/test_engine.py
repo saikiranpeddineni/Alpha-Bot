@@ -68,6 +68,30 @@ async def test_engine_ticks_and_streams(engine: TradingEngine):
     assert engine.state == EngineState.STOPPED
 
 
+@pytest.mark.asyncio
+async def test_stale_position_guard_waits_for_broker_flatness(engine: TradingEngine, monkeypatch):
+    """Do not run PIS on a stale position while close fills are settling."""
+    engine._flatten_at_open = True
+    monkeypatch.setattr(engine.clock, "is_open", lambda _dt=None: True)
+    engine.flatten = AsyncMock()
+    engine.broker = SimpleNamespace(
+        name="test-broker",
+        positions=AsyncMock(side_effect=[[object()], []]),
+        open_orders=AsyncMock(side_effect=[[object()], []]),
+    )
+
+    first = await engine._flatten_stale_positions_at_open()
+
+    assert first is False
+    assert engine._flatten_at_open is True
+
+    second = await engine._flatten_stale_positions_at_open()
+
+    assert second is True
+    assert engine._flatten_at_open is False
+    assert engine.flatten.await_count == 2
+
+
 async def _run_safety_candidate_tick(
     engine: TradingEngine,
     signal: Signal,

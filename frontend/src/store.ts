@@ -62,6 +62,7 @@ interface AppState {
   setPositions(p: PositionRow[]): void;
   setOrders(o: OrderRow[]): void;
   setExecutionSnapshot(p: PositionRow[], o: OrderRow[], t: TradeRow[]): void;
+  clearBacktestProgress(): void;
   setHeartbeatStyle(style: HeartbeatStyle): void;
   showToast(kind: "info" | "error", text: string): void;
   clearToast(): void;
@@ -161,6 +162,7 @@ export const useStore = create<AppState>((set, get) => ({
     orders: mergeOrders(orders, get().orders),
     trades: trades.slice(0, MAX_TRADES),
   }),
+  clearBacktestProgress: () => set({ backtestProgress: null }),
   setHeartbeatStyle: (style) => {
     localStorage.setItem("alphadesk_heartbeat_style", style);
     set({ heartbeatStyle: style });

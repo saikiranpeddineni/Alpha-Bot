@@ -466,6 +466,7 @@ class WalkForwardValidator:
                 summary={},
                 windows_evaluated=0,
                 side=side,
+                fallback_used=True,
             )
 
         X_all = pd.concat(xs).sort_index()
@@ -509,6 +510,7 @@ class WalkForwardValidator:
                 summary={},
                 windows_evaluated=0,
                 side=side,
+                fallback_used=True,
             )
 
         # Accumulate per-model metrics across windows.
@@ -538,6 +540,14 @@ class WalkForwardValidator:
                         clf.fit(X_tr, y_tr, sample_weight=w_tr)
                 proba = clf.predict_proba(X_va)[:, 1]
                 m = _trading_metrics(y_va.to_numpy(), proba)
+                m.update(
+                    {
+                        "train_start": str(X_tr.index.min()),
+                        "train_end": str(X_tr.index.max()),
+                        "validation_start": str(X_va.index.min()),
+                        "validation_end": str(X_va.index.max()),
+                    }
+                )
                 return wi, name, m
             except Exception as exc:  # noqa: BLE001
                 applog.debug("wfv", f"{name} window failed: {exc}")
@@ -628,6 +638,7 @@ class WalkForwardValidator:
             summary=summary,
             windows_evaluated=n_windows,
             side=side,
+            window_metrics=model_window_metrics,
         )
 
 
@@ -638,6 +649,13 @@ class WalkForwardResult:
     summary: dict             # per-model aggregated trading metrics
     windows_evaluated: int
     side: str                 # "long" | "short"
+    # Raw per-window metrics are retained for uncertainty analysis. The
+    # production model-selection behavior still uses ``summary`` above.
+    window_metrics: dict[str, list[dict]] = field(default_factory=dict)
+    # True means the result was produced without the requested number of
+    # genuine temporal validation windows. Callers that require strict OOS
+    # evidence must reject these results rather than treating them as WFV.
+    fallback_used: bool = False
 
 
 # ---------------------------------------------------------------------------

@@ -154,6 +154,7 @@ class DiscoveryCoordinator:
         max_snapshot_age: timedelta = timedelta(minutes=5),
         future_tolerance: timedelta = timedelta(0),
         shortlist_limit: int = 50,
+        result_cache_ttl: timedelta = timedelta(minutes=15),
         max_retries: int = 2,
         retry_base_delay: float = 0.25,
         retry_max_delay: float = 5.0,
@@ -172,6 +173,8 @@ class DiscoveryCoordinator:
             raise ValueError("max_snapshot_age must be non-negative")
         if future_tolerance < timedelta(0):
             raise ValueError("future_tolerance must be non-negative")
+        if result_cache_ttl < timedelta(0):
+            raise ValueError("result_cache_ttl must be non-negative")
         if shortlist_limit < 1:
             raise ValueError("shortlist_limit must be positive")
         if max_retries < 0:
@@ -188,6 +191,7 @@ class DiscoveryCoordinator:
         self.max_snapshot_age = max_snapshot_age
         self.future_tolerance = future_tolerance
         self.shortlist_limit = shortlist_limit
+        self.result_cache_ttl = result_cache_ttl
         self.max_retries = max_retries
         self.retry_base_delay = retry_base_delay
         self.retry_max_delay = retry_max_delay
@@ -198,6 +202,7 @@ class DiscoveryCoordinator:
         self._asset_cache: tuple[str, ...] | None = None
         self._asset_cache_at: datetime | None = None
         self._cached_result: DiscoveryResult | None = None
+        self._cached_result_at: datetime | None = None
 
     async def _symbols(self) -> tuple[tuple[str, ...], bool]:
         now = self._clock()
@@ -261,7 +266,12 @@ class DiscoveryCoordinator:
 
     async def acquire(self) -> DiscoveryResult:
         symbols, cache_hit = await self._symbols()
-        if cache_hit and self._cached_result is not None:
+        now = self._clock()
+        result_cache_fresh = (
+            self._cached_result_at is not None
+            and now - self._cached_result_at <= self.result_cache_ttl
+        )
+        if cache_hit and self._cached_result is not None and result_cache_fresh:
             tel = self._cached_result.telemetry
             new_tel = DiscoveryTelemetry(
                 provider=tel.provider,
@@ -287,7 +297,7 @@ class DiscoveryCoordinator:
                 shortlist=self._cached_result.shortlist,
                 telemetry=new_tel,
             )
-        as_of = self._clock()
+        as_of = now
         # Shuffle symbols deterministically by day to cover the entire A-Z spectrum
         shuffled = list(symbols)
         import random
@@ -366,4 +376,5 @@ class DiscoveryCoordinator:
         )
         res = DiscoveryResult(quotes=quotes, shortlist=shortlist, telemetry=telemetry)
         self._cached_result = res
+        self._cached_result_at = as_of
         return res

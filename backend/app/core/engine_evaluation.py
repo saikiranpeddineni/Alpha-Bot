@@ -295,29 +295,92 @@ class TradingEngineEvaluationMixin:
             # =============================================================================
 
             if pis_order is not None:
+                close_accepted = False
                 try:
                     applog.info("engine", f"{symbol}: PIS Unified Exit triggered: {pis_order.reason} (qty={pis_order.qty})")
-                    await self._close_position_guarded(symbol, reason=pis_order.reason, qty=pis_order.qty)
-                    # Keep peak/trough/stop/TP memory alive until the closing
-                    # fill is drained: _drain_fills reads them to stamp true
-                    # mfe/mae onto the trade record and cleans the maps up
-                    # afterwards. Deleting here (before the fill existed) made
-                    # every PIS-exited trade report mfe == mae == final move.
-                    return []
+                    close_accepted = await self._close_position_guarded(
+                        symbol,
+                        reason=pis_order.reason,
+                        qty=pis_order.qty,
+                        strategy=getattr(pis_order, "strategy", None),
+                    )
                 except Exception as e:
-                    # ==================================================================================================
-                    # WARNING TO FUTURE AI AGENTS:
-                    # Do NOT wrap the above `_close_position_guarded` routing call inside the PIS evaluation try-block.
-                    # Routing failures (like Alpaca 502s) must NOT be masked as PIS AI evaluation crashes.
-                    # ==================================================================================================
+                    # Keep broker-routing failures distinct from PIS evaluation
+                    # failures.  The guard has already released its latch;
+                    # this boundary only converts the ambiguous result into a
+                    # PIS rollback before the next evaluation can retry.
                     applog.error("engine.exit", f"Execution failed for PIS exit on {symbol}: {e}")
-                    # The scale-out never executed. Revert the brain's decision-time
-                    # flags so it cannot phantom-trade as a runner with ratcheted
-                    # floors built on a partial exit that did not happen.
+                    close_accepted = False
+
+                if not close_accepted:
+                    # A rejected, missing, or ambiguous broker result is not a
+                    # fill.  In particular, PARTIAL_EXIT mutates PIS state at
+                    # decision time, so leave the brain in its pre-scale-out
+                    # posture until broker execution is actually accepted.
                     try:
                         self.pis_adapter.revert_scale_out(symbol)
                     except Exception:
                         pass
+                    applog.warning("engine.exit", f"{symbol}: PIS close was not accepted; scale-out state reverted")
+                    # Keep the existing close-latch safety contract: do not
+                    # continue into entry evaluation after an exit decision.
+                    return []
+
+                # Alpaca partial closes cancel the live bracket/OTO legs to
+                # release held quantity.  Re-establish a broker stop for only
+                # the residual runner before returning from this evaluation;
+                # otherwise the runner is naked during the next tick.
+                position_qty = abs(float(position.qty))
+                close_qty = abs(float(pis_order.qty))
+                residual_qty = max(0.0, position_qty - close_qty)
+                if residual_qty > 1e-9:
+                    runner_floor = getattr(pis_decision, "target_stop_loss", None)
+                    if runner_floor is None and _lot is not None:
+                        runner_floor = getattr(_lot, "stop_loss", None)
+                    if runner_floor is not None:
+                        runner_floor = float(runner_floor)
+                        # Protection floors remain monotonic even when a stale
+                        # PIS decision carries a weaker candidate than local
+                        # broker-confirmed state.
+                        local_floor = (
+                            getattr(_lot, "stop_loss", None)
+                            if _lot is not None
+                            else None
+                        )
+                        if local_floor is not None:
+                            runner_floor = (
+                                max(runner_floor, float(local_floor))
+                                if position.qty > 0
+                                else min(runner_floor, float(local_floor))
+                            )
+                        try:
+                            protected = await self._sync_broker_protective_stop(
+                                symbol,
+                                runner_floor,
+                                qty=residual_qty,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            protected = False
+                            applog.warning("engine.exit", f"{symbol}: residual runner stop repair failed: {exc}")
+                        if protected and _lot is not None:
+                            _lot.stop_loss = runner_floor
+                        elif not protected:
+                            applog.warning(
+                                "engine.exit",
+                                f"{symbol}: residual runner close accepted but broker protection was not verified",
+                            )
+                    else:
+                        applog.warning(
+                            "engine.exit",
+                            f"{symbol}: partial PIS close accepted with no protective floor available for residual qty={residual_qty:g}",
+                        )
+
+                # Keep peak/trough/stop/TP memory alive until the closing
+                # fill is drained: _drain_fills reads them to stamp true
+                # mfe/mae onto the trade record and cleans the maps up
+                # afterwards. Deleting here (before the fill existed) made
+                # every PIS-exited trade report mfe == mae == final move.
+                return []
             # Synchronize ratcheted protective stop floor to broker truth first,
             # then update the local lot.  Updating only _lot.stop_loss made the
             # PIS floor look protected locally while Alpaca's original OTO stop
@@ -625,7 +688,12 @@ class TradingEngineEvaluationMixin:
         # =============================================================================
         return candidate_entries
 
-    async def _sync_broker_protective_stop(self, symbol: str, stop_price: float) -> bool:
+    async def _sync_broker_protective_stop(
+        self,
+        symbol: str,
+        stop_price: float,
+        qty: float | None = None,
+    ) -> bool:
         """Synchronize a monotonic PIS stop floor with broker-side protection.
 
         PaperBroker stores the protective stop on the in-memory position and has
@@ -694,14 +762,18 @@ class TradingEngineEvaluationMixin:
                 if not hasattr(self, "_stop_leg_submit_ts") or not isinstance(self._stop_leg_submit_ts, dict):
                     self._stop_leg_submit_ts = {}
                 self._stop_leg_submit_ts[symbol.upper()] = now_ts
-                qty = abs(float(pos.qty))
+                broker_qty = abs(float(pos.qty))
+                requested_qty = broker_qty if qty is None else abs(float(qty))
+                repair_qty = min(broker_qty, requested_qty)
+                if repair_qty <= 1e-9:
+                    return False
                 side = OrderSide.SELL if float(pos.qty) > 0 else OrderSide.BUY
                 try:
                     repair = await broker.submit(
                         OrderRequest(
                             symbol=symbol.upper(),
                             side=side,
-                            qty=qty,
+                            qty=repair_qty,
                             order_type=OrderType.STOP,
                             stop_price=float(stop_price),
                             strategy="pis_protection",

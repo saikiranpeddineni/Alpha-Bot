@@ -22,6 +22,7 @@ class ReplayRunRequest(BaseModel):
     volume_constrained: bool = Field(default=False)
     max_volume_pct: float = Field(default=0.05, ge=0.001, le=1.0)
     warmup_bars: int = Field(default=800, ge=0, le=5000)
+    use_dynamic_scanner: bool = False
     async_mode: bool = False
     # Fast day-sharded engine (fresh-daily-state semantics, no ledger timeline).
     # Default False keeps full-parity continuous replay as the cockpit default.
@@ -38,17 +39,20 @@ def _persist_result(replay_id: str, result: dict[str, Any]) -> None:
 
 def _persist_fast_result(replay_id: str, result: dict[str, Any]) -> None:
     session_mgr.save_artifact(replay_id, "manifest", result.get("manifest", {}))
-    # Ledger-compatible shape so the UI keeps working: the fast engine records
-    # no per-tick event timeline, but trades/equity are real shard outputs.
+    # Ledger-compatible shape so the UI keeps working. Fast replay omits
+    # per-tick ops telemetry but retains scanner decisions for parity audits.
+    scanner = result.get("scanner", {})
     ledger = {
-        "events": [],
-        "timeline": [],
+        "events": scanner.get("timeline", []),
+        "timeline": scanner.get("timeline", []),
+        "candidates": scanner.get("candidates", []),
+        "stage_hashes": scanner.get("stage_hashes", {}),
         "trades": result.get("trades", []),
         "equity_curve": result.get("equity_curve", []),
         "engine": "replay_fast",
     }
     session_mgr.save_artifact(replay_id, "ledger", ledger)
-    session_mgr.save_artifact(replay_id, "timeline", [])
+    session_mgr.save_artifact(replay_id, "timeline", scanner.get("timeline", []))
 
 
 def _run_replay_sync(request: Request, replay_id: str, req: ReplayRunRequest) -> dict[str, Any]:
@@ -59,7 +63,7 @@ def _run_replay_sync(request: Request, replay_id: str, req: ReplayRunRequest) ->
         result = asyncio.run(runtime.run_replay_fast_async(
             req.start_date, req.end_date, req.symbols, req.fill_model, req.slippage_bps,
             volume_constrained=req.volume_constrained, max_volume_pct=req.max_volume_pct,
-            warmup_bars=req.warmup_bars,
+            warmup_bars=req.warmup_bars, use_dynamic_scanner=req.use_dynamic_scanner,
         ))
         _persist_fast_result(replay_id, result)
     else:

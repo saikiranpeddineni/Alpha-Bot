@@ -13,8 +13,10 @@ Guarantees:
 
 from __future__ import annotations
 
+import math
 import threading
 from collections import deque
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
 
@@ -28,7 +30,7 @@ from app.pis.models import (
     SnapshotHistory,
     TradeHealth,
 )
-from app.pis.profit_memory import ProfitMemoryTracker
+from app.pis.profit_memory import ProfitMemoryState, ProfitMemoryTracker
 from app.pis.state_machine import PositionLifecycleStateMachine
 
 
@@ -54,13 +56,15 @@ class PositionBrain:
             symbol: Standardized symbol string.
             initial_observation: PositionObservation snapshot.
             config: Optional PISConfig instance.
-            restored_memory: Optional restored ProfitMemoryState.
+            restored_memory: Optional ProfitMemoryState or serialized PIS state mapping.
         """
         self._lock = threading.RLock()
         self.config = config or PISConfig()
         self.config.validate()
 
         with self._lock:
+            restored_state = self._restored_state_mapping(restored_memory)
+
             # Validate symbol and initial observation
             self.symbol = symbol.upper()
             PositionObservation.validate(initial_observation)
@@ -70,33 +74,230 @@ class PositionBrain:
                 )
 
             self.authority = PISAuthority(self.config)
-            self.state_machine = PositionLifecycleStateMachine(LifecycleState.NEW)
+            self.state_machine = PositionLifecycleStateMachine(
+                self._restored_lifecycle(restored_state)
+            )
 
             # Bounded memory history (Priority 2)
             self._history: deque[PositionObservation] = deque(maxlen=self.config.history_max_len)
             self._history.append(initial_observation)
 
             # Profit memory state (Priority 2, Priority 7)
-            if restored_memory is not None:
-                self._profit_memory = restored_memory
-                # We need to make sure the state is updated with the initial observation to keep it fresh
+            restored_profit_memory = self._restored_profit_memory(restored_memory, restored_state, initial_observation)
+            if restored_profit_memory is not None:
+                self._profit_memory = restored_profit_memory
+                # Update restored memory with the current completed observation so
+                # recovery never loses a favorable/adverse print on the restart bar.
                 self._profit_memory = ProfitMemoryTracker.update(self._profit_memory, initial_observation)
             else:
                 self._profit_memory = ProfitMemoryTracker.initial_state(initial_observation)
 
             self._last_observation: PositionObservation = initial_observation
             self._last_timestamp: datetime = initial_observation.timestamp
-            self._current_stop_floor: float = initial_observation.initial_stop
+            self._current_stop_floor: float = self._restored_stop_floor(
+                restored_state, initial_observation
+            )
             self._last_decision: PISDecision | None = None
             self._is_closed: bool = False
-            self._stagnation_counter: int = 0
-            self._degradation_counter: int = 0
-            self._runner_qualified: bool = False
-            self._has_scaled_out: bool = False
-            self._smoothed_health_score: float | None = None
+            self._stagnation_counter: int = self._restored_counter(restored_state, "stagnation_counter")
+            self._degradation_counter: int = self._restored_counter(restored_state, "degradation_counter")
+            self._has_scaled_out: bool = self._restored_bool(restored_state, "has_scaled_out")
+            # A completed scale-out is itself durable evidence that the runner
+            # was qualified, even for a legacy payload that omitted the second
+            # flag.  Explicit runner qualification remains independently restorable.
+            self._runner_qualified: bool = (
+                self._restored_bool(restored_state, "runner_qualified") or self._has_scaled_out
+            )
+            self._smoothed_health_score: float | None = self._restored_health_score(restored_state)
 
             # Initial evaluation
             self._evaluate_internal(initial_observation)
+
+    @staticmethod
+    def _restored_state_mapping(restored_memory: Any | None) -> Mapping[str, Any]:
+        """Return a safe mapping view for legacy or full persisted state.
+
+        Older adapter payloads contain only profit-memory keys.  Newer payloads
+        reuse that same JSON object and add the rest of the brain state, so both
+        forms intentionally enter the same restore path.
+        """
+        if isinstance(restored_memory, Mapping):
+            nested_state = restored_memory.get("pis_state")
+            if isinstance(nested_state, Mapping):
+                return nested_state
+            return restored_memory
+        return {}
+
+    @staticmethod
+    def _finite_float(value: Any, default: float | None = None) -> float | None:
+        """Coerce a persisted numeric value without accepting NaN or infinity."""
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return default
+        return number if math.isfinite(number) else default
+
+    @classmethod
+    def _restored_profit_memory(
+        cls,
+        restored_memory: Any | None,
+        state: Mapping[str, Any],
+        obs: PositionObservation,
+    ) -> ProfitMemoryState | None:
+        """Build a validated ProfitMemoryState from either supported payload form."""
+        if isinstance(restored_memory, ProfitMemoryState):
+            peak_r = cls._finite_float(restored_memory.peak_r)
+            trough_r = cls._finite_float(restored_memory.trough_r)
+            mfe_price = cls._finite_float(restored_memory.mfe_price)
+            mae_price = cls._finite_float(restored_memory.mae_price)
+        else:
+            memory_payload = state.get("profit_memory", state)
+            if isinstance(memory_payload, ProfitMemoryState):
+                peak_r = cls._finite_float(memory_payload.peak_r)
+                trough_r = cls._finite_float(memory_payload.trough_r)
+                mfe_price = cls._finite_float(memory_payload.mfe_price)
+                mae_price = cls._finite_float(memory_payload.mae_price)
+            elif isinstance(memory_payload, Mapping):
+                peak_r = cls._finite_float(memory_payload.get("peak_r"))
+                trough_r = cls._finite_float(memory_payload.get("trough_r"))
+                mfe_price = cls._finite_float(memory_payload.get("mfe_price"))
+                mae_price = cls._finite_float(memory_payload.get("mae_price"))
+            else:
+                return None
+
+        if peak_r is None or trough_r is None:
+            return None
+        if mfe_price is None or mfe_price <= 0.0:
+            mfe_price = obs.current_price
+        if mae_price is None or mae_price <= 0.0:
+            mae_price = obs.current_price
+        if trough_r > peak_r:
+            return None
+
+        return ProfitMemoryState(
+            peak_r=peak_r,
+            trough_r=trough_r,
+            mfe_price=mfe_price,
+            mae_price=mae_price,
+        )
+
+    @classmethod
+    def _restored_lifecycle(cls, state: Mapping[str, Any]) -> LifecycleState:
+        """Restore an active lifecycle state, failing closed for invalid values."""
+        raw_state = state.get("lifecycle")
+        try:
+            lifecycle = raw_state if isinstance(raw_state, LifecycleState) else LifecycleState(raw_state)
+        except (TypeError, ValueError):
+            return LifecycleState.NEW
+        # A closed brain must never be reanimated from an active-position payload.
+        return LifecycleState.NEW if lifecycle == LifecycleState.CLOSED else lifecycle
+
+    @classmethod
+    def _restored_stop_floor(
+        cls,
+        state: Mapping[str, Any],
+        obs: PositionObservation,
+    ) -> float:
+        """Restore a directional, finite floor without weakening the initial stop."""
+        baseline = obs.initial_stop
+        broker_floor = cls._finite_float(obs.current_stop)
+        if broker_floor is not None and broker_floor > 0.0:
+            if obs.side > 0:
+                baseline = max(baseline, broker_floor)
+            else:
+                baseline = min(baseline, broker_floor)
+
+        floor = cls._finite_float(state.get("current_stop_floor"))
+        if floor is None or floor <= 0.0:
+            return baseline
+        if obs.side > 0 and floor < baseline:
+            return baseline
+        if obs.side < 0 and floor > baseline:
+            return baseline
+        return floor
+
+    @staticmethod
+    def _restored_bool(state: Mapping[str, Any], key: str) -> bool:
+        """Restore JSON booleans without treating arbitrary strings as truthy."""
+        value = state.get(key)
+        return value if isinstance(value, bool) else False
+
+    @classmethod
+    def _restored_counter(cls, state: Mapping[str, Any], key: str) -> int:
+        """Restore a non-negative bounded counter from JSON state."""
+        value = cls._finite_float(state.get(key))
+        if value is None or value < 0.0:
+            return 0
+        return int(value)
+
+    @classmethod
+    def _restored_health_score(cls, state: Mapping[str, Any]) -> float | None:
+        """Restore the health EMA only when it is a valid probability."""
+        value = cls._finite_float(state.get("smoothed_health_score"))
+        if value is None or not 0.0 <= value <= 1.0:
+            return None
+        return value
+
+    @staticmethod
+    def _completed_close_r(obs: PositionObservation) -> float:
+        """Return R based on the completed bar close, never the live quote."""
+        risk = obs.risk_per_share
+        if risk <= 1e-8 or not math.isfinite(risk):
+            return 0.0
+        value = (obs.close - obs.entry_price) / risk * obs.side
+        return value if math.isfinite(value) else 0.0
+
+    def _causal_peak_capture_signal(
+        self,
+        obs: PositionObservation,
+        peak_r: float,
+    ) -> tuple[bool, float]:
+        """Detect a confirmed high-water reversal from observed bars only.
+
+        The latest completed bars must close monotonically against the position
+        direction, and the latest completed close must have surrendered both the
+        configured minimum R and percentage of the remembered high-water peak.
+        No future bar, session summary, or end-of-day value participates.
+        """
+        if not getattr(self.config, "enable_causal_peak_capture", True):
+            return False, 0.0
+
+        confirmation_bars = max(
+            1,
+            int(getattr(self.config, "causal_peak_capture_confirmation_bars", 2)),
+        )
+        if len(self._history) < confirmation_bars + 1:
+            return False, 0.0
+
+        min_peak_r = getattr(self.config, "causal_peak_capture_min_peak_r", 1.00)
+        if not math.isfinite(peak_r) or peak_r < min_peak_r:
+            return False, 0.0
+
+        history = tuple(self._history)
+        recent = history[-confirmation_bars:]
+        previous_close = history[-confirmation_bars - 1].close
+        for bar in recent:
+            if bar.side != obs.side:
+                return False, 0.0
+            # Strict adverse close-to-close confirmation prevents a single wick
+            # or unchanged print from becoming a reversal signal.
+            if obs.side > 0:
+                if bar.close >= previous_close:
+                    return False, 0.0
+            elif bar.close <= previous_close:
+                return False, 0.0
+            previous_close = bar.close
+
+        latest_close_r = self._completed_close_r(obs)
+        giveback_r = max(0.0, peak_r - latest_close_r)
+        giveback_threshold = max(
+            getattr(self.config, "causal_peak_capture_min_giveback_r", 0.50),
+            peak_r * getattr(self.config, "causal_peak_capture_giveback_pct", 0.25),
+        )
+        if giveback_r < giveback_threshold:
+            return False, giveback_r
+
+        return True, giveback_r
 
     @property
     def is_closed(self) -> bool:
@@ -262,6 +463,13 @@ class PositionBrain:
         # 5. State transition rules with persistence confirmation (Priority 3)
         self._update_lifecycle(health, thesis, peak_r)
 
+        # Causal peak capture is evaluated before protection and exit synthesis,
+        # using only the completed observations already present in history.
+        causal_reversal_confirmed, causal_giveback_r = self._causal_peak_capture_signal(
+            obs,
+            peak_r,
+        )
+
         # 6. Protection floor calculation with dynamic ceiling proximity (Priority 4)
         target_stop = self.authority.protection_planner.compute_protection_floor(
             obs=obs,
@@ -271,6 +479,7 @@ class PositionBrain:
             allow_relaxation=False,
             has_scaled_out=self._has_scaled_out,
             predicted_max_r=predicted_max_r,
+            causal_reversal_confirmed=causal_reversal_confirmed,
         )
         self._current_stop_floor = target_stop
 
@@ -289,6 +498,8 @@ class PositionBrain:
             has_scaled_out=self._has_scaled_out,
             predicted_max_r=predicted_max_r,
             runner_probability=runner_prob,
+            causal_reversal_confirmed=causal_reversal_confirmed,
+            causal_giveback_r=causal_giveback_r,
         )
 
         if decision.action == ExitAction.PARTIAL_EXIT:
@@ -303,6 +514,7 @@ class PositionBrain:
                 allow_relaxation=False,
                 has_scaled_out=True,
                 predicted_max_r=predicted_max_r,
+                causal_reversal_confirmed=causal_reversal_confirmed,
             )
             self._current_stop_floor = target_stop
 
@@ -328,7 +540,10 @@ class PositionBrain:
             timestamp=decision.timestamp,
             symbol=decision.symbol,
             action=decision.action,
-            target_stop_loss=decision.target_stop_loss,
+            # PARTIAL_EXIT switches the protection planner into runner mode
+            # above.  Expose that recomputed floor in the immutable decision so
+            # callers cannot submit/use a stale pre-runner stop.
+            target_stop_loss=target_stop,
             exit_ratio=decision.exit_ratio,
             reason_codes=decision.reason_codes,
             health=decision.health,
@@ -447,10 +662,17 @@ class PositionBrain:
                 "lifecycle": self.lifecycle.value,
                 "peak_r": self.peak_r,
                 "trough_r": self.trough_r,
+                "mfe_price": self._profit_memory.mfe_price,
+                "mae_price": self._profit_memory.mae_price,
                 "current_stop_floor": self._current_stop_floor,
+                "has_scaled_out": self._has_scaled_out,
                 "runner_qualified": self._runner_qualified,
                 "stagnation_counter": self._stagnation_counter,
                 "degradation_counter": self._degradation_counter,
+                "smoothed_health_score": self._smoothed_health_score,
                 "is_closed": self._is_closed,
+                "entry_price": self._last_observation.entry_price,
+                "side": self._last_observation.side,
+                "initial_stop": self._last_observation.initial_stop,
                 "last_timestamp": self._last_timestamp.isoformat(),
             }

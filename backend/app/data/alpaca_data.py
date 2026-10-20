@@ -366,6 +366,27 @@ class AlpacaDataProvider(DataProvider):
         return score
     # =============================================================================
 
+    async def get_snapshots(self, symbols: list[str]) -> dict:
+        """Return raw Alpaca snapshots for pre-market gap analysis.
+
+        ``PreMarketGapScanner`` needs the daily/open/previous-day fields that
+        are not represented by the normalized ``Quote`` contract. Keep this
+        provider-specific escape hatch here rather than making the scanner
+        reach into the SDK client or silently fall back to stale daily bars.
+        """
+        if not symbols:
+            return {}
+
+        def fetch() -> dict:
+            from alpaca.data.requests import StockSnapshotRequest
+
+            snapshots = self._client.get_stock_snapshot(
+                StockSnapshotRequest(symbol_or_symbols=[s.upper() for s in symbols])
+            )
+            return dict(snapshots or {})
+
+        return await asyncio.to_thread(fetch)
+
     async def discover_assets(self) -> tuple[DiscoverableAsset, ...]:
         """Fetch Alpaca's active US-equity asset metadata for bounded discovery.
 
@@ -390,13 +411,26 @@ class AlpacaDataProvider(DataProvider):
                     except Exception as e:
                         applog.warning("data.alpaca", f"Screener get_most_actives failed: {e}")
 
-                    # 2. Fetch top 50 market movers (gainers)
+                    # 2. Fetch top 50 market movers in both directions. The
+                    # scanner needs losers as well as gainers for short-side
+                    # discovery; omitting them made discovery directionally
+                    # biased even though the API returned both lists.
                     try:
                         movers = screener.get_market_movers(
                             MarketMoversRequest(top=50, market_type=MarketType.STOCKS)
                         )
-                        if hasattr(movers, "gainers") and movers.gainers:
-                            for item in movers.gainers:
+                        if isinstance(movers, dict):
+                            mover_groups = (
+                                movers.get("gainers", []),
+                                movers.get("losers", []),
+                            )
+                        else:
+                            mover_groups = (
+                                getattr(movers, "gainers", []) or [],
+                                getattr(movers, "losers", []) or [],
+                            )
+                        for group in mover_groups:
+                            for item in group:
                                 if getattr(item, "symbol", None):
                                     symbols.add(item.symbol.upper())
                     except Exception as e:

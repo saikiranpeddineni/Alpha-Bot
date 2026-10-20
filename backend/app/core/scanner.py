@@ -20,6 +20,7 @@ Safety gates:
 from __future__ import annotations
 
 import asyncio
+from dataclasses import asdict, is_dataclass
 from datetime import UTC, datetime, timedelta
 from enum import Enum
 
@@ -30,6 +31,7 @@ from app.ai.features import FEATURE_COLUMNS, build_training_set
 from app.core.applog import applog
 from app.core.gap_scanner import PreMarketGapScanner
 from app.core.scanner_discovery_input import resolve_stage1_symbols
+from app.core.scanner_selection import select_sector_diverse_momentum
 from app.core.universe_discovery import DiscoveryCoordinator
 from app.data.manager import DataManager
 from app.risk.market_regime import (
@@ -135,6 +137,7 @@ class MarketScanner:
         # Parallel backtests or tests with multiple scanner instances would silently
         # overwrite each other's scan state. Instance attribute provides isolation.
         self._last_scans: list[dict] = []
+        self._last_discovery_telemetry: dict | None = None
         self._regime = MarketRiskAggregator(
             data_manager=data_manager,
             universe_symbols=list(CANDIDATE_POOL),
@@ -145,6 +148,7 @@ class MarketScanner:
 
     async def _stage1_symbols(self, as_of: datetime | None = None) -> list[str]:
         """Resolve bounded Stage-1 input without current-data replay leakage."""
+        self._last_discovery_telemetry = None
         provider = self.data.provider
         discovery_supported = bool(getattr(provider, "supports_asset_discovery", False))
         acquire_discovery = None
@@ -156,15 +160,38 @@ class MarketScanner:
                 discovery = DiscoveryCoordinator(
                     provider, feed="iex", asset_cache_ttl=timedelta(hours=6),
                     batch_size=200, request_budget=10, shortlist_limit=50,
+                    result_cache_ttl=timedelta(minutes=15),
                 )
                 self._discovery = discovery
                 self.data._discovery = discovery
-            acquire_discovery = discovery.acquire
+            async def _acquire_discovery():
+                result = await discovery.acquire()
+                telemetry = getattr(result, "telemetry", None)
+                if is_dataclass(telemetry):
+                    self._last_discovery_telemetry = asdict(telemetry)
+                elif isinstance(telemetry, dict):
+                    self._last_discovery_telemetry = dict(telemetry)
+                return result
+
+            acquire_discovery = _acquire_discovery
         symbols = await resolve_stage1_symbols(
             as_of=as_of, static_symbols=CANDIDATE_POOL, fallback_limit=50,
             discovery_supported=discovery_supported, acquire_discovery=acquire_discovery,
         )
         symbols_list = list(symbols)
+
+        # Replay inputs intentionally carry SPY/QQQ/VIX even when they are only
+        # market-risk context.  Keep the historical scanner causal and avoid
+        # sending missing-bar symbols through every Stage-1 filter: only scan
+        # candidate symbols that actually exist in the immutable replay input.
+        available_symbols = getattr(self.data, "available_symbols", None)
+        if as_of is not None and available_symbols is not None:
+            available = {str(symbol).upper() for symbol in available_symbols}
+            symbols_list = [
+                symbol
+                for symbol in symbols_list
+                if symbol in available and symbol not in {"SPY", "QQQ", "VIX", "^VIX"}
+            ]
 
         # Inject gap movers and intraday top gainers/losers only in live/production mode
         if as_of is None:
@@ -523,36 +550,17 @@ class MarketScanner:
             return []
 
         ranked = sorted(candidates, key=lambda c: c.get("auc", 0.0), reverse=True)
-        selected: list[str] = []
-        sector_counts: dict[str, int] = {}
-
-        def _try_add(c: dict) -> bool:
-            sym = c["symbol"]
-            sector = c.get("sector")
-            if not isinstance(sector, str) or not sector.strip():
-                sector = f"unknown:{sym}"
-            if sector_counts.get(sector, 0) >= _MAX_PER_SECTOR:
-                return False
-            selected.append(sym)
-            sector_counts[sector] = sector_counts.get(sector, 0) + 1
-            return True
-
-        for c in ranked:
-            if c.get("auc", 0.0) >= _AUC_TIER1:
-                _try_add(c)
-            if len(selected) >= _TARGET_SYMBOLS:
-                break
-
-        if len(selected) < _TARGET_SYMBOLS:
-            for c in ranked:
-                if c["symbol"] in selected:
-                    continue
-                if c.get("auc", 0.0) > _AUC_TIER2:
-                    _try_add(c)
-                if len(selected) >= _TARGET_SYMBOLS:
-                    break
-
-        return selected
+        tier1 = [c for c in ranked if c.get("auc", 0.0) >= _AUC_TIER1]
+        tier2 = [c for c in ranked if _AUC_TIER2 < c.get("auc", 0.0) < _AUC_TIER1]
+        # The shared helper is the production selection boundary. Keeping both
+        # tiers in one ordered input preserves the tier-1 preference while
+        # enforcing one sector-cap implementation for discovered and static
+        # symbols alike.
+        return select_sector_diverse_momentum(
+            [*tier1, *tier2],
+            max_symbols=_TARGET_SYMBOLS,
+            max_per_sector=_MAX_PER_SECTOR,
+        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -572,6 +580,9 @@ class MarketScanner:
                               existing-position management without authorising
                               new scanner-driven entries.
         """
+        # A successful scan with no final candidates must not expose the prior
+        # cycle's Stage-3 rows to engine/replay telemetry.
+        self._last_scans = []
         try:
             market_state, confidence, reason_codes = await self._assess_market_risk(as_of=as_of)
 
