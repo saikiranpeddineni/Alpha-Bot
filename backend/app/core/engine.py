@@ -231,37 +231,19 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
         self._last_broker_latency_ms: float | None = None
 
     # ------------------------------------------------------------------
-    # kill-switch persistence helpers
+    # halt persistence helpers (kill switch retired)
     # ------------------------------------------------------------------
 
     def _halt_db_key(self, mode: str) -> str:
         return _HALT_KEY.format(mode=mode)
 
     def _persist_halt(self, mode: str, reason: str) -> None:
-        """Write hard-halt state to the settings DB so it survives restarts."""
-        self.db.set_setting(self._halt_db_key(mode), {"hard_halted": True, "reason": reason})
+        pass
 
     def _clear_halt(self, mode: str) -> None:
-        """Remove the persisted hard-halt record after an explicit operator reset."""
-        self.db.set_setting(self._halt_db_key(mode), None)
+        pass
 
     def _restore_halt_if_persisted(self, mode: str) -> bool:
-        """Read DB and restore RiskManager halt state.  Returns True if halt was active."""
-        if mode == "demo":
-            # Demo is a local simulation; a persisted halt would only confuse normal use.
-            return False
-        record = self.db.get_setting(self._halt_db_key(mode))
-        if record and record.get("hard_halted"):
-            reason = record.get("reason", "persisted from previous session")
-            if self.risk is not None:
-                self.risk.hard_halted = True
-                self.risk.hard_halt_reason = reason
-            applog.error(
-                "engine",
-                f"KILL SWITCH RESTORED from DB (mode={mode}): {reason} "
-                "-- engine will not start until operator calls reset_halt()",
-            )
-            return True
         return False
 
     # ------------------------------------------------------------------
@@ -311,8 +293,6 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
     async def start(self, mode: str | None = None, confirm: str = "") -> None:
         if self.state == EngineState.RUNNING:
             raise RuntimeError("Engine is already running")
-        if self.state == EngineState.HALTED:
-            raise RuntimeError("Engine is halted by the risk kill switch -- reset the halt first")
         mode = (mode or self.mode).lower()
         if mode not in ("demo", "paper", "live"):
             raise ValueError(f"Unknown mode {mode!r}")
@@ -348,17 +328,6 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
 
         self.risk = RiskManager(self.risk_config, self.clock)
         self.risk.core_watchlist = self.core_watchlist
-
-        # --- #115 fix: restore durable kill-switch state before doing anything else.
-        # If a hard halt was persisted from a previous session (crash, OOM, restart)
-        # the operator must explicitly call reset_halt() before trading can resume.
-        if self._restore_halt_if_persisted(mode):
-            self.state = EngineState.HALTED
-            self.publish("status", self.status())
-            raise RuntimeError(
-                f"Engine ({mode}): kill switch was active at last shutdown -- "
-                "call reset_halt() to acknowledge and re-enable trading"
-            )
 
         restore_mode = None
         restore_account_id = None
@@ -874,20 +843,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
             is_paper=self.broker.is_paper,
         )
         halt = self.risk.check_halts(ctx, now=now)
-        if halt == "hard":
-            # Latch the capital-preservation state before any fallible broker I/O.
-            self.state = EngineState.HALTED
-            # --- #115 fix: persist the halt immediately so a subsequent crash/restart
-            # cannot silently re-enable trading without operator acknowledgement.
-            self._persist_halt(self.mode, self.risk.hard_halt_reason)
-            self.insights.on_risk_event(
-                "Kill switch tripped", self.risk.hard_halt_reason, severity="danger"
-            )
-            await self._reconcile_hard_halt_liquidation(now)
-            self.publish("status", self.status())
-        elif self.state == EngineState.HALTED and self.risk.hard_halted:
-            await self._reconcile_hard_halt_liquidation(now)
-        elif halt == "daily" or (self.risk.daily_halted and not self.risk.hard_halted):
+        if halt == "daily" or self.risk.daily_halted:
             await self._reconcile_daily_halt_liquidation(now)
             if halt == "daily":
                 self.insights.on_risk_event(
@@ -895,7 +851,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
                     f"Trading paused until the next session (day P&L {ctx.day_pnl:+,.2f}).",
                     severity="danger",
                 )
-        elif halt == "profit" or (self.risk.profit_locked and not self.risk.hard_halted):
+        elif halt == "profit" or self.risk.profit_locked:
             # DAILY PROFIT LOCK 2026-10-16 (bank-and-ride, operator demand):
             # on trip, scratch underwater positions and let green runners ride
             # under PIS (upside open). If the banked day then slips to the
@@ -2075,8 +2031,6 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
     async def manual_order(self, req: OrderRequest) -> Order:
         if self.state != EngineState.RUNNING or self.broker is None:
             raise RuntimeError("Engine is not running")
-        if self.risk and self.risk.hard_halted:
-            raise RuntimeError("Hard halt active -- reset the kill switch first")
 
         # Risk gateway: block manual entry orders in live mode
         positions = await self.broker.positions()

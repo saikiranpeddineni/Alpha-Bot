@@ -56,21 +56,11 @@ export default function App() {
     return () => { window.removeEventListener("resize", handleResize); window.clearInterval(executionRefresh); };
   }, []);
 
-  const halted = status?.state === "halted" || status?.risk?.hard_halted || status?.system_health === "HALTED";
-
   if (isMobile) {
     return (
       <div className="app mobile premium-mobile">
         <MobileHeader onSettings={() => setShowSettings(true)} />
         <SystemStatusBanner status={status} connected={connected} bootError={bootError} onRetry={retryBootstrap} />
-        {halted && (
-          <div className="halt-banner">
-            ⛔ KILL SWITCH ACTIVE — {status?.risk?.hard_halt_reason || "max drawdown breached"}
-            <button className="btn sm danger" onClick={() => api.resetHalt().then((s) => useStore.getState().setStatus(s)).catch((error: unknown) => useStore.getState().showToast("error", error instanceof Error ? error.message : "Unable to reset halt."))} style={{ marginLeft: "8px" }}>
-              Reset
-            </button>
-          </div>
-        )}
         <main className="mobile-content">
           {!status ? <ConnectionEmpty onRetry={retryBootstrap} /> : <>
             {mobileTab === "home" && <MobileHome onOpenActivity={() => setMobileTab("activity")} onOpenChart={() => setMobileTab("trade")} />}
@@ -114,7 +104,6 @@ export default function App() {
     <TopBar onBacktest={() => setShowBacktest(true)} onReplay={() => setShowReplay(true)} onSettings={() => setShowSettings(true)} />
     <div style={{ display: "flex", flexDirection: "column", minHeight: 0 }}>
       <SystemStatusBanner status={status} connected={connected} bootError={bootError} onRetry={retryBootstrap} />
-      {halted && <div className="halt-banner">⛔ KILL SWITCH — {status?.risk?.hard_halt_reason || "max drawdown breached"}<button className="btn sm danger" onClick={() => api.resetHalt().then((s) => useStore.getState().setStatus(s)).catch((error: unknown) => useStore.getState().showToast("error", error instanceof Error ? error.message : "Unable to reset halt."))}>Reset halt</button></div>}
       {status ? <div className="main" style={{ flex: 1, minHeight: 0 }}><div className="left-col"><Watchlist /><TrainerPanel /></div><div className="center"><PriceChart /><BottomTabs /></div><SidePanel /></div> : <ConnectionEmpty onRetry={retryBootstrap} />}
     </div>
     {showBacktest && <BacktestModal onClose={() => setShowBacktest(false)} />}

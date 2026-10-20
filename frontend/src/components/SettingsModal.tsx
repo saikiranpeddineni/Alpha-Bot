@@ -47,13 +47,6 @@ const FIELDS: { key: keyof RiskConfig; label: string; hint: string; help: string
     step: 0.1,
   },
   {
-    key: "max_drawdown_pct",
-    label: "Max drawdown % (kill switch)",
-    hint: "halts until manually reset",
-    help: "Peak-to-trough account drawdown percentage that triggers a hard halt of all operations until manually reset. Recommended: 10% to 15%.",
-    step: 1,
-  },
-  {
     key: "symbol_cooldown_minutes",
     label: "Symbol cooldown (min)",
     hint: "pause a ticker after 1 loss",

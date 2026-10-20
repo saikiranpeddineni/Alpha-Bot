@@ -133,28 +133,13 @@ def test_daily_profit_lock_trips_flattens_and_blocks(rm: RiskManager, bars):
     assert rm.check_halts(ctx(equity=105_000, day_pnl=+5_000), now=MID_SESSION) is None
 
 
-@pytest.mark.parametrize(
-    ("equity", "expected_halt"),
-    [
-        (90_001.0, None),  # 9.999% drawdown: just below the configured 10% limit
-        (90_000.0, "hard"),  # exactly at the limit must trip the hard halt
-    ],
-)
-def test_max_drawdown_kill_switch_boundary_blocks_entries(rm: RiskManager, bars, equity, expected_halt):
-    halted = rm.check_halts(ctx(equity=equity, peak=100_000.0), now=MID_SESSION)
-    assert halted == expected_halt
-
-    if expected_halt == "hard":
-        assert rm.hard_halted
-        assert "MAX DRAWDOWN HALT" in rm.hard_halt_reason
-        assert "10.00%" in rm.hard_halt_reason
-        decision = rm.evaluate_entry(long_signal(), ctx(equity=equity, peak=100_000.0), bars, now=MID_SESSION)
-        assert not decision.approved
-        assert "hard halt" in decision.reason
-        rm.reset_hard_halt()
-        assert not rm.hard_halted
-    else:
-        assert not rm.hard_halted
+def test_max_drawdown_does_not_halt_trading(rm: RiskManager, bars):
+    # Kill switch is retired: even at 10% or greater drawdown, no hard halt is tripped
+    halted = rm.check_halts(ctx(equity=85_000.0, peak=100_000.0), now=MID_SESSION)
+    assert halted is None
+    assert not rm.hard_halted
+    decision = rm.evaluate_entry(long_signal(), ctx(equity=85_000.0, peak=100_000.0), bars, now=MID_SESSION)
+    assert decision.approved
 
 def test_consecutive_loss_cooldown(rm: RiskManager, bars):
     now = MID_SESSION

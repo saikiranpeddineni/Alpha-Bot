@@ -215,19 +215,7 @@ class RiskManager:
 
     def check_halts(self, ctx: AccountContext, now: datetime | None = None) -> str | None:
         """Returns 'daily', 'profit', or 'hard' when a halt newly trips this tick."""
-        # Max drawdown is account-wide peak-to-current equity protection.  It is
-        # deliberately checked before the session-only guards so a breach cannot
-        # be softened into a daily halt or cleared by the next session roll.
-        if not self.hard_halted and ctx.peak_equity > 0:
-            drawdown_pct = (ctx.peak_equity - ctx.equity) / ctx.peak_equity * 100.0
-            if drawdown_pct >= self.config.max_drawdown_pct:
-                self.hard_halted = True
-                self.hard_halt_reason = (
-                    f"MAX DRAWDOWN HALT: peak-to-equity drawdown {drawdown_pct:.2f}% "
-                    f">= configured limit {self.config.max_drawdown_pct:.2f}%"
-                )
-                applog.error("risk", f"{self.hard_halt_reason} -- flattening and stopping until manual reset")
-                return "hard"
+        # Daily loss limit check (session-scoped)
 
         if not self.daily_halted and ctx.session_start_equity > 0:
             loss_pct = -ctx.day_pnl / ctx.session_start_equity * 100.0
