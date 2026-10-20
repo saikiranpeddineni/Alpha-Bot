@@ -319,7 +319,7 @@ batch since. Post-fast-replay edits: imports verified OK, full suite NOT rerun.
    confounds (30 vs ~16 symbols; fresh-daily streak resets; specialists still
    demoted to coin-flip global). Momentum morning re-entry is the prime suspect.
 4. **Specialist retrain** (IN PROGRESS day 2): script at
-   `C:\Users\peddi\.local\share\opencode\tmp\retrain_specialists.py`.
+   `retrain_specialists.py` in the local research workspace.
    After it completes, rerun full window and compare momentum's numbers.
 5. **COMMIT in tagged batches** (nothing committed yet):
    `security` · `remove-cr146` · `capital-safety-fixes` · `ml-integrity` ·

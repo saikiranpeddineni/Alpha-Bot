@@ -114,3 +114,26 @@ def test_same_cycle_correlation_limit_counts_prior_approved_candidate():
     assert len(decision.gated_entries) == 1
     assert decision.gated_entries[0][0] is msft
     assert "correlation" in decision.gated_entries[0][1]
+
+
+def test_allocator_gate_uses_market_risk_state_for_dynamic_sector_limit():
+    gate = PortfolioAIGate(max_correlation=1.0, max_positions_per_sector=5)
+    positions = [
+        Position(symbol="AAPL", qty=1, avg_entry_price=100, market_price=100),
+        Position(symbol="MSFT", qty=1, avg_entry_price=100, market_price=100),
+    ]
+    candidate = _signal("META", 0.8, 0.6)
+
+    decision = process_portfolio_allocations(
+        [candidate],
+        positions,
+        available_capital=20_000,
+        equity=100_000,
+        portfolio_gate=gate,
+        market_state="STRESS",
+    )
+
+    assert decision.approved_entries == []
+    assert len(decision.gated_entries) == 1
+    assert "dynamic sector limit 1" in decision.gated_entries[0][1]
+    assert "state=STRESS" in decision.gated_entries[0][1]

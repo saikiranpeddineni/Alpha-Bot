@@ -272,38 +272,120 @@ class AlpacaDataProvider(DataProvider):
                 break
         return empty_bars()
 
+    # =============================================================================
+    # [MODIFIED 2026-10-16]: Non-blocking News Sentiment to eliminate tick evaluation latency
+    # ORIGINAL INTENT: Fetched Alpaca news on cache miss with synchronous requests.get in
+    # asyncio.to_thread with 5s timeout.
+    # REASON FOR CHANGE: Waiting on external REST HTTP in the position evaluation tick loop
+    # causes latency spikes (up to 5s) during critical trailing stop evaluations.
+    # SAFE ROLLBACK: The original code is preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # async def get_news_sentiment(self, symbol: str) -> float:
+    #     """Fetches recent news for a symbol and returns a sentiment score, caching for 5 minutes."""
+    #     if not self._sentiment_analyzer:
+    #         return 0.0
+    #
+    #     now = datetime.now(UTC)
+    #     if symbol in self._news_cache:
+    #         score, cached_time = self._news_cache[symbol]
+    #         if (now - cached_time).total_seconds() < 300:  # 5 minute cache
+    #             return score
+    #
+    #     def fetch():
+    #         import requests
+    #         url = f"https://data.alpaca.markets/v1beta1/news?symbols={symbol}&limit=5"
+    #         headers = {
+    #             "APCA-API-KEY-ID": self._client._api_key,
+    #             "APCA-API-SECRET-KEY": self._client._secret_key
+    #         }
+    #         try:
+    #             resp = requests.get(url, headers=headers, timeout=5.0)
+    #             if resp.status_code == 200:
+    #                 data = resp.json()
+    #                 news = data.get('news', [])
+    #                 return [n['headline'] for n in news]
+    #         except Exception as e:
+    #             applog.error("data.alpaca", f"News fetch failed for {symbol}: {e}")
+    #         return []
+    #
+    #     headlines = await asyncio.to_thread(fetch)
+    #     score = self._sentiment_analyzer.analyze_headlines(headlines)
+    #     self._news_cache[symbol] = (score, now)
+    #     return score
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
     async def get_news_sentiment(self, symbol: str) -> float:
-        """Fetches recent news for a symbol and returns a sentiment score, caching for 5 minutes."""
+        """Non-blocking news sentiment query. Returns cached score immediately (0ms tick latency).
+        
+        Refreshes expired cache asynchronously in the background so the core trading engine
+        evaluation loop is never stalled by external network HTTP calls.
+        """
         if not self._sentiment_analyzer:
             return 0.0
 
         now = datetime.now(UTC)
+        score = 0.0
+        needs_refresh = True
+
         if symbol in self._news_cache:
             score, cached_time = self._news_cache[symbol]
             if (now - cached_time).total_seconds() < 300:  # 5 minute cache
-                return score
+                needs_refresh = False
 
-        def fetch():
-            import requests
-            url = f"https://data.alpaca.markets/v1beta1/news?symbols={symbol}&limit=5"
-            headers = {
-                "APCA-API-KEY-ID": self._client._api_key,
-                "APCA-API-SECRET-KEY": self._client._secret_key
-            }
-            try:
-                resp = requests.get(url, headers=headers, timeout=5.0)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    news = data.get('news', [])
-                    return [n['headline'] for n in news]
-            except Exception as e:
-                applog.error("data.alpaca", f"News fetch failed for {symbol}: {e}")
-            return []
+        if needs_refresh:
+            # Trigger non-blocking background fetch
+            async def _bg_fetch(sym: str) -> None:
+                def _do_req() -> list[str]:
+                    import requests
+                    url = f"https://data.alpaca.markets/v1beta1/news?symbols={sym}&limit=5"
+                    headers = {
+                        "APCA-API-KEY-ID": self._client._api_key,
+                        "APCA-API-SECRET-KEY": self._client._secret_key,
+                    }
+                    try:
+                        resp = requests.get(url, headers=headers, timeout=2.0)
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            news = data.get("news", [])
+                            return [n["headline"] for n in news]
+                    except Exception as e:
+                        applog.debug("data.alpaca", f"Background news fetch failed for {sym}: {e}")
+                    return []
 
-        headlines = await asyncio.to_thread(fetch)
-        score = self._sentiment_analyzer.analyze_headlines(headlines)
-        self._news_cache[symbol] = (score, now)
+                try:
+                    headlines = await asyncio.to_thread(_do_req)
+                    if self._sentiment_analyzer:
+                        new_score = self._sentiment_analyzer.analyze_headlines(headlines)
+                        self._news_cache[sym] = (new_score, datetime.now(UTC))
+                except Exception:
+                    pass
+
+            asyncio.create_task(_bg_fetch(symbol))
+
         return score
+    # =============================================================================
+
+    async def get_snapshots(self, symbols: list[str]) -> dict:
+        """Return raw Alpaca snapshots for pre-market gap analysis.
+
+        ``PreMarketGapScanner`` needs the daily/open/previous-day fields that
+        are not represented by the normalized ``Quote`` contract. Keep this
+        provider-specific escape hatch here rather than making the scanner
+        reach into the SDK client or silently fall back to stale daily bars.
+        """
+        if not symbols:
+            return {}
+
+        def fetch() -> dict:
+            from alpaca.data.requests import StockSnapshotRequest
+
+            snapshots = self._client.get_stock_snapshot(
+                StockSnapshotRequest(symbol_or_symbols=[s.upper() for s in symbols])
+            )
+            return dict(snapshots or {})
+
+        return await asyncio.to_thread(fetch)
 
     async def discover_assets(self) -> tuple[DiscoverableAsset, ...]:
         """Fetch Alpaca's active US-equity asset metadata for bounded discovery.
@@ -329,13 +411,26 @@ class AlpacaDataProvider(DataProvider):
                     except Exception as e:
                         applog.warning("data.alpaca", f"Screener get_most_actives failed: {e}")
 
-                    # 2. Fetch top 50 market movers (gainers)
+                    # 2. Fetch top 50 market movers in both directions. The
+                    # scanner needs losers as well as gainers for short-side
+                    # discovery; omitting them made discovery directionally
+                    # biased even though the API returned both lists.
                     try:
                         movers = screener.get_market_movers(
                             MarketMoversRequest(top=50, market_type=MarketType.STOCKS)
                         )
-                        if hasattr(movers, "gainers") and movers.gainers:
-                            for item in movers.gainers:
+                        if isinstance(movers, dict):
+                            mover_groups = (
+                                movers.get("gainers", []),
+                                movers.get("losers", []),
+                            )
+                        else:
+                            mover_groups = (
+                                getattr(movers, "gainers", []) or [],
+                                getattr(movers, "losers", []) or [],
+                            )
+                        for group in mover_groups:
+                            for item in group:
                                 if getattr(item, "symbol", None):
                                     symbols.add(item.symbol.upper())
                     except Exception as e:

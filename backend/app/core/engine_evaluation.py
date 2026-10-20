@@ -68,9 +68,6 @@ class TradingEngineEvaluationMixin:
         # SAFE ROLLBACK: Live trading continues to trigger backfill for non-synthetic/non-replay
         #                providers when hasattr(self.data, "backfill") is True.
         # -----------------------------------------------------------------------------
-        # [PREVIOUS CODE - PRESERVED]:
-        # if len(df) < 120 and not getattr(getattr(self.data, "provider", None), "name", "") == "synthetic":
-        # -----------------------------------------------------------------------------
         # [NEW CODE]:
         if (
             len(df) < 120
@@ -104,11 +101,7 @@ class TradingEngineEvaluationMixin:
         # ORIGINAL INTENT: Early return for df < 30 bars to ensure full feature calculation.
         # REASON FOR CHANGE: Pipeline has a calibrated fail-soft warmup path for 15 <= len(df) < 30.
         # Dropping frames at < 30 bars in engine_evaluation.py starved scanner-discovered candidates.
-        # SAFE ROLLBACK: The original code is preserved below as comments.
-        # -----------------------------------------------------------------------------
-        # [PREVIOUS CODE - PRESERVED]:
-        # if df.empty or len(df) < 30:
-        #     return []
+        # SAFE ROLLBACK: The original code is removed; rollback via git history.
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
         if df.empty or len(df) < 15:
@@ -156,13 +149,6 @@ class TradingEngineEvaluationMixin:
         #   Record every gated tick drop to shadow_ledger with gate="gated_tick".
         # SAFE ROLLBACK: Commented-out original code below.
         # -----------------------------------------------------------------------------
-        # [PREVIOUS CODE - PRESERVED]:
-        # if position is None and skip_entries_reason and not getattr(self, "replay_fast_path", False):
-        #     if symbol not in getattr(self, "_entry_gate_warned", set()):
-        #         self._entry_gate_warned.add(symbol)
-        #         applog.info("engine", f"{symbol}: entry evaluation skipped -- {skip_entries_reason}")
-        #     return []
-        # -----------------------------------------------------------------------------
         # [NEW CODE]:
         if position is None and skip_entries_reason and not getattr(self, "replay_fast_path", False):
             if symbol not in getattr(self, "_entry_gate_warned", set()):
@@ -201,9 +187,6 @@ class TradingEngineEvaluationMixin:
             if symbol not in self._position_peaks:
                 self._position_peaks[symbol] = position.avg_entry_price
                 self._position_troughs[symbol] = position.avg_entry_price
-                # --- PREVIOUS IMPLEMENTATION (Preserved for historical intent & audit) ---
-                # self._position_initial_stops[symbol] = position.stop_loss
-                # --------------------------------------------------------------------------
                 # --- NEW IMPLEMENTATION ---
                 # Broker Position objects (e.g. from Alpaca) do not expose a native stop_loss attribute.
                 # Query the portfolio tracker's internal lot memory (_lot.initial_stop_loss or _lot.stop_loss)
@@ -281,26 +264,7 @@ class TradingEngineEvaluationMixin:
             # ORIGINAL INTENT: Positions rode underwater into end-of-day flatten (flatten_all at market).
             # REASON FOR CHANGE: Positions holding loss < -0.30R with poor health at the entry-window cutoff
             # should be scratched early to avoid end-of-day market-order slippage and free risk budget.
-            # SAFE ROLLBACK: The original code is preserved below as comments.
-            # -----------------------------------------------------------------------------
-            # [PREVIOUS CODE - PRESERVED]:
-            # # No EOD pre-harvest check
-            # -----------------------------------------------------------------------------
-            # [PREVIOUS CODE - PRESERVED]:
-            # if pis_order is None and position is not None and _lot is not None and hasattr(self, "risk") and hasattr(self.risk, "clock"):
-            #     try:
-            #         no_entry_mins = int(getattr(self.risk.config, "no_entry_minutes_before_close", 15) or 15)
-            #         in_preharvest_window = not self.risk.clock.in_entry_window(no_entry_mins, now)
-            #         if in_preharvest_window:
-            #             init_risk = getattr(_lot, "initial_risk_per_share", 0.0) or 0.0
-            #             if init_risk > 1e-8:
-            #                 current_r = (close - _lot.avg_price) / init_risk if position.qty > 0 else (_lot.avg_price - close) / init_risk
-            #                 if current_r <= -0.30:
-            #                     applog.warning("engine.exit", f"CR-15: EOD pre-harvest triggered for {symbol} at {current_r:.2f}R (near close cutoff)")
-            #                     await self._close_position_guarded(symbol, reason="PIS Exit Reason: EOD_PREHARVEST", qty=abs(position.qty))
-            #                     return []
-            #     except Exception as _eod_exc:
-            #         applog.debug("engine.exit", f"EOD pre-harvest evaluation skipped: {_eod_exc}")
+            # SAFE ROLLBACK: The original code is removed; rollback via git history.
             # -----------------------------------------------------------------------------
             # [NEW CODE]:
             if pis_order is None and position is not None and _lot is not None and hasattr(self, "risk") and hasattr(self.risk, "clock"):
@@ -312,10 +276,6 @@ class TradingEngineEvaluationMixin:
                         if init_risk > 1e-8:
                             current_r = (close - _lot.avg_price) / init_risk if position.qty > 0 else (_lot.avg_price - close) / init_risk
                             preharvest_threshold = float(getattr(self.risk.config, "eod_preharvest_r", -0.30))
-                            # [PREVIOUS CODE - PRESERVED]:
-                            # health_val = float(getattr(pis_decision, "health_score", 0.0) if pis_decision else 0.0)
-                            # is_runner = bool(getattr(pis_decision, "is_runner", False) if pis_decision else False)
-                            # -----------------------------------------------------------------------------
                             # [NEW CODE]:
                             from app.pis.models import LifecycleState
                             if pis_decision is not None:
@@ -335,29 +295,92 @@ class TradingEngineEvaluationMixin:
             # =============================================================================
 
             if pis_order is not None:
+                close_accepted = False
                 try:
                     applog.info("engine", f"{symbol}: PIS Unified Exit triggered: {pis_order.reason} (qty={pis_order.qty})")
-                    await self._close_position_guarded(symbol, reason=pis_order.reason, qty=pis_order.qty)
-                    # Keep peak/trough/stop/TP memory alive until the closing
-                    # fill is drained: _drain_fills reads them to stamp true
-                    # mfe/mae onto the trade record and cleans the maps up
-                    # afterwards. Deleting here (before the fill existed) made
-                    # every PIS-exited trade report mfe == mae == final move.
-                    return []
+                    close_accepted = await self._close_position_guarded(
+                        symbol,
+                        reason=pis_order.reason,
+                        qty=pis_order.qty,
+                        strategy=getattr(pis_order, "strategy", None),
+                    )
                 except Exception as e:
-                    # ==================================================================================================
-                    # WARNING TO FUTURE AI AGENTS:
-                    # Do NOT wrap the above `_close_position_guarded` routing call inside the PIS evaluation try-block.
-                    # Routing failures (like Alpaca 502s) must NOT be masked as PIS AI evaluation crashes.
-                    # ==================================================================================================
+                    # Keep broker-routing failures distinct from PIS evaluation
+                    # failures.  The guard has already released its latch;
+                    # this boundary only converts the ambiguous result into a
+                    # PIS rollback before the next evaluation can retry.
                     applog.error("engine.exit", f"Execution failed for PIS exit on {symbol}: {e}")
-                    # The scale-out never executed. Revert the brain's decision-time
-                    # flags so it cannot phantom-trade as a runner with ratcheted
-                    # floors built on a partial exit that did not happen.
+                    close_accepted = False
+
+                if not close_accepted:
+                    # A rejected, missing, or ambiguous broker result is not a
+                    # fill.  In particular, PARTIAL_EXIT mutates PIS state at
+                    # decision time, so leave the brain in its pre-scale-out
+                    # posture until broker execution is actually accepted.
                     try:
                         self.pis_adapter.revert_scale_out(symbol)
                     except Exception:
                         pass
+                    applog.warning("engine.exit", f"{symbol}: PIS close was not accepted; scale-out state reverted")
+                    # Keep the existing close-latch safety contract: do not
+                    # continue into entry evaluation after an exit decision.
+                    return []
+
+                # Alpaca partial closes cancel the live bracket/OTO legs to
+                # release held quantity.  Re-establish a broker stop for only
+                # the residual runner before returning from this evaluation;
+                # otherwise the runner is naked during the next tick.
+                position_qty = abs(float(position.qty))
+                close_qty = abs(float(pis_order.qty))
+                residual_qty = max(0.0, position_qty - close_qty)
+                if residual_qty > 1e-9:
+                    runner_floor = getattr(pis_decision, "target_stop_loss", None)
+                    if runner_floor is None and _lot is not None:
+                        runner_floor = getattr(_lot, "stop_loss", None)
+                    if runner_floor is not None:
+                        runner_floor = float(runner_floor)
+                        # Protection floors remain monotonic even when a stale
+                        # PIS decision carries a weaker candidate than local
+                        # broker-confirmed state.
+                        local_floor = (
+                            getattr(_lot, "stop_loss", None)
+                            if _lot is not None
+                            else None
+                        )
+                        if local_floor is not None:
+                            runner_floor = (
+                                max(runner_floor, float(local_floor))
+                                if position.qty > 0
+                                else min(runner_floor, float(local_floor))
+                            )
+                        try:
+                            protected = await self._sync_broker_protective_stop(
+                                symbol,
+                                runner_floor,
+                                qty=residual_qty,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            protected = False
+                            applog.warning("engine.exit", f"{symbol}: residual runner stop repair failed: {exc}")
+                        if protected and _lot is not None:
+                            _lot.stop_loss = runner_floor
+                        elif not protected:
+                            applog.warning(
+                                "engine.exit",
+                                f"{symbol}: residual runner close accepted but broker protection was not verified",
+                            )
+                    else:
+                        applog.warning(
+                            "engine.exit",
+                            f"{symbol}: partial PIS close accepted with no protective floor available for residual qty={residual_qty:g}",
+                        )
+
+                # Keep peak/trough/stop/TP memory alive until the closing
+                # fill is drained: _drain_fills reads them to stamp true
+                # mfe/mae onto the trade record and cleans the maps up
+                # afterwards. Deleting here (before the fill existed) made
+                # every PIS-exited trade report mfe == mae == final move.
+                return []
             # Synchronize ratcheted protective stop floor to broker truth first,
             # then update the local lot.  Updating only _lot.stop_loss made the
             # PIS floor look protected locally while Alpaca's original OTO stop
@@ -390,41 +413,37 @@ class TradingEngineEvaluationMixin:
             self.pis_adapter.handle_position_closed(symbol)
 
         # =============================================================================
-        # [MODIFIED 2026-10-14]: CR-08 — Gated-tick shadow ledger recording
-        # ORIGINAL INTENT: Early returned [] with applog only, leaving no trace in shadow ledger.
-        # REASON FOR CHANGE: Gated-tick drops were traceless (360 candidates lost without trace).
-        #   Record every gated tick drop to shadow_ledger with gate="gated_tick".
-        # SAFE ROLLBACK: Commented-out original code below.
+        # [MODIFIED 2026-10-16]: Remove redundant duplicate gated-tick check
+        # ORIGINAL INTENT: Duplicate check of skip_entries_reason after position exits.
+        # REASON FOR CHANGE: Unreachable code. Lines 153-174 already handle this when position is None.
+        # When position is not None, skip_entries_reason is never set.
+        # SAFE ROLLBACK: Preserved below as comments.
         # -----------------------------------------------------------------------------
         # [PREVIOUS CODE - PRESERVED]:
         # if skip_entries_reason and not getattr(self, "replay_fast_path", False):
         #     if symbol not in getattr(self, "_entry_gate_warned", set()):
         #         self._entry_gate_warned.add(symbol)
         #         applog.info("engine", f"{symbol}: entry evaluation skipped -- {skip_entries_reason}")
+        #     try:
+        #         from app.core.shadow_ledger import shadow_ledger
+        #         shadow_ledger.record(
+        #             symbol=symbol,
+        #             action="ENTER_LONG",
+        #             strategy="engine",
+        #             gate="gated_tick",
+        #             reason=f"gated tick ({skip_entries_reason})",
+        #             price=float(df["close"].iloc[-1]) if not df.empty and "close" in df else 0.0,
+        #             stop_loss=None,
+        #             take_profit=None,
+        #             atr14=float(df["atr14"].iloc[-1]) if not df.empty and "atr14" in df.columns else None,
+        #             confidence=0.0,
+        #         )
+        #     except Exception:
+        #         pass
         #     return []
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
-        if skip_entries_reason and not getattr(self, "replay_fast_path", False):
-            if symbol not in getattr(self, "_entry_gate_warned", set()):
-                self._entry_gate_warned.add(symbol)
-                applog.info("engine", f"{symbol}: entry evaluation skipped -- {skip_entries_reason}")
-            try:
-                from app.core.shadow_ledger import shadow_ledger
-                shadow_ledger.record(
-                    symbol=symbol,
-                    action="ENTER_LONG",
-                    strategy="engine",
-                    gate="gated_tick",
-                    reason=f"gated tick ({skip_entries_reason})",
-                    price=float(df["close"].iloc[-1]) if not df.empty and "close" in df else 0.0,
-                    stop_loss=None,
-                    take_profit=None,
-                    atr14=float(df["atr14"].iloc[-1]) if not df.empty and "atr14" in df.columns else None,
-                    confidence=0.0,
-                )
-            except Exception:
-                pass
-            return []
+        # (Redundant duplicate omitted; authoritative check executes at lines 153-174)
         # =============================================================================
 
 
@@ -475,9 +494,6 @@ class TradingEngineEvaluationMixin:
             # [ADDED 2026-10-14]: CR-02b — Wire RiskConfig.enable_pullback_rearm
             # ORIGINAL INTENT: RiskConfig.enable_pullback_rearm was defined but unread by engine.
             # REASON FOR CHANGE: Enforce RiskConfig.enable_pullback_rearm dynamically at runtime.
-            # [PREVIOUS CODE - PRESERVED]:
-            # # No check for pullback_rearm against risk.config.enable_pullback_rearm
-            # -----------------------------------------------------------------------------
             # [NEW CODE]:
             if strat.name == "pullback_rearm":
                 if hasattr(self, "risk") and hasattr(self.risk, "config"):
@@ -498,6 +514,42 @@ class TradingEngineEvaluationMixin:
         if not signals:
             return []
 
+        # Opportunity economics are evaluated before the admission firewall.
+        # This layer only removes candidates whose modeled reward cannot cover
+        # configured round-trip costs; sizing, portfolio gates, ML, and broker
+        # execution remain authoritative downstream.
+        try:
+            from app.config import get_settings
+            from app.opportunities.engine import OpportunityEngine
+            from app.opportunities.models import OpportunityContext
+            opportunity_cfg = get_settings().opportunity_config()
+            if opportunity_cfg.enabled:
+                evaluator = OpportunityEngine()
+                economic_signals = []
+                for sig in signals:
+                    if sig.action == SignalAction.EXIT:
+                        economic_signals.append(sig)
+                        continue
+                    candidate = evaluator.evaluate(
+                        sig,
+                        df,
+                        OpportunityContext(
+                            min_net_edge_bps=opportunity_cfg.min_net_edge_bps,
+                            min_reward_risk=opportunity_cfg.min_reward_risk,
+                            estimated_round_trip_cost_bps=opportunity_cfg.round_trip_cost_bps,
+                        ),
+                    )
+                    if candidate is not None:
+                        economic_signals.append(sig)
+                    else:
+                        applog.info("opportunity", f"{symbol} {sig.strategy}: rejected by cost-aware opportunity economics")
+                signals = economic_signals
+        except Exception as exc:  # defensive telemetry must not break exits
+            applog.warning("opportunity", f"cost-aware opportunity evaluation unavailable: {exc}")
+
+        if not signals:
+            return []
+
         # Resolve strategy overlap: If multiple entry signals trigger on the same bar,
         # pick the one with the highest priority to prevent signal correlation and AI confusion.
         entry_signals = [sig for sig in signals if sig.action != SignalAction.EXIT]
@@ -508,45 +560,7 @@ class TradingEngineEvaluationMixin:
         # ORIGINAL INTENT: Kept entry_signals[0] and silently discarded all other signals.
         # REASON FOR CHANGE: Discarded overlap signals left zero forensic trace. Record every
         # discarded signal to shadow_ledger with gate="strategy_overlap" and winner details.
-        # SAFE ROLLBACK: The original code is preserved below as comments.
-        # -----------------------------------------------------------------------------
-        # [PREVIOUS CODE - PRESERVED]:
-        # if len(entry_signals) > 1:
-        #     STRATEGY_PRIORITY = {
-        #         "gap_and_go": 1,
-        #         "liquidity_sweep": 2,
-        #         "bb_squeeze": 3,
-        #         "relative_strength": 4,
-        #         "trend_pullback": 5,
-        #         "orb": 6,
-        #         "rsi_reversion": 7,
-        #         "vwap_reversion": 8,
-        #         "momentum": 9,
-        #     }
-        #     # Sort ascending by priority (1 is best). Unknown strategies default to 99.
-        #     entry_signals.sort(key=lambda s: STRATEGY_PRIORITY.get(s.strategy, 99))
-        #     entry_signals = [entry_signals[0]] # Keep only the absolute best one
-        # -----------------------------------------------------------------------------
-        # =============================================================================
-        # [MODIFIED 2026-10-14]: CR-08 & Gap-10 - Direct Pipeline Candidate Evaluation
-        # ORIGINAL INTENT: Truncated entry_signals to a single static priority winner before pipeline,
-        # which preempted valid breakout strategies with unvalidated continuation candidates that then
-        # failed location/chase vetoes, producing false negative drops (DPZ, HIMS).
-        # REASON FOR CHANGE: Let all candidate entry signals flow directly into SignalPipeline.process().
-        # The pipeline already evaluates every candidate against all risk, ML, and Meta gates, and
-        # resolves multi-candidate conflicts by TradeScore ranking among approved entries, recording
-        # losers to shadow_ledger.
-        # SAFE ROLLBACK: Re-enable the STRATEGY_PRIORITY sort and entry_signals = [winner] below.
-        # -----------------------------------------------------------------------------
-        # =============================================================================
-        # [MODIFIED 2026-10-14]: CR-08 & L26 - Strategy Overlap Resolution & Shadow Ledger Recording
-        # ORIGINAL INTENT: Kept entry_signals[0] and silently discarded all other signals.
-        # REASON FOR CHANGE: Discarded overlap signals left zero forensic trace. Record every
-        # discarded signal to shadow_ledger with gate="strategy_overlap" and winner details.
-        # SAFE ROLLBACK: The original code is preserved below as comments.
-        # -----------------------------------------------------------------------------
-        # [PREVIOUS CODE - PRESERVED]:
-        # # Silently truncated without shadow recording
+        # SAFE ROLLBACK: The original code is removed; rollback via git history.
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
         if len(entry_signals) > 1:
@@ -604,18 +618,7 @@ class TradingEngineEvaluationMixin:
         # dropped candidates during reconciliation failure with log warning only without shadow ledger record.
         # REASON FOR CHANGE: Populate decision_bar_timestamp_utc for backtest/live forensics;
         # record reconciliation rejections to shadow_ledger so no accepted pipeline candidate disappears without trace.
-        # SAFE ROLLBACK: The original code is preserved below as comments.
-        # -----------------------------------------------------------------------------
-        # [PREVIOUS CODE - PRESERVED]:
-        # for sig in signals:
-        #     if sig.action != SignalAction.EXIT:
-        #         if getattr(sig, "candidate_id", None) is None:
-        #             prefix = f"{symbol}_{sig.strategy}_{now.strftime('%Y%m%d_%H%M%S')}"
-        #             sig.candidate_id = f"{prefix}_{uuid.uuid4().hex[:6]}".upper()
-        # ...
-        #     if getattr(self, "reconciliation_failed", False):
-        #         applog.warning("engine", f"{symbol}: entry signal {sig.strategy} rejected -- engine position/broker reconciliation state is uncertain")
-        #         continue
+        # SAFE ROLLBACK: The original code is removed; rollback via git history.
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
         for sig in signals:
@@ -685,7 +688,12 @@ class TradingEngineEvaluationMixin:
         # =============================================================================
         return candidate_entries
 
-    async def _sync_broker_protective_stop(self, symbol: str, stop_price: float) -> bool:
+    async def _sync_broker_protective_stop(
+        self,
+        symbol: str,
+        stop_price: float,
+        qty: float | None = None,
+    ) -> bool:
         """Synchronize a monotonic PIS stop floor with broker-side protection.
 
         PaperBroker stores the protective stop on the in-memory position and has
@@ -720,11 +728,72 @@ class TradingEngineEvaluationMixin:
                 }
             ]
             if not stop_orders:
+                # STOP-LEG REPAIR 2026-10-16: entries are broker-request
+                # target-free by design (PIS owns exits), so positions opened
+                # without a bracket often have NO broker stop leg at all —
+                # then this warned every minute while the position rode naked
+                # (2026-10-15 LRCX: floor 273.86, no leg, server died before
+                # EOD). Repair instead of only warning: submit a standalone
+                # STOP at the PIS floor. Later ratchets use replace_exit_leg.
+                # Throttled to one attempt per symbol per 60s so a persistent
+                # rejection cannot spam the broker.
+                import time as _time
+
+                from app.core.domain import OrderRequest, OrderSide, OrderType
+
+                now_ts = _time.time()
+                last_try = getattr(self, "_stop_leg_submit_ts", {}).get(symbol.upper(), 0.0)
+                if now_ts - last_try < 60.0:
+                    return False
+                try:
+                    broker_positions = await broker.positions()
+                except Exception:
+                    broker_positions = []
+                pos = next(
+                    (p for p in broker_positions if str(getattr(p, "symbol", "")).upper() == symbol.upper()),
+                    None,
+                )
+                if pos is None or not abs(float(getattr(pos, "qty", 0.0) or 0.0)) > 0:
+                    applog.warning(
+                        "engine.exit",
+                        f"{symbol}: PIS stop floor {stop_price:.4f} not synchronized; no open broker stop leg found",
+                    )
+                    return False
+                if not hasattr(self, "_stop_leg_submit_ts") or not isinstance(self._stop_leg_submit_ts, dict):
+                    self._stop_leg_submit_ts = {}
+                self._stop_leg_submit_ts[symbol.upper()] = now_ts
+                broker_qty = abs(float(pos.qty))
+                requested_qty = broker_qty if qty is None else abs(float(qty))
+                repair_qty = min(broker_qty, requested_qty)
+                if repair_qty <= 1e-9:
+                    return False
+                side = OrderSide.SELL if float(pos.qty) > 0 else OrderSide.BUY
+                try:
+                    repair = await broker.submit(
+                        OrderRequest(
+                            symbol=symbol.upper(),
+                            side=side,
+                            qty=repair_qty,
+                            order_type=OrderType.STOP,
+                            stop_price=float(stop_price),
+                            strategy="pis_protection",
+                            reason=f"PIS protective stop repair @ {stop_price:.4f}",
+                        )
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    applog.warning("engine.exit", f"{symbol}: protective stop repair submit failed: {exc}")
+                    return False
+                if getattr(repair, "status", None) == OrderStatus.REJECTED:
+                    applog.warning(
+                        "engine.exit",
+                        f"{symbol}: protective stop repair rejected: {getattr(repair, 'reason', '')}",
+                    )
+                    return False
                 applog.warning(
                     "engine.exit",
-                    f"{symbol}: PIS stop floor {stop_price:.4f} not synchronized; no open broker stop leg found",
+                    f"{symbol}: submitted missing broker STOP leg @ {stop_price:.4f} (PIS floor repair)",
                 )
-                return False
+                return True
             for order in stop_orders:
                 replacement = await replace_exit_leg(str(order.id), stop_price=stop_price)
                 if replacement is not None:

@@ -37,6 +37,10 @@ class OpeningRangeBreakout(Strategy):
         "breakout_buffer_bps": 5,     # close must clear the range by 0.05%
         "atr_buffer_mult": 0.0,       # if > 0, overrides breakout_buffer_bps with (mult * ATR)
         "volume_z_min": 1.5,
+        "short_volume_z_min": 2.0,     # REWRITE 2026-10-16: shorts need vol_z >= 2.0
+                                        # (rollback = 1.5, env ORB_SHORT_VOL_Z)
+        "short_acceptance": 0.60,       # REWRITE 2026-10-16: shorts always need 0.60
+                                        # acceptance (rollback = 0.50, env ORB_SHORT_ACCEPTANCE)
         "atr_stop_mult": 2.0,         # risk cap when the range is very wide
         "reward_risk": 2.0,
         "trailing_stop_atr_mult": 1.5, # if > 0, activates dynamic trailing stop
@@ -59,7 +63,14 @@ class OpeningRangeBreakout(Strategy):
         #   - min_range_atr: degenerate tiny ranges whose breakout is noise get skipped.
         # SAFE ROLLBACK: Set end_time='15:59', acceptance_lowvol=0.50, min_range_atr=0.0
         # [NEW CODE]:
-        "end_time": "15:00",             # CR-03: no new ORB after 15:00 ET; runners managed by PIS
+        "end_time": "14:00",             # REWRITE 2026-10-16: no new ORB after 14:00 ET (was 15:00).
+                                          # Baseline replay Aug10-21 x36: 18Z bucket (14:00-14:59 ET)
+                                          # printed 20 trades -$1,076 riding into EOD flatten.
+                                          # Runners still PIS-managed. Env ORB_END_TIME overrides.
+        "start_time": "10:00",           # REWRITE 2026-10-16: no new ORB before 10:00 ET.
+                                          # Baseline replay: 13Z bucket (09:30-10:00 ET) printed
+                                          # 7 trades -$1,636 opening-fakeout losses. Env ORB_START_TIME
+                                          # overrides; rollback = start_time '09:30', end_time '15:00'.
         "acceptance_lowvol": 0.60,       # CR-03: tighter acceptance when vol_z < 2.0 (wick fakeout guard)
         "min_range_atr": 0.5,            # CR-03: skip degenerate ranges smaller than 0.5 ATR
         # =============================================================================
@@ -124,9 +135,6 @@ class OpeningRangeBreakout(Strategy):
         # REASON FOR CHANGE: If df was stale, today evaluated to yesterday's date, causing ORB
         #   to evaluate yesterday's opening range as today's (e.g. NVDA px=128.92 incident).
         #   If ctx.now is provided, require that the latest bar's date matches ctx.now's session date.
-        # [PREVIOUS CODE - PRESERVED]:
-        # # No check against ctx.now session date
-        # -----------------------------------------------------------------------------
         # [NEW CODE]:
         if ctx.now is not None:
             ctx_date = ctx.now.astimezone(ET).date()
@@ -144,13 +152,15 @@ class OpeningRangeBreakout(Strategy):
         # REASON FOR CHANGE: Late-day ORB entries (post-15:00) with insufficient PIS time
         #   ride to EOD flatten for full -1R. ORB edge is strictly a morning phenomenon.
         #   Existing runners after 15:00 are still managed by PIS (this only blocks new entries).
-        # [PREVIOUS CODE - PRESERVED]:
-        # end_time_str = p.get("end_time", "15:00")
         import os
-        end_time_str = os.environ.get("ORB_END_TIME", p.get("end_time", "15:00"))
+        end_time_str = os.environ.get("ORB_END_TIME", p.get("end_time", "14:00"))
+        start_time_str = os.environ.get("ORB_START_TIME", p.get("start_time", "10:00"))
         from datetime import time as dtime
         end_t = dtime.fromisoformat(end_time_str)
+        start_t = dtime.fromisoformat(start_time_str)
         if now_time > end_t:
+            return None
+        if now_time < start_t:
             return None
         # =============================================================================
 
@@ -194,6 +204,15 @@ class OpeningRangeBreakout(Strategy):
         else:
             buffer = 1.0 + p["breakout_buffer_bps"] / 10_000.0
         volume_ok = vol_z >= p["volume_z_min"]
+        # REWRITE 2026-10-16: short discipline — ORB shorts printed 85 trades
+        # -$822 (vs longs +$126/56) on the Aug10-21 x36 baseline; lifetime
+        # shorts are -$7.6k/605. Short breakouts need real participation, not
+        # drift-throughs: shorts require vol_z >= short_volume_z_min (2.0).
+        # Longs keep volume_z_min (1.5). Tightening-only, env-overridable.
+        import os as _os
+        short_vol_min = float(_os.environ.get(
+            "ORB_SHORT_VOL_Z", p.get("short_volume_z_min", 2.0)))
+        volume_ok_short = vol_z >= max(float(p["volume_z_min"]), short_vol_min)
         confidence = min(0.85, 0.55 + 0.08 * max(0.0, vol_z))
 
         # Climax guard: prevent entering if price is stretched more than climax_atr_mult ATR from EMA9
@@ -213,13 +232,13 @@ class OpeningRangeBreakout(Strategy):
         #   probe than genuine acceptance. Tighten to acceptance_lowvol=0.60 in that case.
         #   High-vol breakouts (vol_z >= 2.0) keep the standard 0.50 threshold.
         # SAFE ROLLBACK: Remove vol_z condition; use min_acceptance unconditionally.
-        # [PREVIOUS CODE - PRESERVED]:
-        # min_acceptance = float(p.get("min_acceptance_ratio", 0.50))
-        # -----------------------------------------------------------------------------
         # [NEW CODE]:
         min_acceptance_base = float(p.get("min_acceptance_ratio", 0.50))
         min_acceptance_lowvol = float(p.get("acceptance_lowvol", 0.60))
         min_acceptance = min_acceptance_lowvol if vol_z < 2.0 else min_acceptance_base
+        # FALSIFIED 2026-10-16: shorts-always-0.60 acceptance printed -$589 vs
+        # -$522 baseline (cut winners, kept losers). Reverted to the shared
+        # min_acceptance path. Param short_acceptance retained but unused.
         # =============================================================================
         bar_high = float(last["high"]); bar_low = float(last["low"])
         bar_range = max(1e-6, bar_high - bar_low)
@@ -265,7 +284,7 @@ class OpeningRangeBreakout(Strategy):
                 stop_loss=stop,
                 take_profit=close + p["reward_risk"] * risk,
             )
-        if close < or_low / buffer and volume_ok and is_bearish_5m and ctx.regime == Regime.TREND_DOWN:
+        if close < or_low / buffer and volume_ok_short and is_bearish_5m and ctx.regime == Regime.TREND_DOWN:
             if not drift_short_ok:
                 return None
             if acceptance_short < min_acceptance:

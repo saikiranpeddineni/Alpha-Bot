@@ -16,6 +16,7 @@ import math
 from datetime import UTC, datetime
 from typing import Any
 
+import pandas as pd
 from app.core.domain import OrderRequest, Position
 from app.pis.execution import PISExecutionAdapter
 from app.pis.models import PISConfig, PISDecision, PositionObservation
@@ -100,21 +101,16 @@ class PISEngineAdapter:
         if initial_stop is None or math.isnan(initial_stop) or initial_stop <= 0:
             initial_stop = entry_px - (side * 2.0 * atr_px)
 
-        # --- PREVIOUS IMPLEMENTATION (Preserved for historical intent & audit) ---
-        # risk_per_share = abs(entry_px - initial_stop)
-        # if risk_per_share <= 1e-8 or math.isnan(risk_per_share):
-        #     risk_per_share = max(0.01, atr_px)
-        # --------------------------------------------------------------------------
-        # --- NEW IMPLEMENTATION ---
-        # When evaluating high-priced stocks (e.g. AVGO at $363) during low-volatility windows,
-        # atr_px can be as low as $0.20-$0.25, collapsing risk_per_share to $0.50.
-        # A sub-0.1% tick fluctuation (-$0.26) would then artificially register as > -0.55R,
-        # prematurely triggering early thesis invalidation in under 60 seconds.
-        # Enforce a sensible minimum risk floor of at least 0.5% of entry price (matching RiskConfig.min_stop_pct).
+        # R geometry is defined by the actual initial stop.  Do not widen a tight
+        # broker stop with an unrelated percentage floor: doing so changes every
+        # downstream R calculation (peak, trough, targets, and thesis drift).
         risk_per_share = abs(entry_px - initial_stop)
-        min_risk_floor = max(0.01, entry_px * 0.005)
-        if risk_per_share < min_risk_floor or math.isnan(risk_per_share):
-            risk_per_share = max(risk_per_share, min_risk_floor) if not math.isnan(risk_per_share) and risk_per_share > 1e-8 else min_risk_floor
+        if math.isnan(risk_per_share) or math.isinf(risk_per_share) or risk_per_share <= 0.0:
+            # A zero-width explicit stop cannot produce a valid PositionObservation.
+            # Fall back to the same ATR-derived stop used for a missing stop rather
+            # than inventing a different R denominator while retaining that stop.
+            initial_stop = entry_px - (side * 2.0 * atr_px)
+            risk_per_share = abs(entry_px - initial_stop)
 
         r_multiple = (cur_px - entry_px) / risk_per_share * side
         if math.isnan(r_multiple) or math.isinf(r_multiple):
@@ -139,28 +135,7 @@ class PISEngineAdapter:
         # [MODIFIED 2026-10-14]: CR-07 - Pass Strategy & RSI2 Context to PIS
         # ORIGINAL INTENT: PositionObservation lacked strategy name and rsi2 indicator value.
         # REASON FOR CHANGE: Enable mean-reversion target hit recognition (RSI2 >= 70) in PIS exit planner.
-        # SAFE ROLLBACK: The original code is preserved below as comments.
-        # -----------------------------------------------------------------------------
-        # [PREVIOUS CODE - PRESERVED]:
-        # obs = PositionObservation(
-        #     timestamp=eval_ts,
-        #     symbol=symbol,
-        #     side=side,
-        #     qty=abs(float(position.qty)),
-        #     entry_price=entry_px,
-        #     current_price=cur_px,
-        #     high=max(high_px, cur_px),
-        #     low=min(low_px, cur_px),
-        #     close=close_px,
-        #     volume=vol_px,
-        #     atr=atr_px,
-        #     initial_stop=initial_stop,
-        #     risk_per_share=risk_per_share,
-        #     current_stop=current_stop,
-        #     take_profit=take_profit,
-        #     r_multiple=r_multiple,
-        #     news_sentiment_score=news_sentiment,
-        # )
+        # SAFE ROLLBACK: The original code is removed; rollback via git history.
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
         strat_name = str(getattr(position, "strategy", "") or "")
@@ -178,8 +153,11 @@ class PISEngineAdapter:
             qty=abs(float(position.qty)),
             entry_price=entry_px,
             current_price=cur_px,
-            high=max(high_px, cur_px),
-            low=min(low_px, cur_px),
+            # Keep bar extremes tied to the completed row.  ``cur_px`` may be a
+            # fresher broker quote than the row and must not become lookahead
+            # input for peak-R memory or runner protection.
+            high=high_px,
+            low=low_px,
             close=close_px,
             volume=vol_px,
             atr=atr_px,
@@ -195,11 +173,10 @@ class PISEngineAdapter:
         # =============================================================================
 
         from app.db.database import Database
-        from app.pis.profit_memory import ProfitMemoryState
 
         db = Database.active()
 
-        restored_memory = None
+        restored_state = None
         # Mode-namespaced profit memory: paper and live excursion histories are
         # separate worlds. Falls back to "unknown" for standalone/test usage.
         mem_mode = mode or getattr(self, "mode", None) or "unknown"
@@ -207,47 +184,98 @@ class PISEngineAdapter:
         entry_date = opened_at.astimezone(UTC).date().isoformat() if opened_at else None
 
         if db and self.persist_profit_memory and self.service.get_brain(symbol) is None:
-            # About to create a new brain. Restore prior excursion memory ONLY
-            # when it belongs to this same position lifetime (same symbol AND
-            # same entry date). Otherwise a previous day's runner memory would
-            # seed today's fresh trade with phantom peak_r floors.
+            # About to create a new brain. Restore prior excursion memory only
+            # when it belongs to this same position lifetime.  Older payloads
+            # are date-bound; newer payloads also carry exact entry/side/stop
+            # identity because broker position snapshots do not always expose
+            # opened_at after a restart.
             mem_dict = await asyncio.to_thread(db.get_pis_profit_memory, mode=mem_mode, symbol=symbol)
-            if mem_dict:
+            if isinstance(mem_dict, dict) and mem_dict:
                 stored_entry_date = mem_dict.get("entry_date")
-                if entry_date is not None and stored_entry_date == entry_date:
-                    try:
-                        restored_memory = ProfitMemoryState(
-                            peak_r=mem_dict.get("peak_r", 0.0),
-                            trough_r=mem_dict.get("trough_r", 0.0),
-                            mfe_price=mem_dict.get("mfe_price", cur_px),
-                            mae_price=mem_dict.get("mae_price", cur_px)
-                        )
-                    except Exception:
-                        restored_memory = None
+                has_position_identity = all(
+                    key in mem_dict for key in ("entry_price", "side", "initial_stop")
+                )
+                same_position_lifetime = (
+                    entry_date == stored_entry_date
+                    if stored_entry_date is not None
+                    else has_position_identity
+                )
+                if (
+                    same_position_lifetime
+                    and self._payload_matches_position(
+                        mem_dict,
+                        symbol=symbol,
+                        entry_price=entry_px,
+                        side=side,
+                        initial_stop=initial_stop,
+                    )
+                ):
+                    # The existing JSON payload store is deliberately reused.
+                    # Passing the full mapping lets PositionBrain restore both
+                    # legacy excursion memory and the durable runner/lifecycle
+                    # state added to that payload.
+                    restored_state = dict(mem_dict)
 
         # Dispatch through service
-        decision = self.service.observe(obs, restored_memory=restored_memory)
+        decision = self.service.observe(obs, restored_memory=restored_state)
 
         if db and self.persist_profit_memory:
             brain = self.service.get_brain(symbol)
             if brain:
+                state_payload = brain.serialize_state()
+                state_payload.update(
+                    {
+                        "entry_date": entry_date,
+                        "entry_price": entry_px,
+                        "side": side,
+                        "initial_stop": initial_stop,
+                    }
+                )
                 await asyncio.to_thread(
                     db.save_pis_profit_memory,
                     mode=mem_mode,
                     symbol=symbol,
-                    payload={
-                        "peak_r": brain.peak_r,
-                        "trough_r": brain.trough_r,
-                        "mfe_price": brain._profit_memory.mfe_price,
-                        "mae_price": brain._profit_memory.mae_price,
-                        "entry_date": entry_date,
-                    }
+                    payload=state_payload,
                 )
 
         # Convert to order request if exit triggered
         order_req = PISExecutionAdapter.build_order_request(decision, obs)
 
         return order_req, decision
+
+    @staticmethod
+    def _payload_matches_position(
+        payload: dict[str, Any],
+        *,
+        symbol: str,
+        entry_price: float,
+        side: float,
+        initial_stop: float,
+    ) -> bool:
+        """Reject persisted state that is clearly for another position.
+
+        The pre-existing store is keyed by mode and symbol and historically only
+        carried ``entry_date``.  New fields are checked when present, while old
+        payloads remain restorable for the same position lifetime.
+        """
+        stored_symbol = payload.get("symbol")
+        if stored_symbol is not None and str(stored_symbol).upper() != symbol:
+            return False
+
+        for key, expected in (
+            ("entry_price", entry_price),
+            ("side", side),
+            ("initial_stop", initial_stop),
+        ):
+            if key not in payload:
+                continue
+            try:
+                stored = float(payload[key])
+            except (TypeError, ValueError):
+                return False
+            if not math.isfinite(stored) or not math.isclose(stored, expected, rel_tol=1e-9, abs_tol=1e-6):
+                return False
+        return True
 
     def handle_position_closed(self, symbol: str) -> None:
         """Handle position close event from engine."""

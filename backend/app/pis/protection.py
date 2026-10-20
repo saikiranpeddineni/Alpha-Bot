@@ -36,6 +36,7 @@ class AdaptiveProtectionPlanner:
         allow_relaxation: bool = False,
         has_scaled_out: bool = False,
         predicted_max_r: float = 2.0,
+        causal_reversal_confirmed: bool = False,
     ) -> float:
         """Compute the updated protection floor for a position.
 
@@ -46,6 +47,10 @@ class AdaptiveProtectionPlanner:
             allow_relaxation: If True, bypasses strict monotonicity (default False).
             has_scaled_out: If True, position has locked initial profit; uses breakeven + adaptive ATR trail.
             predicted_max_r: Predicted dynamic maximum R capacity.
+            causal_reversal_confirmed: True only when the position brain has
+                confirmed a reversal across completed bars with sufficient
+                high-water giveback.  This tightens a runner floor without
+                weakening the monotonic invariant.
 
         Returns:
             Calculated stop loss price (float).
@@ -83,26 +88,69 @@ class AdaptiveProtectionPlanner:
                 # Early runner phase: allow maximum breathing room (2.0x ATR)
                 trail_mult = getattr(self.config, "runner_wide_atr_mult", 2.0)
 
-            wide_trail = obs.close - (side * trail_mult * obs.atr)
-            candidate_floor = max(breakeven_floor, wide_trail) if side > 0 else min(breakeven_floor, wide_trail)
+            # A completed bar's favorable extreme is the only price input used to
+            # advance runner protection.  Using close here leaves a large amount of
+            # captured excursion unprotected whenever a bar closes back from its
+            # high (or low for a short).  The remembered peak is also a completed
+            # observation, so it can extend the anchor without lookahead.  Once a
+            # bar has already breached the prior floor, do not ratchet from that
+            # older peak; monotonicity should preserve the existing floor only.
+            peak_price = entry + (side * max(0.0, peak_r) * risk)
+            floor_not_breached = (
+                previous_floor is None
+                or (
+                    side > 0
+                    and obs.current_price > previous_floor
+                    and obs.close > previous_floor
+                )
+                or (
+                    side < 0
+                    and obs.current_price < previous_floor
+                    and obs.close < previous_floor
+                )
+            )
+            if previous_floor is not None and not floor_not_breached:
+                # A breached broker floor is already actionable; never move it
+                # again from a reversal bar after the breach.
+                candidate_floor = previous_floor
+            else:
+                if side > 0:
+                    runner_anchor = max(obs.high, peak_price)
+                else:
+                    runner_anchor = min(obs.low, peak_price)
+                wide_trail = runner_anchor - (side * trail_mult * obs.atr)
+                candidate_floor = max(breakeven_floor, wide_trail) if side > 0 else min(breakeven_floor, wide_trail)
+
+                # Once a completed-bar reversal is confirmed, replace the
+                # runner's deliberately wide breathing room with a causal
+                # high-water giveback floor.  The floor is capped at the
+                # completed-bar close so this path does not use a fresher quote
+                # as a hidden future extreme; the final monotonic guard still
+                # wins if the hard floor has already been breached.
+                if causal_reversal_confirmed and getattr(self.config, "enable_causal_peak_capture", True):
+                    giveback_r = max(
+                        getattr(self.config, "causal_peak_capture_min_giveback_r", 0.50),
+                        max(0.0, peak_r)
+                        * getattr(self.config, "causal_peak_capture_giveback_pct", 0.25),
+                    )
+                    locked_r = max(
+                        self.config.min_locked_r,
+                        max(0.0, peak_r) - giveback_r,
+                    )
+                    causal_floor = entry + (side * locked_r * risk)
+                    if side > 0:
+                        causal_floor = min(causal_floor, obs.close)
+                        candidate_floor = max(candidate_floor, causal_floor)
+                    else:
+                        causal_floor = max(causal_floor, obs.close)
+                        candidate_floor = min(candidate_floor, causal_floor)
         elif peak_r < activation_r:
             # =============================================================================
             # [MODIFIED 2026-10-14]: CR-10 - Adaptive Protection Arming (Strategy-Aware ATR Multiplier)
             # ORIGINAL INTENT: Used flat breakeven_trigger_atr_mult (2.50) for all trades.
             # REASON FOR CHANGE: Breakouts (momentum, orb, bb_squeeze) reverse fast and need earlier
             # protection arming (1.5x ATR) than mean-reversion setups (2.5x ATR).
-            # SAFE ROLLBACK: The original code is preserved below as comments.
-            # -----------------------------------------------------------------------------
-            # [PREVIOUS CODE - PRESERVED]:
-            # atr_r = obs.atr / risk if risk > 1e-8 else 0.0
-            # cap_trig = getattr(self.config, "progressive_lock_cap_trigger_r", 0.85)
-            # effective_trigger = min(
-            #     cap_trig,
-            #     max(
-            #         self.config.breakeven_trigger_r,
-            #         getattr(self.config, "breakeven_trigger_atr_mult", 0.0) * atr_r,
-            #     ),
-            # )
+            # SAFE ROLLBACK: The original code is removed; rollback via git history.
             # -----------------------------------------------------------------------------
             # [NEW CODE]:
             atr_r = obs.atr / risk if risk > 1e-8 else 0.0

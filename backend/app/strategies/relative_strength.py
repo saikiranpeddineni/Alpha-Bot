@@ -90,34 +90,7 @@ class RelativeStrength(Strategy):
         # without any ATR buffer, letting $0.01 nominal tag highs pass into generic excursion fills.
         # REASON FOR CHANGE: Supply native ATR-based stop and target geometry (2.0 ATR stop, 2.5R target)
         # and require a 0.1 ATR breakout buffer to prevent spread noise triggers.
-        # SAFE ROLLBACK: The original code is preserved below as comments.
-        # -----------------------------------------------------------------------------
-        # [PREVIOUS CODE - PRESERVED]:
-        # # Long Setup (High Relative Strength)
-        # if ctx.rs_score >= p["rs_long_threshold"]:
-        #     if close_px > local_high:
-        #         confidence = min(0.90, 0.60 + 0.1 * (ctx.rs_score - p["rs_long_threshold"]))
-        #         return Signal(
-        #             symbol=symbol,
-        #             action=SignalAction.ENTER_LONG,
-        #             confidence=round(confidence, 4),
-        #             strategy=self.name,
-        #             reason=f"RS score {ctx.rs_score:.2f} > {p['rs_long_threshold']} and broke local high",
-        #             score=0.75,
-        #         )
-        #
-        # # Short Setup (High Relative Weakness)
-        # if ctx.rs_score <= p["rs_short_threshold"]:
-        #     if close_px < local_low:
-        #         confidence = min(0.90, 0.60 + 0.1 * (p["rs_short_threshold"] - ctx.rs_score))
-        #         return Signal(
-        #             symbol=symbol,
-        #             action=SignalAction.ENTER_SHORT,
-        #             confidence=round(confidence, 4),
-        #             strategy=self.name,
-        #             reason=f"RS score {ctx.rs_score:.2f} < {p['rs_short_threshold']} and broke local low",
-        #             score=0.75,
-        #         )
+        # SAFE ROLLBACK: The original code is removed; rollback via git history.
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
         atr14 = float(last_row["atr14"]) if ("atr14" in last_row and not pd.isna(last_row["atr14"])) else (close_px * 0.015)

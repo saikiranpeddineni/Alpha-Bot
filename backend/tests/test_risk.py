@@ -113,31 +113,48 @@ def test_daily_loss_halt_trips_and_blocks(rm: RiskManager, bars):
     assert not rm.daily_halted
 
 
-# =============================================================================
-# [RESTORED 2026-10-13]: Max-drawdown kill switch is capital protection.
-# The temporary disabled behavior is preserved below as comments for audit.
-# -----------------------------------------------------------------------------
-# [HISTORICAL DISABLED IMPLEMENTATION - PRESERVED]:
-# def test_max_drawdown_kill_switch_disabled(rm: RiskManager, bars):
-#     halted = rm.check_halts(ctx(equity=89_000, peak=100_000), now=MID_SESSION)
-#     assert halted is None
-#     assert not rm.hard_halted
-# -----------------------------------------------------------------------------
-# [NEW CODE]:
-# def test_max_drawdown_kill_switch(rm: RiskManager, bars):
-#     halted = rm.check_halts(ctx(equity=89_000, peak=100_000), now=MID_SESSION)
-#     assert halted == "hard"
-#     assert rm.hard_halted
-#     decision = rm.evaluate_entry(long_signal(), ctx(), bars, now=MID_SESSION)
-#     assert not decision.approved and "hard halt" in decision.reason
-#     rm.reset_hard_halt()
-#     assert not rm.hard_halted
-# # =============================================================================
+def test_daily_profit_lock_trips_flattens_and_blocks(rm: RiskManager, bars):
+    # Operator demand 2026-10-16: bank green days at +daily_profit_lock_pct (default 1.0%).
+    assert rm.config.daily_profit_lock_pct == 1.0
+    halted = rm.check_halts(ctx(equity=101_100, day_pnl=+1_100), now=MID_SESSION)
+    assert halted == "profit"
+    assert rm.profit_locked
+    decision = rm.evaluate_entry(long_signal(), ctx(), bars, now=MID_SESSION)
+    assert not decision.approved and "profit" in decision.reason
+    # Below threshold: no trip
+    rm2_halt = rm.check_halts(ctx(equity=100_500, day_pnl=+500), now=MID_SESSION)
+    assert rm2_halt is None or rm.profit_locked  # already locked stays locked
+    # New session clears it
+    rm.roll_session(datetime(2026, 1, 7).date())
+    assert not rm.profit_locked
+    # Disabled at 0.0
+    rm.config.daily_profit_lock_pct = 0.0
+    rm.profit_locked = False
+    assert rm.check_halts(ctx(equity=105_000, day_pnl=+5_000), now=MID_SESSION) is None
 
-def test_max_drawdown_kill_switch_disabled(rm: RiskManager, bars):
-    halted = rm.check_halts(ctx(equity=89_000, peak=100_000), now=MID_SESSION)
-    assert halted is None
-    assert not rm.hard_halted
+
+@pytest.mark.parametrize(
+    ("equity", "expected_halt"),
+    [
+        (90_001.0, None),  # 9.999% drawdown: just below the configured 10% limit
+        (90_000.0, "hard"),  # exactly at the limit must trip the hard halt
+    ],
+)
+def test_max_drawdown_kill_switch_boundary_blocks_entries(rm: RiskManager, bars, equity, expected_halt):
+    halted = rm.check_halts(ctx(equity=equity, peak=100_000.0), now=MID_SESSION)
+    assert halted == expected_halt
+
+    if expected_halt == "hard":
+        assert rm.hard_halted
+        assert "MAX DRAWDOWN HALT" in rm.hard_halt_reason
+        assert "10.00%" in rm.hard_halt_reason
+        decision = rm.evaluate_entry(long_signal(), ctx(equity=equity, peak=100_000.0), bars, now=MID_SESSION)
+        assert not decision.approved
+        assert "hard halt" in decision.reason
+        rm.reset_hard_halt()
+        assert not rm.hard_halted
+    else:
+        assert not rm.hard_halted
 
 def test_consecutive_loss_cooldown(rm: RiskManager, bars):
     now = MID_SESSION

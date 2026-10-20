@@ -22,6 +22,7 @@
 .replay-controls input, .replay-controls select { height: 32px; min-width: 130px; }
 .replay-run-wrap { margin-left: auto; display: flex; align-items: flex-end; }
 .replay-run { height: 32px; min-width: 190px; }
+.replay-cancel { height: 32px; }
 
 .replay-symbols-bar { display: flex; align-items: center; gap: 12px; padding: 10px 22px; border-bottom: 1px solid var(--border); background: var(--panel-2); }
 .replay-symbols-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--faint); white-space: nowrap; }

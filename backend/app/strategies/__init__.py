@@ -4,20 +4,7 @@
 # [MODIFIED 2026-10-14]: CR-02b - Register PullbackRearm Strategy
 # ORIGINAL INTENT: Registered 9 built-in strategies.
 # REASON FOR CHANGE: Register pullback_rearm second-chance continuation strategy.
-# SAFE ROLLBACK: The original code is preserved below as comments.
-# -----------------------------------------------------------------------------
-# [PREVIOUS CODE - PRESERVED]:
-# from app.strategies import (  # noqa: F401
-#     bb_squeeze,
-#     gap_and_go,
-#     liquidity_sweep,
-#     momentum,
-#     orb,
-#     relative_strength,
-#     rsi_reversion,
-#     trend_pullback,
-#     vwap_reversion,
-# )
+# SAFE ROLLBACK: The original code is removed; rollback via git history.
 # -----------------------------------------------------------------------------
 # [NEW CODE]:
 from app.strategies import (  # noqa: F401

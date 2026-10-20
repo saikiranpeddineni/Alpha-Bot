@@ -45,6 +45,8 @@ class ExitPlanner:
         has_scaled_out: bool = False,
         predicted_max_r: float = 2.0,
         runner_probability: float = 0.0,
+        causal_reversal_confirmed: bool = False,
+        causal_giveback_r: float = 0.0,
     ) -> PISDecision:
         """Synthesize final PISDecision.
 
@@ -62,6 +64,10 @@ class ExitPlanner:
             has_scaled_out: True if position has already executed its first-stage scale out.
             predicted_max_r: Predicted maximum R capacity.
             runner_probability: Quant runner probability score [0.0, 1.0].
+            causal_reversal_confirmed: True only after the position brain has
+                observed the configured number of adverse completed-bar closes.
+            causal_giveback_r: High-water peak-R minus the latest completed-bar
+                close-R, supplied by the position brain.
 
         Returns:
             Immutable PISDecision.
@@ -88,15 +94,7 @@ class ExitPlanner:
         # ORIGINAL INTENT: Target hit only evaluated static take_profit price boundary.
         # REASON FOR CHANGE: For rsi2_reversion setups, reaching RSI2 >= 70 (long) or <= 30 (short)
         # represents full thesis completion/normalization. Wire into target_hit as a Stage-1 trigger.
-        # SAFE ROLLBACK: The original code is preserved below as comments.
-        # -----------------------------------------------------------------------------
-        # [PREVIOUS CODE - PRESERVED]:
-        # target_hit = False
-        # if obs.take_profit is not None and obs.take_profit > 0:
-        #     target_dist = (obs.take_profit - obs.high) if side > 0 else (obs.low - obs.take_profit)
-        #     target_tolerance = max(0.05, 0.20 * obs.atr)
-        #     if side > 0 and (obs.high >= obs.take_profit or (peak_r >= 1.50 and target_dist <= target_tolerance)) or side < 0 and (obs.low <= obs.take_profit or (peak_r >= 1.50 and target_dist <= target_tolerance)):
-        #         target_hit = True
+        # SAFE ROLLBACK: The original code is removed; rollback via git history.
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
         target_hit = False
@@ -186,13 +184,7 @@ class ExitPlanner:
         # When predicted_max_r is available, trigger Stage-1 50% scale-out when position reaches
         # >= 70% of predicted ceiling (min 1.0R) with fading momentum (score <= 0.45), banking
         # profit at predicted capacity.
-        # SAFE ROLLBACK: The original code is preserved below as comments.
-        # -----------------------------------------------------------------------------
-        # [PREVIOUS CODE - PRESERVED]:
-        # scale_out_triggered = False
-        # if getattr(self.config, "enable_scale_out", True) and not has_scaled_out:
-        #     if target_hit or peak_r >= effective_scale_out_r or exhaustion_climax or stagnation_harvest:
-        #         scale_out_triggered = True
+        # SAFE ROLLBACK: The original code is removed; rollback via git history.
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
         predicted_ceiling_scale_out = (
@@ -221,31 +213,7 @@ class ExitPlanner:
         # REASON FOR CHANGE: Excursions > 1R gave back 55% of gains. Tier giveback (40% for 1-2R, 30% for >=2R)
         # to lock in proven moves. Dead-money losers (r <= -0.25 after 12-15 bars with peak < 0.30R)
         # bled 30 bars to full -1R; DOA stagnation cut exits early to protect capital.
-        # SAFE ROLLBACK: The original code is preserved below as comments.
-        # -----------------------------------------------------------------------------
-        # [PREVIOUS CODE - PRESERVED]:
-        # giveback_guard_triggered = False
-        # if (
-        #     getattr(self.config, "enable_profit_giveback_guard", True)
-        #     and not has_scaled_out
-        #     and not scale_out_triggered
-        #     and peak_r >= self.config.profit_guard_peak_r
-        #     and obs.r_multiple > 0.0
-        # ):
-        #     giveback = peak_r - obs.r_multiple
-        #     atr_r_buffer = (
-        #         getattr(self.config, "profit_guard_min_giveback_atr_r", 0.0)
-        #         * (obs.atr / obs.risk_per_share if obs.risk_per_share > 1e-8 else 0.0)
-        #     )
-        #     min_giveback = min(
-        #         peak_r * 0.50,
-        #         max(
-        #             self.config.profit_guard_max_giveback_pct * peak_r,
-        #             atr_r_buffer,
-        #         ),
-        #     )
-        #     if giveback >= min_giveback:
-        #         giveback_guard_triggered = True
+        # SAFE ROLLBACK: The original code is removed; rollback via git history.
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
         # CR-13: DOA-stall harvest for underwater, zero-excursion dead money
@@ -288,6 +256,28 @@ class ExitPlanner:
                 giveback_guard_triggered = True
         # =============================================================================
 
+        # Causal high-water harvest.  The position brain supplies a signal built
+        # only from observations already received; this planner never consults a
+        # future bar or an end-of-day maximum.  After a first-stage scale-out the
+        # remaining runner is harvested in full once reversal confirmation and
+        # material giveback are both present.  Before scale-out, the same signal
+        # banks the configured first tranche and leaves the new runner protected.
+        causal_peak_capture_triggered = False
+        causal_giveback_threshold = max(
+            getattr(self.config, "causal_peak_capture_min_giveback_r", 0.50),
+            max(0.0, peak_r)
+            * getattr(self.config, "causal_peak_capture_giveback_pct", 0.25),
+        )
+        if (
+            getattr(self.config, "enable_causal_peak_capture", True)
+            and causal_reversal_confirmed
+            and peak_r >= getattr(self.config, "causal_peak_capture_min_peak_r", 1.00)
+            and causal_giveback_r >= causal_giveback_threshold
+        ):
+            causal_peak_capture_triggered = True
+            is_runner = True
+        # =============================================================================
+
         # Determine exit action
         # Floor-tag runner gate: thesis must be intact and health not collapsing.
         # A tagged floor WITH degradation is a real exit, not an option to run.
@@ -305,17 +295,15 @@ class ExitPlanner:
         # ORIGINAL INTENT: Early invalidation was the only negative-R fast harvest.
         # REASON FOR CHANGE: Dead-money trades stuck at <= -0.25R with zero excursion for 12+ bars
         # held all the way to 30 bars or -1R. Trigger FULL_EXIT on doa_stall_triggered.
-        # SAFE ROLLBACK: The original code is preserved below as comments.
-        # -----------------------------------------------------------------------------
-        # [PREVIOUS CODE - PRESERVED]:
-        # if early_invalidation_breach:
-        #     action = ExitAction.FULL_EXIT
-        #     exit_ratio = 1.0
+        # SAFE ROLLBACK: The original code is removed; rollback via git history.
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
         if early_invalidation_breach or doa_stall_triggered:
             action = ExitAction.FULL_EXIT
             exit_ratio = 1.0
+        elif causal_peak_capture_triggered:
+            action = ExitAction.FULL_EXIT if has_scaled_out else ExitAction.PARTIAL_EXIT
+            exit_ratio = 1.0 if has_scaled_out else getattr(self.config, "scale_out_ratio", 0.50)
         # =============================================================================
         elif protection_breached or lifecycle == LifecycleState.EXIT_CANDIDATE:
             if floor_tag_runner and not has_scaled_out:
@@ -368,6 +356,12 @@ class ExitPlanner:
             reasons.append(ReasonCode.EARLY_THESIS_INVALIDATED)
         elif doa_stall_triggered:
             reasons.append(ReasonCode.DOA_STAGNATION_HARVEST)
+        elif causal_peak_capture_triggered:
+            reasons.append(ReasonCode.CAUSAL_PEAK_REVERSAL)
+            if protection_breached:
+                # Keep the hard-stop evidence visible when the tightened causal
+                # floor and the live quote reach the broker boundary together.
+                reasons.append(ReasonCode.PROTECTION_BREACH)
         elif floor_tag_runner and action == ExitAction.PARTIAL_EXIT:
             # Order matters: this must precede the plain PROTECTION_BREACH tag so
             # telemetry distinguishes "runner left behind" from "full cut".
@@ -407,5 +401,8 @@ class ExitPlanner:
                 "predicted_max_r": predicted_max_r,
                 "runner_probability": runner_probability,
                 "early_invalidation": early_invalidation_breach,
+                "causal_peak_capture": causal_peak_capture_triggered,
+                "causal_giveback_r": causal_giveback_r,
+                "causal_giveback_threshold_r": causal_giveback_threshold,
             },
         )

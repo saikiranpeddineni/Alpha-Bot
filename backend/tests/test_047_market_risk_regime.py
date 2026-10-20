@@ -547,3 +547,34 @@ async def test_isolated_breadth_stress_keeps_dynamic_pipeline_alive():
     state, conf, reasons = await scanner._assess_market_risk()
     assert state is MarketRiskState.CAUTION
 
+
+# =============================================================================
+# [ADDED 2026-10-16]: Regression Test for Isolated QQQ Panic
+# ORIGINAL INTENT: QQQ ATR spike without broad market or breadth confirmation falsely forced PANIC.
+# REASON FOR CHANGE: Verify that isolated QQQ panic maps to CAUTION so dynamic universe remains alive.
+# SAFE ROLLBACK: Remove this test.
+# -----------------------------------------------------------------------------
+# [NEW CODE]:
+@pytest.mark.asyncio
+async def test_isolated_qqq_panic_becomes_caution():
+    """Isolated QQQ PANIC (with broad_market SPY NORMAL) maps to CAUTION, not PANIC."""
+    agg = MarketRiskAggregator(SimpleNamespace())
+    healthy_votes = [
+        SignalVote("broad_market", MarketRiskState.NORMAL, SignalHealth(True, "OK", confidence=0.9), "OK"),
+        SignalVote("qqq", MarketRiskState.PANIC, SignalHealth(True, "high tech vol", confidence=0.9), "high tech vol"),
+        SignalVote("breadth", MarketRiskState.NORMAL, SignalHealth(True, "OK", confidence=0.85), "OK"),
+        SignalVote("universe_stress", MarketRiskState.NORMAL, SignalHealth(True, "OK", confidence=0.85), "OK"),
+        SignalVote("data_health", MarketRiskState.NORMAL, SignalHealth(True, "OK", confidence=1.0), "OK"),
+    ]
+    agg._family_broad_market = AsyncMock(side_effect=[healthy_votes[0], healthy_votes[1]])
+    agg._family_breadth = AsyncMock(return_value=healthy_votes[2])
+    agg._family_universe_stress = AsyncMock(return_value=healthy_votes[3])
+    agg._family_data_health = MagicMock(return_value=healthy_votes[4])
+
+    state, conf, cov, reasons, healths = await agg.assess()
+    assert state is MarketRiskState.CAUTION
+    assert any("qqq:PANIC" in r for r in reasons)
+    assert any("stress_confirmations=1" in r for r in reasons)
+# =============================================================================
+
+

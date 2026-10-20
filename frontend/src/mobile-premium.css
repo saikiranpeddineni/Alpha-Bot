@@ -97,7 +97,8 @@
     gap: 7px;
   }
   .mobile-engine-btn,
-  .mobile-icon-btn {
+  .mobile-icon-btn,
+  .mobile-mode-select {
     border: 1px solid rgba(255, 255, 255, 0.08);
     background: #121720;
     color: #dfe5ef;
@@ -111,6 +112,12 @@
     color: #8ef0b1;
     background: rgba(34, 197, 94, 0.08);
     border-color: rgba(34, 197, 94, 0.18);
+  }
+  .mobile-mode-select {
+    max-width: 72px;
+    padding: 0 5px;
+    font-size: 9px;
+    text-transform: uppercase;
   }
   .mobile-icon-btn {
     width: 34px;

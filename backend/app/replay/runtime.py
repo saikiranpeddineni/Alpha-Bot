@@ -39,6 +39,19 @@ class ReplayRuntime:
         self.session_manager = session_manager or ReplaySessionManager()
         self.feed = ReplayMarketFeed(data_path=data_path)
 
+    @staticmethod
+    def _expand_dynamic_scanner_symbols(
+        symbols: list[str],
+        enabled: bool,
+    ) -> list[str]:
+        """Return the causal symbol surface required by fast replay scanning."""
+        normalized = {str(symbol).upper() for symbol in symbols if str(symbol).strip()}
+        if enabled:
+            from app.core.scanner import CANDIDATE_POOL
+
+            normalized.update(CANDIDATE_POOL)
+        return sorted(normalized)
+
     def run_replay(self, start_date: str, end_date: str, symbols: list[str] | None = None,
                    fill_model: str = "ohlc_touch", slippage_bps: float = 0.0, verify_parity_pass: bool = True,
                    volume_constrained: bool = False, max_volume_pct: float = 0.05, warmup_bars: int = 0) -> dict[str, Any]:
@@ -54,38 +67,19 @@ class ReplayRuntime:
     # [MODIFIED 2026-10-14]: L50 - Dynamic Starting Cash Passthrough in Replay Runtime
     # ORIGINAL INTENT: run_replay_fast_async did not accept starting_cash, defaulting to fixed setting.
     # REASON FOR CHANGE: Caller starting_cash was ignored by replay engine.
-    # SAFE ROLLBACK: The original code is preserved below as comments.
-    # -----------------------------------------------------------------------------
-    # [PREVIOUS CODE - PRESERVED]:
-    # async def run_replay_fast_async(self, start_date: str, end_date: str,
-    #                                 symbols: list[str] | None = None,
-    #                                 fill_model: str = "ohlc_touch",
-    #                                 slippage_bps: float = 0.0,
-    #                                 volume_constrained: bool = False,
-    #                                 max_volume_pct: float = 0.05,
-    #                                 warmup_bars: int = 600,
-    #                                 max_workers: int | None = None) -> dict[str, Any]:
-    #     import os
-    #     from concurrent.futures import ProcessPoolExecutor
-    #     from datetime import timedelta as _td
-    #
-    #     from app.replay.fast_worker import run_day_shard
-    #
-    #     config = {"start_date": start_date, "end_date": end_date, "symbols": symbols,
-    #               "fill_model": fill_model, "slippage_bps": slippage_bps,
-    #               "volume_constrained": volume_constrained, "max_volume_pct": max_volume_pct,
-    #               "warmup_bars": warmup_bars, "engine": "replay_fast"}
+    # SAFE ROLLBACK: The original code is removed; rollback via git history.
     # -----------------------------------------------------------------------------
     # [NEW CODE]:
     async def run_replay_fast_async(self, start_date: str, end_date: str,
                                     symbols: list[str] | None = None,
                                     fill_model: str = "ohlc_touch",
                                     slippage_bps: float = 0.0,
-                                    volume_constrained: bool = False,
-                                    max_volume_pct: float = 0.05,
-                                    warmup_bars: int = 600,
-                                    starting_cash: float | None = None,
-                                    max_workers: int | None = None) -> dict[str, Any]:
+                                     volume_constrained: bool = False,
+                                     max_volume_pct: float = 0.05,
+                                     warmup_bars: int = 600,
+                                     starting_cash: float | None = None,
+                                     use_dynamic_scanner: bool = False,
+                                     max_workers: int | None = None) -> dict[str, Any]:
         import os
         from concurrent.futures import ProcessPoolExecutor
         from datetime import timedelta as _td
@@ -94,8 +88,12 @@ class ReplayRuntime:
 
         config = {"start_date": start_date, "end_date": end_date, "symbols": symbols,
                   "fill_model": fill_model, "slippage_bps": slippage_bps,
-                  "volume_constrained": volume_constrained, "max_volume_pct": max_volume_pct,
-                  "warmup_bars": warmup_bars, "starting_cash": starting_cash, "engine": "replay_fast"}
+                   "volume_constrained": volume_constrained, "max_volume_pct": max_volume_pct,
+                   "warmup_bars": warmup_bars, "starting_cash": starting_cash,
+                   "use_dynamic_scanner": use_dynamic_scanner,
+                   "commission_per_share": float(getattr(self.settings, "paper_commission_per_share", 0.0)),
+                  "minimum_commission": float(getattr(self.settings, "paper_minimum_commission", 0.0)),
+                  "engine": "replay_fast"}
     # =============================================================================
         self.session_manager.create_session(self.replay_id, start_date, end_date, config)
         self.session_manager.update_session(self.replay_id, status="RUNNING", progress_pct=1.0)
@@ -107,6 +105,15 @@ class ReplayRuntime:
             else:
                 target_symbols = [s.upper() for s in
                                   (self.source_db.get_setting("watchlist") or self.settings.watchlist_symbols())]
+
+            # The scanner's historical surface is the static candidate pool.
+            # Load that pool into the replay input so dynamic scanner work can
+            # discover causal candidates instead of seeing only the user's
+            # initial watchlist plus forced SPY/QQQ/VIX context bars.
+            target_symbols = self._expand_dynamic_scanner_symbols(
+                target_symbols,
+                use_dynamic_scanner,
+            )
 
             from datetime import timedelta
             history_start = start_date if self.feed._explicit_data_path else (datetime.fromisoformat(start_date).date() - timedelta(days=60)).isoformat()
@@ -123,10 +130,6 @@ class ReplayRuntime:
             for sym, sb in by_sym.items():
                 sb.sort(key=lambda x: x["ts_dt"])
                 first_w = next((i for i, b in enumerate(sb) if b["in_replay_window"]), len(sb))
-                # --- PREVIOUS IMPLEMENTATION (Preserved for historical audit) ---
-                # start_idx = max(0, first_w - int(warmup_bars))
-                # -----------------------------------------------------------------
-                # Market risk calculation (e.g. SPY/QQQ ATR percentile) requires >= 20 hourly bars (multi-week history).
                 start_idx = 0 if sym in {"SPY", "QQQ", "VIX", "^VIX"} else max(0, first_w - int(warmup_bars))
                 filtered.extend(sb[start_idx:])
             bars = sorted(filtered, key=lambda b: (b["ts_dt"], b["symbol"]))
@@ -171,9 +174,6 @@ class ReplayRuntime:
                 kept: list[dict[str, Any]] = []
                 for b in reversed(warm):
                     c = per_sym[b["symbol"]]
-                    # --- PREVIOUS IMPLEMENTATION (Preserved for historical audit) ---
-                    # if c < warmup_bars:
-                    # -----------------------------------------------------------------
                     if b["symbol"] in {"SPY", "QQQ", "VIX", "^VIX"} or c < warmup_bars:
                         kept.append(b)
                         per_sym[b["symbol"]] += 1
@@ -191,42 +191,90 @@ class ReplayRuntime:
                     "slippage_bps": slippage_bps,
                     "volume_constrained": volume_constrained,
                     "max_volume_pct": max_volume_pct,
-                    "starting_cash": starting_cash,
+                     "starting_cash": starting_cash,
+                     "use_dynamic_scanner": use_dynamic_scanner,
+                     "commission_per_share": config["commission_per_share"],
+                    "minimum_commission": config["minimum_commission"],
                 })
 
-            workers = max_workers or min(len(day_payloads), os.cpu_count() or 4, 10)
+            # ``max_workers=0`` is the API-safe Windows mode. TestClient and
+            # some desktop launchers invoke the async route from a worker
+            # thread; spawning a ProcessPool from that context can terminate
+            # the interpreter with an access violation. Run one shard at a
+            # time in a dedicated thread instead. The CLI can still request
+            # process parallelism explicitly.
+            sequential = max_workers == 0
+            workers = 1 if sequential else (max_workers or min(len(day_payloads), os.cpu_count() or 4, 10))
             trades: list[dict[str, Any]] = []
             equity: list[list[Any]] = []
+            scanner_events: list[dict[str, Any]] = []
             shard_results: dict[str, dict[str, Any]] = {}
             ticks_total = 0
             all_flat = True
             done = 0
             loop = asyncio.get_running_loop()
-            with ProcessPoolExecutor(max_workers=workers) as pool:
-                futures = {loop.run_in_executor(pool, run_day_shard, p): p["day"] for p in day_payloads}
-                for fut in asyncio.as_completed(list(futures.keys())):
-                    res = await fut
+            if sequential:
+                for payload in day_payloads:
+                    res = await asyncio.to_thread(run_day_shard, payload)
                     shard_results[res["day"]] = res
                     done += 1
                     ticks_total += res.get("ticks", 0)
                     all_flat = all_flat and res.get("flat_ok", True)
                     trades.extend(res.get("trades", []))
+                    scanner_events.extend(
+                        (res.get("scanner") or {}).get("timeline", [])
+                    )
                     self.session_manager.update_session(
                         self.replay_id, progress_pct=min(99.0, 5.0 + 94.0 * done / max(1, len(day_payloads)))
                     )
+            else:
+                with ProcessPoolExecutor(max_workers=workers) as pool:
+                    futures = {loop.run_in_executor(pool, run_day_shard, p): p["day"] for p in day_payloads}
+                    for fut in asyncio.as_completed(list(futures.keys())):
+                        res = await fut
+                        shard_results[res["day"]] = res
+                        done += 1
+                        ticks_total += res.get("ticks", 0)
+                        all_flat = all_flat and res.get("flat_ok", True)
+                        trades.extend(res.get("trades", []))
+                        scanner_events.extend(
+                            (res.get("scanner") or {}).get("timeline", [])
+                        )
+                        self.session_manager.update_session(
+                            self.replay_id, progress_pct=min(99.0, 5.0 + 94.0 * done / max(1, len(day_payloads)))
+                        )
 
             # Workers intentionally start from starting_cash. Rebase each day's
             # marked equity by prior realized P&L before merging; otherwise the
             # last day's equity silently replaces the account equity.
-            carry = float(getattr(self.settings, "paper_starting_cash", 100000.0))
+            base_starting_cash = float(starting_cash or getattr(self.settings, "paper_starting_cash", 100000.0))
+            carry = base_starting_cash
             for day in sorted(shard_results):
                 res = shard_results[day]
                 day_trades = res.get("trades", [])
                 for point in res.get("equity_curve", []):
-                    equity.append([point[0], float(point[1]) + carry - getattr(self.settings, "paper_starting_cash", 100000.0)])
+                    equity.append([point[0], float(point[1]) + carry - base_starting_cash])
                 carry += sum(float(t.get("pnl") or 0.0) for t in day_trades)
             trades.sort(key=lambda t: str(t.get("exit_at", "")))
             equity.sort(key=lambda e: e[0])
+            scanner_events.sort(key=lambda event: str(event.get("timestamp", "")))
+            scanner_ledger = ReplayLedger(
+                f"{self.replay_id}:scanner",
+                start_date=days[0] if days else start_date,
+                end_date=days[-1] if days else end_date,
+            )
+            for event in scanner_events:
+                try:
+                    timestamp = datetime.fromisoformat(str(event["timestamp"]))
+                    scanner_ledger.record_event(
+                        str(event.get("event_type", "")),
+                        timestamp,
+                        str(event.get("symbol", "")),
+                        dict(event.get("details") or {}),
+                    )
+                except (KeyError, TypeError, ValueError):
+                    continue
+            scanner_payload = scanner_ledger.to_payload()
             if not all_flat:
                 applog.error("replay_runtime", f"Replay {self.replay_id}: at least one shard ended NON-FLAT")
             summary = {
@@ -234,14 +282,26 @@ class ReplayRuntime:
                 "production_ticks": ticks_total, "total_trades": len(trades),
                 "days_sharded": len(day_payloads), "workers": workers,
                 "all_days_flat": all_flat, "parity_verdict": "SHARDED_EXACT",
+                "scanner_enabled": use_dynamic_scanner,
                 "final_equity": equity[-1][1] if equity else 100000.0,
             }
             manifest = {"config_hash": hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest(),
-                        "decision_path": "TradingEngine._tick", "engine": "replay_fast",
-                        "model_policy": "immutable_asof_snapshot", "days": days}
+                         "decision_path": "TradingEngine._tick", "engine": "replay_fast",
+                         "model_policy": "immutable_asof_snapshot", "days": days,
+                         "scanner_enabled": use_dynamic_scanner}
             self.session_manager.update_session(self.replay_id, status="COMPLETED", progress_pct=100.0,
                                                 manifest=manifest, summary=summary)
-            return {"session": summary, "manifest": manifest, "trades": trades, "equity_curve": equity}
+            return {
+                "session": summary,
+                "manifest": manifest,
+                "trades": trades,
+                "equity_curve": equity,
+                "scanner": {
+                    "timeline": scanner_payload["timeline"],
+                    "candidates": scanner_payload["candidates"],
+                    "stage_hashes": scanner_payload["stage_hashes"],
+                },
+            }
         except Exception as exc:
             applog.error("replay_runtime", f"Fast replay {self.replay_id} failed: {exc}")
             self.session_manager.update_session(self.replay_id, status="FAILED",
@@ -305,10 +365,6 @@ class ReplayRuntime:
             for sym, sym_bars in by_sym.items():
                 sym_bars.sort(key=lambda x: x["ts_dt"])
                 first_in_window = next((i for i, b in enumerate(sym_bars) if b["in_replay_window"]), len(sym_bars))
-                # --- PREVIOUS IMPLEMENTATION (Preserved for historical audit) ---
-                # start_idx = max(0, first_in_window - warmup_bars)
-                # -----------------------------------------------------------------
-                # Market risk calculation (e.g. SPY/QQQ ATR percentile) requires >= 20 hourly bars (multi-week history).
                 start_idx = 0 if sym in {"SPY", "QQQ", "VIX", "^VIX"} else max(0, first_in_window - warmup_bars)
                 filtered_bars.extend(sym_bars[start_idx:])
 
@@ -433,10 +489,6 @@ class ReplayRuntime:
                 engine.model = SignalModel(replay_models)
                 await self._initialize_engine(engine, clock, broker, data, ledger, replay_models)
             by_ts: dict[datetime, list[dict[str, Any]]] = defaultdict(list)
-            # --- PREVIOUS IMPLEMENTATION (Preserved for historical audit) ---
-            # for bar in bars: by_ts[bar["ts_dt"]].append(bar)
-            # -----------------------------------------------------------------
-            # Tick only rolling warmup bars before the replay window; historical reference bars remain in data._frames
             window_timestamps = {bar["ts_dt"] for bar in bars if bar.get("in_replay_window", False)}
             min_window_ts = min(window_timestamps) if window_timestamps else min(b["ts_dt"] for b in bars)
             pre_window_ts = sorted({b["ts_dt"] for b in bars if b["ts_dt"] < min_window_ts})

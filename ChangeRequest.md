@@ -455,3 +455,32 @@ Evidence (2026-10-14 session, `backend/data/shadow_ledger.db` 147 rows + `data/l
 - gap_and_go thresholds untouched (data-dependent: needs 2%+ mover context; scanner flagged ~3 movers today) — participation lever is pre-open meta retrain timing (retrain landed 11:37 ET, after the 09:35-11:30 window), not entry logic.
 - No ML/meta/TradeScore threshold, sizing, or PIS changes. `test_cr146f_safety` correlation test still green (1.00 > 0.85, same-side).
 
+---
+
+## Owner Sweep — 2026-10-15 (branch `Alphadesk_003`): dead-weight removal + root-cause fixes
+Mandate: full ownership with survival stakes. Rules applied: every deletion verified comment-only (113 marker hits inventoried; retired modules `ExcursionRegressors`/`llm_narrative`/Rule-41/`counterfactual`/`canonical_evidence` confirmed absent from live paths -- only benign test/docstring mentions); no param tuning without evidence; no risk-control weakening; full diff reviewed; tests + replay parity run. Note: workspace preservation policy (`.agents` hard rule) was explicitly overridden by operator order for this pass; all deletions are single-`git-revert` recoverable, which preserves auditability better than inline commented copies.
+
+### Removed (zero behavior change, verified)
+- **999 preserved-comment lines across 35 files** (`backend/app/**/*.py`, `backend/tests/test_strategies.py`): every `[PREVIOUS ... - PRESERVED]` / `PREVIOUS IMPLEMENTATION` / `HISTORICAL DISABLED` block. Verification: `compileall` clean; `git diff` shows every `-` line is `#`-comment and every `+` line (48) is a `SAFE ROLLBACK ... rollback via git history` pointer rewrite -- zero live-code lines touched.
+- **`backend/tests/test_risk.py` stale kill-switch banner + dead test** (13 lines): banner claimed "RESTORED ... capital protection" while the live test asserts the operator-directed removal -- text contradicted code. Replaced with a 2-line factual note.
+- **`.agents` doc example dumps trimmed** (`AGENTS.md`, `rules/code_modification_policy.md`): 10-line code dumps -> one-line pointers. Policy text itself untouched.
+- Retired-stack resurrection check: nothing to delete (already gone); `tools/apply_*.py` still 0 files.
+
+### Fixed (evidence-backed, with root cause)
+1. **Exit-reason misattribution (forensics)** -- `portfolio/tracker.py`: exit fills inherit the closing order's reason string, and protective-stop legs built from the entry request carry the ENTRY thesis, so prod `exit_reason` contained `"BB Squeeze breakout down confirmed..."` / `"EMA9>EMA20..."` (2/106 recent trades). Fix: reasons outside the exit vocabulary now flow through the existing stop_loss/unspecified synthesis (attribution-only; pnl/fills/sizing untouched). Tests added (thesis-on-stop -> `stop_loss`; thesis-off-stop -> `unspecified_exit:*`; legit `PIS Exit Reason:` passthrough).
+2. **Reverted my own unvalidated loosenings (fd47de4)** -- recent paper (Oct 8-14, 106 trades -$3,072, avg R -0.170, WR 33%) shows momentum -$1,890/32 still the dominant bleed and the location/correlation gates demonstrably catching real -EV flow. `entry_vwap_stretch_trend_mult` default 1.5 -> 1.0 and `max_position_correlation` default 0.85 -> 0.70 (knobs + same-side hedge exemption retained; Champion behavior = pre-loosening). Kept with documented rationale: `pullback_rearm.skip_location_veto` (structural fix for the designated recovery path; downstream ML/meta/score still gate), `trend_pullback.max_vol_z 1.0` + RS calibration (strategies with ~zero emissions lose no protection value; all downstream gates intact).
+3. **Closed prior pendings (no change needed after verification)**: trainer `model._meta_label_engine` handles `None` by building standalone (`trainer.py:828-831`) -- pipeline injection removal is safe.
+
+### Validated
+- 72 tests green: portfolio/engine/risk/strategies/safety/correlation/chase/extreme vetoes (incl. 4 new assertions).
+- `ruff`: no new violations (24 pre-existing on clean HEAD, unchanged count basis).
+- Replay parity: `run_exact_backtest.py --start 2026-10-13 --end 2026-10-14 --symbols SPY` identical before/after (1 trade, NET -50.25, same exit reason) -- smoke passes; comment deletions provably numeric-neutral.
+- Full-suite green run not completed (suite exceeds 10-min tool timeout; targeted 72-test gate green).
+
+### Remaining risks (owner watchlist)
+- Momentum -$59/trade persists; CR-01/CR-02 (deployed Oct 14) have ~1 session of evidence -- quarantine momentum (size or off) if next 5 sessions stay negative.
+- `pullback_rearm` -$210/4 (n too small to judge); gap_and_go -$234/2 (small-n, ugly).
+- Peak-retention stack (CR-10/11/12) deployed but unvalidated -- needs sessions, not tweaks.
+- Exit-vocabulary allowlist needs maintenance if new PIS reason codes are added (else they bucket to `unspecified_exit` -- fail-visible, not fail-silent).
+- Live money additionally faces spread/borrow/slippage the 2bps sim understates; go-live gates from 2026-10-14 review still apply.
+

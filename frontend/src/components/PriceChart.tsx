@@ -86,7 +86,10 @@ export function PriceChart() {
   const trades = useStore((s) => s.trades);
   const quotes = useStore((s) => s.quotes);
   const [tf, setTf] = useState(TIMEFRAMES[0]);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [hasData, setHasData] = useState(false);
+  const [retryToken, setRetryToken] = useState(0);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -164,8 +167,9 @@ export function PriceChart() {
   }, []);
 
   function render(bars: Bar[]) {
-    if (!candlesRef.current || !volumeRef.current) return;
     barsRef.current = bars;
+    setHasData(bars.length > 0);
+    if (!candlesRef.current || !volumeRef.current) return;
     candlesRef.current.setData(
       bars.map<CandlestickData>((b) => ({ time: b.t as UTCTimestamp, open: b.o, high: b.h, low: b.l, close: b.c })),
     );
@@ -179,29 +183,43 @@ export function PriceChart() {
     const overlays = computeOverlays(bars);
     emaRef.current?.setData(overlays.ema);
     vwapRef.current?.setData(overlays.vwap);
-    if (bars.length) {
-      candlesRef.current.setMarkers(toMarkers(trades, symbol, bars[0].t, tf.seconds));
-    }
+    candlesRef.current.setMarkers(bars.length ? toMarkers(trades, symbol, bars[0].t, tf.seconds) : []);
+  }
+
+  function clearChart() {
+    barsRef.current = [];
+    setHasData(false);
+    candlesRef.current?.setData([]);
+    volumeRef.current?.setData([]);
+    emaRef.current?.setData([]);
+    vwapRef.current?.setData([]);
+    candlesRef.current?.setMarkers([]);
   }
 
   // ---- (re)load history on symbol / timeframe change ----
   useEffect(() => {
     let cancelled = false;
+    clearChart();
+    setError(null);
     setLoading(true);
     api
       .bars(symbol, tf.key, 500)
       .then((res) => {
         if (cancelled) return;
         render(res.bars);
-        chartRef.current?.timeScale().fitContent();
+        if (res.bars.length) chartRef.current?.timeScale().fitContent();
       })
-      .catch(() => undefined)
+      .catch((reason: unknown) => {
+        if (cancelled) return;
+        clearChart();
+        setError(reason instanceof Error && reason.message ? reason.message : "Unable to load price data.");
+      })
       .finally(() => !cancelled && setLoading(false));
     return () => {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [symbol, tf.key]);
+  }, [symbol, tf.key, retryToken]);
 
   // ---- markers refresh when trades change ----
   useEffect(() => {
@@ -273,8 +291,25 @@ export function PriceChart() {
           </div>
         </div>
       </div>
-      <div className="chart-wrap">
+      <div className="chart-wrap" aria-busy={loading}>
         <div ref={containerRef} className="chart-el" />
+        {loading && (
+          <div className="chart-state" role="status" aria-live="polite">
+            Loading price data…
+          </div>
+        )}
+        {!loading && error && (
+          <div className="chart-state chart-state-error" role="alert">
+            <span>{error}</span>
+            <button className="btn sm" onClick={() => setRetryToken((value) => value + 1)}>Retry</button>
+          </div>
+        )}
+        {!loading && !error && !hasData && (
+          <div className="chart-state" role="status">
+            <span>No price data available for {symbol}.</span>
+            <button className="btn sm" onClick={() => setRetryToken((value) => value + 1)}>Retry</button>
+          </div>
+        )}
       </div>
     </div>
   );

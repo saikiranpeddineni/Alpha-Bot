@@ -2,7 +2,7 @@
 
 Runs in a separate process (spawn-safe: module-level entrypoint). Each shard
 executes ONE trading day through the authoritative TradingEngine._tick with:
-  - no ledger event recording (publish -> no-op)
+   - scanner ledger events are recorded; other live-ops events remain disabled
   - no heartbeat ops monitors / no equity persistence (replay_fast_path)
   - no PIS profit-memory persistence
   - deterministic datetime/uuid bindings identical to the full runtime
@@ -38,6 +38,7 @@ async def _run_day_shard_async(payload: dict[str, Any]) -> dict[str, Any]:
     from app.replay.clock import ReplayClock
     from app.replay.determinism import DeterministicUUIDProxy
     from app.replay.market_feed import ReplayDataManager
+    from app.replay.ledger import ReplayLedger
 
     # Shard processes are short-lived; keep rejection forensics out of the
     # production shadow ledger (same isolation as the continuous runtime).
@@ -59,16 +60,7 @@ async def _run_day_shard_async(payload: dict[str, Any]) -> dict[str, Any]:
     # [MODIFIED 2026-10-14]: L50 - Dynamic Starting Cash Support in Replay Worker
     # ORIGINAL INTENT: Hardcoded to getattr(settings, "paper_starting_cash", 100000.0).
     # REASON FOR CHANGE: API backtest caller sends starting_cash in request payload, which was ignored.
-    # SAFE ROLLBACK: The original code is preserved below as comments.
-    # -----------------------------------------------------------------------------
-    # [PREVIOUS CODE - PRESERVED]:
-    # broker = ReplayBroker(
-    #     float(getattr(settings, "paper_starting_cash", 100000.0)),
-    #     float(payload.get("slippage_bps", 0.0)),
-    #     payload.get("fill_model", "ohlc_touch"),
-    #     volume_constrained=bool(payload.get("volume_constrained", False)),
-    #     max_volume_pct=float(payload.get("max_volume_pct", 0.05)),
-    # )
+    # SAFE ROLLBACK: The original code is removed; rollback via git history.
     # -----------------------------------------------------------------------------
     # [NEW CODE]:
     initial_cash = float(payload.get("starting_cash") or getattr(settings, "paper_starting_cash", 100000.0))
@@ -78,6 +70,8 @@ async def _run_day_shard_async(payload: dict[str, Any]) -> dict[str, Any]:
         payload.get("fill_model", "ohlc_touch"),
         volume_constrained=bool(payload.get("volume_constrained", False)),
         max_volume_pct=float(payload.get("max_volume_pct", 0.05)),
+        commission_per_share=float(payload.get("commission_per_share", getattr(settings, "paper_commission_per_share", 0.0))),
+        minimum_commission=float(payload.get("minimum_commission", getattr(settings, "paper_minimum_commission", 0.0))),
     )
     # =============================================================================
 
@@ -110,7 +104,13 @@ async def _run_day_shard_async(payload: dict[str, Any]) -> dict[str, Any]:
 
         engine = TradingEngine(settings, replay_db, runtime=TradingRuntime(clock=clock, broker=broker, data=data))
         engine.replay_fast_path = True
+        engine.replay_scanner_enabled = bool(payload.get("use_dynamic_scanner", False))
         engine._skip_broadcast = True
+        engine.runtime_ledger = ReplayLedger(
+            f"{payload['day']}|shard",
+            start_date=payload["day"],
+            end_date=payload["day"],
+        )
         if hasattr(engine, "pis_adapter"):
             engine.pis_adapter.persist_profit_memory = False
 
@@ -154,10 +154,6 @@ async def _run_day_shard_async(payload: dict[str, Any]) -> dict[str, Any]:
             tick_start_ts = pre_window_ts[0] if pre_window_ts else min_window_ts
         by_ts: dict[datetime, list[dict[str, Any]]] = defaultdict(list)
         for bar in bars:
-            # --- PREVIOUS IMPLEMENTATION (Preserved for historical audit) ---
-            # by_ts[bar["ts_dt"]].append(bar)
-            # -----------------------------------------------------------------
-            # Tick only rolling warmup bars before the day window; historical reference bars remain in data._frames
             if bar.get("in_replay_window", False) or bar["ts_dt"] >= tick_start_ts:
                 by_ts[bar["ts_dt"]].append(bar)
 
@@ -226,7 +222,14 @@ async def _run_day_shard_async(payload: dict[str, Any]) -> dict[str, Any]:
             details.setdefault("symbol", symbol)
             trades_out.append(details)
 
-        return {"day": payload["day"], "trades": trades_out, "equity_curve": equity_out, "ticks": ticks, "flat_ok": flat_ok}
+        return {
+            "day": payload["day"],
+            "trades": trades_out,
+            "equity_curve": equity_out,
+            "ticks": ticks,
+            "flat_ok": flat_ok,
+            "scanner": engine.runtime_ledger.to_payload(),
+        }
     finally:
         import app.db.database as db_module
         db_module._ACTIVE_DATABASE = None

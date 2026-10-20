@@ -47,6 +47,43 @@ class TradingEngineHaltsMixin:
             attempts += 1
             await asyncio.sleep(10.0)
 
+    async def _bank_profit_lock(self, now: datetime) -> bool:
+        """PROFIT LOCK 2026-10-16 (bank-and-ride): scratch underwater positions,
+        keep green runners under PIS. New entries are already blocked by the
+        lock; this removes the dead weight so the banked day cannot be dragged
+        red by losers. Winners keep their broker stop legs and PIS floors.
+        Returns True when no underwater positions remain.
+        """
+        assert self.broker is not None
+        try:
+            positions = await self.broker.positions()
+        except Exception as exc:
+            applog.warning("engine", f"Profit-lock banking: position fetch failed: {exc}")
+            return False
+        scratched = 0
+        for position in positions:
+            try:
+                upnl = float(position.unrealized_pnl)
+            except Exception:
+                continue
+            if upnl <= 0:
+                try:
+                    await self.broker.close_position(
+                        position.symbol, reason="daily profit lock (scratch loser)"
+                    )
+                    scratched += 1
+                except Exception as exc:  # noqa: BLE001
+                    applog.warning("engine", f"Profit-lock scratch failed for {position.symbol}: {exc}")
+        try:
+            await self._drain_fills(now)
+        except Exception:
+            pass
+        applog.warning("engine", f"PROFIT LOCK banking: scratched {scratched} underwater positions; winners ride")
+        # NOTE: PIS brains are deliberately NOT purged here (unlike the loss
+        # halt path) — green runners keep their excursion memory and floors.
+        self.publish("status", self.status())
+        return True
+
     async def _reconcile_daily_halt_liquidation(self, now: datetime) -> bool:
         """Keep daily halt liquidation active until broker state proves flat."""
         assert self.broker is not None

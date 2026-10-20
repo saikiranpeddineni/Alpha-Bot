@@ -45,8 +45,6 @@ class BollingerBandSqueeze(Strategy):
         #   - min_target_atr: economic gate — skip when target < 0.5*ATR (uneconomic R).
         # SAFE ROLLBACK: Set min_minutes_since_open=5, breakout_buffer_atr=0.0,
         #   volatile_squeeze_pct=None, min_target_atr=0.0
-        # [PREVIOUS CODE - PRESERVED]:
-        # "min_minutes_since_open": 5,
         # [NEW CODE]:
         "min_minutes_since_open": 15,          # CR-04: need established VWAP range
         "event_window_bars": EVENT_WINDOW_BARS,
@@ -212,10 +210,6 @@ class BollingerBandSqueeze(Strategy):
             #   when BB squeeze has highest expected value. Blanket rejection throws away
             #   the highest-quality setups. Allow when: extreme squeeze AND vol_z >= 1.5.
             # SAFE ROLLBACK: Remove the condition; keep the original blanket VOLATILE reject.
-            # [PREVIOUS CODE - PRESERVED]:
-            # if ctx.regime == Regime.VOLATILE:
-            #     return None
-            # -----------------------------------------------------------------------------
             # [NEW CODE]:
             if ctx.regime == Regime.VOLATILE:
                 volatile_squeeze_pct = float(p.get("volatile_squeeze_pct", 0.10))
@@ -224,9 +218,6 @@ class BollingerBandSqueeze(Strategy):
                 lb = int(p["width_percentile_lookback"])
                 current_width_pct = (w_series.iloc[-lb:] <= float(last["bb_width"])).mean() if len(w_series) >= lb // 2 else 1.0
                 is_extreme_squeeze = current_width_pct <= volatile_squeeze_pct
-                # [PREVIOUS CODE - PRESERVED]:
-                # high_vol = vol_z >= 1.5
-                # -----------------------------------------------------------------------------
                 # [NEW CODE]:
                 volatile_min_vol = float(p.get("volatile_min_vol_z", 1.5))
                 high_vol = vol_z >= volatile_min_vol

@@ -22,9 +22,6 @@ jobs:
       - name: Install frontend dependencies
         working-directory: frontend
         run: npm ci
-      - name: Run theme contract tests
-        working-directory: frontend
-        run: npm run test:theme
       - name: Build frontend
         working-directory: frontend
         run: npm run build

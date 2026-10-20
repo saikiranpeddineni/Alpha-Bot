@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
@@ -34,10 +35,6 @@ log = logging.getLogger(__name__)
 # How many top gainers / losers to return per session
 _TOP_N = 20
 
-# --- PREVIOUS IMPLEMENTATION (Preserved for historical intent & audit) ---
-# _MIN_PRICE = 5.0
-# _MIN_DOLLAR_VOLUME = 2_000_000.0   # $2M daily dollar volume
-# --------------------------------------------------------------------------
 # --- NEW IMPLEMENTATION ---
 # Calibrated to permit penny stock trading ($0.50+) so the scanner captures
 # explosive small-cap / penny momentum movers (e.g. 50c - $5 stocks up 10%+),
@@ -128,24 +125,30 @@ class TopMoversScanner:
     async def _fetch_via_screener(self) -> TopMoversResult:
         """Use Alpaca's /v1beta1/screener/stocks/movers endpoint."""
         provider = self.data.provider
+        gainers_raw: list[object] = []
+        losers_raw: list[object] = []
+
+        # Alpaca exposes market movers through ScreenerClient, not the
+        # historical bars client. The old path constructed a most-actives
+        # request, discarded its response, and then depended on a method that
+        # is not present on the trading client in many alpaca-py versions.
+        screener = getattr(provider, "_screener_client", None)
+        if screener is not None and hasattr(screener, "get_market_movers"):
+            try:
+                from alpaca.data import MarketMoversRequest, MarketType
+
+                request = MarketMoversRequest(top=_TOP_N, market_type=MarketType.STOCKS)
+                movers = await asyncio.to_thread(screener.get_market_movers, request)
+                if isinstance(movers, Mapping):
+                    gainers_raw = list(movers.get("gainers") or [])
+                    losers_raw = list(movers.get("losers") or [])
+                else:
+                    gainers_raw = list(getattr(movers, "gainers", None) or [])
+                    losers_raw = list(getattr(movers, "losers", None) or [])
+            except Exception as exc:
+                log.debug(f"[TopMovers] ScreenerClient request failed ({exc}); trying fallbacks")
+
         client = getattr(provider, "_client", None) or getattr(provider, "client", None)
-        if client is None:
-            raise RuntimeError("No Alpaca client available on provider")
-
-        # Try both alpaca-py and raw REST approaches
-        gainers_raw: list[dict] = []
-        losers_raw: list[dict] = []
-
-        # alpaca-py StockScreenerRequest
-        try:
-            from alpaca.data.historical import StockHistoricalDataClient
-            from alpaca.data.requests import ScreenerRequest
-            if isinstance(client, StockHistoricalDataClient):
-                req = ScreenerRequest(by="change_percent", top=_TOP_N)
-                resp = client.get_stock_most_actives(req)
-                # screener returns MostActives, try movers differently
-        except Exception:
-            pass
 
         # Direct REST fallback using alpaca-py trading client
         try:
@@ -155,8 +158,12 @@ class TopMoversScanner:
             )
             if trading_client and hasattr(trading_client, "get_stock_movers"):
                 movers = trading_client.get_stock_movers(by="change_percent", top=_TOP_N)
-                gainers_raw = [m.__dict__ for m in getattr(movers, "gainers", [])]
-                losers_raw = [m.__dict__ for m in getattr(movers, "losers", [])]
+                if isinstance(movers, Mapping):
+                    gainers_raw = list(movers.get("gainers") or [])
+                    losers_raw = list(movers.get("losers") or [])
+                else:
+                    gainers_raw = list(getattr(movers, "gainers", []) or [])
+                    losers_raw = list(getattr(movers, "losers", []) or [])
         except Exception:
             pass
 
@@ -179,18 +186,35 @@ class TopMoversScanner:
         gainers: list[str] = []
         losers: list[str] = []
 
+        def _value(raw: object, *names: str) -> object:
+            for name in names:
+                if isinstance(raw, Mapping):
+                    value = raw.get(name)
+                else:
+                    value = getattr(raw, name, None)
+                if value is not None:
+                    return value
+            return None
+
+        def _float_value(raw: object, *names: str) -> float:
+            value = _value(raw, *names)
+            try:
+                return float(value or 0.0)
+            except (TypeError, ValueError):
+                return 0.0
+
         for raw in gainers_raw:
-            sym = str(raw.get("symbol", "") or raw.get("Symbol", "")).upper()
-            price = float(raw.get("price", 0.0) or raw.get("close", 0.0) or 0.0)
-            change = float(raw.get("percent_change", 0.0) or raw.get("change_percent", 0.0) or 0.0)
+            sym = str(_value(raw, "symbol", "Symbol") or "").upper()
+            price = _float_value(raw, "price", "close")
+            change = _float_value(raw, "percent_change", "change_percent", "change")
             if sym and price >= self.min_price and change >= _MIN_GAINER_PCT:
                 entries[sym] = MoverEntry(sym, "gainer", change, price)
                 gainers.append(sym)
 
         for raw in losers_raw:
-            sym = str(raw.get("symbol", "") or raw.get("Symbol", "")).upper()
-            price = float(raw.get("price", 0.0) or raw.get("close", 0.0) or 0.0)
-            change = float(raw.get("percent_change", 0.0) or raw.get("change_percent", 0.0) or 0.0)
+            sym = str(_value(raw, "symbol", "Symbol") or "").upper()
+            price = _float_value(raw, "price", "close")
+            change = _float_value(raw, "percent_change", "change_percent", "change")
             if sym and price >= self.min_price and change <= _MIN_LOSER_PCT:
                 entries[sym] = MoverEntry(sym, "loser", change, price)
                 losers.append(sym)

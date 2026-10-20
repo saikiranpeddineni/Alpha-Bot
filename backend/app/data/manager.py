@@ -180,9 +180,6 @@ class DataManager:
                 # REASON FOR CHANGE: Gaps in bars_cache.db hindered offline forensics and forced
                 #   heavy on-demand repair from provider. Persisting newly closed bars guarantees
                 #   historical continuity without network overhead.
-                # [PREVIOUS CODE - PRESERVED]:
-                # # No persistence of fresh bars in poll()
-                # -----------------------------------------------------------------------------
                 # [NEW CODE]:
                 if not self.is_synthetic:
                     try:

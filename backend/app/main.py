@@ -99,8 +99,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         hub.set_loop(asyncio.get_running_loop())
         from app.core.shadow_ledger import resolver_loop
-        shadow_task = asyncio.create_task(resolver_loop(engine.data))
+        # RESOLVER WIRING FIX 2026-10-16: the loop previously captured
+        # engine.data BEFORE ensure_data() ran, so it held None forever —
+        # every row waited forever (or aged to NO_BARS) with 0 errors, 7,412
+        # rows, zero real verdicts. Build data first, then bind the loop.
         await engine.ensure_data()
+        shadow_task = asyncio.create_task(resolver_loop(engine.data))
         await init_alerting(settings.slack_webhook_url)
         applog.info("app", f"AlphaDesk v{__version__} ready -- mode={settings.mode}")
         yield

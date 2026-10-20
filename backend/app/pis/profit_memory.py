@@ -57,8 +57,15 @@ class ProfitMemoryTracker:
             new_mfe_price = min(current_state.mfe_price, obs.low)
             new_mae_price = max(current_state.mae_price, obs.high)
 
-        new_peak_r = max(current_state.peak_r, high_r, obs.r_multiple)
-        new_trough_r = min(current_state.trough_r, low_r, obs.r_multiple)
+        # Peak/trough memory is deliberately derived from the completed bar's
+        # high/low only.  ``current_price`` can be a fresher broker quote than
+        # the bar row (and replay inputs can contain a later snapshot); allowing
+        # ``obs.r_multiple`` to update excursion memory would turn that quote
+        # into a lookahead-like high-water mark.  Current R remains available to
+        # health, thesis, and hard-stop decisions, while excursion memory stays
+        # causal to observed completed bars.
+        new_peak_r = max(current_state.peak_r, high_r)
+        new_trough_r = min(current_state.trough_r, low_r)
 
         # Sanitize against NaN / inf
         if math.isnan(new_peak_r) or math.isinf(new_peak_r):
@@ -76,6 +83,11 @@ class ProfitMemoryTracker:
     @staticmethod
     def initial_state(obs: PositionObservation) -> ProfitMemoryState:
         """Initialize profit memory from initial observation."""
+        # The initial snapshot is the position baseline; subsequent snapshots
+        # are the completed-bar excursion stream updated above.  Seeding from
+        # the point-in-time R preserves the existing entry-window semantics
+        # while still preventing any later/fresher quote from moving the
+        # high-water memory.
         return ProfitMemoryState(
             peak_r=max(0.0, obs.r_multiple),
             trough_r=min(0.0, obs.r_multiple),

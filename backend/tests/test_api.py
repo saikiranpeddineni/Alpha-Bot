@@ -106,6 +106,10 @@ def test_backtest_endpoint(client):
     assert r.status_code == 200, r.text
     body = r.json()
     assert "metrics" in body and "equity_curve" in body
+    assert isinstance(body["warnings"], list)
+    assert isinstance(body["bars_processed"], int)
+    assert {"total_return_pct", "max_drawdown_pct", "sharpe", "sortino", "win_rate",
+            "profit_factor", "total_trades", "expectancy", "avg_r", "final_equity"} <= set(body["metrics"])
     runs = client.get("/api/backtests").json()
     assert len(runs) == 1
     full = client.get(f"/api/backtests/{body['id']}")

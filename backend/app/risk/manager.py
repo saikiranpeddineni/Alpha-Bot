@@ -88,6 +88,9 @@ class RiskManager:
         self.hard_halt_reason: str = ""
         self.daily_halted: bool = False
         self.daily_halt_date: date | None = None
+        # DAILY PROFIT LOCK 2026-10-16: bank green days like the loss halt banks red ones.
+        self.profit_locked: bool = False
+        self.profit_lock_date: date | None = None
         self.consecutive_losses: int = 0
         self.cooldown_until: datetime | None = None
         self.strategy_consecutive_losses: dict[str, int] = {}
@@ -108,6 +111,8 @@ class RiskManager:
             "hard_halt_reason": self.hard_halt_reason,
             "daily_halted": self.daily_halted,
             "daily_halt_date": self.daily_halt_date.isoformat() if self.daily_halt_date else None,
+            "profit_locked": self.profit_locked,
+            "profit_lock_date": self.profit_lock_date.isoformat() if self.profit_lock_date else None,
         }
 
     def restore_risk_state(self, data: dict) -> None:
@@ -142,7 +147,13 @@ class RiskManager:
                 self.daily_halt_date = date.fromisoformat(halt_date)
             except (TypeError, ValueError):
                 self.daily_halt_date = None
-
+        self.profit_locked = bool(data.get("profit_locked", False))
+        profit_date = data.get("profit_lock_date")
+        if profit_date:
+            try:
+                self.profit_lock_date = date.fromisoformat(profit_date)
+            except (TypeError, ValueError):
+                self.profit_lock_date = None
     # ---- lifecycle hooks ----
 
     def on_trade_closed(self, trade: TradeRecord, now: datetime | None = None) -> None:
@@ -185,6 +196,10 @@ class RiskManager:
             self.daily_halted = False
             self.daily_halt_date = None
             applog.info("risk", "New session -- daily loss halt cleared")
+        if self.profit_locked and self.profit_lock_date is not None and session_date > self.profit_lock_date:
+            self.profit_locked = False
+            self.profit_lock_date = None
+            applog.info("risk", "New session -- daily profit lock cleared")
         self.cooldown_until = None
         self.consecutive_losses = 0
         self.strategy_consecutive_losses.clear()
@@ -199,26 +214,21 @@ class RiskManager:
     # ---- halt checks (engine calls every tick) ----
 
     def check_halts(self, ctx: AccountContext, now: datetime | None = None) -> str | None:
-        """Returns 'daily' or 'hard' when a halt newly trips this tick."""
-        # =============================================================================
-        # [MODIFIED 2026-10-13]: Max drawdown kill switch removed per operator directive
-        # ORIGINAL INTENT: Hard halt the system if account equity peak drawdown exceeds max_drawdown_pct.
-        # REASON FOR CHANGE: Operator directed to completely remove max drawdown kill switch and unhalt bot.
-        # SAFE ROLLBACK: The original code is preserved below as comments.
-        # -----------------------------------------------------------------------------
-        # [PREVIOUS ACTIVE CODE - PRESERVED]:
-        # if not self.hard_halted and ctx.peak_equity > 0:
-        #     dd_pct = (ctx.peak_equity - ctx.equity) / ctx.peak_equity * 100.0
-        #     if dd_pct >= self.config.max_drawdown_pct:
-        #         self.hard_halted = True
-        #         self.hard_halt_reason = (
-        #             f"Max drawdown breached: {dd_pct:.1f}% >= {self.config.max_drawdown_pct}%"
-        #         )
-        #         applog.error("risk", f"KILL SWITCH: {self.hard_halt_reason}")
-        #         return "hard"
-        # -----------------------------------------------------------------------------
-        # [NEW CODE]: Max drawdown check removed. Daily loss halt remains active below.
-        # =============================================================================
+        """Returns 'daily', 'profit', or 'hard' when a halt newly trips this tick."""
+        # Max drawdown is account-wide peak-to-current equity protection.  It is
+        # deliberately checked before the session-only guards so a breach cannot
+        # be softened into a daily halt or cleared by the next session roll.
+        if not self.hard_halted and ctx.peak_equity > 0:
+            drawdown_pct = (ctx.peak_equity - ctx.equity) / ctx.peak_equity * 100.0
+            if drawdown_pct >= self.config.max_drawdown_pct:
+                self.hard_halted = True
+                self.hard_halt_reason = (
+                    f"MAX DRAWDOWN HALT: peak-to-equity drawdown {drawdown_pct:.2f}% "
+                    f">= configured limit {self.config.max_drawdown_pct:.2f}%"
+                )
+                applog.error("risk", f"{self.hard_halt_reason} -- flattening and stopping until manual reset")
+                return "hard"
+
         if not self.daily_halted and ctx.session_start_equity > 0:
             loss_pct = -ctx.day_pnl / ctx.session_start_equity * 100.0
             if loss_pct >= self.config.max_daily_loss_pct:
@@ -230,6 +240,21 @@ class RiskManager:
                     "-- flattening and stopping for the session",
                 )
                 return "daily"
+        # DAILY PROFIT LOCK 2026-10-16: bank the day at +lock_pct the same way
+        # the loss halt banks red days. 0.0 disables. Never triggers on a
+        # non-positive session start, same guard as the loss halt.
+        lock_pct = float(getattr(self.config, "daily_profit_lock_pct", 0.0) or 0.0)
+        if lock_pct > 0 and not self.profit_locked and ctx.session_start_equity > 0:
+            gain_pct = ctx.day_pnl / ctx.session_start_equity * 100.0
+            if gain_pct >= lock_pct:
+                self.profit_locked = True
+                self.profit_lock_date = self.clock.session_date(now)
+                applog.warning(
+                    "risk",
+                    f"PROFIT LOCK: day gain {gain_pct:.2f}% >= {lock_pct:.2f}% "
+                    "-- flattening and banking the session",
+                )
+                return "profit"
         return None
 
     def in_cooldown(self, now: datetime | None = None) -> bool:
@@ -242,9 +267,6 @@ class RiskManager:
         return cooldown_until is not None and now < cooldown_until
 
     def should_flatten(self, now: datetime | None = None) -> bool:
-        # --- PREVIOUS IMPLEMENTATION (Preserved for historical intent & audit) ---
-        # return self.clock.in_flatten_window(self.config.flatten_minutes_before_close, now)
-        # --------------------------------------------------------------------------
         # --- NEW IMPLEMENTATION ---
         # Defensive getattr fallback to default 5 minutes prevents engine tick halts on missing attribute.
         flatten_mins = int(getattr(self.config, "flatten_minutes_before_close", 5) or 5)
@@ -262,6 +284,8 @@ class RiskManager:
             return RiskDecision(False, f"hard halt active: {self.hard_halt_reason}")
         if self.daily_halted:
             return RiskDecision(False, "daily loss halt active")
+        if self.profit_locked:
+            return RiskDecision(False, "daily profit lock active -- day banked")
         if self.is_strategy_in_cooldown(strategy, now):
             return RiskDecision(False, "loss-streak cooldown active")
         cooldown_until = self.symbol_cooldowns.get(symbol)
@@ -346,9 +370,6 @@ class RiskManager:
         if stop_distance < min_distance:
             return RiskDecision(False, f"stop too tight ({stop_distance:.4f})")
 
-        # --- PREVIOUS IMPLEMENTATION (Preserved for historical audit) ---
-        # risk_mult = getattr(signal, "risk_multiplier", 1.0)
-        # -----------------------------------------------------------------
         raw_risk_mult = getattr(signal, "risk_multiplier", 1.0)
         try:
             risk_mult = float(raw_risk_mult)
@@ -356,14 +377,6 @@ class RiskManager:
             risk_mult = 1.0
         if kelly_override is not None:
             # -----------------------------------------------------------------------------
-            # [PREVIOUS IMPLEMENTATION - PRESERVED]:
-            # base_risk_pct_cap = (getattr(cfg, "risk_per_trade_pct", 1.0) * 2.0) / 100.0
-            # kelly_cap = min(getattr(cfg, "kelly_fraction_cap", 0.15), base_risk_pct_cap)
-            # -----------------------------------------------------------------------------
-            # [RESTORED CONFIG-DRIVEN IMPLEMENTATION]: Kelly may refine risk downward,
-            # but it cannot override the configured per-trade risk budget. The configured
-            # Kelly cap remains an additional ceiling, and the existing safety multiplier
-            # still tightens the resulting allocation.
             configured_risk_fraction = float(cfg.risk_per_trade_pct) / 100.0
             kelly_cap = min(float(cfg.kelly_fraction_cap), configured_risk_fraction)
 
@@ -404,23 +417,6 @@ class RiskManager:
                 applog.info("risk", f"Dynamic safety risk multiplier applied: scaling risk to {effective_risk_pct}%")
 
             # -----------------------------------------------------------------------------
-            # [PREVIOUS IMPLEMENTATION - PRESERVED]:
-            # conf = getattr(signal, "score", None)
-            # if isinstance(conf, (int, float)) and conf > 0.0:
-            #     min_risk = 0.50
-            #     max_risk = 2.00
-            #     min_conf = 0.50
-            #     max_conf = 0.90
-            #     clamped_conf = max(min_conf, min(max_conf, conf))
-            #     ratio = (clamped_conf - min_conf) / (max_conf - min_conf)
-            #     base_risk = min_risk + (ratio * (max_risk - min_risk))
-            #     effective_risk_pct = base_risk * risk_mult
-            #     applog.info("risk", f"Dynamic sizing: TradeScore {conf:.2f} -> scaled risk to {effective_risk_pct:.2f}%")
-            # else:
-            #     applog.info("risk", f"No TradeScore for {symbol}: using base risk {effective_risk_pct}%")
-            # -----------------------------------------------------------------------------
-            # Trade Score remains an admission/ranking signal. It must not replace the
-            # configured risk budget with an unrelated hardcoded percentage range.
             applog.info("risk", f"Configured risk sizing for {symbol}: {effective_risk_pct:.4f}%")
 
 
@@ -455,28 +451,6 @@ class RiskManager:
         if qty < 1:
             return RiskDecision(False, "computed size below 1 share (risk budget or cash too small)")
 
-        # --- PREVIOUS IMPLEMENTATION (Preserved for historical intent & audit) ---
-        # side = OrderSide.BUY if signal.action == SignalAction.ENTER_LONG else OrderSide.SELL
-        # executable_entry = round(float(price), 2)
-        # executable_stop = round(float(stop_loss), 2)
-        # if side == OrderSide.BUY:
-        #     if executable_stop >= executable_entry:
-        #         executable_stop = round(executable_entry - 0.01, 2)
-        # else:
-        #     if executable_stop <= executable_entry:
-        #         executable_stop = round(executable_entry + 0.01, 2)
-        # if executable_stop <= 0:
-        #     return RiskDecision(False, "broker-valid bracket geometry unavailable at current price")
-        #
-        # entry_type = str(getattr(self.config, "entry_order_type", "market") or "market").lower().strip()
-        # if entry_type == "limit":
-        #     order_type = OrderType.LIMIT
-        #     max_slippage_pct = 0.0015
-        #     if side == OrderSide.BUY:
-        #         limit_price = round(price * (1 + max_slippage_pct), 2)
-        #     else:
-        #         limit_price = round(price * (1 - max_slippage_pct), 2)
-        # --------------------------------------------------------------------------
         # --- NEW IMPLEMENTATION ---
         # Penny Stock & Sub-Penny Precision Support (SEC Rule 612 / Alpaca API compliance):
         # Stocks >= $1.00 use 2 decimal places with 0.01 tick.
@@ -516,20 +490,7 @@ class RiskManager:
         # leaving them NULL in downstream Order/Fill records and replay artifacts.
         # REASON FOR CHANGE: Populate decision_bar_timestamp_utc and signal_timestamp_utc on OrderRequest
         # to ensure end-to-end auditability and trade forensics.
-        # SAFE ROLLBACK: The original code is preserved below as comments.
-        # -----------------------------------------------------------------------------
-        # [PREVIOUS CODE - PRESERVED]:
-        # order = OrderRequest(
-        #     symbol=symbol,
-        #     side=side,
-        #     qty=qty,
-        #     order_type=order_type,
-        #     limit_price=limit_price,
-        #     stop_loss=executable_stop,
-        #     take_profit=executable_target,
-        #     strategy=signal.strategy,
-        #     reason=signal.reason,
-        # )
+        # SAFE ROLLBACK: The original code is removed; rollback via git history.
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
         order = OrderRequest(
@@ -541,8 +502,6 @@ class RiskManager:
             stop_loss=executable_stop,
             take_profit=executable_target,
             strategy=signal.strategy,
-            # [PREVIOUS CODE - PRESERVED]:
-            # signal_timestamp_utc=getattr(signal, "timestamp", None),
             signal_timestamp_utc=getattr(signal, "timestamp", None) or getattr(signal, "ts", None),
             decision_bar_timestamp_utc=getattr(signal, "decision_bar_timestamp_utc", None),
         )
@@ -561,6 +520,7 @@ class RiskManager:
             "hard_halted": self.hard_halted,
             "hard_halt_reason": self.hard_halt_reason,
             "daily_halted": self.daily_halted,
+            "profit_locked": self.profit_locked,
             "consecutive_losses": self.consecutive_losses,
             "cooldown_until": self.cooldown_until.isoformat() if self.cooldown_until else None,
             "config": self.config.model_dump(),

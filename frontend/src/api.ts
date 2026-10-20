@@ -11,6 +11,7 @@ import type {
   OrderRow,
   PositionRow,
   RiskConfig,
+  ScannerStatus,
   ShadowLedgerData,
   Status,
   StrategyInfo,
@@ -18,16 +19,52 @@ import type {
   TrainerStatus,
 } from "./types";
 
+function formatApiDetail(detail: unknown): string {
+  if (typeof detail === "string") return detail.trim();
+
+  if (Array.isArray(detail)) {
+    const messages = detail
+      .map((item) => formatApiDetail(item))
+      .filter((message) => message.length > 0);
+    return messages.join("; ");
+  }
+
+  if (detail && typeof detail === "object") {
+    const record = detail as Record<string, unknown>;
+    const message = record.msg ?? record.message ?? record.error ?? record.detail;
+    const formattedMessage = formatApiDetail(message);
+    const location = Array.isArray(record.loc)
+      ? record.loc
+          .filter((part): part is string | number => typeof part === "string" || typeof part === "number")
+          .filter((part) => part !== "body" && part !== "query" && part !== "path")
+          .join(".")
+      : "";
+
+    if (formattedMessage) return location ? `${location}: ${formattedMessage}` : formattedMessage;
+
+    try {
+      return JSON.stringify(detail);
+    } catch {
+      return "";
+    }
+  }
+
+  if (detail == null) return "";
+  return String(detail);
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
     headers: { "Content-Type": "application/json" },
     ...init,
   });
   if (!res.ok) {
-    let detail = res.statusText;
+    const fallback = res.statusText || `Request failed (${res.status})`;
+    let detail = fallback;
     try {
       const body = await res.json();
-      detail = body.detail ?? JSON.stringify(body);
+      const formatted = formatApiDetail(body?.detail ?? body?.message ?? body?.error ?? body);
+      if (formatted) detail = formatted;
     } catch {
       /* keep statusText */
     }
@@ -92,15 +129,13 @@ export const api = {
     symbols: string[];
     days: number;
     starting_cash?: number;
-    use_ml_gate?: boolean;
     use_dynamic_scanner?: boolean;
-    ignore_temporal_leakage?: boolean;
     start_date?: string | null;
     end_date?: string | null;
   }) => request<BacktestResult>("/api/backtest", { method: "POST", body: JSON.stringify(body) }),
   backtests: () => request<BacktestSummary[]>("/api/backtests"),
   backtest: (id: string) => request<BacktestResult>(`/api/backtests/${id}`),
-  runScanner: () => request<{ status: string; watchlist: string[] }>("/api/scanner/run", { method: "POST" }),
+  runScanner: () => request<{ status: string; watchlist: string[]; scanner?: ScannerStatus }>("/api/scanner/run", { method: "POST" }),
   shadowLedger: (limit = 1000, verdict = "all") =>
     request<ShadowLedgerData>(`/api/shadow-ledger?limit=${limit}&verdict=${encodeURIComponent(verdict)}`),
 };

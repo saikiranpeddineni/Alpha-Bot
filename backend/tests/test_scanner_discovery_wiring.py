@@ -5,6 +5,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.core.scanner import CANDIDATE_POOL, MarketScanner, ScannerOutcome
+from app.replay.market_feed import ReplayDataManager
+from app.replay.runtime import ReplayRuntime
 from app.risk.market_regime import MarketRiskState
 
 HISTORICAL_T = datetime(2026, 7, 14, 14, 0, tzinfo=UTC)
@@ -20,6 +22,37 @@ async def test_scanner_replay_stage1_symbols_never_call_current_discovery():
     symbols = await scanner._stage1_symbols(HISTORICAL_T)
     assert symbols == CANDIDATE_POOL
     scanner._discovery.acquire.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_replay_scanner_stage1_uses_only_symbols_with_causal_bars():
+    bars = []
+    for symbol in ("AAPL", "NVDA", "SPY", "QQQ", "^VIX"):
+        bars.append(
+            {
+                "symbol": symbol,
+                "ts_dt": HISTORICAL_T,
+                "open": 100.0,
+                "high": 101.0,
+                "low": 99.0,
+                "close": 100.0,
+                "volume": 1000.0,
+            }
+        )
+
+    scanner = MarketScanner(ReplayDataManager(bars), [])
+
+    symbols = await scanner._stage1_symbols(HISTORICAL_T)
+
+    assert symbols == ["AAPL", "NVDA"]
+
+
+def test_fast_replay_dynamic_scanner_expands_input_surface():
+    symbols = ReplayRuntime._expand_dynamic_scanner_symbols(["aapl"], enabled=True)
+
+    assert set(CANDIDATE_POOL).issubset(symbols)
+    assert "AAPL" in symbols
+    assert symbols == sorted(symbols)
 
 
 @pytest.mark.asyncio

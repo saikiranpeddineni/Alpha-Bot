@@ -56,12 +56,7 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     # ORIGINAL INTENT: Unclamped division by close and atr14 produced NaN/Inf on low-price/flat bars.
     # REASON FOR CHANGE: Low-price stocks caused macd_hist_norm to explode, and NaN price_velocity
     # caused latest_feature_row to return None, rejecting trades unnecessarily.
-    # SAFE ROLLBACK: The original code is preserved below as comments.
-    # -----------------------------------------------------------------------------
-    # [PREVIOUS CODE - PRESERVED]:
-    # out["macd_hist_norm"] = out["macd_hist"] / out["close"] * 1000.0
-    # out["atr_pct"] = out["atr14"] / out["close"] * 100.0
-    # out["price_velocity"] = (out["close"] - out["close"].shift(3)) / out["atr14"].replace(0.0, np.nan)
+    # SAFE ROLLBACK: The original code is removed; rollback via git history.
     # -----------------------------------------------------------------------------
     # [NEW CODE]:
     safe_close = out["close"].replace(0.0, np.nan)

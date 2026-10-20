@@ -233,11 +233,7 @@ def _make_momentum_df(
     # ORIGINAL INTENT: highs = np.maximum(opens, closes) + 0.05 created micro 10-cent bars.
     # REASON FOR CHANGE: A $9 move over 80 bars with 10-cent bars had close-ema9 exceed 2*ATR,
     # falsely tripping the CR-01 climax guard. A 25-cent buffer produces realistic ~0.50 ATR.
-    # SAFE ROLLBACK: The original code is preserved below as comments.
-    # -----------------------------------------------------------------------------
-    # [PREVIOUS CODE - PRESERVED]:
-    # highs = np.maximum(opens, closes) + 0.05
-    # lows = np.minimum(opens, closes) - 0.05
+    # SAFE ROLLBACK: The original code is removed; rollback via git history.
     # -----------------------------------------------------------------------------
     # [NEW CODE]:
     highs = np.maximum(opens, closes) + 0.25

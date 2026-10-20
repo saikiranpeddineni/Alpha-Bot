@@ -459,34 +459,15 @@ class AlpacaBroker(Broker):
         is_child_order = parent_id is not None
         is_group_parent = order_class in {"bracket", "oco", "oto"} and not is_child_order
 
-        # --- PREVIOUS IMPLEMENTATION (Preserved for historical intent & audit) ---
-        # raw_leg = getattr(o, "leg", None)
-        # if raw_leg is not None:
-        #     leg = str(raw_leg).split(".")[-1].lower()
-        # elif order_type in (OrderType.STOP, OrderType.STOP_LIMIT):
-        #     leg = "stop"
-        # elif order_class in {"bracket", "oco", "oto"} or getattr(o, "parent_order_id", None) or getattr(o, "parent_id", None):
-        #     if stop_price is not None and limit_price is None:
-        #         leg = "stop"
-        #     elif limit_price is not None and stop_price is None:
-        #         leg = "take_profit"
-        #     else:
-        #         leg = "entry"
-        # else:
-        #     leg = "entry"
-        # --------------------------------------------------------------------------
         # --- NEW IMPLEMENTATION ---
         # A parent order can carry stop/target prices copied from nested broker
         # legs for metadata, so price presence must not identify the parent as a
         # protective leg.  Trust explicit broker leg metadata first; otherwise
         # use a parent identifier (including the nested-ID map above) to classify
-        # real children, and treat an advanced order class without a parent as
-        # the entry container.  Standalone STOP/STOP_LIMIT orders retain their
-        # historical stop classification.
+        # real children.  A flat STOP/STOP_LIMIT remains a protective stop even
+        # when Alpaca labels it with an advanced order class.
         if broker_leg is not None:
             leg = broker_leg
-        elif is_group_parent:
-            leg = "entry"
         elif is_child_order:
             if order_type in (OrderType.STOP, OrderType.STOP_LIMIT) or (
                 stop_price is not None and limit_price is None
@@ -497,7 +478,15 @@ class AlpacaBroker(Broker):
             else:
                 leg = "entry"
         elif order_type in (OrderType.STOP, OrderType.STOP_LIMIT):
+            # Alpaca can return an OTO protective child as a flat order with
+            # ``order_class=oto`` but without parent_order_id/leg metadata.
+            # The order type is still authoritative: treating it as an OTO
+            # group parent hides the live stop from PIS floor synchronization,
+            # which then submits a duplicate stop and gets a held-quantity
+            # rejection from Alpaca.
             leg = "stop"
+        elif is_group_parent:
+            leg = "entry"
         else:
             leg = "entry"
 
@@ -519,15 +508,6 @@ class AlpacaBroker(Broker):
             stop_loss=None,
             status=order_status,
             order_class=order_class,
-            # --- PREVIOUS IMPLEMENTATION (Preserved for historical intent & audit) ---
-            # parent_id=(
-            #     str(o.parent_order_id)
-            #     if getattr(o, "parent_order_id", None)
-            #     else (str(o.parent_id) if getattr(o, "parent_id", None) else None)
-            # ),
-            # --------------------------------------------------------------------------
-            # Use the resolved broker relationship so nested children retain
-            # their parent identity even when the SDK only supplied ``legs``.
             parent_id=parent_id,
             leg=leg,
             strategy=strategy,
@@ -561,33 +541,6 @@ class AlpacaBroker(Broker):
         if req.stop_loss is not None or req.take_profit is not None:
             from alpaca.trading.enums import OrderClass
 
-        # --- PREVIOUS IMPLEMENTATION (Preserved for historical intent & audit) ---
-        # if req.stop_loss is not None and req.take_profit is not None:
-        #     kwargs["order_class"] = OrderClass.BRACKET
-        #     kwargs["stop_loss"] = StopLossRequest(stop_price=round(req.stop_loss, 2))
-        #     kwargs["take_profit"] = TakeProfitRequest(limit_price=round(req.take_profit, 2))
-        # elif req.stop_loss is not None:
-        #     kwargs["order_class"] = OrderClass.OTO
-        #     kwargs["stop_loss"] = StopLossRequest(stop_price=round(req.stop_loss, 2))
-        # elif req.take_profit is not None:
-        #     kwargs["order_class"] = OrderClass.OTO
-        #     kwargs["take_profit"] = TakeProfitRequest(limit_price=round(req.take_profit, 2))
-        #
-        # if req.order_type == OrderType.MARKET:
-        #     request = MarketOrderRequest(**kwargs)
-        # elif req.order_type == OrderType.LIMIT:
-        #     if req.limit_price is None:
-        #         raise ValueError("LIMIT orders require limit_price")
-        #     request = LimitOrderRequest(limit_price=round(req.limit_price, 2), **kwargs)
-        # elif req.order_type == OrderType.STOP:
-        #     if req.stop_price is None:
-        #         raise ValueError("STOP orders require stop_price")
-        #     request = StopOrderRequest(stop_price=round(req.stop_price, 2), **kwargs)
-        # elif req.order_type == OrderType.STOP_LIMIT:
-        #     if req.stop_price is None or req.limit_price is None:
-        #         raise ValueError("STOP_LIMIT orders require stop_price and limit_price")
-        #     request = StopLimitOrderRequest(stop_price=round(req.stop_price, 2), limit_price=round(req.limit_price, 2), **kwargs)
-        # --------------------------------------------------------------------------
         # --- NEW IMPLEMENTATION ---
         # Sub-penny precision support: Apply normalize_stock_price (2dp >= $1.00, 4dp < $1.00)
         # per SEC Rule 612 and Alpaca API requirements for penny stock orders.
@@ -655,17 +608,6 @@ class AlpacaBroker(Broker):
                     return rescued
             if self._is_definitive_rejection(exc):
                 err_msg = str(exc).lower()
-                # --- PREVIOUS IMPLEMENTATION (Preserved for historical intent & audit) ---
-                # short_permission_denied = (
-                #     "not allowed to short" in err_msg
-                #     or "shorting is not permitted" in err_msg
-                #     or "asset is not shortable" in err_msg
-                #     or "not shortable" in err_msg
-                # )
-                # if short_permission_denied:
-                #     self._shorting_enabled = False
-                #     self._shortable_cache[req.symbol.upper()] = False
-                # --------------------------------------------------------------------------
                 # --- NEW IMPLEMENTATION ---
                 # Decouple account-level margin permission denial from single-asset borrow restrictions.
                 # If a single ticker (e.g. ONDS) is not shortable, cache that specific asset as unshortable,
@@ -683,26 +625,7 @@ class AlpacaBroker(Broker):
                 # ORIGINAL INTENT: Marked rejected with generic f"{req.reason} | rejected: {exc}".
                 # REASON FOR CHANGE: Distinctly log and tag SHORT_BORROW_UNAVAILABLE so borrow rejections
                 # are not lumped into generic execution failures or bare exits.
-                # SAFE ROLLBACK: The original code is preserved below as comments.
-                # -----------------------------------------------------------------------------
-                # [PREVIOUS CODE - PRESERVED]:
-                # if account_short_denied:
-                #     self._shorting_enabled = False
-                #     self._shortable_cache[req.symbol.upper()] = False
-                # elif asset_not_shortable:
-                #     self._shortable_cache[req.symbol.upper()] = False
-                # applog.error("broker.alpaca", f"Order rejected {req.symbol} {req.side} {qty}: {exc}")
-                # return Order(
-                #     client_order_id=req.client_order_id,
-                #     symbol=req.symbol.upper(),
-                #     side=req.side,
-                #     qty=qty,
-                #     order_type=req.order_type,
-                #     limit_price=req.limit_price,
-                #     status=OrderStatus.REJECTED,
-                #     strategy=req.strategy,
-                #     reason=f"{req.reason} | rejected: {exc}",
-                # )
+                # SAFE ROLLBACK: The original code is removed; rollback via git history.
                 # -----------------------------------------------------------------------------
                 # [NEW CODE]:
                 rejection_reason = f"{req.reason} | rejected: {exc}"
@@ -737,11 +660,6 @@ class AlpacaBroker(Broker):
         self._meta[str(raw.id)] = (req.strategy, req.reason)
         if req.strategy != "emergency_protection":
             self._symbol_strategies[req.symbol.upper()] = req.strategy
-        # -----------------------------------------------------------------------------
-        # [PREVIOUS CODE - PRESERVED]:
-        # order = self._to_order(raw)
-        # order.stop_loss = req.stop_loss
-        # order.take_profit = req.take_profit
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
         order = self._to_order(raw)
@@ -971,11 +889,14 @@ class AlpacaBroker(Broker):
             applog.warning("broker.alpaca", f"cancel_all failed: {exc}")
 
     # -----------------------------------------------------------------------------
-    # [PREVIOUS CODE - PRESERVED]:
-    # async def close_position(self, symbol: str, reason: str = "manual", qty: float | None = None) -> Order | None:
-    # -----------------------------------------------------------------------------
     # [NEW CODE]:
-    async def close_position(self, symbol: str, reason: str = "manual close", qty: float | None = None) -> Order | None:
+    async def close_position(
+        self,
+        symbol: str,
+        reason: str = "manual close",
+        qty: float | None = None,
+        strategy: str | None = None,
+    ) -> Order | None:
         if not reason or not reason.strip() or reason.strip().lower() in ("exit", "manual"):
             reason = "manual close"
         try:
@@ -1052,7 +973,13 @@ class AlpacaBroker(Broker):
                 )
             else:
                 raw = await _call(self._client.close_position, symbol.upper(), label=f"close_position/{symbol}")
-            self._meta[str(raw.id)] = ("engine", reason)
+            # Broker-generated closes bypass submit(), so use the symbol's
+            # owning entry strategy when the close fill is later polled.  The
+            # engine persists the PIS exit reason separately; keeping the
+            # strategy here prevents a restart/fill poll from downgrading the
+            # execution to the generic broker label.
+            close_strategy = strategy or self._symbol_strategies.get(symbol.upper(), "engine")
+            self._meta[str(raw.id)] = (close_strategy, reason)
             applog.trade("broker.alpaca", f"Closing {symbol} ({reason}{f', qty={qty}' if qty else ''})")
             return self._to_order(raw)
         except BrokerTimeoutError:

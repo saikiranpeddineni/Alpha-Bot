@@ -57,9 +57,6 @@ class PullbackRearm(Strategy):
         # REASON FOR CHANGE: Expose configurable enable_pullback_rearm parameter and env support.
         # SAFE ROLLBACK: Remove param.
         # -----------------------------------------------------------------------------
-        # [PREVIOUS CODE - PRESERVED]:
-        # # No enable_pullback_rearm param in default_params
-        # -----------------------------------------------------------------------------
         # [NEW CODE]:
         "enable_pullback_rearm": True,
         # =============================================================================

@@ -1,5 +1,105 @@
 # ⚡ AlphaDesk — Adaptive AI Day Trading & Research Platform
 
+## Rebuild from scratch
+
+The supported runtime is **Python 3.12.10**, pinned in `.python-version`.
+The lockfile is `requirements.lock` and contains the runtime and development
+dependencies used by the reproducible test environment.
+
+### Local setup
+
+```bash
+git clone --branch rewrite/atra-opportunity-engine --single-branch \
+  https://github.com/saikiranpeddineni/Alpha-Bot.git alphadesk
+cd alphadesk
+python3.12 -m venv .venv
+. .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install --requirement requirements.lock
+cp .env.example .env
+```
+
+On Windows PowerShell, activate with `.venv\\Scripts\\Activate.ps1` instead.
+Keep broker credentials only in `.env` or the environment; never commit them.
+
+### Test
+
+Run the single supported test command from the repository root:
+
+```bash
+python -m pytest
+```
+
+### Walk-forward, out-of-sample, and uncertainty validation
+
+The validation runner is read-only with respect to the bar cache and does not
+promote models, change trading settings, or submit orders. It requires complete
+XNYS session coverage, refuses to treat a full-dataset fallback as walk-forward
+evidence, evaluates on a date range strictly after the training cutoff, and
+resamples complete New York trading sessions for block-bootstrap uncertainty
+intervals.
+
+Run it from the repository root after the local setup above:
+
+```bash
+PYTHONPATH=backend \
+ALPHADESK_TRAIN_WORKERS=4 \
+OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+python backend/scripts/run_walk_forward_validation.py \
+  --data-db data/bars_cache.db \
+  --symbols SPY,QQQ,AAPL,NVDA \
+  --train-start 2025-08-05 \
+  --train-end 2026-08-31 \
+  --oos-start 2026-09-01 \
+  --oos-end 2026-10-14 \
+  --train-days 90 \
+  --val-days 10 \
+  --min-windows 3 \
+  --horizon-bars 15 \
+  --threshold-pct 0.10 \
+  --min-bars-per-session 180 \
+  --bootstrap-samples 2000 \
+  --seed 20261017 \
+  --train-workers 4 \
+  --out data/reports/walk_forward_oos_uncertainty.json
+```
+
+The JSON report is written to
+`data/reports/walk_forward_oos_uncertainty.json`. The `data/` directory is
+intentionally ignored because it contains local market data and runtime
+artifacts; regenerate the report with the command above on another machine.
+
+This validation is evidence about the configured feature/label model path, not
+a guarantee of profitable live execution. The report's trading metrics include
+the existing 0.5 probability decision threshold and do not model broker fills,
+slippage, or portfolio interactions.
+
+### Run locally
+
+Demo mode is offline and uses synthetic data:
+
+```bash
+python backend/run_server.py
+```
+
+The server listens on `http://127.0.0.1:8742` by default. Set
+`ALPHADESK_HOST=0.0.0.0` when exposing it from a container.
+
+### Docker
+
+```bash
+docker build --tag alphadesk:local .
+docker run --rm --name alphadesk \
+  --env-file .env \
+  --env ALPHADESK_HOST=0.0.0.0 \
+  --publish 8742:8742 \
+  --volume alphadesk-data:/app/data \
+  alphadesk:local
+```
+
+The container does not include local databases, models, credentials, or logs.
+Mount data separately when those assets are intentionally part of a deployment.
+
 AlphaDesk is a local-first automated day-trading and quantitative research platform for U.S. stocks and ETFs. It combines an asynchronous trading engine, multiple intraday strategies, machine-learning signal filters, portfolio/risk controls, broker reconciliation, event-driven backtesting, shadow evaluation, Champion/Challenger experimentation, contextual performance memory, and a real-time React trading terminal.
 
 > **Start safely in Demo mode with no broker account or API keys.** AlphaDesk includes a deterministic synthetic market so the full engine can run offline before connecting real market data or brokerage services.

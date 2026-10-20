@@ -364,11 +364,7 @@ class _LegacySignalModel:
         # ORIGINAL INTENT: Fallback to complement of p_up for legacy/cold-start models.
         # REASON FOR CHANGE: 1.0 - p_up produces biased short estimates during strong trends.
         # Use symmetric _heuristic_p_down logistic scorer.
-        # SAFE ROLLBACK: The original code is preserved below as comments.
-        # -----------------------------------------------------------------------------
-        # [PREVIOUS CODE - PRESERVED]:
-        # # Fallback to complement of p_up for legacy models
-        # return 1.0 - self.p_up(features)
+        # SAFE ROLLBACK: The original code is removed; rollback via git history.
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
         return self._heuristic_p_down(features)
@@ -515,10 +511,7 @@ class _LegacySignalModel:
                     # [MODIFIED 2026-10-13]: Explicit FEATURE_VERSION_MISMATCH tagging
                     # ORIGINAL INTENT: Reset spec to None to fall through to base model.
                     # REASON FOR CHANGE: Explicitly tag fallback reason as FEATURE_VERSION_MISMATCH.
-                    # SAFE ROLLBACK: The original code is preserved below as comments.
-                    # -----------------------------------------------------------------------------
-                    # [PREVIOUS CODE - PRESERVED]:
-                    # spec = None
+                    # SAFE ROLLBACK: The original code is removed; rollback via git history.
                     # -----------------------------------------------------------------------------
                     # [NEW CODE]:
                     return self._get_base_result(
@@ -941,40 +934,7 @@ class SignalModel(_LegacySignalModel):
     # ORIGINAL INTENT: Hardcoded 0.70 * p_global + 0.30 * p_adaptive and fell back to 1.0 - p_up.
     # REASON FOR CHANGE: Honor configured adaptive_model_weight from Settings / RiskConfig
     # and use dedicated _heuristic_p_down for short cold-start inference.
-    # SAFE ROLLBACK: The original code is preserved below as comments.
-    # -----------------------------------------------------------------------------
-    # [PREVIOUS CODE - PRESERVED]:
-    # def p_up(self, features, regime_key=None) -> float:
-    #     snapshot = self._generation_store.current
-    #     global_long = snapshot.long_model if snapshot is not None else self._model_long
-    #     if global_long is None:
-    #         return self._heuristic_p_up(features)
-    #     x = pd.DataFrame([features[FEATURE_COLUMNS].to_numpy(dtype=float)], columns=FEATURE_COLUMNS)  # noqa: F405
-    #     p_global = float(predict_proba_safe(global_long, x)[0, 1])  # noqa: F405
-    #     reg_model = self._regime_adaptive_long.get(regime_key or "")
-    #     if reg_model is not None:
-    #         p_adaptive = float(predict_proba_safe(reg_model, x)[0, 1])  # noqa: F405
-    #         return 0.70 * p_global + 0.30 * p_adaptive
-    #     if self._adaptive_long is not None:
-    #         p_adaptive = float(predict_proba_safe(self._adaptive_long, x)[0, 1])  # noqa: F405
-    #         return 0.70 * p_global + 0.30 * p_adaptive
-    #     return p_global
-    #
-    # def p_down(self, features, regime_key=None) -> float:
-    #     snapshot = self._generation_store.current
-    #     global_short = snapshot.short_model if snapshot is not None else self._model_short
-    #     if global_short is None:
-    #         return 1.0 - self.p_up(features)
-    #     x = pd.DataFrame([features[FEATURE_COLUMNS].to_numpy(dtype=float)], columns=FEATURE_COLUMNS)  # noqa: F405
-    #     p_global = float(predict_proba_safe(global_short, x)[0, 1])  # noqa: F405
-    #     reg_model = self._regime_adaptive_short.get(regime_key or "")
-    #     if reg_model is not None:
-    #         p_adaptive = float(predict_proba_safe(reg_model, x)[0, 1])  # noqa: F405
-    #         return 0.70 * p_global + 0.30 * p_adaptive
-    #     if self._adaptive_short is not None:
-    #         p_adaptive = float(predict_proba_safe(self._adaptive_short, x)[0, 1])  # noqa: F405
-    #         return 0.70 * p_global + 0.30 * p_adaptive
-    #     return p_global
+    # SAFE ROLLBACK: The original code is removed; rollback via git history.
     # -----------------------------------------------------------------------------
     # [NEW CODE]:
     def p_up(self, features, regime_key=None) -> float:

@@ -63,6 +63,7 @@ class ReasonCode(str, Enum):
     PROTECTION_BREACH = "PROTECTION_BREACH"
     FLOOR_TAG_RUNNER = "FLOOR_TAG_RUNNER"
     DOA_STAGNATION_HARVEST = "DOA_STAGNATION_HARVEST"
+    CAUSAL_PEAK_REVERSAL = "CAUSAL_PEAK_REVERSAL"
     EOD_PREHARVEST = "EOD_PREHARVEST"
     MANUAL_OVERRIDE = "MANUAL_OVERRIDE"
     KILL_SWITCH_ACTIVE = "KILL_SWITCH_ACTIVE"
@@ -115,9 +116,6 @@ class PositionObservation:
     # REASON FOR CHANGE: Enable mean-reversion target hit recognition (e.g., RSI2 >= 70)
     # inside PIS exit planning without creating separate competing exit paths.
     # SAFE ROLLBACK: Default values preserve existing behavior without regression.
-    # -----------------------------------------------------------------------------
-    # [PREVIOUS CODE - PRESERVED]:
-    # # No strategy or rsi2 fields
     # -----------------------------------------------------------------------------
     # [NEW CODE]:
     strategy: str = ""
@@ -258,10 +256,7 @@ class PISConfig:
     # ORIGINAL INTENT: Required peak >= 3.0R to qualify as runner.
     # REASON FOR CHANGE: 3.0R peak is unreachable for standard intraday trades where winners average
     # 0.44-1.83R peak. Calibrated to 2.0R to allow genuine trend runners to be nurtured.
-    # SAFE ROLLBACK: The original code is preserved below as comments.
-    # -----------------------------------------------------------------------------
-    # [PREVIOUS CODE - PRESERVED]:
-    # runner_qualification_r: float = 3.0
+    # SAFE ROLLBACK: The original code is removed; rollback via git history.
     # -----------------------------------------------------------------------------
     # [NEW CODE]:
     runner_qualification_r: float = 2.0
@@ -295,21 +290,7 @@ class PISConfig:
     # REASON FOR CHANGE: Excursions peaked at 1.83R in live winners but gave back 55% down to 0.83R.
     # Adaptive breakout breakeven trigger (1.5x ATR vs 2.5x ATR for reversion), higher lock fraction (0.45)
     # for peak >= 1.0R, tiered giveback (40% for 1-2R, 30% for >=2R), and DOA stagnation cut at -0.25R.
-    # SAFE ROLLBACK: The original code is preserved below as comments.
-    # -----------------------------------------------------------------------------
-    # [PREVIOUS CODE - PRESERVED]:
-    # breakeven_trigger_r: float = 0.40
-    # breakeven_trigger_atr_mult: float = 2.50
-    # progressive_lock_cap_trigger_r: float = 0.85
-    # progressive_lock_start_frac: float = 0.20
-    # progressive_lock_end_frac: float = 0.35
-    # progressive_lock_trail_atr_mult: float = 1.00
-    # enable_profit_giveback_guard: bool = True
-    # profit_guard_peak_r: float = 0.60
-    # profit_guard_max_giveback_pct: float = 0.55
-    # profit_guard_min_giveback_atr_r: float = 0.75
-    # profit_guard_exit_ratio: float = 0.50
-    # weak_trend_scale_out_r: float = 1.00
+    # SAFE ROLLBACK: The original code is removed; rollback via git history.
     # -----------------------------------------------------------------------------
     # [NEW CODE]:
     breakeven_trigger_r: float = 0.40
@@ -332,6 +313,15 @@ class PISConfig:
     enable_doa_stagnation_harvest: bool = True
     doa_stagnation_bars: int = 12
     doa_r_threshold: float = -0.25
+    # Causal peak capture: after a runner has demonstrated a material high-water
+    # excursion, require completed-bar reversal confirmation and a meaningful
+    # giveback before harvesting the remaining quantity.  This deliberately does
+    # not use a session's eventual high or any future bar.
+    enable_causal_peak_capture: bool = True
+    causal_peak_capture_confirmation_bars: int = 2
+    causal_peak_capture_min_peak_r: float = 1.00
+    causal_peak_capture_min_giveback_r: float = 0.50
+    causal_peak_capture_giveback_pct: float = 0.25
     # =============================================================================
     weak_momentum_threshold: float = 0.45
     # --- Floor-tag runner (evidence-driven) ---
@@ -406,5 +396,25 @@ class PISConfig:
             raise ValueError(
                 "early_invalidation_confirmation_bars must be >= 1, "
                 f"got {self.early_invalidation_confirmation_bars}"
+            )
+        if self.causal_peak_capture_confirmation_bars < 1:
+            raise ValueError(
+                "causal_peak_capture_confirmation_bars must be >= 1, "
+                f"got {self.causal_peak_capture_confirmation_bars}"
+            )
+        if self.causal_peak_capture_min_peak_r <= 0.0:
+            raise ValueError(
+                "causal_peak_capture_min_peak_r must be > 0, "
+                f"got {self.causal_peak_capture_min_peak_r}"
+            )
+        if self.causal_peak_capture_min_giveback_r <= 0.0:
+            raise ValueError(
+                "causal_peak_capture_min_giveback_r must be > 0, "
+                f"got {self.causal_peak_capture_min_giveback_r}"
+            )
+        if not (0.0 < self.causal_peak_capture_giveback_pct < 1.0):
+            raise ValueError(
+                "causal_peak_capture_giveback_pct must be between 0 and 1, "
+                f"got {self.causal_peak_capture_giveback_pct}"
             )
 

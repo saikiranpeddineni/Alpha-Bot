@@ -34,6 +34,7 @@ export interface RiskStatus {
   hard_halted?: boolean;
   hard_halt_reason?: string;
   daily_halted?: boolean;
+  profit_locked?: boolean;
   consecutive_losses?: number;
   cooldown_until?: string | null;
   config: RiskConfig;
@@ -44,6 +45,8 @@ export interface RiskConfig {
   max_position_pct: number;
   max_open_positions: number;
   max_daily_loss_pct: number;
+  daily_profit_lock_pct?: number;
+  daily_profit_defend_pct?: number;
   max_drawdown_pct: number;
   symbol_cooldown_minutes: number;
   strategy_consecutive_loss_limit: number;
@@ -75,6 +78,18 @@ export interface ScannerContextEntry {
   expires_at: string;
 }
 
+export interface ScannerStatus {
+  status: "never_run" | "running" | "success" | "failed" | string;
+  outcome?: "SUCCESS_NONEMPTY" | "SUCCESS_EMPTY" | "FAILED" | string | null;
+  last_started_at?: string | null;
+  last_completed_at?: string | null;
+  last_error?: string | null;
+  last_watchlist_count?: number;
+  is_intraday?: boolean | null;
+  as_of?: string | null;
+  discovery?: Record<string, unknown> | null;
+}
+
 export interface Status {
   state: EngineState;
   mode: Mode;
@@ -84,6 +99,7 @@ export interface Status {
   watchlist: string[];
   core_watchlist?: string[];
   scanner_context?: Record<string, ScannerContextEntry>;
+  scanner?: ScannerStatus;
   risk: RiskStatus;
   model: ModelInfo;
   trainer?: TrainerStatus;
@@ -91,6 +107,11 @@ export interface Status {
   has_alpaca_keys: boolean;
   tick: number;
   last_error: string;
+  reconciliation_failed?: boolean;
+  system_health?: "NORMAL" | "DEGRADED" | "SAFE_MODE" | "HALTED" | string;
+  allow_new_entries?: boolean;
+  heartbeat_diagnostics?: Record<string, unknown>;
+  data_gap_symbols?: string[];
 }
 
 export interface Account {

@@ -20,24 +20,30 @@ const METRIC_LABELS: [string, string, boolean][] = [
   ["final_equity", "Final equity $", false],
 ];
 
+function etDateInput(date: Date): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
 export function BacktestModal(props: { onClose: () => void }) {
   const status = useStore((s) => s.status);
   const progress = useStore((s) => s.backtestProgress);
   const showToast = useStore((s) => s.showToast);
+  const clearBacktestProgress = useStore((s) => s.clearBacktestProgress);
 
   const watchlist = status?.watchlist ?? [];
   const [symbols, setSymbols] = useState<string[]>(watchlist.slice(0, 3));
   const [days, setDays] = useState(5);
   const [rangeMode, setRangeMode] = useState<"days" | "dates">("days");
-  const [startDate, setStartDate] = useState(() => {
-    const d = new Date();
-    d.setDate(d.getDate() - 5);
-    return d.toISOString().split("T")[0];
-  });
-  const [endDate, setEndDate] = useState(() => new Date().toISOString().split("T")[0]);
-  const [mlGate, setMlGate] = useState(true);
-  const [dynamicScanner, setDynamicScanner] = useState(true);
-  const [ignoreTemporalLeakage, setIgnoreTemporalLeakage] = useState(false);
+  const [startDate, setStartDate] = useState(() => etDateInput(new Date(Date.now() - 5 * 86400000)));
+  const [endDate, setEndDate] = useState(() => etDateInput(new Date()));
+  const [dynamicScanner, setDynamicScanner] = useState(false);
   const [cash, setCash] = useState(100000);
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<BacktestResult | null>(null);
@@ -51,16 +57,27 @@ export function BacktestModal(props: { onClose: () => void }) {
       showToast("error", "Select at least one symbol");
       return;
     }
+    if (rangeMode === "dates" && (!startDate || !endDate || startDate > endDate)) {
+      showToast("error", "Choose a valid custom date range");
+      return;
+    }
+    if (rangeMode === "days" && (!Number.isInteger(days) || days < 1 || days > 90)) {
+      showToast("error", "Lookback days must be between 1 and 90");
+      return;
+    }
+    if (!Number.isFinite(cash) || cash < 1000) {
+      showToast("error", "Starting cash must be at least $1,000");
+      return;
+    }
     setRunning(true);
     setResult(null);
+    clearBacktestProgress();
     try {
       const res = await api.runBacktest({
         symbols,
         days,
         starting_cash: cash,
-        use_ml_gate: mlGate,
         use_dynamic_scanner: dynamicScanner,
-        ignore_temporal_leakage: ignoreTemporalLeakage,
         start_date: rangeMode === "dates" ? startDate : null,
         end_date: rangeMode === "dates" ? endDate : null,
       });
@@ -69,6 +86,7 @@ export function BacktestModal(props: { onClose: () => void }) {
       showToast("error", (e as Error).message);
     } finally {
       setRunning(false);
+      clearBacktestProgress();
     }
   }
 
@@ -155,29 +173,21 @@ export function BacktestModal(props: { onClose: () => void }) {
               onChange={(e) => setCash(Number(e.target.value))}
             />
           </div>
-          <div className="field">
-            <label>AI signal gate</label>
-            <div className="row">
-              <button type="button" className={`switch ${mlGate ? "on" : ""}`} onClick={() => setMlGate(!mlGate)} />
-              <span className="muted">{mlGate ? "ML/heuristic gate on" : "raw strategy signals"}</span>
-            </div>
-          </div>
-          <div className="field">
-            <label>Dynamic Market Scanner</label>
-            <div className="row">
-              <button type="button" className={`switch ${dynamicScanner ? "on" : ""}`} onClick={() => setDynamicScanner(!dynamicScanner)} />
-              <span className="muted">{dynamicScanner ? "Active pre-market rotation" : "Static watchlist"}</span>
-            </div>
-          </div>
-          <div className="field" style={{ gridColumn: "1 / -1" }}>
-            <label>Ignore Temporal Leakage</label>
-            <div className="row" style={{ alignItems: "center" }}>
-              <button type="button" className={`switch ${ignoreTemporalLeakage ? "on" : ""}`} onClick={() => setIgnoreTemporalLeakage(!ignoreTemporalLeakage)} />
-              <span className="muted">{ignoreTemporalLeakage ? "Bypassed (Models will run)" : "Enforced (Look-ahead protection)"}</span>
-            </div>
-            <span className="hint">
-              Enables backtesting past dates using models trained in the future. <b>Warning:</b> May introduce look-ahead bias if the model has trained on your backtest data.
+          <label className="field" style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+            <input
+              type="checkbox"
+              checked={dynamicScanner}
+              onChange={(e) => setDynamicScanner(e.target.checked)}
+            />
+            <span>
+              <b>Use historical dynamic scanner</b>
+              <span className="hint" style={{ display: "block" }}>
+                Replays scanner decisions causally from the historical stream; slower but auditable.
+              </span>
             </span>
+          </label>
+          <div className="form-notice" style={{ gridColumn: "1 / -1" }} role="note">
+            Production ML, risk, execution, and look-ahead protections remain enabled for every run. This screen does not expose unsafe bypass switches.
           </div>
         </div>
 
@@ -196,7 +206,7 @@ export function BacktestModal(props: { onClose: () => void }) {
           <div style={{ marginTop: 14 }}>
             <div className="metric-grid">
               {METRIC_LABELS.map(([key, label, colorize]) => {
-                const v = result.metrics[key];
+                const v = (result.metrics ?? {})[key];
                 const cls = colorize && typeof v === "number" ? (v >= 0 ? "pos" : "neg") : "";
                 return (
                   <div className="metric-card" key={key}>
@@ -207,11 +217,11 @@ export function BacktestModal(props: { onClose: () => void }) {
               })}
             </div>
             <div style={{ border: "1px solid var(--border)", borderRadius: 8, padding: "6px 4px" }}>
-              <EquityChart curve={result.equity_curve} height={180} />
+              <EquityChart curve={result.equity_curve ?? []} height={180} />
             </div>
-            {result.warnings.length > 0 && (
+            {(result.warnings ?? []).length > 0 && (
               <div className="muted" style={{ marginTop: 8, fontSize: 11 }}>
-                {result.warnings.map((w, i) => (
+                {(result.warnings ?? []).map((w, i) => (
                   <div key={i}>⚠ {w}</div>
                 ))}
               </div>
@@ -226,7 +236,7 @@ export function BacktestModal(props: { onClose: () => void }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {result.trades.map((t) => (
+                  {(result.trades ?? []).map((t) => (
                     <tr key={t.id}>
                       <td className="num faint">{fmtDateTime(t.exit_at)}</td>
                       <td><b>{t.symbol}</b></td>
@@ -240,7 +250,7 @@ export function BacktestModal(props: { onClose: () => void }) {
                       <td className="muted">{t.exit_reason}</td>
                     </tr>
                   ))}
-                  {result.trades.length === 0 && (
+                  {(result.trades ?? []).length === 0 && (
                     <tr><td colSpan={10} className="muted">No trades in this run</td></tr>
                   )}
                 </tbody>

@@ -53,10 +53,24 @@ async def test_pool_screener_filtering(mock_data_manager):
             # Fails: Price $8 (below $10 minimum price floor)
             closes = np.ones(15) * 8.0
             vols = np.ones(15) * 5_000_000.0
+# =============================================================================
+# [MODIFIED 2026-10-16]: Deterministic Liquidity Filter Mock in test_scanner
+# ORIGINAL INTENT: Intended to fail liquidity (# Fails: Vol 500k), but 500k at $100 with intraday RVOL passed.
+# REASON FOR CHANGE: Reduce volume to 5,000 so liquidity filter fails deterministically at all hours.
+# SAFE ROLLBACK: Preserved below.
+# -----------------------------------------------------------------------------
+# [PREVIOUS CODE - PRESERVED]:
+#        else:
+#            # Fails: Vol 500k
+#            closes = np.ones(15) * 100.0
+#            vols = np.ones(15) * 500_000.0
+# -----------------------------------------------------------------------------
+# [NEW CODE]:
         else:
-            # Fails: Vol 500k
+            # Fails: Low dollar volume
             closes = np.ones(15) * 100.0
-            vols = np.ones(15) * 500_000.0
+            vols = np.ones(15) * 5_000.0
+# =============================================================================
             
         return pd.DataFrame({
             "open": closes, "high": closes + 0.5, "low": closes - 0.5, "close": closes, "volume": vols

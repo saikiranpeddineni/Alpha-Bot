@@ -155,3 +155,26 @@ def test_exit_reason_never_bare():
     assert trade2.exit_reason != "exit"
     assert trade2.exit_reason == "unspecified_exit:orb"
 
+    # Owner hardening: entry-thesis reason leaking onto a stop fill must not
+    # masquerade as exit attribution (observed: "BB Squeeze breakout...",
+    # "EMA9>EMA20..." in prod exit_reason).
+    p.on_fill(fill(symbol="SNDQ", qty=10, price=50.0, strategy="bb_squeeze"), initial_stop=48.0)
+    trade3 = p.on_fill(fill(symbol="SNDQ", side=OrderSide.SELL, qty=10, price=47.5,
+                            reason="BB Squeeze breakout down confirmed (vol z 3.1)", strategy="bb_squeeze"))
+    assert trade3 is not None
+    assert trade3.exit_reason == "stop_loss"
+
+    # Entry thesis on a non-stop exit -> strategy-attributed bucket, never raw text.
+    p.on_fill(fill(symbol="V", qty=10, price=100.0, strategy="vwap_reversion"), initial_stop=95.0)
+    trade4 = p.on_fill(fill(symbol="V", side=OrderSide.SELL, qty=10, price=101.0,
+                            reason="Stretched -2.2 sigma below VWAP", strategy="vwap_reversion"))
+    assert trade4 is not None
+    assert trade4.exit_reason == "unspecified_exit:vwap_reversion"
+
+    # Legit exit vocabulary passes through untouched.
+    p.on_fill(fill(symbol="U", qty=10, price=30.0, strategy="liquidity_sweep"), initial_stop=28.0)
+    trade5 = p.on_fill(fill(symbol="U", side=OrderSide.SELL, qty=10, price=27.0,
+                            reason="PIS Exit Reason: THESIS_DEGRADED", strategy="liquidity_sweep"))
+    assert trade5 is not None
+    assert trade5.exit_reason == "PIS Exit Reason: THESIS_DEGRADED"
+

@@ -7,13 +7,15 @@ Everything the dashboard does goes through these routes; the WebSocket at
 from __future__ import annotations
 
 import asyncio
+import os
 from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from app.backtest.metrics import compute_metrics
 from app.core.applog import applog
-from app.core.domain import EngineState, OrderRequest, OrderSide, OrderType, utcnow
+from app.core.domain import EngineState, OrderRequest, OrderSide, OrderType, TradeRecord, utcnow
 
 router = APIRouter(prefix="/api")
 
@@ -238,17 +240,6 @@ async def submit_order(body: ManualOrderBody, request: Request) -> dict:
     if body.order_type == OrderType.LIMIT and body.limit_price is None:
         raise HTTPException(status_code=400, detail="limit_price required for limit orders")
     # -----------------------------------------------------------------------------
-    # [PREVIOUS CODE - PRESERVED]:
-    # req = OrderRequest(
-    #     symbol=body.symbol.upper(),
-    #     side=body.side,
-    #     qty=body.qty,
-    #     order_type=body.order_type,
-    #     limit_price=body.limit_price,
-    #     strategy="manual",
-    #     reason="manual order",
-    # )
-    # -----------------------------------------------------------------------------
     # [NEW CODE]:
     order_reason = f"manual order: {body.reason.strip()}" if body.reason and body.reason.strip() else "manual order"
     req = OrderRequest(
@@ -344,6 +335,8 @@ class RiskConfigUpdateBody(BaseModel):
     max_position_pct: float | None = None
     max_open_positions: int | None = None
     max_daily_loss_pct: float | None = None
+    daily_profit_lock_pct: float | None = None
+    daily_profit_defend_pct: float | None = None
     max_drawdown_pct: float | None = None
     symbol_cooldown_minutes: int | None = None
     strategy_consecutive_loss_limit: int | None = None
@@ -455,20 +448,7 @@ async def run_trainer(request: Request) -> dict:
 # [MODIFIED 2026-10-14]: L50 - Pass BacktestBody starting_cash and slippage_bps to Replay
 # ORIGINAL INTENT: BacktestBody lacked slippage_bps, and starting_cash was not forwarded to run_replay_fast_async.
 # REASON FOR CHANGE: Ensure full contract compliance between API request and ReplayRuntime execution.
-# SAFE ROLLBACK: The original code is preserved below as comments.
-# -----------------------------------------------------------------------------
-# [PREVIOUS CODE - PRESERVED]:
-# class BacktestBody(BaseModel):
-#     symbols: list[str]
-#     days: int = Field(default=5, ge=1, le=90)
-#     starting_cash: float = Field(default=100_000.0, gt=0)
-#     use_ml_gate: bool = True
-#     use_dynamic_scanner: bool = False
-#     ignore_temporal_leakage: bool = False
-#     debug_mode: bool = False
-#     strategies: dict[str, dict] | None = None
-#     start_date: str | None = None
-#     end_date: str | None = None
+# SAFE ROLLBACK: The original code is removed; rollback via git history.
 # -----------------------------------------------------------------------------
 # [NEW CODE]:
 class BacktestBody(BaseModel):
@@ -524,20 +504,24 @@ async def post_backtest(body: BacktestBody, request: Request) -> dict:
         runtime = ReplayRuntime(self_settings(request), _db(request))
         on_progress = lambda pct: hub.publish("backtest_progress", {"progress": round(pct / 100.0, 3)})  # noqa: E731
         runtime.session_manager.update_session = _wrap_progress(runtime.session_manager.update_session, on_progress)
+        # Windows desktop runs have repeatedly produced unstable child-process
+        # failures when the UI starts one worker per replay day. Keep the API
+        # path deterministic and bounded by default; the CLI remains available
+        # for explicitly parallel research runs.
+        configured_workers = os.environ.get("ALPHADESK_BACKTEST_WORKERS")
+        if configured_workers:
+            try:
+                max_workers = max(1, int(configured_workers))
+            except ValueError:
+                max_workers = 0 if os.name == "nt" else None
+        else:
+            max_workers = 0 if os.name == "nt" else None
 
         # =============================================================================
         # [MODIFIED 2026-10-14]: L50 - Pass starting_cash and slippage_bps to Replay Runtime
         # ORIGINAL INTENT: Hardcoded arguments omitted starting_cash and slippage_bps.
         # REASON FOR CHANGE: Ensure starting capital and slippage settings from request body bind to replay.
-        # SAFE ROLLBACK: The original code is preserved below as comments.
-        # -----------------------------------------------------------------------------
-        # [PREVIOUS CODE - PRESERVED]:
-        # replay = await runtime.run_replay_fast_async(
-        #     start_date=start_date,
-        #     end_date=end_date,
-        #     symbols=[s.upper() for s in body.symbols] or None,
-        #     warmup_bars=600,
-        # )
+        # SAFE ROLLBACK: The original code is removed; rollback via git history.
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
         replay = await runtime.run_replay_fast_async(
@@ -547,6 +531,8 @@ async def post_backtest(body: BacktestBody, request: Request) -> dict:
             warmup_bars=600,
             starting_cash=body.starting_cash,
             slippage_bps=getattr(body, "slippage_bps", 0.0),
+            use_dynamic_scanner=body.use_dynamic_scanner,
+            max_workers=max_workers,
         )
         # =============================================================================
 
@@ -554,28 +540,80 @@ async def post_backtest(body: BacktestBody, request: Request) -> dict:
         # Fast path returns day-shard results directly (validated byte-exact
         # against the continuous pass at window boundaries, 2026-08-23).
         trades = list(replay.get("trades", []))
-        curve = [[p[0], p[1]] for p in replay.get("equity_curve", [])]
-        wins = [t for t in trades if float(t.get("pnl") or 0) > 0]
-        losses = [t for t in trades if float(t.get("pnl") or 0) <= 0]
-        gp = sum(float(t.get("pnl") or 0) for t in wins)
-        gl = abs(sum(float(t.get("pnl") or 0) for t in losses))
-        eq0 = curve[0][1] if curve else None
-        eqN = curve[-1][1] if curve else None
-        metrics = {
-            "total_trades": len(trades),
-            "win_rate": round(len(wins) / len(trades) * 100, 2) if trades else 0.0,
-            "profit_factor": round(gp / gl, 3) if gl > 0 else None,
-            "net_pnl": round(gp - gl, 2),
-            "total_return_pct": round((eqN / eq0 - 1) * 100, 4) if eq0 and eqN else None,
-        }
+        warnings: list[str] = [str(w) for w in (replay.get("warnings") or [])]
+        curve: list[list[str | float]] = []
+        metric_curve: list[tuple[datetime, float]] = []
+        for point in replay.get("equity_curve", []) or []:
+            if not isinstance(point, (list, tuple)) or len(point) < 2:
+                warnings.append("Replay returned an invalid equity-curve point.")
+                continue
+            try:
+                point_ts = point[0] if isinstance(point[0], datetime) else datetime.fromisoformat(str(point[0]).replace("Z", "+00:00"))
+                point_equity = float(point[1])
+            except (TypeError, ValueError) as exc:
+                warnings.append(f"Replay returned an invalid equity-curve point: {exc}")
+                continue
+            curve.append([point_ts.isoformat(), point_equity])
+            metric_curve.append((point_ts, point_equity))
+
+        try:
+            metric_trades = [TradeRecord.model_validate(trade) for trade in trades]
+            metrics = compute_metrics(metric_curve, metric_trades, body.starting_cash)
+        except (TypeError, ValueError) as exc:
+            # Keep the UI usable even if an older replay artifact contains a
+            # partial trade payload. The detailed metric calculator is preferred,
+            # but the basic fields remain available for that compatibility case.
+            warnings.append(f"Detailed metrics unavailable: {exc}")
+            wins = [t for t in trades if float(t.get("pnl") or 0) > 0]
+            losses = [t for t in trades if float(t.get("pnl") or 0) <= 0]
+            gross_profit = sum(float(t.get("pnl") or 0) for t in wins)
+            gross_loss = abs(sum(float(t.get("pnl") or 0) for t in losses))
+            final_equity = float(summary_in.get("final_equity") or body.starting_cash)
+            metrics = {
+                "starting_equity": round(body.starting_cash, 2),
+                "final_equity": round(final_equity, 2),
+                "total_return_pct": round((final_equity / body.starting_cash - 1.0) * 100.0, 2),
+                "max_drawdown_pct": None,
+                "sharpe": None,
+                "sortino": None,
+                "total_trades": len(trades),
+                "win_rate": round(len(wins) / len(trades) * 100.0, 1) if trades else 0.0,
+                "profit_factor": round(gross_profit / gross_loss, 2) if gross_loss > 0 else None,
+                "expectancy": round((gross_profit - gross_loss) / len(trades), 2) if trades else 0.0,
+                "avg_r": None,
+            }
+
+        # The fast worker samples the curve during replay. Its session summary
+        # contains the authoritative final marked equity after the last tick.
+        if summary_in.get("final_equity") is not None:
+            metrics["final_equity"] = round(float(summary_in["final_equity"]), 2)
+            metrics["total_return_pct"] = round((metrics["final_equity"] / body.starting_cash - 1.0) * 100.0, 2)
+        if not curve:
+            warnings.append("Replay returned no equity samples.")
+        if summary_in.get("all_days_flat") is False:
+            warnings.append("Replay ended with an open position in at least one session.")
+
+        bars_processed = int(summary_in.get("production_ticks") or 0)
         payload = {
             "id": summary_in.get("replay_id"),
             "created_at": datetime.now(UTC).isoformat(),
-            "params": {"symbols": body.symbols, "start_date": start_date, "end_date": end_date,
-                       "engine": "replay_fast"},
+            "params": {
+                "symbols": [s.upper() for s in body.symbols],
+                "days": body.days,
+                "start_date": start_date,
+                "end_date": end_date,
+                "starting_cash": body.starting_cash,
+                "slippage_bps": body.slippage_bps,
+                "use_ml_gate": body.use_ml_gate,
+                "use_dynamic_scanner": body.use_dynamic_scanner,
+                "ignore_temporal_leakage": body.ignore_temporal_leakage,
+                "engine": "replay_fast",
+            },
             "metrics": metrics,
             "trades": trades,
             "equity_curve": curve,
+            "bars_processed": bars_processed,
+            "warnings": warnings,
             "manifest": replay.get("manifest", {}),
         }
         try:
@@ -657,9 +695,21 @@ async def run_profit_validation_suite(body: ValidationBody, request: Request) ->
 @router.post("/scanner/run")
 async def run_scanner(request: Request) -> dict:
     try:
-        new_watchlist = await _engine(request).run_market_scanner()
-        return {"status": "success", "watchlist": new_watchlist}
+        engine = _engine(request)
+        new_watchlist = await engine.run_market_scanner()
+        scanner_status = dict(getattr(engine, "scanner_status", {}) or {})
+        if scanner_status.get("outcome") == "FAILED":
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "message": "Market scanner failed; the existing watchlist was preserved.",
+                    "scanner": scanner_status,
+                },
+            )
+        return {"status": "success", "watchlist": new_watchlist, "scanner": scanner_status}
     except Exception as exc:
+        if isinstance(exc, HTTPException):
+            raise
         applog.error(
             "routes",
             f"Scanner endpoint error: {exc}",

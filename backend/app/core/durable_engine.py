@@ -55,6 +55,27 @@ class DurableTradingEngine(TradingEngine):
             )
             self.recent_orders.appendleft(order)
         else:
+            # A broker restart can surface the execution with metadata from
+            # neither the in-memory order map nor Alpaca's nested child.  Do
+            # not let a known PIS fill overwrite an already-specific reason,
+            # but do upgrade generic placeholders before persisting the order
+            # ledger used by later attribution/recovery.
+            fill_reason = str(getattr(fill, "reason", "") or "").strip()
+            order_reason = str(getattr(order, "reason", "") or "").strip()
+            if fill_reason and (
+                order_reason.lower() in {"", "exit", "manual", "manual close", "broker fill"}
+                or order_reason.lower().startswith("unspecified_exit")
+            ):
+                order.reason = fill_reason
+            fill_strategy = str(getattr(fill, "strategy", "") or "").strip()
+            order_strategy = str(getattr(order, "strategy", "") or "").strip()
+            if fill_strategy and fill_strategy.lower() not in {"manual", "engine", "alpaca", "unknown"} and order_strategy.lower() in {"", "manual", "engine", "alpaca", "unknown"}:
+                order.strategy = fill_strategy
+            if not getattr(order, "signal_timestamp_utc", None) and getattr(fill, "signal_timestamp_utc", None):
+                order.signal_timestamp_utc = fill.signal_timestamp_utc
+            if not getattr(order, "decision_bar_timestamp_utc", None) and getattr(fill, "decision_bar_timestamp_utc", None):
+                order.decision_bar_timestamp_utc = fill.decision_bar_timestamp_utc
+
             cumulative_qty = float(getattr(fill, "cumulative_qty", 0.0) or 0.0)
             order_qty = max(0.0, float(getattr(order, "qty", 0.0) or 0.0))
             order.filled_qty = cumulative_qty if cumulative_qty > 0 else max(float(order.filled_qty or 0.0), float(fill.qty))

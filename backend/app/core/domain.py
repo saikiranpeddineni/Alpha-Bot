@@ -81,9 +81,6 @@ class Signal(BaseModel):
     # REASON FOR CHANGE: Expose `timestamp` property returning `self.ts` for clean lineage.
     # SAFE ROLLBACK: Remove property block.
     # -----------------------------------------------------------------------------
-    # [PREVIOUS CODE - PRESERVED]:
-    # # No timestamp property alias
-    # -----------------------------------------------------------------------------
     # [NEW CODE]:
     @property
     def timestamp(self) -> datetime:

@@ -115,4 +115,5 @@ class ReplayLedger:
                 "ml_decisions": self.ml_decisions,
                 "risk_decisions": self.risk_decisions, "orders": self.orders, "fills": self.fills,
                 "production_fills": self.production_fills, "trades": self.trades,
-                "equity_curve": self.equity_curve, "timeline": self.timeline}
+                "equity_curve": self.equity_curve, "timeline": self.timeline,
+                "stage_hashes": self.compute_stage_hashes()}

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "../api";
 import { useStore } from "../store";
 import type { RiskConfig } from "../types";
@@ -31,6 +31,20 @@ const FIELDS: { key: keyof RiskConfig; label: string; hint: string; help: string
     hint: "halts trading for the session",
     help: "Maximum percentage of daily account value loss allowed before the engine halts trading for the rest of the session. Recommended: 2.0% to 3.0%.",
     step: 0.5,
+  },
+  {
+    key: "daily_profit_lock_pct",
+    label: "Daily profit lock %",
+    hint: "locks new entries after this gain (0 = off)",
+    help: "When the session reaches this profit percentage, new entries are locked so the green day is protected. Set to 0 to disable.",
+    step: 0.1,
+  },
+  {
+    key: "daily_profit_defend_pct",
+    label: "Profit-lock defend %",
+    hint: "defend the locked profit floor (0 = off)",
+    help: "After the profit lock, flatten if the session gives back to this defended profit level. Set to 0 to disable.",
+    step: 0.1,
   },
   {
     key: "max_drawdown_pct",
@@ -113,6 +127,15 @@ const FIELDS: { key: keyof RiskConfig; label: string; hint: string; help: string
   },
 ];
 
+function draftFromRiskConfig(config: RiskConfig): Record<string, string> {
+  const draft: Record<string, string> = {};
+  for (const field of FIELDS) {
+    const value = config[field.key];
+    draft[field.key] = Number.isFinite(value) ? String(value) : "";
+  }
+  return draft;
+}
+
 export function SettingsModal(props: { onClose: () => void }) {
   const status = useStore((s) => s.status);
   const showToast = useStore((s) => s.showToast);
@@ -120,19 +143,33 @@ export function SettingsModal(props: { onClose: () => void }) {
   const setHeartbeatStyle = useStore((s) => s.setHeartbeatStyle);
   const initial = status?.risk?.config;
   const [draft, setDraft] = useState<Record<string, string>>(() => {
-    const d: Record<string, string> = {};
-    if (initial) {
-      for (const f of FIELDS) d[f.key] = String(initial[f.key]);
-    }
-    return d;
+    return initial ? draftFromRiskConfig(initial) : {};
   });
   const [saving, setSaving] = useState(false);
 
+  useEffect(() => {
+    if (initial && Object.keys(draft).length === 0) setDraft(draftFromRiskConfig(initial));
+  }, [initial, draft]);
+
+  const riskValuesReady = Boolean(
+    initial &&
+      FIELDS.every((field) => {
+        const raw = draft[field.key]?.trim() ?? "";
+        return raw.length > 0 && Number.isFinite(Number(raw));
+      }),
+  );
+
   async function save() {
+    if (!initial) {
+      showToast("error", "Risk settings are still loading. Try again in a moment.");
+      return;
+    }
+
     const payload: Record<string, number> = {};
     for (const f of FIELDS) {
-      const v = Number(draft[f.key]);
-      if (!Number.isFinite(v)) {
+      const raw = draft[f.key]?.trim() ?? "";
+      const v = Number(raw);
+      if (!raw || !Number.isFinite(v)) {
         showToast("error", `Invalid value for ${f.label}`);
         return;
       }
@@ -155,6 +192,11 @@ export function SettingsModal(props: { onClose: () => void }) {
   return (
     <Modal title="Settings — Risk & Engine" onClose={props.onClose}>
       <div className="modal-body">
+        {!initial && (
+          <div className="form-notice" role="status">
+            Loading current risk values…
+          </div>
+        )}
         <div className="form-grid">
           {FIELDS.map((f) => (
             <div className="field" key={f.key} title={f.help}>
@@ -166,6 +208,8 @@ export function SettingsModal(props: { onClose: () => void }) {
                 className="num"
                 step={f.step ?? 1}
                 value={draft[f.key] ?? ""}
+                required
+                aria-invalid={draft[f.key] !== undefined && (!draft[f.key].trim() || !Number.isFinite(Number(draft[f.key])))}
                 onChange={(e) => setDraft({ ...draft, [f.key]: e.target.value })}
               />
               <span className="hint">{f.hint}</span>
@@ -205,7 +249,7 @@ export function SettingsModal(props: { onClose: () => void }) {
       </div>
       <div className="modal-foot">
         <button className="btn ghost" onClick={props.onClose}>Cancel</button>
-        <button className="btn primary" onClick={save} disabled={saving}>
+        <button className="btn primary" onClick={save} disabled={saving || !riskValuesReady}>
           {saving ? "Saving…" : "Save settings"}
         </button>
       </div>
