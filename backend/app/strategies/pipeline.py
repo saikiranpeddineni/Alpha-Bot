@@ -217,11 +217,30 @@ class SignalPipeline:
             _strat_cls = _REG.get(sig.strategy)
             is_reversion_strat = bool(getattr(_strat_cls, "is_mean_reversion", False)) if _strat_cls else False
             is_structural_breakout = bool(getattr(_strat_cls, "is_structural_breakout", False)) if _strat_cls else False
+            # =============================================================================
+            # [MODIFIED 2026-10-22]: Exempt Structural Breakouts (ORB) from Entry Chase Veto
+            # ORIGINAL INTENT: entry_chase_veto exempted is_reversion_strat, but omitted is_structural_breakout.
+            # An authentic ORB breakout candle by definition closes near the bar extreme (acceptance >= 0.50).
+            # Downstream chase veto was killing valid ORB setups that survived strategy evaluation.
+            # REASON FOR CHANGE: Align with Betadesk architecture: allow genuine structural breakouts
+            # (such as ORB) to clear the pipeline while retaining chase veto on generic momentum continuations.
+            # SAFE ROLLBACK: Previous condition preserved below as comments.
+            # -----------------------------------------------------------------------------
+            # [PREVIOUS CODE - PRESERVED]:
+            # if (
+            #     getattr(rc, "enable_entry_chase_veto", True)
+            #     and not is_reversion_strat
+            #     and df is not None and len(df) >= 2
+            # ):
+            # -----------------------------------------------------------------------------
+            # [NEW CODE]:
             if (
                 getattr(rc, "enable_entry_chase_veto", True)
                 and not is_reversion_strat
+                and not is_structural_breakout
                 and df is not None and len(df) >= 2
             ):
+            # =============================================================================
                 last_bar = df.iloc[-1]
                 try:
                     b_hi = float(last_bar["high"]); b_lo = float(last_bar["low"])
