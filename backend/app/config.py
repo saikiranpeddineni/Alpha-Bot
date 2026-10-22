@@ -36,7 +36,19 @@ class OpportunityConfig(BaseModel):
     """Cost-aware opportunity controls; never overrides risk or execution gates."""
     enabled: bool = True
     min_net_edge_bps: float = Field(15.0, ge=0.0, le=10_000.0)
-    min_reward_risk: float = Field(1.25, ge=0.1, le=100.0)
+    # =============================================================================
+    # [MODIFIED 2026-10-22]: Calibrate min_reward_risk from 1.25 to 0.70
+    # ORIGINAL INTENT: Required R:R >= 1.25 for all candidates.
+    # REASON FOR CHANGE: Conflicted with ORB chop_reward_risk (0.75R) in RANGE/VOLATILE regimes,
+    # causing 100% of chop breakouts (including winners like SOXS) to be vetoed.
+    # SAFE ROLLBACK: Previous line preserved below as comment.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # min_reward_risk: float = Field(1.25, ge=0.1, le=100.0)
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    min_reward_risk: float = Field(0.70, ge=0.1, le=100.0)
+    # =============================================================================
     round_trip_cost_bps: float = Field(8.0, ge=0.0, le=10_000.0)
     overnight_enabled: bool = False
     overnight_max_allocation_pct: float = Field(15.0, ge=0.0, le=100.0)
@@ -336,7 +348,18 @@ class Settings(BaseSettings):
     # =============================================================================
     opportunity_enabled: bool = Field(True, validation_alias="OPPORTUNITY_ENABLED")
     opportunity_min_net_edge_bps: float = Field(15.0, validation_alias="OPPORTUNITY_MIN_NET_EDGE_BPS")
-    opportunity_min_reward_risk: float = Field(1.25, validation_alias="OPPORTUNITY_MIN_REWARD_RISK")
+    # =============================================================================
+    # [MODIFIED 2026-10-22]: Calibrate Settings.opportunity_min_reward_risk from 1.25 to 0.70
+    # ORIGINAL INTENT: Required R:R >= 1.25 in Settings.
+    # REASON FOR CHANGE: Permits regime-adapted 0.75R targets from strategies like ORB in chop regimes.
+    # SAFE ROLLBACK: Previous line preserved below as comment.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # opportunity_min_reward_risk: float = Field(1.25, validation_alias="OPPORTUNITY_MIN_REWARD_RISK")
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    opportunity_min_reward_risk: float = Field(0.70, validation_alias="OPPORTUNITY_MIN_REWARD_RISK")
+    # =============================================================================
     opportunity_round_trip_cost_bps: float = Field(8.0, validation_alias="OPPORTUNITY_ROUND_TRIP_COST_BPS")
     overnight_enabled: bool = Field(False, validation_alias="OVERNIGHT_ENABLED")
     overnight_max_allocation_pct: float = Field(15.0, validation_alias="OVERNIGHT_MAX_ALLOCATION_PCT")
