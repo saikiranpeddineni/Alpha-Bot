@@ -6,7 +6,6 @@ import pytest
 
 from app.core.scanner_discovery_input import resolve_stage1_symbols
 
-
 HISTORICAL_T = datetime(2026, 7, 14, 14, 0, tzinfo=UTC)
 STATIC = ("ZZZ", "AAA", "BBB", "CCC")
 
@@ -41,6 +40,41 @@ async def test_live_shortlist_is_bounded_normalized_stage1_input():
 
     assert symbols == ("NEW1", "NEW2")
     acquire.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_live_discovery_reserves_bounded_slots_for_core_symbols():
+    acquire = AsyncMock(
+        return_value=SimpleNamespace(shortlist=("NEW4", "NEW2", "NEW3", "NEW1"))
+    )
+
+    symbols = await resolve_stage1_symbols(
+        as_of=None,
+        static_symbols=("AAA",),
+        core_symbols=(" core2 ", "NEW2", "CORE1"),
+        fallback_limit=4,
+        discovery_supported=True,
+        acquire_discovery=acquire,
+    )
+
+    assert symbols == ("CORE1", "CORE2", "NEW1", "NEW2")
+
+
+@pytest.mark.asyncio
+async def test_historical_core_symbols_are_causal_static_input_only():
+    acquire = AsyncMock(side_effect=AssertionError("current discovery reached replay"))
+
+    symbols = await resolve_stage1_symbols(
+        as_of=HISTORICAL_T,
+        static_symbols=("AAA",),
+        core_symbols=("USER1",),
+        fallback_limit=1,
+        discovery_supported=True,
+        acquire_discovery=acquire,
+    )
+
+    assert symbols == ("AAA", "USER1")
+    acquire.assert_not_awaited()
 
 
 @pytest.mark.asyncio

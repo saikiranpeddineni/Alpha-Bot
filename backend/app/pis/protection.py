@@ -37,6 +37,7 @@ class AdaptiveProtectionPlanner:
         has_scaled_out: bool = False,
         predicted_max_r: float = 2.0,
         causal_reversal_confirmed: bool = False,
+        causal_floor_tightened: bool | None = None,
     ) -> float:
         """Compute the updated protection floor for a position.
 
@@ -51,6 +52,8 @@ class AdaptiveProtectionPlanner:
                 confirmed a reversal across completed bars with sufficient
                 high-water giveback.  This tightens a runner floor without
                 weakening the monotonic invariant.
+            causal_floor_tightened: True when either the confirmed reversal or
+                the first-bar causal runner ratchet has tightened the floor.
 
         Returns:
             Calculated stop loss price (float).
@@ -63,6 +66,8 @@ class AdaptiveProtectionPlanner:
         risk = obs.risk_per_share
         side = obs.side
         initial_stop = obs.initial_stop
+        if causal_floor_tightened is None:
+            causal_floor_tightened = causal_reversal_confirmed
 
         if risk <= 1e-8 or math.isnan(risk) or math.isinf(risk):
             # Fallback to initial stop if risk is invalid
@@ -127,7 +132,7 @@ class AdaptiveProtectionPlanner:
                 # completed-bar close so this path does not use a fresher quote
                 # as a hidden future extreme; the final monotonic guard still
                 # wins if the hard floor has already been breached.
-                if causal_reversal_confirmed and getattr(self.config, "enable_causal_peak_capture", True):
+                if causal_floor_tightened and getattr(self.config, "enable_causal_peak_capture", True):
                     giveback_r = max(
                         getattr(self.config, "causal_peak_capture_min_giveback_r", 0.50),
                         max(0.0, peak_r)
@@ -139,10 +144,24 @@ class AdaptiveProtectionPlanner:
                     )
                     causal_floor = entry + (side * locked_r * risk)
                     if side > 0:
-                        causal_floor = min(causal_floor, obs.close)
+                        if causal_reversal_confirmed:
+                            causal_floor = min(causal_floor, obs.close)
+                        else:
+                            buffer = max(
+                                self.config.min_price_buffer_abs,
+                                obs.close * self.config.price_buffer_pct,
+                            )
+                            causal_floor = min(causal_floor, obs.close - buffer)
                         candidate_floor = max(candidate_floor, causal_floor)
                     else:
-                        causal_floor = max(causal_floor, obs.close)
+                        if causal_reversal_confirmed:
+                            causal_floor = max(causal_floor, obs.close)
+                        else:
+                            buffer = max(
+                                self.config.min_price_buffer_abs,
+                                obs.close * self.config.price_buffer_pct,
+                            )
+                            causal_floor = max(causal_floor, obs.close + buffer)
                         candidate_floor = min(candidate_floor, causal_floor)
         elif peak_r < activation_r:
             # =============================================================================

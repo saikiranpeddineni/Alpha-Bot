@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import tempfile
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 # Test isolation FIRST (before any app.* import reads it): engine-level tests
 # flow rejections into the global shadow-ledger singleton whose default path
@@ -24,6 +24,10 @@ os.environ.setdefault(
     "ALPHADESK_LOG_FILE",
     os.path.join(tempfile.mkdtemp(prefix="alphadesk_test_logs_", dir=tempfile.gettempdir()), "app.log"),
 )
+# Unit/integration tests must not launch the real post-market trainer from a
+# wall-clock-dependent demo tick. The trainer uses native ML fits in executor
+# threads, which otherwise keeps pytest's event-loop teardown alive for minutes.
+os.environ.setdefault("ALPHADESK_POSTMARKET_TRAIN", "0")
 
 import numpy as np
 import pandas as pd
@@ -31,6 +35,7 @@ import pytest
 
 from app.config import RiskConfig, _replay_models_dir
 from app.core.clock import MarketClock
+
 
 @pytest.fixture(autouse=True)
 def temp_models_dir(tmp_path):

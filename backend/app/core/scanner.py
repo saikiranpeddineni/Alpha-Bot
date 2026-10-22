@@ -175,7 +175,7 @@ class MarketScanner:
 
             acquire_discovery = _acquire_discovery
         symbols = await resolve_stage1_symbols(
-            as_of=as_of, static_symbols=CANDIDATE_POOL, fallback_limit=50,
+            as_of=as_of, static_symbols=CANDIDATE_POOL, core_symbols=self.core_watchlist, fallback_limit=50,
             discovery_supported=discovery_supported, acquire_discovery=acquire_discovery,
         )
         symbols_list = list(symbols)

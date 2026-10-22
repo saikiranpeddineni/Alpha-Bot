@@ -335,6 +335,8 @@ export interface Bootstrap {
 export interface ShadowEntry {
   id: number;
   created_at: string;
+  signal_timestamp_utc: string | null;
+  decision_bar_timestamp_utc: string | null;
   session_date: string;
   symbol: string;
   strategy: string | null;
@@ -362,8 +364,17 @@ export interface ShadowEntry {
   verdict: string | null;
 }
 
+export interface ShadowGateSummary {
+  gate: string;
+  total: number;
+  missed: number;
+  avoided: number;
+  avg_forward_move: number | null;
+}
+
 export interface ShadowLedgerData {
   entries: ShadowEntry[];
   summary: Record<string, number>;
+  gate_summary: ShadowGateSummary[];
   missed_winners: ShadowEntry[];
 }

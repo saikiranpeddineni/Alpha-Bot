@@ -15,11 +15,15 @@ Nothing in this module feeds back into sizing, gating, or execution.
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import math
 import os
 import queue
 import re
 import sqlite3
 import threading
+import time
+from contextlib import contextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -49,6 +53,8 @@ _SCHEMA = """
 CREATE TABLE IF NOT EXISTS shadow_entries (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     created_at TEXT NOT NULL,
+    signal_timestamp_utc TEXT,
+    decision_bar_timestamp_utc TEXT,
     session_date TEXT NOT NULL,
     symbol TEXT NOT NULL,
     strategy TEXT,
@@ -74,6 +80,9 @@ CREATE TABLE IF NOT EXISTS shadow_entries (
 );
 CREATE INDEX IF NOT EXISTS idx_shadow_created ON shadow_entries(created_at);
 CREATE INDEX IF NOT EXISTS idx_shadow_resolved ON shadow_entries(resolved);
+CREATE INDEX IF NOT EXISTS idx_shadow_verdict ON shadow_entries(verdict);
+CREATE INDEX IF NOT EXISTS idx_shadow_gate ON shadow_entries(gate);
+CREATE INDEX IF NOT EXISTS idx_shadow_candidate_gate ON shadow_entries(candidate_id, gate, symbol);
 """
 
 _META_PROB_RE = re.compile(r"prob[_ ]([01]\.\d+)")
@@ -94,6 +103,38 @@ def _parse_trade_score(reason: str) -> float | None:
     return float(m.group(1)) if m else None
 
 
+def _normalise_timestamp(value) -> datetime | None:  # noqa: ANN001
+    """Convert datetime-like values to timezone-aware UTC without raising."""
+    try:
+        if isinstance(value, datetime):
+            converted = value
+        else:
+            to_pydatetime = getattr(value, "to_pydatetime", None)
+            converted = to_pydatetime() if callable(to_pydatetime) else None
+        if not isinstance(converted, datetime):
+            return None
+        if converted.tzinfo is None:
+            converted = converted.replace(tzinfo=UTC)
+        return converted.astimezone(UTC)
+    except Exception:
+        return None
+
+
+def _first_timestamp(*values) -> datetime | None:  # noqa: ANN001
+    for value in values:
+        if value is None:
+            continue
+        timestamp = _normalise_timestamp(value)
+        if timestamp is not None:
+            return timestamp
+    return None
+
+
+_CONTEXT_DISABLED: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "shadow_ledger_context_disabled", default=False
+)
+
+
 class ShadowLedger:
     """Fire-and-forget recorder + background resolver."""
 
@@ -108,7 +149,7 @@ class ShadowLedger:
         # Replay isolation: replays must not write rejection forensics into
         # the production ledger (2026-08-26: one replay deposited ~300 rows
         # that then stalled the resolver waiting on forward bars the cache
-        # will never have). Runtime flips this off for the duration of a pass.
+        # will never have). Replays use a context-local suppression scope.
         self.enabled = True
         # Schema/WAL are applied exactly once per file, before any concurrent
         # connection exists. Running DDL on every connect caused persistent
@@ -132,6 +173,17 @@ class ShadowLedger:
             try:
                 con.execute("PRAGMA journal_mode=WAL")
                 con.executescript(_SCHEMA)
+                columns = {
+                    row[1]
+                    for row in con.execute("PRAGMA table_info(shadow_entries)").fetchall()
+                }
+                for column in ("signal_timestamp_utc", "decision_bar_timestamp_utc"):
+                    if column not in columns:
+                        con.execute(f"ALTER TABLE shadow_entries ADD COLUMN {column} TEXT")
+                con.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_shadow_decision_bar "
+                    "ON shadow_entries(decision_bar_timestamp_utc)"
+                )
                 con.commit()
             finally:
                 con.close()
@@ -152,29 +204,50 @@ class ShadowLedger:
         atr14: float | None = None,
         confidence: float | None = None,
         sig=None,
+        decision_bar_timestamp_utc: datetime | None = None,
+        candidate_id: str | None = None,
         extra_reason: str = "",
     ) -> None:
         """Capture one rejected entry signal. Never raises."""
-        if not self.enabled:
+        if not self.enabled or _CONTEXT_DISABLED.get():
             return
         try:
             now = datetime.now(UTC)
             reason_full = f"{reason}{(' | ' + extra_reason) if extra_reason else ''}"
+            decision_ts = _first_timestamp(
+                decision_bar_timestamp_utc,
+                getattr(sig, "decision_bar_timestamp_utc", None),
+            )
+            signal_ts = _first_timestamp(
+                getattr(sig, "signal_timestamp_utc", None),
+                getattr(sig, "timestamp", None),
+                getattr(sig, "ts", None),
+            )
+
+            def _finite(value):
+                try:
+                    number = float(value)
+                except (TypeError, ValueError):
+                    return None
+                return number if math.isfinite(number) else None
+
             row = {
                 "created_at": now.isoformat(),
-                "session_date": now.date().isoformat(),
+                "signal_timestamp_utc": signal_ts.isoformat() if signal_ts else None,
+                "decision_bar_timestamp_utc": decision_ts.isoformat() if decision_ts else None,
+                "session_date": (decision_ts or signal_ts or now).date().isoformat(),
                 "symbol": symbol.upper(),
                 "strategy": strategy,
                 "action": action,
-                "signal_price": price,
-                "stop_loss": stop_loss,
-                "take_profit": take_profit,
-                "atr14": atr14,
-                "confidence": confidence,
-                "ml_probability": getattr(sig, "ml_probability", None),
+                "signal_price": _finite(price),
+                "stop_loss": _finite(stop_loss),
+                "take_profit": _finite(take_profit),
+                "atr14": _finite(atr14),
+                "confidence": _finite(confidence),
+                "ml_probability": _finite(getattr(sig, "ml_probability", None)),
                 "meta_prob": _parse_meta_prob(reason_full),
                 "trade_score": _parse_trade_score(reason_full),
-                "candidate_id": getattr(sig, "candidate_id", None),
+                "candidate_id": candidate_id or getattr(sig, "candidate_id", None),
                 "gate": gate,
                 "reason": reason_full[:500],
             }
@@ -187,47 +260,100 @@ class ShadowLedger:
     def _connect(self) -> sqlite3.Connection:
         return self._plain_connect(self._db_path)
 
+    @contextmanager
+    def disabled(self):
+        """Suppress this context's records without mutating process-global state.
+
+        Continuous replays run beside the live resolver and, in some deployments,
+        beside a live engine tick. A context-local switch isolates replay writes
+        without silencing unrelated live tasks.
+        """
+        token = _CONTEXT_DISABLED.set(True)
+        try:
+            yield
+        finally:
+            _CONTEXT_DISABLED.reset(token)
+
+    def flush(self, timeout_sec: float = 10.0) -> bool:
+        """Wait until all queued rows have been committed by the writer."""
+        timeout = max(0.0, float(timeout_sec))
+        deadline = time.monotonic() + timeout
+        with self._queue.all_tasks_done:
+            while self._queue.unfinished_tasks:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    applog.warning(
+                        "shadow",
+                        f"writer flush timed out with {self._queue.unfinished_tasks} rows pending",
+                    )
+                    return False
+                self._queue.all_tasks_done.wait(timeout=remaining)
+        return True
+
     def _start_writer(self) -> None:
         def _writer_loop() -> None:
             _dbg("writer thread started")
-            try:
-                con = self._connect()
-            except Exception as ex:
-                _dbg(f"writer connect FAILED: {ex!r}")
-                return
-            cols = ["created_at", "session_date", "symbol", "strategy", "action", "signal_price", "stop_loss", "take_profit", "atr14", "confidence", "ml_probability", "meta_prob", "trade_score", "candidate_id", "gate", "reason"]
+            con: sqlite3.Connection | None = None
+            cols = ["created_at", "signal_timestamp_utc", "decision_bar_timestamp_utc", "session_date", "symbol", "strategy", "action", "signal_price", "stop_loss", "take_profit", "atr14", "confidence", "ml_probability", "meta_prob", "trade_score", "candidate_id", "gate", "reason"]
             sql = (
                 f"INSERT INTO shadow_entries ({', '.join(cols)}) "
-                f"VALUES ({', '.join(':' + c for c in cols)})"
+                f"SELECT {', '.join(':' + c for c in cols)} "
+                "WHERE :candidate_id IS NULL OR NOT EXISTS ("
+                "SELECT 1 FROM shadow_entries "
+                "WHERE candidate_id = :candidate_id AND gate = :gate AND symbol = :symbol"
+                ")"
             )
-            while not self._stop.is_set():
-                batch: list[dict] = []
-                try:
-                    batch.append(self._queue.get(timeout=2.0))
-                    while len(batch) < 200:
-                        batch.append(self._queue.get_nowait())
-                except queue.Empty:
-                    pass
-                except Exception:
-                    continue
-                if not batch:
-                    continue
-                # Retry: dropping a batch on a transient lock would silently
-                # lose rejection forensics forever.
-                for attempt in range(5):
+            try:
+                while not self._stop.is_set():
+                    if con is None:
+                        try:
+                            con = self._connect()
+                            _dbg("writer connected")
+                        except Exception as ex:
+                            _dbg(f"writer connect FAILED: {ex!r}")
+                            self._stop.wait(1.0)
+                            continue
+
+                    batch: list[dict] = []
                     try:
-                        con.executemany(sql, batch)
-                        con.commit()
-                        _dbg(f"committed {len(batch)} rows (attempt {attempt})")
-                        break
-                    except sqlite3.OperationalError as e:
-                        if attempt == 4:
-                            applog.warning("shadow", f"write batch dropped after retries: {e}")
-                        else:
-                            self._stop.wait(0.2 * (attempt + 1))
-                    except Exception as e:  # noqa: BLE001
-                        applog.warning("shadow", f"writer flush failed: {e}")
-                        break
+                        batch.append(self._queue.get(timeout=2.0))
+                        while len(batch) < 200:
+                            batch.append(self._queue.get_nowait())
+                    except queue.Empty:
+                        pass
+                    except Exception:
+                        continue
+                    if not batch:
+                        continue
+                    # Retry until SQLite accepts the batch. Dropping a batch after
+                    # a fixed retry count silently loses rejection forensics.
+                    attempt = 0
+                    committed = False
+                    while not committed and not self._stop.is_set():
+                        try:
+                            con.executemany(sql, batch)
+                            con.commit()
+                            committed = True
+                            _dbg(f"committed {len(batch)} rows (attempt {attempt})")
+                        except sqlite3.OperationalError as e:
+                            with suppress(sqlite3.Error):
+                                con.rollback()
+                            attempt += 1
+                            if attempt == 1 or attempt % 5 == 0:
+                                applog.warning("shadow", f"write batch waiting on SQLite ({attempt} attempts): {e}")
+                            self._stop.wait(min(5.0, 0.2 * attempt))
+                        except Exception as e:  # noqa: BLE001
+                            with suppress(sqlite3.Error):
+                                con.rollback()
+                            applog.warning("shadow", f"writer flush failed: {e}")
+                            committed = True  # Invalid rows cannot be retried as a batch.
+                            break
+                    for _ in batch:
+                        self._queue.task_done()
+            finally:
+                if con is not None:
+                    with suppress(sqlite3.Error):
+                        con.close()
 
         self._thread = threading.Thread(target=_writer_loop, name="shadow-ledger", daemon=True)
         self._thread.start()
@@ -235,20 +361,30 @@ class ShadowLedger:
     # ------------------------------------------------------------------
     async def resolve_pending(self, data_manager, max_rows: int = 300) -> int:
         """Update forward-return fields for unresolved entries. Read-only w.r.t. prod."""
-        if not self.enabled:
+        if not self.enabled or _CONTEXT_DISABLED.get():
             return 0
 
         updated = 0
 
         def _fetch(symbol: str, target: datetime):
+            """Return bars, an empty frame for confirmed no-bars, or None for unavailable data."""
             try:
+                if data_manager is None:
+                    return None
                 df = data_manager.frame(symbol, "1Min", limit=600)
                 if df is not None and not getattr(df, "empty", True):
                     idx = df.index
                     if getattr(idx, "tz", None) is None:
                         idx = idx.tz_localize(UTC)
                     if len(idx) and idx.min() <= target <= idx.max():
-                        return df
+                        horizon = target + timedelta(minutes=60)
+                        # A rolling frame may still contain the decision bar
+                        # while ending before the full outcome horizon. Let
+                        # the cache/history path fill that older window.
+                        if idx.max() >= horizon or datetime.now(UTC) < horizon:
+                            return df
+                        if not callable(getattr(data_manager, "history", None)):
+                            return df
                 # Retro path: the rolling frame only holds the most recent
                 # ~600 bars, so rows older than that (server restart, weekend)
                 # could NEVER resolve and stuck unresolved forever. Pull the
@@ -275,14 +411,20 @@ class ShadowLedger:
                     if _has_loop:
                         _coro.close()
                         raise RuntimeError("history needs a loop; using raw cache")
-                    return _aio.run(_coro)
+                    history_df = _aio.run(_coro)
+                    if history_df is not None and not getattr(history_df, "empty", True):
+                        return history_df
+                    # A completed history request with no bars is a real
+                    # no-bars result; transport/provider exceptions are handled
+                    # separately below and remain retryable.
+                    return history_df
                 except Exception:
                     # RESOLVER REPAIR 2026-10-16: history() enforces session
                     # coverage validation, which rejects partial/intraday
                     # sessions. Forensics is read-only: bypass the
                     # trading-path coverage gate and read raw cached bars
-                    # directly. Partial windows still resolve (px_at clamps
-                    # to the last available bar).
+                    # directly. The resolver still requires a complete forward
+                    # horizon before assigning a verdict.
                     try:
                         cache = getattr(data_manager, "cache", None)
                         if cache is not None:
@@ -295,7 +437,10 @@ class ShadowLedger:
                                 return raw
                     except Exception:
                         pass
-                    return df
+                    # ``None`` means the data source could not answer. Do not
+                    # age this row into NO_BARS: that verdict is reserved for a
+                    # completed lookup that genuinely returned no usable bars.
+                    return None
             except Exception:
                 return None
 
@@ -305,18 +450,35 @@ class ShadowLedger:
         try:
             rows = await asyncio.to_thread(
                 con.execute,
-                "SELECT id, created_at, symbol, action, signal_price, stop_loss, atr14 "
+                "SELECT id, created_at, decision_bar_timestamp_utc, symbol, action, "
+                "signal_price, stop_loss, atr14 "
                 "FROM shadow_entries WHERE resolved = 0 ORDER BY id LIMIT ?",
                 (max_rows,),
             )
             pending = rows.fetchall()
-            for row_id, created_at, symbol, action, entry_px, stop_px, atr in pending:
+            for row_id, created_at, decision_bar_timestamp_utc, symbol, action, entry_px, stop_px, atr in pending:
                 try:
-                    dec_dt = datetime.fromisoformat(created_at)
-                    age = datetime.now(UTC) - dec_dt
-                    target = dec_dt.astimezone(UTC).replace(second=0, microsecond=0)
+                    created_dt = datetime.fromisoformat(created_at)
+                    if created_dt.tzinfo is None:
+                        created_dt = created_dt.replace(tzinfo=UTC)
+                    decision_dt = created_dt
+                    if decision_bar_timestamp_utc:
+                        try:
+                            decision_dt = datetime.fromisoformat(decision_bar_timestamp_utc)
+                            if decision_dt.tzinfo is None:
+                                decision_dt = decision_dt.replace(tzinfo=UTC)
+                        except (TypeError, ValueError):
+                            decision_dt = created_dt
+                    age = datetime.now(UTC) - decision_dt
+                    target = decision_dt.astimezone(UTC).replace(second=0, microsecond=0)
                     df = await asyncio.to_thread(_fetch, symbol, target)
-                    if df is None or getattr(df, "empty", True):
+                    if df is None:
+                        # Provider/cache unavailable: retry on a later cycle.
+                        # It is not evidence that the rejected candidate had no
+                        # forward bars.
+                        skipped += 1
+                        continue
+                    if getattr(df, "empty", True):
                         if age > timedelta(hours=6):
                             await asyncio.to_thread(
                                 con.execute,
@@ -327,6 +489,7 @@ class ShadowLedger:
                         else:
                             skipped += 1
                         continue
+                    assert df is not None
                     idx = df.index
                     # Normalize the bar index to tz-aware UTC regardless of what
                     # the provider returns (naive UTC, aware, etc.). A mismatch
@@ -336,7 +499,9 @@ class ShadowLedger:
                     idx = idx.tz_convert(UTC)
                     # Positional lookup: get_loc breaks on duplicate timestamps.
                     start_loc = int(idx.searchsorted(target, side="left"))
-                    if start_loc >= len(idx):
+                    horizon = target + timedelta(minutes=60)
+                    horizon_loc = int(idx.searchsorted(horizon, side="left"))
+                    if start_loc >= len(idx) or horizon_loc >= len(idx):
                         if age > timedelta(hours=6):
                             await asyncio.to_thread(
                                 con.execute,
@@ -347,7 +512,14 @@ class ShadowLedger:
                         else:
                             skipped += 1
                         continue
-                    window = df.iloc[start_loc : start_loc + 61]
+                    # Do not label a partial observation window as a real
+                    # 60-minute outcome by repeating the last available price.
+                    # A complete horizon is required; stale partial data ages
+                    # out as NO_BARS instead.
+                    if age < timedelta(minutes=60):
+                        skipped += 1
+                        continue
+                    window = df.iloc[start_loc : horizon_loc + 1]
                     if len(window) < 2:
                         # Sparse forward bars (cache gaps on thin names): without
                         # this age-out the row waited forever and the cycle
@@ -362,15 +534,51 @@ class ShadowLedger:
                         else:
                             skipped += 1
                         continue
-                    closes = [float(x) for x in window["close"].iloc[:61]]
-                    highs = [float(x) for x in window["high"].iloc[:61]]
-                    lows = [float(x) for x in window["low"].iloc[:61]]
-                    entry = entry_px if entry_px is not None else closes[0]
+                    closes = [float(x) for x in window["close"]]
+                    highs = [float(x) for x in window["high"]]
+                    lows = [float(x) for x in window["low"]]
+                    if not all(math.isfinite(value) for values in (closes, highs, lows) for value in values):
+                        if age > timedelta(hours=6):
+                            await asyncio.to_thread(
+                                con.execute,
+                                "UPDATE shadow_entries SET resolved=1, verdict='NO_BARS' WHERE id=?",
+                                (row_id,),
+                            )
+                            updated += 1
+                        else:
+                            skipped += 1
+                        continue
+                    try:
+                        entry = float(entry_px) if entry_px is not None else closes[0]
+                    except (TypeError, ValueError):
+                        entry = closes[0]
+                    if not math.isfinite(entry) or entry <= 0:
+                        entry = closes[0]
+                    if not math.isfinite(entry) or entry <= 0:
+                        if age > timedelta(hours=6):
+                            await asyncio.to_thread(
+                                con.execute,
+                                "UPDATE shadow_entries SET resolved=1, verdict='NO_BARS' WHERE id=?",
+                                (row_id,),
+                            )
+                            updated += 1
+                        else:
+                            skipped += 1
+                        continue
 
-                    def px_at(k: int, _closes: list[float] = closes) -> float:
-                        return _closes[k] if k < len(_closes) else _closes[-1]
+                    def px_at(
+                        minutes: int,
+                        _target: datetime = target,
+                        _idx=idx,
+                        _start_loc: int = start_loc,
+                        _closes: list[float] = closes,
+                    ) -> float:
+                        desired = _target + timedelta(minutes=minutes)
+                        position = int(_idx.searchsorted(desired, side="left"))
+                        relative = min(max(position - _start_loc, 0), len(_closes) - 1)
+                        return _closes[relative]
 
-                    p5, p15, p30, p60 = px_at(5), px_at(15), px_at(30), px_at(min(60, len(closes) - 1))
+                    p5, p15, p30, p60 = px_at(5), px_at(15), px_at(30), px_at(60)
                     sign = 1.0 if str(action).upper().endswith("LONG") else -1.0
                     fav_pct = (p60 - entry) / entry * 100 * sign
                     if sign > 0:
@@ -381,13 +589,14 @@ class ShadowLedger:
                         mae = (max(highs) - entry) / entry * 100
                     r_fav = None
                     if stop_px is not None and atr is not None:
-                        risk = abs(entry - stop_px) or atr
-                        r_fav = (p60 - entry) * sign / risk
-                    elapsed_bars = len(window) - 1
-                    fully_elapsed = elapsed_bars >= 60 or age > timedelta(hours=6)
-                    if not fully_elapsed:
-                        skipped += 1
-                        continue
+                        try:
+                            risk = abs(entry - float(stop_px))
+                            if not math.isfinite(risk) or risk <= 0:
+                                risk = abs(float(atr))
+                            if math.isfinite(risk) and risk > 0:
+                                r_fav = (p60 - entry) * sign / risk
+                        except (TypeError, ValueError):
+                            r_fav = None
                     if fav_pct >= WINNER_PCT or (r_fav is not None and r_fav >= WINNER_R):
                         verdict = "MISSED_WINNER"
                     elif fav_pct <= -WINNER_PCT or (r_fav is not None and r_fav <= -WINNER_R):
@@ -414,6 +623,12 @@ class ShadowLedger:
             if updated or errors:
                 await asyncio.to_thread(con.commit)
         finally:
+            # Preserve updates already issued if the resolver task is cancelled
+            # during application shutdown. Re-resolution is idempotent, but
+            # losing a completed cycle makes the durable verdict lag forever.
+            if con.in_transaction:
+                with suppress(sqlite3.Error):
+                    con.commit()
             con.close()
         # Visibility: a fully silent cycle hid the tz bug for a full session.
         if pending and (updated or skipped or errors):
@@ -425,6 +640,10 @@ class ShadowLedger:
 
     # ------------------------------------------------------------------
     def query(self, limit: int = 100, verdict: str | None = None) -> dict:
+        try:
+            limit = max(0, int(limit))
+        except (TypeError, ValueError):
+            limit = 100
         con = self._plain_connect(self._db_path)
         con.row_factory = sqlite3.Row
         try:
@@ -435,16 +654,38 @@ class ShadowLedger:
             rows = con.execute(
                 f"SELECT * FROM shadow_entries {where} ORDER BY id DESC LIMIT ?", (*params, limit)
             ).fetchall()
+            summary_where = "WHERE resolved=1"
+            summary_params: list[str] = []
+            if where:
+                summary_where += " AND verdict = ?"
+                summary_params.append(verdict)
             summary = con.execute(
-                "SELECT verdict, COUNT(*) n FROM shadow_entries WHERE resolved=1 GROUP BY verdict"
+                f"SELECT verdict, COUNT(*) n FROM shadow_entries {summary_where} GROUP BY verdict",
+                summary_params,
             ).fetchall()
+            gate_where = f" {where}" if where else ""
+            gate_summary = con.execute(
+                "SELECT gate, COUNT(*) total, "
+                "SUM(CASE WHEN verdict='MISSED_WINNER' THEN 1 ELSE 0 END) missed, "
+                "SUM(CASE WHEN verdict='AVOIDED_LOSER' THEN 1 ELSE 0 END) avoided, "
+                "AVG(CASE WHEN resolved=1 AND verdict NOT IN ('NO_BARS') "
+                "AND fav_pct_60m IS NOT NULL THEN fav_pct_60m END) avg_forward_move "
+                f"FROM shadow_entries{gate_where} GROUP BY gate ORDER BY total DESC",
+                params,
+            ).fetchall()
+            missed_where = "WHERE verdict='MISSED_WINNER'"
+            missed_params: list[str] = []
+            if where:
+                missed_where += " AND verdict = ?"
+                missed_params.append(verdict)
             missed = con.execute(
-                "SELECT * FROM shadow_entries WHERE verdict='MISSED_WINNER' ORDER BY fav_pct_60m DESC LIMIT ?",
-                (limit,),
+                f"SELECT * FROM shadow_entries {missed_where} ORDER BY fav_pct_60m DESC",
+                missed_params,
             ).fetchall()
             return {
                 "entries": [dict(r) for r in rows],
                 "summary": {r["verdict"]: r["n"] for r in summary},
+                "gate_summary": [dict(r) for r in gate_summary],
                 "missed_winners": [dict(r) for r in missed],
             }
         finally:
@@ -459,7 +700,8 @@ async def resolver_loop(data_manager, interval_sec: int = 60) -> None:
     while True:
         try:
             await asyncio.sleep(interval_sec)
-            n = await shadow_ledger.resolve_pending(data_manager)
+            current_data_manager = data_manager() if callable(data_manager) else data_manager
+            n = await shadow_ledger.resolve_pending(current_data_manager)
             if n:
                 applog.info("shadow", f"resolved {n} shadow entries")
         except asyncio.CancelledError:

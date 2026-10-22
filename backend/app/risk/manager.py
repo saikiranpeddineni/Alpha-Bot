@@ -13,6 +13,7 @@ Capital preservation rules, in evaluation order:
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 
@@ -362,7 +363,9 @@ class RiskManager:
         try:
             risk_mult = float(raw_risk_mult)
         except Exception:
-            risk_mult = 1.0
+            return RiskDecision(False, "invalid risk multiplier")
+        if not math.isfinite(risk_mult) or risk_mult <= 0:
+            return RiskDecision(False, "invalid risk multiplier")
         if kelly_override is not None:
             # -----------------------------------------------------------------------------
             configured_risk_fraction = float(cfg.risk_per_trade_pct) / 100.0

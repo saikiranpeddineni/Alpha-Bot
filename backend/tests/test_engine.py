@@ -200,6 +200,77 @@ async def test_tick_accepts_entry_strategy_in_heartbeat_allowlist(engine: Tradin
 
 
 @pytest.mark.asyncio
+async def test_tick_records_broker_rejection_without_reserving_entry(engine: TradingEngine, monkeypatch):
+    from app.core.domain import Order, OrderSide, OrderStatus, OrderType
+    from app.core.shadow_ledger import shadow_ledger
+
+    await engine.start("demo")
+    if engine._task is not None:
+        engine._task.cancel()
+        with suppress(asyncio.CancelledError):
+            await engine._task
+        engine._task = None
+
+    signal = _safety_signal("mean_reversion")
+    bars = pd.DataFrame(
+        {
+            "open": [100.0] * 15,
+            "high": [101.0] * 15,
+            "low": [99.0] * 15,
+            "close": [100.0] * 15,
+            "volume": [100_000.0] * 15,
+        },
+        index=pd.date_range("2026-07-17 14:00:00", periods=15, freq="min", tz="UTC"),
+    )
+    rejected_order = Order(
+        id="reject-1",
+        client_order_id="reject-1",
+        symbol="SPY",
+        side=OrderSide.BUY,
+        qty=1,
+        order_type=OrderType.MARKET,
+        status=OrderStatus.REJECTED,
+        reason="broker rejected: buying power unavailable",
+    )
+    decision = SafetyDecision(
+        system_state="NORMAL",
+        market_risk_state="NORMAL",
+        allow_new_entries=True,
+        risk_multiplier=1.0,
+        allowed_strategies=["mean_reversion"],
+        require_exit_only=False,
+    )
+
+    engine.replay_fast_path = True
+    engine.last_safety_decision = decision
+    engine._check_system_heartbeat = AsyncMock()
+    engine._reconcile_pending_submissions = AsyncMock()
+    engine.data.poll = AsyncMock(return_value={signal.symbol: bars})
+    engine._evaluate_symbol = AsyncMock(return_value=[(signal, bars)])
+    engine.risk.check_halts = MagicMock(return_value=None)
+    engine.risk.should_flatten = MagicMock(return_value=False)
+    engine.insights.on_signal = MagicMock(
+        return_value=SimpleNamespace(model_dump=MagicMock(return_value={}))
+    )
+    engine.broker.submit = AsyncMock(return_value=rejected_order)
+    shadow_record = MagicMock()
+    monkeypatch.setattr(shadow_ledger, "record", shadow_record)
+
+    def approve_one(**_kwargs):
+        return PortfolioDecision(approved_entries=[(signal, None)], gated_entries=[])
+
+    monkeypatch.setattr("app.portfolio.allocator.process_portfolio_allocations", approve_one)
+
+    await engine._tick()
+
+    assert engine.pending_reconciliation_orders == {}
+    assert engine.broker.submit.await_count == 1
+    assert engine.insights.on_signal.call_args.kwargs["gated"] is True
+    assert "broker rejection" in engine.insights.on_signal.call_args.kwargs["gate_reason"]
+    assert any(call.kwargs.get("gate") == "broker_rejection" for call in shadow_record.call_args_list)
+
+
+@pytest.mark.asyncio
 async def test_tick_passes_market_risk_state_to_portfolio_allocator(engine: TradingEngine, monkeypatch):
     decision = SafetyDecision(
         system_state="NORMAL",
@@ -214,30 +285,6 @@ async def test_tick_passes_market_risk_state_to_portfolio_allocator(engine: Trad
     captured = await _run_safety_candidate_tick(engine, signal, decision, monkeypatch)
 
     assert captured["market_state"] == "DEFENSIVE"
-
-
-async def test_tick_reuses_authoritative_positions_snapshot_for_broadcast(engine: TradingEngine, monkeypatch):
-    published_positions: list[list[dict]] = []
-    engine.publish = lambda topic, payload: published_positions.append(payload) if topic == "positions" else None
-
-    await engine.start("demo")
-    assert engine.broker is not None
-
-    original_positions = engine.broker.positions
-    provider_calls = 0
-
-    async def counted_positions():
-        nonlocal provider_calls
-        provider_calls += 1
-        return await original_positions()
-
-    monkeypatch.setattr(engine.broker, "positions", counted_positions)
-
-    await engine._tick()
-    await asyncio.sleep(0)
-
-    assert provider_calls == 1, "one tick must use one authoritative broker positions snapshot"
-    assert published_positions, "the tick must broadcast the snapshot it already fetched"
 
 
 async def test_engine_manual_flow(engine: TradingEngine):
@@ -281,7 +328,7 @@ async def test_manual_entry_session_budget(engine: TradingEngine):
     await engine.stop()
 
 
-async def test_tick_reuses_authoritative_positions_snapshot_for_broadcast(engine: TradingEngine):
+async def test_tick_reuses_authoritative_positions_snapshot_after_loop_cancel(engine: TradingEngine):
     published_positions: list[list[dict]] = []
     engine.publish = lambda topic, payload: published_positions.append(payload) if topic == "positions" else None
 

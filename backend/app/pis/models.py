@@ -318,6 +318,9 @@ class PISConfig:
     # giveback before harvesting the remaining quantity.  This deliberately does
     # not use a session's eventual high or any future bar.
     enable_causal_peak_capture: bool = True
+    # First completed adverse bar can tighten a proven runner's floor without
+    # exiting it. Full runner harvest still requires the confirmation bars above.
+    enable_causal_peak_ratchet: bool = True
     causal_peak_capture_confirmation_bars: int = 2
     causal_peak_capture_min_peak_r: float = 1.00
     causal_peak_capture_min_giveback_r: float = 0.50

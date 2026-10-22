@@ -12,7 +12,7 @@ import asyncio
 import math
 import sys
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
@@ -98,17 +98,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         hub.set_loop(asyncio.get_running_loop())
-        from app.core.shadow_ledger import resolver_loop
+        from app.core.shadow_ledger import resolver_loop, shadow_ledger
         # RESOLVER WIRING FIX 2026-10-16: the loop previously captured
         # engine.data BEFORE ensure_data() ran, so it held None forever —
         # every row waited forever (or aged to NO_BARS) with 0 errors, 7,412
         # rows, zero real verdicts. Build data first, then bind the loop.
         await engine.ensure_data()
-        shadow_task = asyncio.create_task(resolver_loop(engine.data))
+        # Resolve against the engine's current data manager. Mode/provider
+        # switches can replace engine.data after startup.
+        shadow_task = asyncio.create_task(resolver_loop(lambda: engine.data))
         await init_alerting(settings.slack_webhook_url)
         applog.info("app", f"AlphaDesk v{__version__} ready -- mode={settings.mode}")
         yield
         shadow_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await shadow_task
+        if not await asyncio.to_thread(shadow_ledger.flush):
+            applog.warning("shadow", "shutdown completed with shadow-ledger rows still queued")
         await stop_alerting()
         await engine.shutdown()
 

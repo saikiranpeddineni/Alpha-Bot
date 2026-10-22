@@ -83,14 +83,41 @@ class ProfitMemoryTracker:
     @staticmethod
     def initial_state(obs: PositionObservation) -> ProfitMemoryState:
         """Initialize profit memory from initial observation."""
-        # The initial snapshot is the position baseline; subsequent snapshots
-        # are the completed-bar excursion stream updated above.  Seeding from
-        # the point-in-time R preserves the existing entry-window semantics
-        # while still preventing any later/fresher quote from moving the
-        # high-water memory.
+        # The initial snapshot is also the entry-window baseline, so preserve
+        # its current-state R when the quote is represented by this bar.  If a
+        # broker quote is clearly outside the completed bar, use the bar's
+        # extremes instead; that quote is fresher than the observed bar and
+        # must not seed the first max-R high-water mark.
+        quote_in_bar = obs.low <= obs.current_price <= obs.high
+        if quote_in_bar:
+            peak_r = obs.r_multiple
+            trough_r = obs.r_multiple
+            mfe_price = obs.current_price
+            mae_price = obs.current_price
+        else:
+            risk = obs.risk_per_share
+            if risk <= 1e-8 or not math.isfinite(risk):
+                return ProfitMemoryState(
+                    peak_r=0.0,
+                    trough_r=0.0,
+                    mfe_price=obs.current_price,
+                    mae_price=obs.current_price,
+                )
+
+            if obs.side > 0:
+                peak_r = (obs.high - obs.entry_price) / risk
+                trough_r = (obs.low - obs.entry_price) / risk
+                mfe_price = obs.high
+                mae_price = obs.low
+            else:
+                peak_r = (obs.entry_price - obs.low) / risk
+                trough_r = (obs.entry_price - obs.high) / risk
+                mfe_price = obs.low
+                mae_price = obs.high
+
         return ProfitMemoryState(
-            peak_r=max(0.0, obs.r_multiple),
-            trough_r=min(0.0, obs.r_multiple),
-            mfe_price=obs.current_price,
-            mae_price=obs.current_price,
+            peak_r=max(0.0, peak_r) if math.isfinite(peak_r) else 0.0,
+            trough_r=min(0.0, trough_r) if math.isfinite(trough_r) else 0.0,
+            mfe_price=mfe_price,
+            mae_price=mae_price,
         )

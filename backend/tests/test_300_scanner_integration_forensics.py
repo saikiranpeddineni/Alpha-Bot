@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pandas as pd
 import pytest
 
 from app.config import RiskConfig
@@ -109,6 +110,34 @@ async def test_scanner_ttl_uses_the_configured_risk_field(tmp_path: Path):
 
     assert engine.scanned_watchlist_expires_at["AAPL"] == scan_time + timedelta(minutes=7)
     assert engine.scanned_watchlist_ttl["AAPL"] == 7
+
+
+@pytest.mark.asyncio
+async def test_event_monitor_additions_receive_bounded_scanner_ttl(tmp_path: Path, monkeypatch):
+    now = datetime(2026, 7, 14, 14, 0, tzinfo=UTC)
+    engine = _engine(tmp_path, RiskConfig(scanner_watchlist_ttl=7))
+    frame = pd.DataFrame(
+        {
+            "open": [100.0] * 20,
+            "high": [101.0] * 20,
+            "low": [99.0] * 20,
+            "close": [100.0] * 19 + [102.0],
+            "volume": [100.0] * 20,
+        },
+        index=pd.date_range("2026-07-14 13:40:00", periods=20, freq="min", tz="UTC"),
+    )
+    engine.data.provider.get_multi_bars = AsyncMock(return_value={"EVENT1": frame})
+    engine.data.warmup = AsyncMock()
+    engine.calendar.check = AsyncMock(return_value=(False, ""))
+    engine.model.score_action = MagicMock(return_value=0.9)
+    monkeypatch.setattr("app.core.scanner.CANDIDATE_POOL", ["EVENT1"])
+    monkeypatch.setattr("app.indicators.ta.enrich", lambda df: df)
+
+    await engine.run_event_monitor(now)
+
+    assert "EVENT1" in engine.scanned_watchlist
+    assert engine.scanned_watchlist_expires_at["EVENT1"] == now + timedelta(minutes=7)
+    assert engine.scanned_watchlist_ttl["EVENT1"] == 7
 
 
 @pytest.mark.asyncio

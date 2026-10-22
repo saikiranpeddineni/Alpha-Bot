@@ -13,7 +13,6 @@ from datetime import UTC, datetime, timedelta
 from app.pis.models import ExitAction, PISConfig, PositionObservation, ReasonCode
 from app.pis.position_brain import PositionBrain
 
-
 _START = datetime(2026, 10, 17, 13, 30, tzinfo=UTC)
 
 
@@ -86,6 +85,10 @@ def test_causal_peak_capture_harvests_remaining_runner_after_confirmation() -> N
     assert ReasonCode.CAUSAL_PEAK_REVERSAL in confirmed_reversal.reason_codes
     assert confirmed_reversal.metadata["causal_peak_capture"] is True
     assert confirmed_reversal.peak_r == 2.0
+    assert confirmed_reversal.metadata["observed_peak_r"] == 2.0
+    assert confirmed_reversal.metadata["completed_close_r"] == 1.5
+    assert confirmed_reversal.metadata["giveback_r"] == 0.5
+    assert confirmed_reversal.metadata["protected_floor_r"] >= 0.0
 
 
 def test_one_adverse_completed_bar_does_not_harvest_runner() -> None:
@@ -101,6 +104,26 @@ def test_one_adverse_completed_bar_does_not_harvest_runner() -> None:
     assert scale_out.action == ExitAction.PARTIAL_EXIT
     assert one_reversal.action in (ExitAction.HOLD, ExitAction.UPDATE_PROTECTION)
     assert ReasonCode.CAUSAL_PEAK_REVERSAL not in one_reversal.reason_codes
+
+
+def test_first_material_adverse_bar_ratchets_runner_without_full_exit() -> None:
+    """A proven runner locks a causal floor on bar one, then waits for confirmation to exit."""
+    brain = _long_brain()
+    scale_out = brain.observe(
+        _obs(current=109.0, high=110.0, low=99.5, close=109.0, minute=1)
+    )
+    first_adverse = brain.observe(
+        _obs(current=107.5, high=108.5, low=107.0, close=107.5, minute=2, qty=50.0)
+    )
+
+    assert scale_out.action == ExitAction.PARTIAL_EXIT
+    assert first_adverse.action in (ExitAction.HOLD, ExitAction.UPDATE_PROTECTION)
+    assert first_adverse.action != ExitAction.FULL_EXIT
+    assert first_adverse.metadata["causal_peak_ratchet"] is True
+    assert first_adverse.metadata["causal_peak_capture"] is False
+    assert first_adverse.target_stop_loss is not None
+    assert scale_out.target_stop_loss is not None
+    assert first_adverse.target_stop_loss > scale_out.target_stop_loss
 
 
 def test_disabling_causal_peak_capture_preserves_old_runner_hold() -> None:
@@ -130,6 +153,26 @@ def test_peak_r_ignores_fresher_quote_outside_completed_bar() -> None:
 
     assert decision.peak_r == 2.0
     assert brain.peak_r == 2.0
+
+
+def test_initial_peak_r_ignores_fresher_quote_outside_completed_bar() -> None:
+    """The first observed bar must not seed max-R from its fresher live quote."""
+    brain = PositionBrain(
+        "TEST",
+        _obs(
+            current=130.0,
+            high=110.0,
+            low=99.5,
+            close=109.0,
+            minute=0,
+        ),
+        PISConfig(scale_out_target_r=1.0),
+    )
+
+    assert brain.peak_r == 2.0
+    assert brain.trough_r == -0.1
+    assert brain.last_decision is not None
+    assert brain.last_decision.peak_r == 2.0
 
 
 def test_confirmed_peak_reversal_harvests_a_short_runner() -> None:
@@ -170,12 +213,50 @@ def test_confirmed_peak_reversal_harvests_a_short_runner() -> None:
     assert confirmed_reversal.peak_r == 2.0
 
 
+def test_first_material_adverse_bar_ratchets_short_runner() -> None:
+    """The early causal ratchet is symmetric for short runners."""
+    def short_obs(
+        *, current: float, high: float, low: float, close: float, minute: int, qty: float = 100.0
+    ) -> PositionObservation:
+        return _obs(
+            current=current,
+            high=high,
+            low=low,
+            close=close,
+            minute=minute,
+            side=-1.0,
+            initial_stop=105.0,
+            qty=qty,
+        )
+
+    brain = PositionBrain(
+        "TEST",
+        short_obs(current=100.0, high=101.0, low=100.0, close=100.0, minute=0),
+        PISConfig(scale_out_target_r=1.0),
+    )
+    scale_out = brain.observe(
+        short_obs(current=91.0, high=100.5, low=90.0, close=91.0, minute=1)
+    )
+    first_adverse = brain.observe(
+        short_obs(current=92.5, high=93.0, low=92.0, close=92.5, minute=2, qty=50.0)
+    )
+
+    assert scale_out.action == ExitAction.PARTIAL_EXIT
+    assert first_adverse.action in (ExitAction.HOLD, ExitAction.UPDATE_PROTECTION)
+    assert first_adverse.action != ExitAction.FULL_EXIT
+    assert first_adverse.metadata["causal_peak_ratchet"] is True
+    assert first_adverse.target_stop_loss is not None
+    assert scale_out.target_stop_loss is not None
+    assert first_adverse.target_stop_loss < scale_out.target_stop_loss
+
+
 def test_causal_capture_only_ratchets_protection_and_hard_stop_still_wins() -> None:
     """Causal harvesting cannot weaken a floor or replace an actual stop breach."""
     brain = _long_brain()
     scale_out, first_reversal, confirmed_reversal = _scale_out_and_reversal(brain)
 
     assert scale_out.target_stop_loss is not None
+    assert confirmed_reversal.target_stop_loss is not None
     assert confirmed_reversal.target_stop_loss >= scale_out.target_stop_loss
 
     hard_stop_brain = _long_brain()

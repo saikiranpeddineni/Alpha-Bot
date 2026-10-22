@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-import uuid
-from datetime import UTC, datetime
+from contextlib import suppress
+from datetime import UTC, datetime, timedelta
 from functools import partial
 
 import pandas as pd
 
 from app.ai.regime import detect_regime
 from app.core.applog import applog
-from app.core.domain import OrderStatus, Position, Signal, SignalAction
+from app.core.domain import OrderStatus, Position, Signal, SignalAction, new_id
 from app.indicators.ta import compute_relative_strength, enrich
 from app.strategies import StrategyContext
 
@@ -32,9 +32,8 @@ class TradingEngineEvaluationMixin:
         if hit is not None:
             return hit
         try:
-            from datetime import timedelta as _td, UTC as _UTC, datetime as _dt
-            end = _dt.now(_UTC)
-            daily = await self.data.history(key, "1Day", end - _td(days=60), end)
+            end = datetime.now(UTC)
+            daily = await self.data.history(key, "1Day", end - timedelta(days=60), end)
             if daily is None or len(daily) < 20 or "close" not in daily.columns:
                 # Cache the miss too: one probe per symbol per session, no hammering.
                 cache[key] = 0.0
@@ -167,6 +166,16 @@ class TradingEngineEvaluationMixin:
                     take_profit=None,
                     atr14=float(df["atr14"].iloc[-1]) if not df.empty and "atr14" in df.columns else None,
                     confidence=0.0,
+                    decision_bar_timestamp_utc=(
+                        pd.Timestamp(df.index[-1]).to_pydatetime()
+                        if not df.empty
+                        else None
+                    ),
+                    candidate_id=(
+                        f"{symbol}_GATED_TICK_{pd.Timestamp(df.index[-1]).strftime('%Y%m%d_%H%M%S')}"
+                        if not df.empty
+                        else None
+                    ),
                 )
             except Exception:
                 pass
@@ -317,10 +326,8 @@ class TradingEngineEvaluationMixin:
                     # fill.  In particular, PARTIAL_EXIT mutates PIS state at
                     # decision time, so leave the brain in its pre-scale-out
                     # posture until broker execution is actually accepted.
-                    try:
+                    with suppress(Exception):
                         self.pis_adapter.revert_scale_out(symbol)
-                    except Exception:
-                        pass
                     applog.warning("engine.exit", f"{symbol}: PIS close was not accepted; scale-out state reverted")
                     # Keep the existing close-latch safety contract: do not
                     # continue into entry evaluation after an exit decision.
@@ -394,9 +401,8 @@ class TradingEngineEvaluationMixin:
                     position.qty < 0
                     and (_lot.stop_loss is None or new_floor < _lot.stop_loss)
                 )
-                if improves_floor:
-                    if await self._sync_broker_protective_stop(symbol, new_floor):
-                        _lot.stop_loss = new_floor
+                if improves_floor and await self._sync_broker_protective_stop(symbol, new_floor):
+                    _lot.stop_loss = new_floor
 
             # All exits (including strategy take profit targets) are now handled exclusively by PIS
             # to guarantee PIS acts as the single source of truth for intelligent exits.
@@ -495,10 +501,13 @@ class TradingEngineEvaluationMixin:
             # ORIGINAL INTENT: RiskConfig.enable_pullback_rearm was defined but unread by engine.
             # REASON FOR CHANGE: Enforce RiskConfig.enable_pullback_rearm dynamically at runtime.
             # [NEW CODE]:
-            if strat.name == "pullback_rearm":
-                if hasattr(self, "risk") and hasattr(self.risk, "config"):
-                    if not getattr(self.risk.config, "enable_pullback_rearm", True):
-                        continue
+            if (
+                strat.name == "pullback_rearm"
+                and hasattr(self, "risk")
+                and hasattr(self.risk, "config")
+                and not getattr(self.risk.config, "enable_pullback_rearm", True)
+            ):
+                continue
             # =============================================================================
             decision = getattr(self, "last_safety_decision", None)
             if decision is not None and strat.name not in decision.allowed_strategies:
@@ -513,6 +522,19 @@ class TradingEngineEvaluationMixin:
                 signals.append(sig)
         if not signals:
             return []
+
+        # Assign lineage before any downstream filter so opportunity, pipeline,
+        # portfolio, and reconciliation shadow rows all identify the same candidate.
+        for sig in signals:
+            if sig.action != SignalAction.EXIT:
+                if getattr(sig, "candidate_id", None) is None:
+                    prefix = f"{symbol}_{sig.strategy}_{now.strftime('%Y%m%d_%H%M%S')}"
+                    # Use the domain ID helper so replay's deterministic UUID
+                    # binding also covers candidate lineage.
+                    sig.candidate_id = f"{prefix}_{new_id()[:6]}".upper()
+                if getattr(sig, "decision_bar_timestamp_utc", None) is None and len(df) > 0:
+                    last_idx = df.index[-1]
+                    sig.decision_bar_timestamp_utc = pd.Timestamp(last_idx).to_pydatetime() if hasattr(last_idx, "to_pydatetime") else last_idx
 
         # Opportunity economics are evaluated before the admission firewall.
         # This layer only removes candidates whose modeled reward cannot cover
@@ -542,7 +564,25 @@ class TradingEngineEvaluationMixin:
                     if candidate is not None:
                         economic_signals.append(sig)
                     else:
-                        applog.info("opportunity", f"{symbol} {sig.strategy}: rejected by cost-aware opportunity economics")
+                        reason = "rejected by cost-aware opportunity economics"
+                        applog.info("opportunity", f"{symbol} {sig.strategy}: {reason}")
+                        try:
+                            from app.core.shadow_ledger import shadow_ledger
+                            shadow_ledger.record(
+                                symbol=symbol,
+                                action=str(sig.action.value if hasattr(sig.action, "value") else sig.action),
+                                strategy=sig.strategy,
+                                gate="opportunity",
+                                reason=reason,
+                                price=sig.price,
+                                stop_loss=sig.stop_loss,
+                                take_profit=sig.take_profit,
+                                atr14=float(df["atr14"].iloc[-1]) if "atr14" in df.columns and len(df) else None,
+                                confidence=sig.confidence,
+                                sig=sig,
+                            )
+                        except Exception:
+                            pass
                 signals = economic_signals
         except Exception as exc:  # defensive telemetry must not break exits
             applog.warning("opportunity", f"cost-aware opportunity evaluation unavailable: {exc}")
@@ -550,56 +590,13 @@ class TradingEngineEvaluationMixin:
         if not signals:
             return []
 
-        # Resolve strategy overlap: If multiple entry signals trigger on the same bar,
-        # pick the one with the highest priority to prevent signal correlation and AI confusion.
+        # Keep every entry candidate together until the pipeline evaluates ML, meta,
+        # Trade Score, and conflict ranking. A second static priority gate here hid
+        # lower-priority strategies before those quality signals could be measured.
+        # Post-hoc shadow verdicts are deliberately not used to bypass live gates;
+        # MISSED_WINNER is analytics-only and AVOIDED_LOSER never becomes a rescue input.
         entry_signals = [sig for sig in signals if sig.action != SignalAction.EXIT]
         exit_signals = [sig for sig in signals if sig.action == SignalAction.EXIT]
-
-        # =============================================================================
-        # [MODIFIED 2026-10-14]: CR-08 & L26 - Shadow Ledger Recording for Overlap Drops
-        # ORIGINAL INTENT: Kept entry_signals[0] and silently discarded all other signals.
-        # REASON FOR CHANGE: Discarded overlap signals left zero forensic trace. Record every
-        # discarded signal to shadow_ledger with gate="strategy_overlap" and winner details.
-        # SAFE ROLLBACK: The original code is removed; rollback via git history.
-        # -----------------------------------------------------------------------------
-        # [NEW CODE]:
-        if len(entry_signals) > 1:
-            STRATEGY_PRIORITY = {
-                "gap_and_go": 1,
-                "liquidity_sweep": 2,
-                "bb_squeeze": 3,
-                "relative_strength": 4,
-                "trend_pullback": 5,
-                "pullback_rearm": 6,
-                "orb": 7,
-                "rsi_reversion": 8,
-                "vwap_reversion": 9,
-                "momentum": 10,
-            }
-            # Sort ascending by priority (1 is best). Unknown strategies default to 99.
-            entry_signals.sort(key=lambda s: STRATEGY_PRIORITY.get(s.strategy, 99))
-            winner = entry_signals[0]
-            for loser in entry_signals[1:]:
-                applog.info("pipeline", f"{symbol} {loser.strategy} {loser.action}: rejected -- lost overlap conflict to {winner.strategy}")
-                try:
-                    from app.core.shadow_ledger import shadow_ledger
-                    shadow_ledger.record(
-                        symbol=symbol,
-                        action=str(loser.action.value if hasattr(loser.action, "value") else loser.action),
-                        strategy=loser.strategy,
-                        gate="strategy_overlap",
-                        reason=f"lost conflict to {winner.strategy} (priority {STRATEGY_PRIORITY.get(winner.strategy, 99)} vs {STRATEGY_PRIORITY.get(loser.strategy, 99)})",
-                        price=loser.price or (float(df["close"].iloc[-1]) if len(df) else None),
-                        stop_loss=loser.stop_loss,
-                        take_profit=loser.take_profit,
-                        atr14=float(df["atr14"].iloc[-1]) if "atr14" in df.columns and len(df) else None,
-                        confidence=loser.confidence,
-                        sig=loser,
-                    )
-                except Exception:
-                    pass
-            entry_signals = [winner]
-        # =============================================================================
 
         signals = exit_signals + entry_signals
 
@@ -611,24 +608,6 @@ class TradingEngineEvaluationMixin:
         # same-cycle approvals onto the broker snapshot. A second pre-ML gate
         # here ran against stale positions only and could contradict the
         # authoritative verdict; removed as redundant.
-
-        # =============================================================================
-        # [MODIFIED 2026-10-14]: CR-08 & CR-20 - Decision Bar Timestamp & Reconciliation Shadow Recording
-        # ORIGINAL INTENT: Generated candidate_id but left decision_bar_timestamp_utc NULL;
-        # dropped candidates during reconciliation failure with log warning only without shadow ledger record.
-        # REASON FOR CHANGE: Populate decision_bar_timestamp_utc for backtest/live forensics;
-        # record reconciliation rejections to shadow_ledger so no accepted pipeline candidate disappears without trace.
-        # SAFE ROLLBACK: The original code is removed; rollback via git history.
-        # -----------------------------------------------------------------------------
-        # [NEW CODE]:
-        for sig in signals:
-            if sig.action != SignalAction.EXIT:
-                if getattr(sig, "candidate_id", None) is None:
-                    prefix = f"{symbol}_{sig.strategy}_{now.strftime('%Y%m%d_%H%M%S')}"
-                    sig.candidate_id = f"{prefix}_{uuid.uuid4().hex[:6]}".upper()
-                if getattr(sig, "decision_bar_timestamp_utc", None) is None and len(df) > 0:
-                    last_idx = df.index[-1]
-                    sig.decision_bar_timestamp_utc = pd.Timestamp(last_idx).to_pydatetime() if hasattr(last_idx, "to_pydatetime") else last_idx
 
         accepted, rejected = await asyncio.to_thread(
             partial(self.pipeline.process, symbol, df, signals, regime, sector_strength=rs_score)

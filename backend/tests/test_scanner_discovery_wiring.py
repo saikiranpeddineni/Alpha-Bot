@@ -15,12 +15,12 @@ HISTORICAL_T = datetime(2026, 7, 14, 14, 0, tzinfo=UTC)
 @pytest.mark.asyncio
 async def test_scanner_replay_stage1_symbols_never_call_current_discovery():
     provider = SimpleNamespace(name="alpaca", supports_asset_discovery=True)
-    scanner = MarketScanner(SimpleNamespace(provider=provider), [])
+    scanner = MarketScanner(SimpleNamespace(provider=provider), ["USER1"])
     scanner._discovery = SimpleNamespace(
         acquire=AsyncMock(side_effect=AssertionError("current discovery reached replay"))
     )
     symbols = await scanner._stage1_symbols(HISTORICAL_T)
-    assert symbols == CANDIDATE_POOL
+    assert symbols == sorted([*CANDIDATE_POOL, "USER1"])
     scanner._discovery.acquire.assert_not_awaited()
 
 
@@ -58,7 +58,7 @@ def test_fast_replay_dynamic_scanner_expands_input_surface():
 @pytest.mark.asyncio
 async def test_run_passes_live_discovery_shortlist_only_to_stage1(monkeypatch):
     provider = SimpleNamespace(name="alpaca", supports_asset_discovery=True)
-    scanner = MarketScanner(SimpleNamespace(provider=provider), [])
+    scanner = MarketScanner(SimpleNamespace(provider=provider), ["USER1"])
     scanner._discovery = SimpleNamespace(
         acquire=AsyncMock(return_value=SimpleNamespace(shortlist=("NEW2", "NEW1")))
     )
@@ -68,7 +68,7 @@ async def test_run_passes_live_discovery_shortlist_only_to_stage1(monkeypatch):
     outcome, symbols = await scanner.run()
     assert outcome is ScannerOutcome.SUCCESS_EMPTY
     assert symbols == []
-    stage1.assert_awaited_once_with(as_of=None, symbols=["NEW1", "NEW2"])
+    stage1.assert_awaited_once_with(as_of=None, symbols=["NEW1", "NEW2", "USER1"])
 
 
 @pytest.mark.asyncio

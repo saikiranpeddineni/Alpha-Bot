@@ -77,6 +77,17 @@ def test_stop_synthesized_from_atr(rm: RiskManager, bars):
     assert decision.order.stop_loss < float(bars["close"].iloc[-1])
 
 
+@pytest.mark.parametrize("risk_multiplier", [None, 0.0, -1.0, float("nan"), float("inf"), "not-a-number"])
+def test_invalid_risk_multiplier_fails_closed(rm: RiskManager, bars, risk_multiplier):
+    signal = long_signal()
+    signal.risk_multiplier = risk_multiplier
+
+    decision = rm.evaluate_entry(signal, ctx(), bars, now=MID_SESSION)
+
+    assert not decision.approved
+    assert decision.reason == "invalid risk multiplier"
+
+
 def test_rejects_duplicate_symbol(rm: RiskManager, bars):
     pos = Position(symbol="AAPL", qty=10, avg_entry_price=100, market_price=100)
     decision = rm.evaluate_entry(long_signal(), ctx(positions=[pos]), bars, now=MID_SESSION)

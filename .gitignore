@@ -44,6 +44,7 @@ temp/
 # Trading/runtime artifacts
 /data/
 backend/data/
+/trader/config.json
 cache/
 backtest_results/
 reports/

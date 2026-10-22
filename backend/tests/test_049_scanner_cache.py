@@ -87,14 +87,14 @@ async def test_scanner_persists_discovery_on_datamanager():
         # Run Scanner 1
         scanner1 = MarketScanner(data_manager, ["SPY"])
         symbols1 = await scanner1._stage1_symbols()
-        assert len(symbols1) == 2
+        assert set(symbols1) == {"A", "B", "SPY"}
         assert mock_provider.discover_assets.call_count == 1
         assert mock_provider.get_quotes.call_count == 1
 
         # Run Scanner 2 (new instance, same DataManager)
         scanner2 = MarketScanner(data_manager, ["SPY"])
         symbols2 = await scanner2._stage1_symbols()
-        assert len(symbols2) == 2
+        assert symbols2 == symbols1
         assert mock_provider.discover_assets.call_count == 1  # unchanged
         assert mock_provider.get_quotes.call_count == 1       # unchanged
         await data_manager.close()

@@ -459,9 +459,11 @@ class ReplayRuntime:
         # Rejections observed inside a replay are synthetic decisions; writing
         # them into the production shadow ledger polluted forensics and stalled
         # the resolver on rows whose forward bars only exist inside the replay.
+        # Suppress only this replay context so the live resolver/engine remain
+        # able to write and resolve production forensics concurrently.
         from app.core.shadow_ledger import shadow_ledger as _prod_shadow
-        _shadow_was_enabled = _prod_shadow.enabled
-        _prod_shadow.enabled = False
+        _shadow_scope = _prod_shadow.disabled()
+        _shadow_scope.__enter__()
         try:
             replay_db_path = tmp_path / "replay.db"
             shutil.copy2(snapshot_db, replay_db_path)
@@ -546,7 +548,7 @@ class ReplayRuntime:
             self._hydrate_db_ledger(replay_db, ledger)
             return ledger
         finally:
-            _prod_shadow.enabled = _shadow_was_enabled
+            _shadow_scope.__exit__(None, None, None)
             import app.db.database as db_module
             db_module._ACTIVE_DATABASE = self.source_db
             if engine is not None: await self._stop_replay_engine(engine)

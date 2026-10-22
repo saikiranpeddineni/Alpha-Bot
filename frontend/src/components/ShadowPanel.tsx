@@ -5,12 +5,17 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import { fmtPct, fmtTime, pnlClass } from "../format";
-import type { ShadowEntry } from "../types";
+import type { ShadowEntry, ShadowGateSummary } from "../types";
 
 const GATE_LABEL: Record<string, string> = {
+  gated_tick: "Data/clock gate",
   pipeline: "AI pipeline",
+  opportunity: "Opportunity economics",
+  strategy_overlap: "Pipeline conflict",
   portfolio_or_risk: "Portfolio/risk",
+  reconciliation: "Reconciliation",
   behavioral: "Loop detector",
+  broker_rejection: "Broker rejection",
 };
 
 const VERDICT_STYLE: Record<string, string> = {
@@ -21,7 +26,7 @@ const VERDICT_STYLE: Record<string, string> = {
 };
 
 function SideTag({ action }: { action: string | null }) {
-  const short = (action ?? "").endsWith("SHORT") ? "short" : "long";
+  const short = (action ?? "").toUpperCase().endsWith("SHORT") ? "short" : "long";
   return <span className={`side-tag ${short}`}>{short}</span>;
 }
 
@@ -37,6 +42,9 @@ function ReasonCell({ text }: { text: string | null }) {
 
 export function ShadowPanel() {
   const [entries, setEntries] = useState<ShadowEntry[]>([]);
+  const [summary, setSummary] = useState<Record<string, number>>({});
+  const [globalMissed, setGlobalMissed] = useState<ShadowEntry[]>([]);
+  const [globalGateStats, setGlobalGateStats] = useState<ShadowGateSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<"all" | "MISSED_WINNER" | "AVOIDED_LOSER" | "pending">("all");
@@ -47,6 +55,9 @@ export function ShadowPanel() {
       .shadowLedger(2000)
       .then(d => {
         setEntries(d.entries);
+        setSummary(d.summary);
+        setGlobalMissed(d.missed_winners);
+        setGlobalGateStats(d.gate_summary ?? []);
         setError(null);
         setLoading(false);
       })
@@ -64,10 +75,7 @@ export function ShadowPanel() {
   }, [load, auto]);
 
   const resolved = useMemo(() => entries.filter(e => e.resolved === 1), [entries]);
-  const missed = useMemo(
-    () => resolved.filter(e => e.verdict === "MISSED_WINNER").sort((a, b) => (b.fav_pct_60m ?? 0) - (a.fav_pct_60m ?? 0)),
-    [resolved],
-  );
+  const missed = useMemo(() => globalMissed, [globalMissed]);
   const avoided = useMemo(
     () => resolved.filter(e => e.verdict === "AVOIDED_LOSER").sort((a, b) => (a.fav_pct_60m ?? 0) - (b.fav_pct_60m ?? 0)),
     [resolved],
@@ -75,36 +83,55 @@ export function ShadowPanel() {
   const pending = entries.filter(e => e.resolved !== 1);
 
   const gateStats = useMemo(() => {
-    const m = new Map<string, { total: number; missed: number; avoided: number; favSum: number; favN: number }>();
+    if (globalGateStats.length > 0) return globalGateStats;
+    const m = new Map<string, ShadowGateSummary>();
     for (const e of entries) {
-      const g = m.get(e.gate) ?? { total: 0, missed: 0, avoided: 0, favSum: 0, favN: 0 };
+      const g = m.get(e.gate) ?? { gate: e.gate, total: 0, missed: 0, avoided: 0, avg_forward_move: null };
       g.total += 1;
       if (e.verdict === "MISSED_WINNER") g.missed += 1;
       if (e.verdict === "AVOIDED_LOSER") g.avoided += 1;
-      if (e.resolved === 1 && e.fav_pct_60m != null) {
-        g.favSum += e.fav_pct_60m;
-        g.favN += 1;
-      }
       m.set(e.gate, g);
     }
-    return [...m.entries()].map(([gate, s]) => ({ gate, ...s }));
-  }, [entries]);
+    return [...m.values()];
+  }, [entries, globalGateStats]);
+
+  const totalRejections = gateStats.reduce((sum, gate) => sum + gate.total, 0);
+  const resolvedCount = Object.entries(summary)
+    .filter(([verdict]) => verdict !== "PENDING")
+    .reduce((sum, [, count]) => sum + count, 0);
+  const missedCount = summary.MISSED_WINNER ?? missed.length;
+  const avoidedCount = summary.AVOIDED_LOSER ?? avoided.length;
+  const pendingCount = Math.max(0, totalRejections - resolvedCount);
+  const allDetails = useMemo(() => {
+    const unique = new Map<number, ShadowEntry>();
+    for (const entry of [
+      ...missed,
+      ...avoided,
+      ...resolved.filter(e => e.verdict === "NEUTRAL" || e.verdict === "NO_BARS"),
+      ...pending,
+    ]) {
+      unique.set(entry.id, entry);
+    }
+    return [...unique.values()];
+  }, [missed, avoided, resolved, pending]);
 
   const shown =
     filter === "all"
-      ? [...missed, ...avoided, ...resolved.filter(e => e.verdict === "NEUTRAL" || e.verdict === "NO_BARS"), ...pending]
+      ? allDetails
       : filter === "pending"
         ? pending
-        : resolved.filter(e => e.verdict === filter);
+        : filter === "MISSED_WINNER"
+          ? missed
+          : resolved.filter(e => e.verdict === filter);
 
   return (
     <div style={{ padding: 10, display: "flex", flexDirection: "column", gap: 10 }}>
       <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-        <Chip label="Rejections" value={String(entries.length)} />
-        <Chip label="Resolved" value={String(resolved.length)} />
-        <Chip label="Missed winners" value={String(missed.length)} color="var(--red)" />
-        <Chip label="Avoided losers" value={String(avoided.length)} color="var(--green)" />
-        <Chip label="Pending resolution" value={String(pending.length)} />
+        <Chip label="Rejections" value={String(totalRejections || entries.length)} />
+        <Chip label="Resolved" value={String(resolvedCount || resolved.length)} />
+        <Chip label="Missed winners" value={String(missedCount)} color="var(--red)" />
+        <Chip label="Avoided losers" value={String(avoidedCount)} color="var(--green)" />
+        <Chip label="Pending resolution" value={String(pendingCount || pending.length)} />
         <span style={{ flex: 1 }} />
         <label className="faint" style={{ display: "flex", alignItems: "center", gap: 4 }}>
           <input type="checkbox" checked={auto} onChange={e => setAuto(e.target.checked)} /> auto 30s
@@ -134,8 +161,8 @@ export function ShadowPanel() {
                   <td className="r num">{g.total}</td>
                   <td className="r num">{g.missed || ""}</td>
                   <td className="r num">{g.avoided || ""}</td>
-                  <td className={`r num ${pnlClass(g.favN ? g.favSum / g.favN : null)}`}>
-                    {g.favN ? fmtPct(g.favSum / g.favN) : "—"}
+                  <td className={`r num ${pnlClass(g.avg_forward_move)}`}>
+                    {g.avg_forward_move != null ? fmtPct(g.avg_forward_move) : "—"}
                   </td>
                 </tr>
               ))}
@@ -178,7 +205,9 @@ export function ShadowPanel() {
               <tbody>
                 {shown.map(e => (
                   <tr key={`${e.id}-${e.candidate_id ?? ""}`}>
-                    <td className="num faint">{fmtTime(e.created_at)}</td>
+                    <td className="num faint" title={`Recorded ${fmtTime(e.created_at)}`}>
+                      {fmtTime(e.decision_bar_timestamp_utc ?? e.created_at)}
+                    </td>
                     <td><b>{e.symbol}</b></td>
                     <td><SideTag action={e.action} /></td>
                     <td className="muted">{e.strategy}</td>

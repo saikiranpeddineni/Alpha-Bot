@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 import pandas as pd
+from zoneinfo import ZoneInfo
 
 from app.config import Settings
 from app.core.domain import Order, OrderRequest, OrderSide, OrderStatus, OrderType, Position, Signal, SignalAction
@@ -199,7 +200,7 @@ async def test_reconciliation_failure_blocks_entries_but_allows_exits(tmp_path, 
     # ── 1. Start engine — reconciliation must fail ──────────────────────────
     await engine.start("paper")
     engine.clock.always_open = True  # Force market to be open during test to avoid EOD liquidation
-    engine._last_scan_date = datetime.now(UTC).date()
+    engine._last_scan_date = datetime.now(ZoneInfo("America/New_York")).date()
 
     # Bypass pipeline gates, portfolio gate, and risk-manager entry checks so
     # only the reconciliation guard (engine-level) is exercised by this test.

@@ -28,6 +28,7 @@ from app.pis.models import (
     PISDecision,
     PositionObservation,
     SnapshotHistory,
+    ThesisDrift,
     TradeHealth,
 )
 from app.pis.profit_memory import ProfitMemoryState, ProfitMemoryTracker
@@ -251,6 +252,7 @@ class PositionBrain:
         self,
         obs: PositionObservation,
         peak_r: float,
+        confirmation_bars: int | None = None,
     ) -> tuple[bool, float]:
         """Detect a confirmed high-water reversal from observed bars only.
 
@@ -262,11 +264,15 @@ class PositionBrain:
         if not getattr(self.config, "enable_causal_peak_capture", True):
             return False, 0.0
 
-        confirmation_bars = max(
+        bars = max(
             1,
-            int(getattr(self.config, "causal_peak_capture_confirmation_bars", 2)),
+            int(
+                confirmation_bars
+                if confirmation_bars is not None
+                else getattr(self.config, "causal_peak_capture_confirmation_bars", 2)
+            ),
         )
-        if len(self._history) < confirmation_bars + 1:
+        if len(self._history) < bars + 1:
             return False, 0.0
 
         min_peak_r = getattr(self.config, "causal_peak_capture_min_peak_r", 1.00)
@@ -274,8 +280,8 @@ class PositionBrain:
             return False, 0.0
 
         history = tuple(self._history)
-        recent = history[-confirmation_bars:]
-        previous_close = history[-confirmation_bars - 1].close
+        recent = history[-bars:]
+        previous_close = history[-bars - 1].close
         for bar in recent:
             if bar.side != obs.side:
                 return False, 0.0
@@ -464,11 +470,22 @@ class PositionBrain:
         self._update_lifecycle(health, thesis, peak_r)
 
         # Causal peak capture is evaluated before protection and exit synthesis,
-        # using only the completed observations already present in history.
+        # using only the completed observations already present in history. The
+        # first material adverse bar tightens a proven runner's floor; the
+        # configured multi-bar confirmation still owns the full runner harvest.
+        causal_ratchet_triggered = False
+        causal_ratchet_giveback_r = 0.0
+        if self._has_scaled_out and getattr(self.config, "enable_causal_peak_ratchet", True):
+            causal_ratchet_triggered, causal_ratchet_giveback_r = self._causal_peak_capture_signal(
+                obs,
+                peak_r,
+                confirmation_bars=1,
+            )
         causal_reversal_confirmed, causal_giveback_r = self._causal_peak_capture_signal(
             obs,
             peak_r,
         )
+        causal_floor_tightened = causal_ratchet_triggered or causal_reversal_confirmed
 
         # 6. Protection floor calculation with dynamic ceiling proximity (Priority 4)
         target_stop = self.authority.protection_planner.compute_protection_floor(
@@ -480,6 +497,7 @@ class PositionBrain:
             has_scaled_out=self._has_scaled_out,
             predicted_max_r=predicted_max_r,
             causal_reversal_confirmed=causal_reversal_confirmed,
+            causal_floor_tightened=causal_floor_tightened,
         )
         self._current_stop_floor = target_stop
 
@@ -515,6 +533,7 @@ class PositionBrain:
                 has_scaled_out=True,
                 predicted_max_r=predicted_max_r,
                 causal_reversal_confirmed=causal_reversal_confirmed,
+                causal_floor_tightened=causal_floor_tightened,
             )
             self._current_stop_floor = target_stop
 
@@ -560,9 +579,24 @@ class PositionBrain:
             brainstorm_narrative=narrative,
             metadata={
                 **decision.metadata,
+                # These fields make max-R capture auditable from the live
+                # decision stream without using hindsight values.  The peak is
+                # the completed-bar high-water mark; the close/giveback values
+                # are causal observations available at this decision.
+                "observed_peak_r": peak_r,
+                "completed_close_r": self._completed_close_r(obs),
+                "giveback_r": max(0.0, peak_r - self._completed_close_r(obs)),
+                "protected_floor_r": (
+                    (target_stop - obs.entry_price) / obs.risk_per_share * obs.side
+                    if obs.risk_per_share > 1e-8
+                    else 0.0
+                ),
                 "market_regime": regime.value,
                 "regime_summary": regime_summary,
                 "brainstorm_narrative": narrative,
+                "causal_peak_ratchet": causal_ratchet_triggered,
+                "causal_ratchet_giveback_r": causal_ratchet_giveback_r,
+                "causal_floor_tightened": causal_floor_tightened,
             },
         )
 
@@ -628,9 +662,10 @@ class PositionBrain:
                 target = LifecycleState.EXIT_CANDIDATE
             elif health.overall >= self.config.health_validated_threshold:
                 target = LifecycleState.VALIDATED
-        elif current == LifecycleState.DISTRIBUTION:
-            if self._degradation_counter >= 2 or health.overall < 0.20:
-                target = LifecycleState.EXIT_CANDIDATE
+        elif current == LifecycleState.DISTRIBUTION and (
+            self._degradation_counter >= 2 or health.overall < 0.20
+        ):
+            target = LifecycleState.EXIT_CANDIDATE
 
         if target != current and self.state_machine.can_transition_to(target):
             self.state_machine.transition_to(target, f"Health={health.overall:.2f}, PeakR={peak_r:.2f}, Degr={self._degradation_counter}")

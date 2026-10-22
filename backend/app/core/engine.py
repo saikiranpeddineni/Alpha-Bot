@@ -46,6 +46,7 @@ from app.core.domain import (
     OrderType,
     Position,
     Regime,
+    Signal,
     SignalAction,
     utcnow,
 )
@@ -1164,6 +1165,23 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
                             if not decision.approved:
                                 applog.info("engine", f"{sig.symbol.upper()}: entry rejected by RiskManager — {decision.reason}")
                                 self.publish("insight", self.insights.on_signal(sig, gated=True, gate_reason=decision.reason).model_dump(mode="json"))
+                                try:
+                                    from app.core.shadow_ledger import shadow_ledger
+                                    shadow_ledger.record(
+                                        symbol=sig.symbol,
+                                        action=str(sig.action.value if hasattr(sig.action, "value") else sig.action),
+                                        strategy=sig.strategy,
+                                        gate="portfolio_or_risk",
+                                        reason=f"RiskManager: {decision.reason}",
+                                        price=sig.price,
+                                        stop_loss=sig.stop_loss,
+                                        take_profit=sig.take_profit,
+                                        atr14=float(df["atr14"].iloc[-1]) if "atr14" in df.columns and len(df) else None,
+                                        confidence=sig.confidence,
+                                        sig=sig,
+                                    )
+                                except Exception:
+                                    pass
                                 continue
 
                             # (Asset shortability was already checked in the pre-filter to prevent budget starvation)
@@ -1193,7 +1211,8 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
 
                             try:
                                 order = await self.broker.submit(decision.order)
-                                if order.status == OrderStatus.REJECTED:
+                                order_rejected = order.status == OrderStatus.REJECTED
+                                if order_rejected:
                                     self.pending_reconciliation_orders.pop(client_order_id, None)
                                 else:
                                     self.pending_reconciliation_orders[client_order_id]["submission_state"] = "broker_acknowledged"
@@ -1205,10 +1224,42 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
                                     if entry_target is not None and float(entry_target) > 0
                                     else order
                                 )
-                                if entry_target is not None and float(entry_target) > 0:
+                                if not order_rejected and entry_target is not None and float(entry_target) > 0:
                                     self._position_take_profits[order.symbol.upper()] = float(entry_target)
                                 await asyncio.to_thread(self.db.save_order, persisted_order, self.mode)
-                                self.publish("insight", self.insights.on_signal(sig, gated=False).model_dump(mode="json"))
+                                if order_rejected:
+                                    rejection_reason = str(getattr(order, "reason", "") or "broker rejected entry")
+                                    applog.warning(
+                                        "engine",
+                                        f"{sig.symbol}: broker rejected entry -- {rejection_reason}",
+                                    )
+                                    self.publish(
+                                        "insight",
+                                        self.insights.on_signal(
+                                            sig,
+                                            gated=True,
+                                            gate_reason=f"broker rejection: {rejection_reason}",
+                                        ).model_dump(mode="json"),
+                                    )
+                                    try:
+                                        from app.core.shadow_ledger import shadow_ledger
+                                        shadow_ledger.record(
+                                            symbol=sig.symbol,
+                                            action=str(sig.action.value if hasattr(sig.action, "value") else sig.action),
+                                            strategy=sig.strategy,
+                                            gate="broker_rejection",
+                                            reason=rejection_reason,
+                                            price=sig.price,
+                                            stop_loss=sig.stop_loss,
+                                            take_profit=sig.take_profit,
+                                            atr14=float(df["atr14"].iloc[-1]) if "atr14" in df.columns and len(df) else None,
+                                            confidence=sig.confidence,
+                                            sig=sig,
+                                        )
+                                    except Exception:
+                                        pass
+                                else:
+                                    self.publish("insight", self.insights.on_signal(sig, gated=False).model_dump(mode="json"))
                                 self.publish("orders", self.orders_payload())
                             except Exception as exc:
                                 self.pending_reconciliation_orders[client_order_id]["submission_state"] = "ambiguous"
@@ -1228,10 +1279,11 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
                                 )
                                 await asyncio.to_thread(self.db.save_order, order, self.mode)
 
-                            # Reserve active same-cycle submissions before evaluating the next candidate.
+                            # Reserve only broker-accepted/ambiguous submissions before evaluating the next candidate.
+                            # A definitive rejection did not consume capital or an entry slot.
                             # This overlays the stale broker snapshot for cash, position-count, and sector checks.
                             reference_price = sig.price or float(df["close"].iloc[-1])
-                            if reservations.reserve(order, reference_price):
+                            if order.status != OrderStatus.REJECTED and reservations.reserve(order, reference_price):
                                 effective_pending_entries.add(sig.symbol.upper())
 
             await self._drain_fills(now)
@@ -2608,17 +2660,28 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
 
         if triggered:
             added_any = False
+            try:
+                event_ttl_minutes = max(1, int(getattr(self.risk_config, "scanner_watchlist_ttl", 15)))
+            except (TypeError, ValueError):
+                event_ttl_minutes = 15
+            event_expires_at = now + timedelta(minutes=event_ttl_minutes)
             for sym in triggered:
                 if sym not in self.scanned_watchlist:
                     self.scanned_watchlist.append(sym)
                     added_any = True
-                    self.publish("insight", {
-                        "id": f"event-{sym}-{now.timestamp()}",
-                        "ts": now.isoformat(),
-                        "severity": "info",
-                        "title": f"Momentum Surge: {sym}",
-                        "detail": f"Added dynamically to watchlist. Volume Surge: {sym} surge detected. AI confidence: high."
-                    })
+                # Event-monitor additions are temporary scanner symbols too.
+                # Give them the same bounded lifetime as normal scanner output;
+                # otherwise one transient surge permanently expands the polling
+                # and risk surface.
+                self.scanned_watchlist_ttl[sym] = event_ttl_minutes
+                self.scanned_watchlist_expires_at[sym] = event_expires_at
+                self.publish("insight", {
+                    "id": f"event-{sym}-{now.timestamp()}",
+                    "ts": now.isoformat(),
+                    "severity": "info",
+                    "title": f"Momentum Surge: {sym}",
+                    "detail": f"Added dynamically to watchlist. Volume Surge: {sym} surge detected. AI confidence: high."
+                })
             if added_any:
                 self.watchlist = sorted(list(set(self.user_watchlist + self.scanned_watchlist)))
                 if self.data is not None:
