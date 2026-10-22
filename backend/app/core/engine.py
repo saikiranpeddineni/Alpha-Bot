@@ -624,12 +624,29 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
             regime_map = getattr(self.risk_config, "regime_ml_thresholds", {})
             raw_threshold = regime_map.get(current_regime)
 
+            # =============================================================================
+            # [MODIFIED 2026-10-22]: Calibrate engine regime ML fallback thresholds
+            # ORIGINAL INTENT: Fallbacks were 0.60 in STRESS/PANIC and 0.55 default.
+            # REASON FOR CHANGE: Calibrates fallback thresholds to 0.52 (STRESS/PANIC) and 0.48 (default)
+            # to prevent artificial lockouts during high volatility.
+            # SAFE ROLLBACK: Previous lines preserved below as comments.
+            # -----------------------------------------------------------------------------
+            # [PREVIOUS CODE - PRESERVED]:
+            # if raw_threshold is None:
+            #     raw_threshold = (
+            #         getattr(self.risk_config, "stress_ml_confidence_threshold", 0.60)
+            #         if current_regime in ("STRESS", "PANIC")
+            #         else getattr(self.risk_config, "ml_confidence_threshold", 0.55)
+            #     )
+            # -----------------------------------------------------------------------------
+            # [NEW CODE]:
             if raw_threshold is None:
                 raw_threshold = (
-                    getattr(self.risk_config, "stress_ml_confidence_threshold", 0.60)
+                    getattr(self.risk_config, "stress_ml_confidence_threshold", 0.52)
                     if current_regime in ("STRESS", "PANIC")
-                    else getattr(self.risk_config, "ml_confidence_threshold", 0.55)
+                    else getattr(self.risk_config, "ml_confidence_threshold", 0.48)
                 )
+            # =============================================================================
 
             try:
                 val = float(raw_threshold)

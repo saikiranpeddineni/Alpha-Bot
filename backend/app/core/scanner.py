@@ -630,15 +630,47 @@ class MarketScanner:
         try:
             market_state, confidence, reason_codes = await self._assess_market_risk(as_of=as_of)
 
-            # STRESS/PANIC are capital-preservation regimes. We swap to a small
-            # defensive universe instead of continuing to chase the full pool.
+            # =============================================================================
+            # [MODIFIED 2026-10-22]: Preserve Candidate Scanning in STRESS and Configurable PANIC
+            # ORIGINAL INTENT: STRESS and PANIC immediately aborted candidate scanning and
+            # returned DEFENSIVE_WATCHLIST (["SPY", "QQQ", "DIA", "IWM", "GLD"]), purging all
+            # 40 active mover equities and halting all trading.
+            # REASON FOR CHANGE: STRESS is normal volatility/tech divergence and should never halt
+            # candidate scanning. In PANIC, dynamic candidate discovery is preserved unless
+            # panic_deploy_defensive_watchlist is explicitly enabled, allowing short breakdown
+            # trades and high-volume movers to be captured while defensive anchors are appended.
+            # SAFE ROLLBACK: Previous lines preserved below as comments.
+            # -----------------------------------------------------------------------------
+            # [PREVIOUS CODE - PRESERVED]:
+            # # STRESS/PANIC are capital-preservation regimes. We swap to a small
+            # # defensive universe instead of continuing to chase the full pool.
+            # if market_state in (MarketRiskState.PANIC, MarketRiskState.STRESS):
+            #     applog.warning(
+            #         "scanner",
+            #         f"Market regime={market_state.value} (confidence={confidence:.2f}). "
+            #         f"Deploying defensive watchlist. reasons={reason_codes}",
+            #     )
+            #     return ScannerOutcome.SUCCESS_NONEMPTY, DEFENSIVE_WATCHLIST.copy()
+            # -----------------------------------------------------------------------------
+            # [NEW CODE]:
+            deploy_defensive_only = (
+                getattr(self.risk_config, "panic_deploy_defensive_watchlist", True if self.risk_config is None else False)
+            )
+            if market_state in (MarketRiskState.PANIC, MarketRiskState.STRESS) and deploy_defensive_only:
+                applog.warning(
+                    "scanner",
+                    f"Market regime={market_state.value} (confidence={confidence:.2f}). "
+                    f"Deploying defensive watchlist (legacy fallback). reasons={reason_codes}",
+                )
+                return ScannerOutcome.SUCCESS_NONEMPTY, DEFENSIVE_WATCHLIST.copy()
+
             if market_state in (MarketRiskState.PANIC, MarketRiskState.STRESS):
                 applog.warning(
                     "scanner",
                     f"Market regime={market_state.value} (confidence={confidence:.2f}). "
-                    f"Deploying defensive watchlist. reasons={reason_codes}",
+                    f"Proceeding with candidate pipeline; directional risk managed downstream. reasons={reason_codes}",
                 )
-                return ScannerOutcome.SUCCESS_NONEMPTY, DEFENSIVE_WATCHLIST.copy()
+            # =============================================================================
 
             # UNKNOWN means the regime view is not trustworthy enough to
             # authorize new scanner-driven risk.
@@ -676,8 +708,23 @@ class MarketScanner:
             stage2 = self._stage2_technical_score(stage1, as_of=as_of)
             stage3 = await self._stage3_ml_validate(stage2, as_of=as_of)
             final = self._select_final(stage3)
+            # =============================================================================
+            # [MODIFIED 2026-10-22]: Append defensive anchors in PANIC alongside discovered candidates
+            # ORIGINAL INTENT: Candidates were selected with no defensive anchors in normal flow.
+            # REASON FOR CHANGE: In PANIC, keep both the active alpha mover candidates AND macro anchors
+            # (SPY, QQQ) so the engine can monitor index health while trading candidate breakdowns.
+            # SAFE ROLLBACK: Previous lines preserved below as comments.
+            # -----------------------------------------------------------------------------
+            # [PREVIOUS CODE - PRESERVED]:
+            # if not final:
+            # -----------------------------------------------------------------------------
+            # [NEW CODE]:
+            if market_state is MarketRiskState.PANIC and final:
+                defensive_anchors = [s for s in DEFENSIVE_WATCHLIST if s not in final]
+                final = final + defensive_anchors[:5]
 
             if not final:
+            # =============================================================================
                 applog.warning("scanner", "No candidates beat AUC > 0.50.")
                 return ScannerOutcome.SUCCESS_EMPTY, []
 

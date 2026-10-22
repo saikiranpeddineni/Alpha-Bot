@@ -100,14 +100,36 @@ class RiskConfig(BaseModel):
     # 0 disables the gap block entirely.
     data_gap_threshold_secs: float = Field(120.0, ge=0.0, le=3900.0)
     ml_confidence_threshold: float = Field(0.52, ge=0.0, le=1.0)
+    # =============================================================================
+    # [MODIFIED 2026-10-22]: Calibrate regime_ml_thresholds and add panic_deploy_defensive_watchlist
+    # ORIGINAL INTENT: PANIC=0.62 and STRESS=0.55 were unattainable ceilings that halted all trading.
+    # REASON FOR CHANGE: Calibrating to 0.48-0.52 allows high-conviction breakdown and trend trades
+    # to execute during volatile regimes. Adding panic_deploy_defensive_watchlist=False allows
+    # dynamic candidate scanning instead of purging the universe for 5 stagnant ETFs.
+    # SAFE ROLLBACK: Previous lines preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # regime_ml_thresholds: dict[str, float] = Field(
+    #     default={
+    #         "NORMAL": 0.50,
+    #         "CAUTION": 0.52,
+    #         "STRESS": 0.55,
+    #         "PANIC": 0.62,
+    #     }
+    # )
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    stress_ml_confidence_threshold: float = Field(0.52, ge=0.0, le=1.0)
+    panic_deploy_defensive_watchlist: bool = Field(False)
     regime_ml_thresholds: dict[str, float] = Field(
         default={
-            "NORMAL": 0.50,
-            "CAUTION": 0.52,
-            "STRESS": 0.55,
-            "PANIC": 0.62,
+            "NORMAL": 0.48,
+            "CAUTION": 0.48,
+            "STRESS": 0.50,
+            "PANIC": 0.52,
         }
     )
+    # =============================================================================
     min_specialist_auc: float = Field(0.53, ge=0.50, le=1.0)
     min_stop_pct: float = Field(0.5, ge=0.0, le=5.0)
     score_threshold_trend: float = Field(55.0, ge=0.0, le=100.0)    # was 55.0
@@ -304,11 +326,23 @@ class Settings(BaseSettings):
     opportunity_round_trip_cost_bps: float = Field(8.0, validation_alias="OPPORTUNITY_ROUND_TRIP_COST_BPS")
     overnight_enabled: bool = Field(False, validation_alias="OVERNIGHT_ENABLED")
     overnight_max_allocation_pct: float = Field(15.0, validation_alias="OVERNIGHT_MAX_ALLOCATION_PCT")
-    poll_interval_sec: float = Field(5.0, validation_alias="POLL_INTERVAL_SEC")
     demo_bar_seconds: float = Field(5.0, validation_alias="DEMO_BAR_SECONDS")
     default_watchlist: str = Field("SPY,QQQ,AAPL,NVDA,TSLA,MSFT,AMD,META,AMZN,AVGO,BABA,PLTR,ARM", validation_alias="DEFAULT_WATCHLIST")
-
-    ml_confidence_threshold: float = Field(0.55, validation_alias="ML_CONFIDENCE_THRESHOLD")
+    # =============================================================================
+    # [MODIFIED 2026-10-22]: Calibrate Settings.ml_confidence_threshold and add stress/panic fields
+    # ORIGINAL INTENT: ml_confidence_threshold was 0.55.
+    # REASON FOR CHANGE: Calibrate baseline to 0.48 and add stress_ml_confidence_threshold (0.52)
+    # and panic_deploy_defensive_watchlist (False) to support dynamic trading during volatility.
+    # SAFE ROLLBACK: Previous line preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # ml_confidence_threshold: float = Field(0.55, validation_alias="ML_CONFIDENCE_THRESHOLD")
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    ml_confidence_threshold: float = Field(0.48, validation_alias="ML_CONFIDENCE_THRESHOLD")
+    stress_ml_confidence_threshold: float = Field(0.52, validation_alias="STRESS_ML_CONFIDENCE_THRESHOLD")
+    panic_deploy_defensive_watchlist: bool = Field(False, validation_alias="PANIC_DEPLOY_DEFENSIVE_WATCHLIST")
+    # =============================================================================
     ml_horizon_bars: int = Field(15, validation_alias="ML_HORIZON_BARS")
     gemini_api_key: str = Field("", validation_alias=AliasChoices("GEMINI_API_KEY", "GOOGLE_API_KEY"))
     anthropic_api_key: str = Field("", validation_alias="ANTHROPIC_API_KEY")
