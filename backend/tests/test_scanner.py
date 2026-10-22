@@ -120,3 +120,24 @@ async def test_scanner_panic_fallback(mock_data_manager):
     outcome, watchlist = await scanner.run()
     assert outcome == ScannerOutcome.SUCCESS_NONEMPTY
     assert watchlist == DEFENSIVE_WATCHLIST
+
+def test_scanner_target_symbols_cap_40():
+    from app.core.scanner import _TARGET_SYMBOLS, _MAX_PER_SECTOR, _TECH_SCORE_TOP_N, MarketScanner
+    assert _TARGET_SYMBOLS == 40
+    assert _MAX_PER_SECTOR == 7
+    assert _TECH_SCORE_TOP_N == 60
+
+    # 56 candidates across 8 distinct sector buckets with passing AUC
+    candidates = []
+    for sector_idx in range(8):
+        for i in range(7):
+            candidates.append({
+                "symbol": f"S{sector_idx}SYM{i}",
+                "sector": f"sector_{sector_idx}",
+                "auc": 0.65,
+                "tech_score": 0.80,
+            })
+
+    selected = MarketScanner._select_final(candidates)
+    assert len(selected) == 40
+

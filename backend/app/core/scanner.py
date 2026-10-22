@@ -119,10 +119,27 @@ LARGE_CAP_ANCHORS: list[str] = ["NVDA", "TSLA", "AMD", "META", "AMZN", "AAPL", "
 _PREFILTER_CONCURRENCY = 5
 _ML_CONCURRENCY = 4
 
+# =============================================================================
+# [MODIFIED 2026-10-22]: Expand scanner selection limits to hard cap 40
+# ORIGINAL INTENT: _TECH_SCORE_TOP_N = 35, _MAX_PER_SECTOR = 5, and _TARGET_SYMBOLS = 24
+# limited the scanner output to at most 24 symbols (and at most 35 across 7 sectors).
+# REASON FOR CHANGE: User directive to expand scanner hard cap to 40 symbols. Expanded
+# Stage 2 technical score top N to 60 and max per sector to 7 so 40 symbols can pass
+# through ML validation without being bottlenecked at Stage 2 or sector caps.
+# SAFE ROLLBACK: The original code is preserved below as comments.
+# -----------------------------------------------------------------------------
+# [PREVIOUS CODE - PRESERVED]:
+# # Selection parameters
+# _TECH_SCORE_TOP_N = 35
+# _MAX_PER_SECTOR = 5
+# _TARGET_SYMBOLS = 24
+# -----------------------------------------------------------------------------
+# [NEW CODE]:
 # Selection parameters
-_TECH_SCORE_TOP_N = 35
-_MAX_PER_SECTOR = 5
-_TARGET_SYMBOLS = 24
+_TECH_SCORE_TOP_N = 60
+_MAX_PER_SECTOR = 7
+_TARGET_SYMBOLS = 40
+# ==============================================================================
 _AUC_TIER1 = 0.55
 _AUC_TIER2 = 0.50
 
@@ -158,9 +175,22 @@ class MarketScanner:
                 discovery = getattr(self.data, "_discovery", None)
             if discovery is None:
                 discovery = DiscoveryCoordinator(
+# =============================================================================
+# [MODIFIED 2026-10-22]: Expand DiscoveryCoordinator shortlist_limit from 50 to 80
+# ORIGINAL INTENT: shortlist_limit=50 was sized for the prior 24-symbol cap.
+# REASON FOR CHANGE: Sized to 80 to feed sufficient candidates for the 40 hard cap.
+# SAFE ROLLBACK: The original code is preserved below as comments.
+# -----------------------------------------------------------------------------
+# [PREVIOUS CODE - PRESERVED]:
+#                     provider, feed="iex", asset_cache_ttl=timedelta(hours=6),
+#                     batch_size=200, request_budget=10, shortlist_limit=50,
+#                     result_cache_ttl=timedelta(minutes=15),
+# -----------------------------------------------------------------------------
+# [NEW CODE]:
                     provider, feed="iex", asset_cache_ttl=timedelta(hours=6),
-                    batch_size=200, request_budget=10, shortlist_limit=50,
+                    batch_size=200, request_budget=10, shortlist_limit=80,
                     result_cache_ttl=timedelta(minutes=15),
+# =============================================================================
                 )
                 self._discovery = discovery
                 self.data._discovery = discovery
@@ -174,10 +204,24 @@ class MarketScanner:
                 return result
 
             acquire_discovery = _acquire_discovery
+# =============================================================================
+# [MODIFIED 2026-10-22]: Expand resolve_stage1_symbols fallback_limit from 50 to 80
+# ORIGINAL INTENT: fallback_limit=50 bounded Stage 1 candidate pool for the 24 cap.
+# REASON FOR CHANGE: Sized to 80 to ensure at least 40 candidates survive pre-filter and ML validation.
+# SAFE ROLLBACK: The original code is preserved below as comments.
+# -----------------------------------------------------------------------------
+# [PREVIOUS CODE - PRESERVED]:
+#         symbols = await resolve_stage1_symbols(
+#             as_of=as_of, static_symbols=CANDIDATE_POOL, core_symbols=self.core_watchlist, fallback_limit=50,
+#             discovery_supported=discovery_supported, acquire_discovery=acquire_discovery,
+#         )
+# -----------------------------------------------------------------------------
+# [NEW CODE]:
         symbols = await resolve_stage1_symbols(
-            as_of=as_of, static_symbols=CANDIDATE_POOL, core_symbols=self.core_watchlist, fallback_limit=50,
+            as_of=as_of, static_symbols=CANDIDATE_POOL, core_symbols=self.core_watchlist, fallback_limit=80,
             discovery_supported=discovery_supported, acquire_discovery=acquire_discovery,
         )
+# =============================================================================
         symbols_list = list(symbols)
 
         # Replay inputs intentionally carry SPY/QQQ/VIX even when they are only
