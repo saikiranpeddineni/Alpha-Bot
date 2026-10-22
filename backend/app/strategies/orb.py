@@ -27,7 +27,19 @@ class OpeningRangeBreakout(Strategy):
 
     is_breakout = True
     is_structural_breakout = True
-    ml_threshold = 0.55
+    # =============================================================================
+    # [MODIFIED 2026-10-22]: Calibrate ORB ml_threshold to 0.48
+    # ORIGINAL INTENT: ml_threshold = 0.55 was a restrictive theoretical gate.
+    # REASON FOR CHANGE: Shadow ledger audit revealed prime winners (e.g., EOSE +3.86%, prob 0.4805)
+    # were rejected because the threshold was at 0.55. Calibrating to 0.48 matches Betadesk.
+    # SAFE ROLLBACK: Previous line preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # ml_threshold = 0.55
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    ml_threshold = 0.48
+    # =============================================================================
     evaluation_horizons = ["60m", "close"]
     # =============================================================================
     # [MODIFIED 2026-10-22]: Align ORB with Betadesk Proven Configuration & Regime Weights

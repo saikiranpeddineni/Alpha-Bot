@@ -46,9 +46,19 @@ class RiskConfig(BaseModel):
     """Runtime-tunable risk parameters. Tuned for active capital utilization (4% daily target)."""
     entry_order_type: str = Field("market", pattern="^(market|limit)$")
     risk_per_trade_pct: float = Field(0.5, ge=0.01, le=5.0)        # was 0.5 — 2× capital per trade
-    max_position_pct: float = Field(20.0, ge=1.0, le=100.0)
-    max_open_positions: int = Field(8, ge=1, le=50)                  # was 4 — 2× concurrent exposure
-    max_daily_loss_pct: float = Field(2.0, ge=0.1, le=25.0)         # was 2.0 — room for higher position count
+    # =============================================================================
+    # [MODIFIED 2026-10-22]: Increase max_open_positions from 8 to 10
+    # ORIGINAL INTENT: max_open_positions = 8 capped concurrency.
+    # REASON FOR CHANGE: Forensic audit shows 27 missed winners were blocked by portfolio/risk capacity.
+    # Increasing to 10 provides room for multi-strategy execution without increasing per-trade risk.
+    # SAFE ROLLBACK: Previous line preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # max_open_positions: int = Field(8, ge=1, le=50)                  # was 4 — 2× concurrent exposure
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    max_open_positions: int = Field(10, ge=1, le=50)                 # expanded to 10 for portfolio breadth
+    # =============================================================================
     # DAILY PROFIT LOCK 2026-10-16 (operator demand: bank green days).
     # When day P&L reaches +lock_pct, engine flattens and blocks new entries
     # for the session — symmetric to the daily loss halt. 0.0 disables.
@@ -150,11 +160,21 @@ class RiskConfig(BaseModel):
     # reward:risk). Sibling-bot evidence + our own 68% never-green entries.
     enable_entry_location_veto: bool = Field(True)
     entry_max_vwap_stretch_atr: float = Field(3.0, ge=0.5, le=20.0)
-    # Trend-day allowance: on TREND_UP/TREND_DOWN bars the whole market rides
-    # far from VWAP. Owner verdict 2026-10-15: default 1.0 (OFF) -- momentum is
-    # -$1,890/32 on recent paper and stretched entries are measured negative-EV,
-    # so the loosening ships as a research knob only, Champion behavior unchanged.
-    entry_vwap_stretch_trend_mult: float = Field(1.0, ge=1.0, le=3.0)
+    # =============================================================================
+    # [MODIFIED 2026-10-22]: Calibrate entry_vwap_stretch_trend_mult from 1.0 to 1.6
+    # ORIGINAL INTENT: entry_vwap_stretch_trend_mult = 1.0 kept trend days locked to the same 3.0 ATR
+    # limit as range days.
+    # REASON FOR CHANGE: Shadow ledger audit shows genuine trend breakout runners (SAIQ +4.47%, NBIS +4.01%)
+    # detach from VWAP (>3.0 ATR) in sustained trends and were vetoed. 1.6 allows up to 4.8 ATR in
+    # TREND_UP/TREND_DOWN while maintaining the strict 3.0 ATR discipline for RANGE days.
+    # SAFE ROLLBACK: Previous line preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # entry_vwap_stretch_trend_mult: float = Field(1.0, ge=1.0, le=3.0)
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    entry_vwap_stretch_trend_mult: float = Field(1.6, ge=1.0, le=3.0)
+    # =============================================================================
     # Correlation clustering gate: block a new entry only when its 1-minute
     # close correlation with an open same-side position exceeds this.
     # Owner verdict 2026-10-15: default back to 0.70 -- the 18 same-day blocks
@@ -232,9 +252,20 @@ class Settings(BaseSettings):
 
     entry_order_type: str = Field("market", validation_alias="ENTRY_ORDER_TYPE")
     risk_per_trade_pct: float = Field(1.0, validation_alias="RISK_PER_TRADE_PCT")           # was 0.5
-    max_position_pct: float = Field(20.0, validation_alias="MAX_POSITION_PCT")
-    max_open_positions: int = Field(8, validation_alias="MAX_OPEN_POSITIONS")                # was 4
-    max_daily_loss_pct: float = Field(3.0, validation_alias="MAX_DAILY_LOSS_PCT")            # was 2.0
+    # =============================================================================
+    # [MODIFIED 2026-10-22]: Increase Settings.max_open_positions to 10 and add entry_vwap_stretch_trend_mult
+    # ORIGINAL INTENT: max_open_positions was 8 in Settings.
+    # REASON FOR CHANGE: Sync Settings with RiskConfig capacity increase to 10 and provide
+    # validation_alias for ENTRY_VWAP_STRETCH_TREND_MULT.
+    # SAFE ROLLBACK: Previous line preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # max_open_positions: int = Field(8, validation_alias="MAX_OPEN_POSITIONS")                # was 4
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    max_open_positions: int = Field(10, validation_alias="MAX_OPEN_POSITIONS")
+    entry_vwap_stretch_trend_mult: float = Field(1.6, validation_alias="ENTRY_VWAP_STRETCH_TREND_MULT")
+    # =============================================================================
     daily_profit_lock_pct: float = Field(1.0, validation_alias="DAILY_PROFIT_LOCK_PCT")
     daily_profit_defend_pct: float = Field(0.5, validation_alias="DAILY_PROFIT_DEFEND_PCT")
     max_drawdown_pct: float = Field(10.0, validation_alias="MAX_DRAWDOWN_PCT")

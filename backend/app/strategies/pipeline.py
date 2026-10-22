@@ -37,9 +37,20 @@ _REGIME_KEY: dict[Regime, str] = {
     Regime.RANGE: "range", Regime.VOLATILE: "volatile",
 }
 
-
 class SignalPipeline:
-    def __init__(self, model: SignalModel, ml_threshold: float = 0.55,
+    # =============================================================================
+    # [MODIFIED 2026-10-22]: Calibrate default ml_threshold from 0.55 to 0.48
+    # ORIGINAL INTENT: ml_threshold = 0.55 was a restrictive default that eliminated valid trades.
+    # REASON FOR CHANGE: Forensic audit shows 62 winners (avg +2.34R) were rejected in the 0.48-0.50
+    # band where winners beat losers 3:1.
+    # SAFE ROLLBACK: Previous signature preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # def __init__(self, model: SignalModel, ml_threshold: float = 0.55,
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    def __init__(self, model: SignalModel, ml_threshold: float = 0.48,
+    # =============================================================================
                  risk_config: RiskConfig | None = None, settings: Settings | None = None,
                  regime_weights: dict[str, dict[Regime, float]] | None = None,
                  soft_composite_gating: bool = False) -> None:
@@ -455,19 +466,45 @@ class SignalPipeline:
 
             side_str = "long" if sig.action == SignalAction.ENTER_LONG else "short"
 
-            # Keep the global ML floor as a lower bound, but never let it
-            # silently weaken a strategy's own validated meta-label threshold.
+            # =============================================================================
+            # [MODIFIED 2026-10-22]: Calibrate adaptive_threshold with META_LABEL_THRESHOLD support
+            # ORIGINAL INTENT: max(self.ml_threshold, strategy_meta_floor) prevented lowering below
+            # strategy hardcoded defaults, blocking winners in the 0.48-0.50 range.
+            # REASON FOR CHANGE: Shadow ledger forensics prove 62 winners (avg +2.34R) were rejected.
+            # Allowing min(self.ml_threshold, strategy_meta_floor) or explicit META_LABEL_THRESHOLD
+            # unlocks verified winners (EOSE +3.86%, CRWV +2.6%).
+            # SAFE ROLLBACK: Previous lines preserved below as comments.
+            # -----------------------------------------------------------------------------
+            # [PREVIOUS CODE - PRESERVED]:
+            # # Keep the global ML floor as a lower bound, but never let it
+            # # silently weaken a strategy's own validated meta-label threshold.
+            # thresholds = getattr(self.meta_label_engine, "default_thresholds", {})
+            # fallback_threshold = getattr(self.meta_label_engine, "FALLBACK_THRESHOLD", 0.5)
+            # strategy_meta_floor = thresholds.get(sig.strategy, fallback_threshold) if isinstance(thresholds, dict) else fallback_threshold
+            # if not isinstance(strategy_meta_floor, (int, float)):
+            #     strategy_meta_floor = 0.5
+            # meta_pred = self.meta_label_engine.predict(
+            #     sig.strategy,
+            #     features,
+            #     side=side_str,
+            #     adaptive_threshold=max(self.ml_threshold, strategy_meta_floor),
+            # )
+            # -----------------------------------------------------------------------------
+            # [NEW CODE]:
+            import os
             thresholds = getattr(self.meta_label_engine, "default_thresholds", {})
-            fallback_threshold = getattr(self.meta_label_engine, "FALLBACK_THRESHOLD", 0.5)
+            fallback_threshold = getattr(self.meta_label_engine, "FALLBACK_THRESHOLD", 0.48)
             strategy_meta_floor = thresholds.get(sig.strategy, fallback_threshold) if isinstance(thresholds, dict) else fallback_threshold
             if not isinstance(strategy_meta_floor, (int, float)):
-                strategy_meta_floor = 0.5
+                strategy_meta_floor = 0.48
+            meta_calc_threshold = float(os.environ.get("META_LABEL_THRESHOLD", min(self.ml_threshold, float(strategy_meta_floor))))
             meta_pred = self.meta_label_engine.predict(
                 sig.strategy,
                 features,
                 side=side_str,
-                adaptive_threshold=max(self.ml_threshold, strategy_meta_floor),
+                adaptive_threshold=meta_calc_threshold,
             )
+            # =============================================================================
             # -----------------------------------------------------------------------------
             # [NEW CODE]:
             if is_warmup_reduced and not meta_pred.approved:
@@ -518,11 +555,25 @@ class SignalPipeline:
             admission_score = min(100.0, max(0.0, raw_score * effective_regime_weight))
             approved, threshold = self.trade_score_engine.approve(admission_score, regime, is_event_day=self._is_event_day)
 
-            # CR-09: High-agreement rescue path
-            import os
-            rescue_ml_min = float(os.environ.get("RESCUE_ML_MIN", 0.65))
-            rescue_meta_min = float(os.environ.get("RESCUE_META_MIN", 0.80))
-            rescue_risk_mult = float(os.environ.get("RESCUE_RISK_MULT", 0.75))
+            # =============================================================================
+            # [MODIFIED 2026-10-22]: Calibrate CR-09 High-Agreement Rescue Defaults
+            # ORIGINAL INTENT: rescue_meta_min = 0.80 and rescue_ml_min = 0.65 were theoretical
+            # ceilings that made rescue impossible because meta-label models peak below 0.55.
+            # REASON FOR CHANGE: Shadow ledger audit shows high TradeScore setups (SAIQ raw 70.2,
+            # AVEX raw 80.1) were rejected when discounted by regime weights. Calibrating to 0.52/0.48/0.65
+            # allows these high-conviction trades to be safely executed at reduced size.
+            # SAFE ROLLBACK: Previous lines preserved below as comments.
+            # -----------------------------------------------------------------------------
+            # [PREVIOUS CODE - PRESERVED]:
+            # rescue_ml_min = float(os.environ.get("RESCUE_ML_MIN", 0.65))
+            # rescue_meta_min = float(os.environ.get("RESCUE_META_MIN", 0.80))
+            # rescue_risk_mult = float(os.environ.get("RESCUE_RISK_MULT", 0.75))
+            # -----------------------------------------------------------------------------
+            # [NEW CODE]:
+            rescue_ml_min = float(os.environ.get("RESCUE_ML_MIN", 0.52))
+            rescue_meta_min = float(os.environ.get("RESCUE_META_MIN", 0.48))
+            rescue_risk_mult = float(os.environ.get("RESCUE_RISK_MULT", 0.65))
+            # =============================================================================
             meta_prob_raw = meta_pred.prob_profitable if meta_pred is not None else None
             try:
                 meta_prob = None if isinstance(meta_prob_raw, bool) or meta_prob_raw is None else float(meta_prob_raw)

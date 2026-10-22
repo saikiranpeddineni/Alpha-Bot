@@ -97,7 +97,18 @@ def test_rescue_denied_when_raw_trade_score_floor_is_not_met():
 
 
 def test_rescue_requires_numeric_meta_floor_even_when_meta_says_pass():
-    pipeline = _pipeline(raw_score=80.5, meta_probability=0.6543)
+    # =============================================================================
+    # [MODIFIED 2026-10-22]: Update test meta_probability to test below calibrated 0.48 floor
+    # ORIGINAL INTENT: meta_probability=0.6543 tested rejection against old 0.80 ceiling.
+    # REASON FOR CHANGE: With rescue_meta_min calibrated to 0.48, test with 0.42 to verify floor rejection.
+    # SAFE ROLLBACK: Previous line preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # pipeline = _pipeline(raw_score=80.5, meta_probability=0.6543)
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    pipeline = _pipeline(raw_score=80.5, meta_probability=0.42)
+    # =============================================================================
     signal = _signal()
 
     accepted, rejected = _process(pipeline, signal)
@@ -116,7 +127,18 @@ def test_rescue_works_with_consistent_scores_above_the_floor():
     assert len(accepted) == 1
     assert rejected == []
     assert signal.ml_gate_decision == "HIGH_AGREEMENT_RESCUE"
-    assert signal.risk_multiplier == 0.75
+    # =============================================================================
+    # [MODIFIED 2026-10-22]: Update expected rescue risk_multiplier from 0.75 to 0.65
+    # ORIGINAL INTENT: rescue_risk_mult was 0.75.
+    # REASON FOR CHANGE: Calibrated to 0.65 for prudent sizing on rescued regime-penalized trades.
+    # SAFE ROLLBACK: Previous line preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # assert signal.risk_multiplier == 0.75
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    assert signal.risk_multiplier == 0.65
+    # =============================================================================
 
 
 def test_rescue_telemetry_reports_raw_and_admission_scores_consistently():
