@@ -46,6 +46,7 @@ class RiskConfig(BaseModel):
     """Runtime-tunable risk parameters. Tuned for active capital utilization (4% daily target)."""
     entry_order_type: str = Field("market", pattern="^(market|limit)$")
     risk_per_trade_pct: float = Field(0.5, ge=0.01, le=5.0)        # was 0.5 — 2× capital per trade
+    max_position_pct: float = Field(20.0, ge=1.0, le=100.0)
     # =============================================================================
     # [MODIFIED 2026-10-22]: Increase max_open_positions from 8 to 10
     # ORIGINAL INTENT: max_open_positions = 8 capped concurrency.
@@ -59,6 +60,7 @@ class RiskConfig(BaseModel):
     # [NEW CODE]:
     max_open_positions: int = Field(10, ge=1, le=50)                 # expanded to 10 for portfolio breadth
     # =============================================================================
+    max_daily_loss_pct: float = Field(2.0, ge=0.1, le=25.0)         # was 2.0 — room for higher position count
     # DAILY PROFIT LOCK 2026-10-16 (operator demand: bank green days).
     # When day P&L reaches +lock_pct, engine flattens and blocks new entries
     # for the session — symmetric to the daily loss halt. 0.0 disables.
@@ -252,6 +254,7 @@ class Settings(BaseSettings):
 
     entry_order_type: str = Field("market", validation_alias="ENTRY_ORDER_TYPE")
     risk_per_trade_pct: float = Field(1.0, validation_alias="RISK_PER_TRADE_PCT")           # was 0.5
+    max_position_pct: float = Field(20.0, validation_alias="MAX_POSITION_PCT")
     # =============================================================================
     # [MODIFIED 2026-10-22]: Increase Settings.max_open_positions to 10 and add entry_vwap_stretch_trend_mult
     # ORIGINAL INTENT: max_open_positions was 8 in Settings.
@@ -266,6 +269,7 @@ class Settings(BaseSettings):
     max_open_positions: int = Field(10, validation_alias="MAX_OPEN_POSITIONS")
     entry_vwap_stretch_trend_mult: float = Field(1.6, validation_alias="ENTRY_VWAP_STRETCH_TREND_MULT")
     # =============================================================================
+    max_daily_loss_pct: float = Field(3.0, validation_alias="MAX_DAILY_LOSS_PCT")            # was 2.0
     daily_profit_lock_pct: float = Field(1.0, validation_alias="DAILY_PROFIT_LOCK_PCT")
     daily_profit_defend_pct: float = Field(0.5, validation_alias="DAILY_PROFIT_DEFEND_PCT")
     max_drawdown_pct: float = Field(10.0, validation_alias="MAX_DRAWDOWN_PCT")
