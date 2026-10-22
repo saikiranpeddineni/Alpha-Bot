@@ -496,7 +496,22 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
         self.publish("status", self.status())
 
     async def _run_loop(self) -> None:
-        interval = self.settings.demo_bar_seconds if self.mode == "demo" else self.settings.poll_interval_sec
+        # =============================================================================
+        # [MODIFIED 2026-10-22]: Harden poll interval resolution with safe getattr fallback
+        # ORIGINAL INTENT: interval = self.settings.demo_bar_seconds if self.mode == "demo" else self.settings.poll_interval_sec
+        # REASON FOR CHANGE: If poll_interval_sec was missing from settings, task died with AttributeError.
+        # SAFE ROLLBACK: Previous line preserved below as comment.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # interval = self.settings.demo_bar_seconds if self.mode == "demo" else self.settings.poll_interval_sec
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        interval = (
+            getattr(self.settings, "demo_bar_seconds", 5.0)
+            if self.mode == "demo"
+            else getattr(self.settings, "poll_interval_sec", 5.0)
+        )
+        # =============================================================================
         while True:
             started = asyncio.get_running_loop().time()
             try:
@@ -1747,6 +1762,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
             "live_trading_enabled": self.settings.enable_live_trading,
             "has_alpaca_keys": self.settings.has_alpaca_keys,
             "tick": self._tick_count,
+            "loop_alive": (self._task is not None and not self._task.done()) if self.state == EngineState.RUNNING else False,
             "last_error": self.last_error,
             "reconciliation_failed": getattr(self, "reconciliation_failed", False),
             "system_health": getattr(self, "system_health", "NORMAL"),

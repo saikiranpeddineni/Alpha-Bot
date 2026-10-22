@@ -318,8 +318,22 @@ class Settings(BaseSettings):
 
     paper_starting_cash: float = Field(100_000.0, validation_alias="PAPER_STARTING_CASH")
     paper_slippage_bps: float = Field(2.0, validation_alias="PAPER_SLIPPAGE_BPS")
+    # =============================================================================
+    # [MODIFIED 2026-10-22]: Restore poll_interval_sec in Settings
+    # ORIGINAL INTENT: Settings defines operational timing including poll_interval_sec.
+    # REASON FOR CHANGE: Missing poll_interval_sec caused engine._run_loop to crash on startup
+    # with AttributeError in paper and live modes, preventing the engine from executing any ticks.
+    # SAFE ROLLBACK: Previous lines preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # paper_commission_per_share: float = Field(0.0, validation_alias="PAPER_COMMISSION_PER_SHARE")
+    # paper_minimum_commission: float = Field(0.0, validation_alias="PAPER_MINIMUM_COMMISSION")
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
     paper_commission_per_share: float = Field(0.0, validation_alias="PAPER_COMMISSION_PER_SHARE")
     paper_minimum_commission: float = Field(0.0, validation_alias="PAPER_MINIMUM_COMMISSION")
+    poll_interval_sec: float = Field(5.0, validation_alias="POLL_INTERVAL_SEC")
+    # =============================================================================
     opportunity_enabled: bool = Field(True, validation_alias="OPPORTUNITY_ENABLED")
     opportunity_min_net_edge_bps: float = Field(15.0, validation_alias="OPPORTUNITY_MIN_NET_EDGE_BPS")
     opportunity_min_reward_risk: float = Field(1.25, validation_alias="OPPORTUNITY_MIN_REWARD_RISK")
