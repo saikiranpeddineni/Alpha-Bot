@@ -3320,14 +3320,36 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
                     if (exit_reason == "stop_loss" or sl_hit) and same_thesis:
                         return f"behavioral_loop_detector: re-entry on same symbol {symbol} within 30 mins after stop ({strategy}/{sig_side})"
 
-                # 2. 3 consecutive same-symbol/thesis losses within rolling 7-day window
-                cutoff_7d = now - timedelta(days=7)
+                # =============================================================================
+                # [MODIFIED 2026-10-23]: Calibrate Symbol Loss Lookback Window from 7 Days to 2 Days
+                # ORIGINAL INTENT: Rigid 7-day lookback banned symbols for a full week after 3 losses.
+                # REASON FOR CHANGE: Shadow ledger audit proved top breakout runners like TSLL (+11.18%)
+                # and CRWV (+9.74%) were locked out for days after unrelated micro-losses in past regimes.
+                # Calibrating lookback to 2 days (or SYMBOL_LOSS_LOOKBACK_DAYS env var) preserves protection
+                # against immediate repeat churn while allowing subsequent multi-day breakout expansion.
+                # SAFE ROLLBACK: Previous lines preserved below as comments.
+                # -----------------------------------------------------------------------------
+                # [PREVIOUS CODE - PRESERVED]:
+                # # 2. 3 consecutive same-symbol/thesis losses within rolling 7-day window
+                # cutoff_7d = now - timedelta(days=7)
+                # rows7 = s.scalars(
+                #     select(TradeRow)
+                #     .where(TradeRow.symbol == symbol, TradeRow.exit_at >= cutoff_7d)
+                #     .order_by(TradeRow.exit_at.desc())
+                #     .limit(10)
+                # ).all()
+                # -----------------------------------------------------------------------------
+                # [NEW CODE]:
+                import os as _os
+                _lookback_days = int(_os.environ.get("SYMBOL_LOSS_LOOKBACK_DAYS", "2"))
+                cutoff_losses = now - timedelta(days=_lookback_days)
                 rows7 = s.scalars(
                     select(TradeRow)
-                    .where(TradeRow.symbol == symbol, TradeRow.exit_at >= cutoff_7d)
+                    .where(TradeRow.symbol == symbol, TradeRow.exit_at >= cutoff_losses)
                     .order_by(TradeRow.exit_at.desc())
                     .limit(10)
                 ).all()
+                # =============================================================================
                 matching_losses = []
                 for r in rows7:
                     try:

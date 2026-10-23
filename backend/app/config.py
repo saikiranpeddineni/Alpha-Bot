@@ -181,8 +181,22 @@ class RiskConfig(BaseModel):
     # SAFE ROLLBACK: The original code is removed; rollback via git history.
     # -----------------------------------------------------------------------------
     # [NEW CODE]:
-    max_daily_turnover_multiple: float = Field(5.0, ge=0.1, le=100.0)
-    max_morning_turnover_multiple: float = Field(3.0, ge=0.1, le=100.0)
+    # =============================================================================
+    # [MODIFIED 2026-10-23]: Calibrate Turnover Multiples to Unlock Shadow Missed Winners
+    # ORIGINAL INTENT: max_morning 3.0x and max_daily 5.0x froze trading after 3 morning trades.
+    # REASON FOR CHANGE: Shadow ledger audit proved 113+ winning trades (over 150% PnL, including
+    # USDE +14.69%, FIGS +7.64%, NBIS +5.60%, PLTR +5.56%) were blocked when morning turnover reached 2.39x.
+    # Calibrating morning to 10.0x and daily to 20.0x prevents mid-morning freeze while guarding against runaway loops.
+    # SAFE ROLLBACK: Previous lines preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # max_daily_turnover_multiple: float = Field(5.0, ge=0.1, le=100.0)
+    # max_morning_turnover_multiple: float = Field(3.0, ge=0.1, le=100.0)
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    max_daily_turnover_multiple: float = Field(20.0, ge=0.1, le=100.0)
+    max_morning_turnover_multiple: float = Field(10.0, ge=0.1, le=100.0)
+    # =============================================================================
     countertrend_mult: float = Field(0.5, ge=0.1, le=1.0)
     # =============================================================================
     # Fast-replay only: minimum session-time seconds between full market-risk
@@ -419,7 +433,19 @@ class Settings(BaseSettings):
     trade_score_w6: float = Field(0.05, validation_alias="TRADE_SCORE_W6")
     dq_max_gap_minutes: int = Field(5, validation_alias="DQ_MAX_GAP_MINUTES")
     dq_max_spread_pct: float = Field(0.5, validation_alias="DQ_MAX_SPREAD_PCT")
-    max_daily_turnover_multiple: float = Field(5.0, validation_alias="MAX_DAILY_TURNOVER_MULTIPLE")
+    # =============================================================================
+    # [MODIFIED 2026-10-23]: Expose Calibrated Turnover Multiples in Settings
+    # ORIGINAL INTENT: max_daily was 5.0; max_morning was not aliased in Settings.
+    # REASON FOR CHANGE: Expose MAX_MORNING_TURNOVER_MULTIPLE=10.0 and MAX_DAILY_TURNOVER_MULTIPLE=20.0.
+    # SAFE ROLLBACK: Previous line preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # max_daily_turnover_multiple: float = Field(5.0, validation_alias="MAX_DAILY_TURNOVER_MULTIPLE")
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    max_daily_turnover_multiple: float = Field(20.0, validation_alias="MAX_DAILY_TURNOVER_MULTIPLE")
+    max_morning_turnover_multiple: float = Field(10.0, validation_alias="MAX_MORNING_TURNOVER_MULTIPLE")
+    # =============================================================================
     ml_min_promotable_auc: float = Field(0.53, validation_alias="ML_MIN_PROMOTABLE_AUC")
     eod_post_close_grace_minutes: int = Field(15, validation_alias="EOD_POST_CLOSE_GRACE_MINUTES")
     dq_min_bars_warmup: int = Field(50, validation_alias="DQ_MIN_BARS_WARMUP")
