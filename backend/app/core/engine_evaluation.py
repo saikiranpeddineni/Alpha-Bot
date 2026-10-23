@@ -830,7 +830,31 @@ class TradingEngineEvaluationMixin:
                     f"{symbol}: submitted missing broker STOP leg @ {stop_price:.4f} (PIS floor repair)",
                 )
                 return True
+            # =============================================================================
+            # [MODIFIED 2026-10-23]: Redundant Stop Replacement Check & Tolerance Gate
+            # ORIGINAL INTENT: Always issued network replace_exit_leg call even if broker stop
+            # price was already set to the target stop price within exchange tick precision.
+            # REASON FOR CHANGE: Micro-cent trailing stop recalculations (e.g. 21.5003 vs 21.50)
+            # sent redundant PATCH requests to Alpaca, causing 42210000 "order parameters are not changed".
+            # SAFE ROLLBACK: Previous code preserved below as comments.
+            # -----------------------------------------------------------------------------
+            # [PREVIOUS CODE - PRESERVED]:
+            # for order in stop_orders:
+            #     replacement = await replace_exit_leg(str(order.id), stop_price=stop_price)
+            #     if replacement is not None:
+            #         return True
+            # applog.warning(
+            #     "engine.exit",
+            #     f"{symbol}: broker rejected or could not verify PIS stop replacement at {stop_price:.4f}",
+            # )
+            # return False
+            # -----------------------------------------------------------------------------
+            # [NEW CODE]:
             for order in stop_orders:
+                existing_stop = getattr(order, "stop_price", None)
+                if existing_stop is not None and abs(float(existing_stop) - float(stop_price)) < 0.005:
+                    # Stop order is already at target price within half a cent (sub-penny rounding); avoid network call
+                    return True
                 replacement = await replace_exit_leg(str(order.id), stop_price=stop_price)
                 if replacement is not None:
                     return True
@@ -839,6 +863,7 @@ class TradingEngineEvaluationMixin:
                 f"{symbol}: broker rejected or could not verify PIS stop replacement at {stop_price:.4f}",
             )
             return False
+            # =============================================================================
         except Exception as exc:  # noqa: BLE001
             applog.warning("engine.exit", f"{symbol}: protective stop synchronization failed: {exc}")
             return False

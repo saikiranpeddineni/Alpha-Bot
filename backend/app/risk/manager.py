@@ -434,8 +434,28 @@ class RiskManager:
             return RiskDecision(False, "invalid risk multiplier")
         if not math.isfinite(risk_mult) or risk_mult <= 0:
             return RiskDecision(False, "invalid risk multiplier")
-        if kelly_override is not None:
-            # -----------------------------------------------------------------------------
+        # =============================================================================
+        # [MODIFIED 2026-10-23]: Kelly Sizing Starvation Protection
+        # ORIGINAL INTENT: Accepted any non-None kelly_override, including 0.0, to size positions.
+        # REASON FOR CHANGE: When fractional Kelly evaluates to <= 0.0 for low-payoff or marginal setups,
+        # kelly_override=0.0 starved the position to 0 shares, causing unintended RiskManager rejections.
+        # Falling back to configured baseline risk ensures allocation never acts as an unintended gate.
+        # SAFE ROLLBACK: Previous code preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # if kelly_override is not None:
+        #     # -----------------------------------------------------------------------------
+        #     configured_risk_fraction = float(cfg.risk_per_trade_pct) / 100.0
+        #     kelly_cap = min(float(cfg.kelly_fraction_cap), configured_risk_fraction)
+        #
+        #     effective_kelly = min(kelly_override, kelly_cap) * risk_mult
+        #     risk_amount = ctx.equity * effective_kelly
+        #     qty = int(risk_amount / stop_distance) if stop_distance > 0 else 0
+        #     kelly_used = effective_kelly
+        # else:
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        if kelly_override is not None and kelly_override > 0:
             configured_risk_fraction = float(cfg.risk_per_trade_pct) / 100.0
             kelly_cap = min(float(cfg.kelly_fraction_cap), configured_risk_fraction)
 
@@ -444,6 +464,7 @@ class RiskManager:
             qty = int(risk_amount / stop_distance) if stop_distance > 0 else 0
             kelly_used = effective_kelly
         else:
+        # =============================================================================
             effective_risk_pct = cfg.risk_per_trade_pct
             explicit_scanner = (getattr(signal, "discovery_source", None) == "scanner")
             legacy_dynamic = (

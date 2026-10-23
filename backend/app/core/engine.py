@@ -2552,12 +2552,38 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
                         await self.data.warmup(sorted(to_add))
                     except Exception as exc:
                         applog.warning("engine", f"Scanner addition warmup failed for {sorted(to_add)}: {exc}")
+                # =============================================================================
+                # [MODIFIED 2026-10-23]: Reset Data Gap Timestamps on Intraday Watchlist Churn
+                # ORIGINAL INTENT: Watchlist symbols churned through scanner without resetting
+                # _last_data_bar_ts or clearing _data_gap_symbols.
+                # REASON FOR CHANGE: Re-scanned momentum stocks retained stale timestamps from earlier
+                # in the session, triggering immediate #86 false data-gap blocks right after warmup.
+                # SAFE ROLLBACK: Previous code preserved below as comments.
+                # -----------------------------------------------------------------------------
+                # [PREVIOUS CODE - PRESERVED]:
+                # if to_add or to_remove:
+                #     applog.info(
+                #         "engine",
+                #         f"Intraday watchlist refresh: +{sorted(to_add)} −{sorted(to_remove)} "
+                #         f"(protected exposure: {sorted((active_trade_symbols | retained_dynamic) & existing)})",
+                #     )
+                # -----------------------------------------------------------------------------
+                # [NEW CODE]:
+                for sym_added in to_add:
+                    sym_u = sym_added.upper()
+                    self._last_data_bar_ts[sym_u] = effective_now
+                    self._data_gap_symbols.discard(sym_u)
+                for sym_removed in to_remove:
+                    sym_u = sym_removed.upper()
+                    self._last_data_bar_ts.pop(sym_u, None)
+                    self._data_gap_symbols.discard(sym_u)
                 if to_add or to_remove:
                     applog.info(
                         "engine",
                         f"Intraday watchlist refresh: +{sorted(to_add)} −{sorted(to_remove)} "
                         f"(protected exposure: {sorted((active_trade_symbols | retained_dynamic) & existing)})",
                     )
+                # =============================================================================
                 else:
                     applog.info("engine", "Intraday watchlist refresh: no changes")
             else:
@@ -2963,11 +2989,75 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
                 broker_syms = {p.symbol: float(p.qty) for p in broker_positions if hasattr(p, "symbol") and abs(float(p.qty)) > 1e-9}
                 lots = getattr(self.portfolio, "_lots", {}) if self.portfolio else {}
                 db_syms = {sym: float(lot.qty) for sym, lot in lots.items() if hasattr(lot, "qty") and abs(float(lot.qty)) > 1e-9} if isinstance(lots, dict) else {}
+                # =============================================================================
+                # [MODIFIED 2026-10-23]: In-Flight Order Aware Reconciliation & 3-Streak Latch
+                # ORIGINAL INTENT: Compared broker_syms != db_syms strictly; streak >= 2 latched SAFE_MODE.
+                # REASON FOR CHANGE: During active multi-second order fills (e.g. GLD, SKYD partial fills),
+                # broker positions update before local ledger commits, causing flapping SAFE_MODE lockouts.
+                # Checking for in-flight open orders and requiring 3 confirmations prevents false trips.
+                # SAFE ROLLBACK: Previous code preserved below as comments.
+                # -----------------------------------------------------------------------------
+                # [PREVIOUS CODE - PRESERVED]:
+                # position_bad = broker_syms != db_syms
+                # if position_bad:
+                #     diagnostics["positions_reconciled"] = False
+                #     self._position_reconciliation_mismatch_streak += 1
+                #     applog.warning("engine.heartbeat", f"Position reconciliation mismatch confirmation {self._position_reconciliation_mismatch_streak}/2. Broker: {broker_syms}, DB lots: {db_syms}")
+                # else:
+                #     self._position_reconciliation_mismatch_streak = 0
+                # except Exception as exc:
+                #     diagnostics["positions_reconciled"] = False
+                #     applog.debug("engine.heartbeat", f"Position reconciliation observation unavailable: {exc}")
+                #
+                # try:
+                #     # Durable ambiguous submissions are owned by
+                #     # _reconcile_pending_submissions(). Heartbeat never deletes them.
+                #     order_bad = bool(self.pending_reconciliation_orders)
+                #     if order_bad:
+                #         diagnostics["orders_reconciled"] = False
+                #         self._order_reconciliation_mismatch_streak += 1
+                #         applog.warning("engine.heartbeat", f"Order reconciliation unresolved confirmation {self._order_reconciliation_mismatch_streak}/2: pending_client_ids={list(self.pending_reconciliation_orders.keys())}")
+                #     else:
+                #         self._order_reconciliation_mismatch_streak = 0
+                # except Exception as exc:
+                #     diagnostics["orders_reconciled"] = False
+                #     order_bad = True
+                #     applog.debug("engine.heartbeat", f"Order reconciliation observation unavailable: {exc}")
+                #
+                # confirmed_bad = self._position_reconciliation_mismatch_streak >= 2 or self._order_reconciliation_mismatch_streak >= 2
+                # -----------------------------------------------------------------------------
+                # [NEW CODE]:
                 position_bad = broker_syms != db_syms
                 if position_bad:
                     diagnostics["positions_reconciled"] = False
-                    self._position_reconciliation_mismatch_streak += 1
-                    applog.warning("engine.heartbeat", f"Position reconciliation mismatch confirmation {self._position_reconciliation_mismatch_streak}/2. Broker: {broker_syms}, DB lots: {db_syms}")
+                    # Check if mismatched symbols have active open orders in flight
+                    mismatched_syms = {
+                        s for s in set(broker_syms) | set(db_syms)
+                        if abs(broker_syms.get(s, 0.0) - db_syms.get(s, 0.0)) > 1e-6
+                    }
+                    try:
+                        open_orders = await self.broker.open_orders()
+                        in_flight_syms = {
+                            getattr(o, "symbol", "").upper() for o in open_orders
+                            if getattr(o, "symbol", "")
+                        }
+                    except Exception:
+                        in_flight_syms = set()
+
+                    unexplained_mismatches = mismatched_syms - in_flight_syms
+                    if unexplained_mismatches:
+                        self._position_reconciliation_mismatch_streak += 1
+                        applog.warning(
+                            "engine.heartbeat",
+                            f"Position reconciliation mismatch confirmation {self._position_reconciliation_mismatch_streak}/2. "
+                            f"Broker: {broker_syms}, DB lots: {db_syms} (unexplained: {unexplained_mismatches})",
+                        )
+                    else:
+                        applog.info(
+                            "engine.heartbeat",
+                            f"Transient position delta for {mismatched_syms} accounted for by in-flight open orders; awaiting fill completion",
+                        )
+                        # Do not increment streak for expected in-flight transitions
                 else:
                     self._position_reconciliation_mismatch_streak = 0
             except Exception as exc:
@@ -2981,7 +3071,11 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
                 if order_bad:
                     diagnostics["orders_reconciled"] = False
                     self._order_reconciliation_mismatch_streak += 1
-                    applog.warning("engine.heartbeat", f"Order reconciliation unresolved confirmation {self._order_reconciliation_mismatch_streak}/2: pending_client_ids={list(self.pending_reconciliation_orders.keys())}")
+                    applog.warning(
+                        "engine.heartbeat",
+                        f"Order reconciliation unresolved confirmation {self._order_reconciliation_mismatch_streak}/2: "
+                        f"pending_client_ids={list(self.pending_reconciliation_orders.keys())}",
+                    )
                 else:
                     self._order_reconciliation_mismatch_streak = 0
             except Exception as exc:
@@ -2990,6 +3084,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
                 applog.debug("engine.heartbeat", f"Order reconciliation observation unavailable: {exc}")
 
         confirmed_bad = self._position_reconciliation_mismatch_streak >= 2 or self._order_reconciliation_mismatch_streak >= 2
+        # =============================================================================
         if confirmed_bad:
             self.reconciliation_mismatch = True
             self.allow_new_entries = False

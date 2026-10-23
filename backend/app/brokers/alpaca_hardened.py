@@ -389,20 +389,72 @@ class AlpacaBroker(legacy.AlpacaBroker):
             applog.warning("broker.alpaca", f"replace {order_id} timed out; replacement state is ambiguous")
             return None
         # =============================================================================
-        # [MODIFIED 2026-10-23]: Auto-Heal 42210000 Stop Price Geometry on Replacement
-        # ORIGINAL INTENT: Caught all exceptions, logged warning, and returned None.
-        # REASON FOR CHANGE: Live market price drift pushes market past stop price, triggering
-        # Alpaca 42210000. Parsing market_price and clamping (+0.05 / -0.05) auto-heals replacement.
-        # SAFE ROLLBACK: Previous lines preserved below as comments.
+        # [MODIFIED 2026-10-23]: Idempotent 42210000 Stop Replacement Confirmation & Auto-Heal
+        # ORIGINAL INTENT: Handled market drift auto-healing, but treated "order parameters are not changed"
+        # as an error, causing false warnings and repeated failed replacement attempts in downstream PIS loops.
+        # REASON FOR CHANGE: When stop parameters are unchanged, the protective stop is already at the target
+        # level at the broker; treating it as an idempotent confirmation ensures system state stays synchronized.
+        # SAFE ROLLBACK: Previous code preserved below as comments.
         # -----------------------------------------------------------------------------
         # [PREVIOUS CODE - PRESERVED]:
         # except Exception as exc:  # noqa: BLE001
+        #     err_s = str(exc)
+        #     if "42210000" in err_s and ("greater than current price" in err_s or "less than current price" in err_s) and stop_price is not None:
+        #         import re
+        #         m_px = re.search(r'"market_price":\s*"([0-9\.]+)"', err_s)
+        #         if m_px:
+        #             live_mkt = float(m_px.group(1))
+        #             is_buy_stop = "greater than current price" in err_s
+        #             healed_stop = round(live_mkt + 0.05 if is_buy_stop else live_mkt - 0.05, 2)
+        #             try:
+        #                 kwargs2 = dict(kwargs)
+        #                 kwargs2["stop_price"] = normalize_stock_price(healed_stop)
+        #                 raw2 = await legacy._call(
+        #                     self._client.replace_order_by_id,
+        #                     order_id,
+        #                     ReplaceOrderRequest(**kwargs2),
+        #                     label=f"replace_order/{order_id}_healed",
+        #                 )
+        #                 replacement_id = str(getattr(raw2, "id", "") or "")
+        #                 if replacement_id:
+        #                     verified2 = await legacy._call(
+        #                         self._client.get_order_by_id,
+        #                         replacement_id,
+        #                         label=f"verify_replacement/{replacement_id}",
+        #                     )
+        #                     applog.info(
+        #                         "broker.alpaca",
+        #                         f"Auto-healed stop price replacement for order {order_id} to {healed_stop:.2f} (market: {live_mkt:.2f})",
+        #                     )
+        #                     return self._to_order(verified2)
+        #             except Exception as heal_exc2:
+        #                 applog.warning("broker.alpaca", f"Auto-heal replace failed for {order_id}: {heal_exc2}")
+        #
         #     applog.warning("broker.alpaca", f"replace {order_id} failed: {exc}")
         #     return None
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
         except Exception as exc:  # noqa: BLE001
             err_s = str(exc)
+            # 1. Idempotent confirmation: if parameters are unchanged, the stop is already active at target price
+            if "order parameters are not changed" in err_s or ("42210000" in err_s and "not changed" in err_s):
+                try:
+                    existing = await legacy._call(
+                        self._client.get_order_by_id,
+                        order_id,
+                        label=f"fetch_unchanged_order/{order_id}",
+                    )
+                    target_px = stop_price if stop_price is not None else limit_price
+                    applog.info(
+                        "broker.alpaca",
+                        f"replace {order_id}: order parameters are already identical at broker ({target_px}); treating replacement as confirmed no-op",
+                    )
+                    return self._to_order(existing)
+                except Exception as fetch_exc:
+                    applog.warning("broker.alpaca", f"replace {order_id}: parameters unchanged but could not fetch existing order: {fetch_exc}")
+                    return None
+
+            # 2. Geometry auto-heal: market drift past stop price
             if "42210000" in err_s and ("greater than current price" in err_s or "less than current price" in err_s) and stop_price is not None:
                 import re
                 m_px = re.search(r'"market_price":\s*"([0-9\.]+)"', err_s)

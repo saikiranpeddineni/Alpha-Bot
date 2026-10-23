@@ -256,13 +256,25 @@ def process_portfolio_allocations(
 
     kelly_map = {}
     if portfolio_allocator is not None and approved_candidates:
-        # Allocation ranking and Kelly sizing fractions. RiskManager uses these as
-        # the kelly_override when sizing each entry — the hard stop-distance-based
-        # position size is still the binding constraint, but Kelly provides the
-        # equity fraction budget ceiling.
+        # =============================================================================
+        # [MODIFIED 2026-10-23]: Positive Kelly Fraction Filter for Sizing Override
+        # ORIGINAL INTENT: Always passed res.kelly_fraction to kelly_map, even when 0.0.
+        # REASON FOR CHANGE: When Kelly evaluates to 0.0, passing 0.0 starved the position
+        # to 0 shares. By only recording positive Kelly fractions, non-positive setups fall
+        # back cleanly to standard risk budget sizing without rejecting the trade.
+        # SAFE ROLLBACK: Previous code preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # alloc_results = portfolio_allocator.allocate(approved_candidates, available_capital, equity)
+        # for res in alloc_results:
+        #     kelly_map[res.symbol] = res.kelly_fraction  # now flows to RiskManager.evaluate_entry()
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
         alloc_results = portfolio_allocator.allocate(approved_candidates, available_capital, equity)
         for res in alloc_results:
-            kelly_map[res.symbol] = res.kelly_fraction  # now flows to RiskManager.evaluate_entry()
+            if res.kelly_fraction is not None and res.kelly_fraction > 0:
+                kelly_map[res.symbol] = res.kelly_fraction  # now flows to RiskManager.evaluate_entry()
+        # =============================================================================
 
 
     approved_entries = [(sig, kelly_map.get(sig.symbol)) for sig in approved_candidates]
