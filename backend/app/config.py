@@ -83,9 +83,27 @@ class RiskConfig(BaseModel):
     # the floor. 0.0 disables the defend (ride into close/EOD as usual).
     daily_profit_defend_pct: float = Field(0.5, ge=0.0, le=25.0)
     max_drawdown_pct: float = Field(10.0, ge=1.0, le=50.0)
-    symbol_cooldown_minutes: int = Field(30, ge=0, le=390)                  # was 30
-    strategy_consecutive_loss_limit: int = Field(3, ge=1, le=20)            # was 3
-    strategy_cooldown_minutes: int = Field(30, ge=0, le=390)                # was 30
+    # =============================================================================
+    # [MODIFIED 2026-10-23]: Asymmetric Re-Entry Lockout & Cooldown Calibration
+    # ORIGINAL INTENT: symbol_cooldown_minutes was flat 30; no win consolidation or max losses per ticker.
+    # REASON FOR CHANGE: Forensic audit proved flat/zero cooldown allowed NCPL to re-enter 4 minutes
+    # after a loss for a -$465 blowout. Setting loss cooldown to 20m, win cooldown to 5m, and
+    # symbol_max_daily_losses to 2 eliminates revenge trading while catching 2nd-leg momentum expansions.
+    # SAFE ROLLBACK: Previous lines preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # symbol_cooldown_minutes: int = Field(30, ge=0, le=390)                  # was 30
+    # strategy_consecutive_loss_limit: int = Field(3, ge=1, le=20)            # was 3
+    # strategy_cooldown_minutes: int = Field(30, ge=0, le=390)                # was 30
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    symbol_cooldown_minutes: int = Field(20, ge=0, le=390)                  # 20m cooldown on loss
+    symbol_win_cooldown_minutes: int = Field(5, ge=0, le=390)               # 5m consolidation on win
+    symbol_max_daily_losses: int = Field(2, ge=1, le=10)                    # session quarantine after 2 losses
+    strategy_consecutive_loss_limit: int = Field(4, ge=1, le=20)            # 4 consecutive losses
+    strategy_cooldown_minutes: int = Field(20, ge=0, le=390)                # 20m strategy pause
+    min_bank_profit_usd: float = Field(100.0, ge=0.0)                       # $100 floor on 50% scaleouts
+    # =============================================================================
     no_entry_minutes_before_close: int = Field(30, ge=0, le=180)     # was 30 — more trading time
     # --- NEW IMPLEMENTATION ---
     # Minutes before market close when positions must be flattened.
@@ -405,6 +423,18 @@ class Settings(BaseSettings):
     ml_min_promotable_auc: float = Field(0.53, validation_alias="ML_MIN_PROMOTABLE_AUC")
     eod_post_close_grace_minutes: int = Field(15, validation_alias="EOD_POST_CLOSE_GRACE_MINUTES")
     dq_min_bars_warmup: int = Field(50, validation_alias="DQ_MIN_BARS_WARMUP")
+    # =============================================================================
+    # [MODIFIED 2026-10-23]: Expose Asymmetric Cooldowns and Min Bank Floor in Settings
+    # ORIGINAL INTENT: Not exposed in Settings class.
+    # REASON FOR CHANGE: Expose symbol_win_cooldown_minutes, symbol_max_daily_losses, and min_bank_profit_usd
+    # to environment configuration.
+    # SAFE ROLLBACK: Remove fields.
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    symbol_win_cooldown_minutes: int = Field(5, validation_alias="SYMBOL_WIN_COOLDOWN_MINUTES")
+    symbol_max_daily_losses: int = Field(2, validation_alias="SYMBOL_MAX_DAILY_LOSSES")
+    min_bank_profit_usd: float = Field(100.0, validation_alias="BOT_MIN_BANK_PROFIT_USD")
+    # =============================================================================
     db_path: str = Field("", validation_alias="ALPHADESK_DB_PATH")
     admin_token: str = Field("", validation_alias="ALPHADESK_ADMIN_TOKEN")
 

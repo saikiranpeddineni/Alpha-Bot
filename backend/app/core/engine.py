@@ -3410,19 +3410,66 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
                     for open_sym in open_symbols:
                         if open_sym == symbol:
                             continue
+                        # =============================================================================
+                        # [MODIFIED 2026-10-23]: Profit-Aware Correlation Clustering Filter
+                        # ORIGINAL INTENT: Blocked any new entry if 1-minute correlation with any open same-side
+                        # position exceeded 0.70, regardless of whether the open position was already protected.
+                        # REASON FOR CHANGE: On high-momentum market days, large caps (SPY, QQQ, NVDA, AAPL)
+                        # naturally exhibit >0.70 correlation. If an existing position is already protected by
+                        # breakeven/green stop (stop >= entry) or peak_r >= 0.70, it holds zero downside risk
+                        # and must not block new alpha opportunities (BetaDesk benchmark alignment).
+                        # SAFE ROLLBACK: Previous lines preserved below as comments.
+                        # -----------------------------------------------------------------------------
+                        # [PREVIOUS CODE - PRESERVED]:
+                        # open_lot = self.portfolio._lots.get(open_sym)
+                        # open_qty = float(getattr(open_lot, "qty", 0.0) or 0.0)
+                        # open_side = "long" if open_qty > 0 else ("short" if open_qty < 0 else "")
+                        # if cand_side and open_side and open_side != cand_side:
+                        #     continue  # opposite-side hedge, not a cluster
+                        # open_df = self.data.frame(open_sym, "1Min")
+                        # if open_df is not None and not open_df.empty:
+                        #     open_series = open_df["close"].dropna()
+                        #     combined = pd.concat([cand_series, open_series], axis=1, join="inner")
+                        #     if len(combined) > 5:
+                        #         corr = combined.corr().iloc[0, 1]
+                        #         if corr > corr_limit:
+                        #             return f"behavioral_loop_detector: high correlation ({corr:.2f}) with open symbol {open_sym}"
+                        # -----------------------------------------------------------------------------
+                        # [NEW CODE]:
                         open_lot = self.portfolio._lots.get(open_sym)
                         open_qty = float(getattr(open_lot, "qty", 0.0) or 0.0)
                         open_side = "long" if open_qty > 0 else ("short" if open_qty < 0 else "")
                         if cand_side and open_side and open_side != cand_side:
                             continue  # opposite-side hedge, not a cluster
+
+                        # Downside risk check: If open position is already protected (breakeven stop or peak_r >= 0.70),
+                        # it carries zero portfolio downside risk and does not cluster capital risk.
+                        is_protected = False
+                        open_stop = getattr(open_lot, "stop_loss", None)
+                        open_entry = float(getattr(open_lot, "avg_price", getattr(open_lot, "entry_price", 0.0)) or 0.0)
+                        if open_stop is not None and open_entry > 0:
+                            if open_qty > 0 and open_stop >= open_entry:
+                                is_protected = True
+                            elif open_qty < 0 and open_stop <= open_entry:
+                                is_protected = True
+                        if not is_protected:
+                            open_peak = float(self._position_peaks.get(open_sym, 0.0) or 0.0)
+                            if open_peak >= 0.70:
+                                is_protected = True
+
+                        if is_protected:
+                            continue  # Runner carries zero downside risk; permit diversification/continuation
+
                         open_df = self.data.frame(open_sym, "1Min")
                         if open_df is not None and not open_df.empty:
                             open_series = open_df["close"].dropna()
                             combined = pd.concat([cand_series, open_series], axis=1, join="inner")
                             if len(combined) > 5:
                                 corr = combined.corr().iloc[0, 1]
-                                if corr > corr_limit:
+                                effective_corr_limit = max(corr_limit, 0.70)
+                                if corr > effective_corr_limit:
                                     return f"behavioral_loop_detector: high correlation ({corr:.2f}) with open symbol {open_sym}"
+                        # =============================================================================
         except Exception as e:
             applog.warning("engine.behavioral", f"Failed correlation clustering check: {e}")
 

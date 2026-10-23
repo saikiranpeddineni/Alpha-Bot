@@ -97,6 +97,15 @@ class RiskManager:
         self.strategy_consecutive_losses: dict[str, int] = {}
         self.strategy_cooldowns: dict[str, datetime] = {}
         self.symbol_cooldowns: dict[str, datetime] = {}
+        # =============================================================================
+        # [MODIFIED 2026-10-23]: Ticker Loss Count Tracker for Asymmetric Session Quarantine
+        # ORIGINAL INTENT: Only tracked symbol_cooldowns timestamp; did not count daily losses.
+        # REASON FOR CHANGE: Enforce symbol_max_daily_losses = 2 (session lockout after 2 losses).
+        # SAFE ROLLBACK: Remove self.symbol_loss_counts.
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        self.symbol_loss_counts: dict[str, int] = {}
+        # =============================================================================
         self._pdt_warned = False
         self.core_watchlist: list[str] | None = None
 
@@ -160,35 +169,92 @@ class RiskManager:
     def on_trade_closed(self, trade: TradeRecord, now: datetime | None = None) -> None:
         strategy = trade.strategy or "manual"
         now_dt = now or datetime.now(UTC)
+        # =============================================================================
+        # [MODIFIED 2026-10-23]: Asymmetric Re-Entry Lockout Engine
+        # ORIGINAL INTENT: Symmetrically cleared strategy losses on wins and set symbol_cooldowns only on losses.
+        # Zero cooldown was used on wins, and flat (often 0) cooldown on losses.
+        # REASON FOR CHANGE: On a loss, enforce minimum 20m cooldown and quarantine after 2 losses (stopping
+        # NCPL -$465 disaster). On a win, enforce a brief 5m consolidation lock before allowing 2nd-leg expansions.
+        # SAFE ROLLBACK: Previous lines preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # if trade.pnl <= 0:
+        #     symbol = trade.symbol.upper()
+        #     self.symbol_cooldowns[symbol] = now_dt + timedelta(minutes=self.config.symbol_cooldown_minutes)
+        #     applog.warning(
+        #         "risk",
+        #         f"Loss on {symbol} -- cooling down this ticker for {self.config.symbol_cooldown_minutes} minutes"
+        #     )
+        #     current_losses = self.strategy_consecutive_losses.get(strategy, 0) + 1
+        #     self.strategy_consecutive_losses[strategy] = current_losses
+        #     if current_losses >= self.config.strategy_consecutive_loss_limit:
+        #         cooldown_time = now_dt + timedelta(minutes=self.config.strategy_cooldown_minutes)
+        #         self.strategy_cooldowns[strategy] = cooldown_time
+        #         applog.warning(
+        #             "risk",
+        #             f"Strategy '{strategy}' has {current_losses} consecutive losses -- pausing new entries "
+        #             f"for this strategy for {self.config.strategy_cooldown_minutes} minutes",
+        #         )
+        #     self.consecutive_losses = max(self.strategy_consecutive_losses.values(), default=0)
+        #     active_cooldowns = [t for t in self.strategy_cooldowns.values() if t > now_dt]
+        #     self.cooldown_until = max(active_cooldowns) if active_cooldowns else None
+        # else:
+        #     self.strategy_consecutive_losses[strategy] = 0
+        #     self.consecutive_losses = max(self.strategy_consecutive_losses.values(), default=0)
+        #     self.strategy_cooldowns = {k: v for k, v in self.strategy_cooldowns.items() if v > now_dt}
+        #     active_cooldowns = list(self.strategy_cooldowns.values())
+        #     self.cooldown_until = max(active_cooldowns) if active_cooldowns else None
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        symbol = trade.symbol.upper()
         if trade.pnl <= 0:
-            symbol = trade.symbol.upper()
-            self.symbol_cooldowns[symbol] = now_dt + timedelta(minutes=self.config.symbol_cooldown_minutes)
-            applog.warning(
-                "risk",
-                f"Loss on {symbol} -- cooling down this ticker for {self.config.symbol_cooldown_minutes} minutes"
-            )
+            self.symbol_loss_counts[symbol] = self.symbol_loss_counts.get(symbol, 0) + 1
+            max_daily_losses = getattr(self.config, "symbol_max_daily_losses", 2)
+
+            if self.symbol_loss_counts[symbol] >= max_daily_losses:
+                # Quarantined for the remainder of the session (390m)
+                self.symbol_cooldowns[symbol] = now_dt + timedelta(minutes=390)
+                applog.warning(
+                    "risk",
+                    f"{symbol} hit {self.symbol_loss_counts[symbol]} losses today -- quarantined for remainder of session to eliminate chop",
+                )
+            else:
+                cd_mins = max(20, int(getattr(self.config, "symbol_cooldown_minutes", 20) or 20))
+                self.symbol_cooldowns[symbol] = now_dt + timedelta(minutes=cd_mins)
+                applog.warning(
+                    "risk",
+                    f"Loss on {symbol} (loss #{self.symbol_loss_counts[symbol]}) -- cooling down ticker for {cd_mins} minutes to eliminate whipsaws",
+                )
 
             current_losses = self.strategy_consecutive_losses.get(strategy, 0) + 1
             self.strategy_consecutive_losses[strategy] = current_losses
 
             if current_losses >= self.config.strategy_consecutive_loss_limit:
-                cooldown_time = now_dt + timedelta(minutes=self.config.strategy_cooldown_minutes)
+                strat_cd = max(20, int(getattr(self.config, "strategy_cooldown_minutes", 20) or 20))
+                cooldown_time = now_dt + timedelta(minutes=strat_cd)
                 self.strategy_cooldowns[strategy] = cooldown_time
                 applog.warning(
                     "risk",
-                    f"Strategy '{strategy}' has {current_losses} consecutive losses -- pausing new entries "
-                    f"for this strategy for {self.config.strategy_cooldown_minutes} minutes",
+                    f"Strategy '{strategy}' has {current_losses} consecutive losses -- pausing new entries for {strat_cd} minutes",
                 )
 
             self.consecutive_losses = max(self.strategy_consecutive_losses.values(), default=0)
             active_cooldowns = [t for t in self.strategy_cooldowns.values() if t > now_dt]
             self.cooldown_until = max(active_cooldowns) if active_cooldowns else None
         else:
+            # On winning trade: enforce 5-minute consolidation cooldown before allowing second-leg breakout
+            win_cd_mins = int(getattr(self.config, "symbol_win_cooldown_minutes", 5) or 5)
+            self.symbol_cooldowns[symbol] = now_dt + timedelta(minutes=win_cd_mins)
+            applog.info(
+                "risk",
+                f"Win on {symbol} (+${trade.pnl:.2f}) -- locking ticker for {win_cd_mins}m consolidation before permitting second-leg continuation",
+            )
             self.strategy_consecutive_losses[strategy] = 0
             self.consecutive_losses = max(self.strategy_consecutive_losses.values(), default=0)
             self.strategy_cooldowns = {k: v for k, v in self.strategy_cooldowns.items() if v > now_dt}
             active_cooldowns = list(self.strategy_cooldowns.values())
             self.cooldown_until = max(active_cooldowns) if active_cooldowns else None
+        # =============================================================================
 
     def roll_session(self, session_date) -> None:  # noqa: ANN001
         # A daily halt may clear only on a verified forward session transition.
@@ -206,6 +272,8 @@ class RiskManager:
         self.strategy_consecutive_losses.clear()
         self.strategy_cooldowns.clear()
         self.symbol_cooldowns.clear()
+        if hasattr(self, "symbol_loss_counts"):
+            self.symbol_loss_counts.clear()
 
     def reset_hard_halt(self) -> None:
         self.hard_halted = False

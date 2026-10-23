@@ -38,7 +38,8 @@ class OpeningRangeBreakout(Strategy):
     # ml_threshold = 0.55
     # -----------------------------------------------------------------------------
     # [NEW CODE]:
-    ml_threshold = 0.48
+    # Strategy class default is 0.55; active execution threshold is dynamically governed by RiskConfig / .env
+    ml_threshold = 0.55
     # =============================================================================
     evaluation_horizons = ["60m", "close"]
     # =============================================================================

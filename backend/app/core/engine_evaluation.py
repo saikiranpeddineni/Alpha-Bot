@@ -304,90 +304,142 @@ class TradingEngineEvaluationMixin:
             # =============================================================================
 
             if pis_order is not None:
-                close_accepted = False
-                try:
-                    applog.info("engine", f"{symbol}: PIS Unified Exit triggered: {pis_order.reason} (qty={pis_order.qty})")
-                    close_accepted = await self._close_position_guarded(
-                        symbol,
-                        reason=pis_order.reason,
-                        qty=pis_order.qty,
-                        strategy=getattr(pis_order, "strategy", None),
-                    )
-                except Exception as e:
-                    # Keep broker-routing failures distinct from PIS evaluation
-                    # failures.  The guard has already released its latch;
-                    # this boundary only converts the ambiguous result into a
-                    # PIS rollback before the next evaluation can retry.
-                    applog.error("engine.exit", f"Execution failed for PIS exit on {symbol}: {e}")
-                    close_accepted = False
+                # =============================================================================
+                # [MODIFIED 2026-10-23]: Minimum Bank Profit Threshold Floor ($100.00) on Partial Exits
+                # ORIGINAL INTENT: Unconditionally executed partial scale-outs regardless of dollar profit.
+                # REASON FOR CHANGE: Forensic audit proved slicing small positions (e.g. $10-$30 profit)
+                # incurs commission and spread friction while halving runner compounding. If expected bank
+                # profit < min_bank_usd (default $100.0), skip partial cut, hold 100% position with
+                # ratcheted breakeven/floor stop protection to let multi-R winners expand.
+                # SAFE ROLLBACK: Previous lines preserved below as comments.
+                # -----------------------------------------------------------------------------
+                # [PREVIOUS CODE - PRESERVED]:
+                # close_accepted = False
+                # try:
+                #     applog.info("engine", f"{symbol}: PIS Unified Exit triggered: {pis_order.reason} (qty={pis_order.qty})")
+                #     close_accepted = await self._close_position_guarded(
+                #         symbol,
+                #         reason=pis_order.reason,
+                #         qty=pis_order.qty,
+                #         strategy=getattr(pis_order, "strategy", None),
+                #     )
+                # except Exception as e:
+                #     applog.error("engine.exit", f"Execution failed for PIS exit on {symbol}: {e}")
+                #     close_accepted = False
+                # if not close_accepted:
+                #     with suppress(Exception):
+                #         self.pis_adapter.revert_scale_out(symbol)
+                #     applog.warning("engine.exit", f"{symbol}: PIS close was not accepted; scale-out state reverted")
+                #     return []
+                # -----------------------------------------------------------------------------
+                # [NEW CODE]:
+                import os as _os
+                from app.pis.models import ExitAction
+                is_partial = (pis_decision is not None and getattr(pis_decision, "action", None) == ExitAction.PARTIAL_EXIT) or (position is not None and pis_order.qty < abs(position.qty))
+                min_bank_usd = float(_os.environ.get("BOT_MIN_BANK_PROFIT_USD", getattr(getattr(self, "risk_config", None), "min_bank_profit_usd", 100.0) if hasattr(self, "risk_config") else 100.0) or 100.0)
 
-                if not close_accepted:
-                    # A rejected, missing, or ambiguous broker result is not a
-                    # fill.  In particular, PARTIAL_EXIT mutates PIS state at
-                    # decision time, so leave the brain in its pre-scale-out
-                    # posture until broker execution is actually accepted.
-                    with suppress(Exception):
-                        self.pis_adapter.revert_scale_out(symbol)
-                    applog.warning("engine.exit", f"{symbol}: PIS close was not accepted; scale-out state reverted")
-                    # Keep the existing close-latch safety contract: do not
-                    # continue into entry evaluation after an exit decision.
-                    return []
+                skip_partial_scaleout = False
+                if is_partial and min_bank_usd > 0.0 and position is not None:
+                    unrealized_profit_per_share = (close - position.avg_entry_price) if position.qty > 0 else (position.avg_entry_price - close)
+                    expected_bank_profit = float(pis_order.qty) * unrealized_profit_per_share
+                    if expected_bank_profit < min_bank_usd:
+                        skip_partial_scaleout = True
+                        with suppress(Exception):
+                            self.pis_adapter.revert_scale_out(symbol)
+                        applog.info(
+                            "engine.exit",
+                            f"{symbol}: skipping PIS partial scale-out ({pis_order.reason}) -- expected profit ${expected_bank_profit:.2f} < ${min_bank_usd:.0f} floor "
+                            f"(holding full {abs(position.qty):.0f} sh position with BE/floor stop protection to avoid micro-slice churn)",
+                        )
+                        pis_order = None
+
+                if not skip_partial_scaleout and pis_order is not None:
+                    close_accepted = False
+                    try:
+                        applog.info("engine", f"{symbol}: PIS Unified Exit triggered: {pis_order.reason} (qty={pis_order.qty})")
+                        close_accepted = await self._close_position_guarded(
+                            symbol,
+                            reason=pis_order.reason,
+                            qty=pis_order.qty,
+                            strategy=getattr(pis_order, "strategy", None),
+                        )
+                    except Exception as e:
+                        # Keep broker-routing failures distinct from PIS evaluation
+                        # failures.  The guard has already released its latch;
+                        # this boundary only converts the ambiguous result into a
+                        # PIS rollback before the next evaluation can retry.
+                        applog.error("engine.exit", f"Execution failed for PIS exit on {symbol}: {e}")
+                        close_accepted = False
+
+                    if not close_accepted:
+                        # A rejected, missing, or ambiguous broker result is not a
+                        # fill.  In particular, PARTIAL_EXIT mutates PIS state at
+                        # decision time, so leave the brain in its pre-scale-out
+                        # posture until broker execution is actually accepted.
+                        with suppress(Exception):
+                            self.pis_adapter.revert_scale_out(symbol)
+                        applog.warning("engine.exit", f"{symbol}: PIS close was not accepted; scale-out state reverted")
+                        # Keep the existing close-latch safety contract: do not
+                        # continue into entry evaluation after an exit decision.
+                        return []
+                # =============================================================================
 
                 # Alpaca partial closes cancel the live bracket/OTO legs to
                 # release held quantity.  Re-establish a broker stop for only
                 # the residual runner before returning from this evaluation;
                 # otherwise the runner is naked during the next tick.
-                position_qty = abs(float(position.qty))
-                close_qty = abs(float(pis_order.qty))
-                residual_qty = max(0.0, position_qty - close_qty)
-                if residual_qty > 1e-9:
-                    runner_floor = getattr(pis_decision, "target_stop_loss", None)
-                    if runner_floor is None and _lot is not None:
-                        runner_floor = getattr(_lot, "stop_loss", None)
-                    if runner_floor is not None:
-                        runner_floor = float(runner_floor)
-                        # Protection floors remain monotonic even when a stale
-                        # PIS decision carries a weaker candidate than local
-                        # broker-confirmed state.
-                        local_floor = (
-                            getattr(_lot, "stop_loss", None)
-                            if _lot is not None
-                            else None
-                        )
-                        if local_floor is not None:
-                            runner_floor = (
-                                max(runner_floor, float(local_floor))
-                                if position.qty > 0
-                                else min(runner_floor, float(local_floor))
+                if pis_order is not None:
+                    position_qty = abs(float(position.qty))
+                    close_qty = abs(float(pis_order.qty))
+                    residual_qty = max(0.0, position_qty - close_qty)
+                    if residual_qty > 1e-9:
+                        runner_floor = getattr(pis_decision, "target_stop_loss", None)
+                        if runner_floor is None and _lot is not None:
+                            runner_floor = getattr(_lot, "stop_loss", None)
+                        if runner_floor is not None:
+                            runner_floor = float(runner_floor)
+                            # Protection floors remain monotonic even when a stale
+                            # PIS decision carries a weaker candidate than local
+                            # broker-confirmed state.
+                            local_floor = (
+                                getattr(_lot, "stop_loss", None)
+                                if _lot is not None
+                                else None
                             )
-                        try:
-                            protected = await self._sync_broker_protective_stop(
-                                symbol,
-                                runner_floor,
-                                qty=residual_qty,
-                            )
-                        except Exception as exc:  # noqa: BLE001
-                            protected = False
-                            applog.warning("engine.exit", f"{symbol}: residual runner stop repair failed: {exc}")
-                        if protected and _lot is not None:
-                            _lot.stop_loss = runner_floor
-                        elif not protected:
+                            if local_floor is not None:
+                                runner_floor = (
+                                    max(runner_floor, float(local_floor))
+                                    if position.qty > 0
+                                    else min(runner_floor, float(local_floor))
+                                )
+                            try:
+                                protected = await self._sync_broker_protective_stop(
+                                    symbol,
+                                    runner_floor,
+                                    qty=residual_qty,
+                                )
+                            except Exception as exc:  # noqa: BLE001
+                                protected = False
+                                applog.warning("engine.exit", f"{symbol}: residual runner stop repair failed: {exc}")
+                            if protected and _lot is not None:
+                                _lot.stop_loss = runner_floor
+                            elif not protected:
+                                applog.warning(
+                                    "engine.exit",
+                                    f"{symbol}: residual runner close accepted but broker protection was not verified",
+                                )
+                        else:
                             applog.warning(
                                 "engine.exit",
-                                f"{symbol}: residual runner close accepted but broker protection was not verified",
+                                f"{symbol}: partial PIS close accepted with no protective floor available for residual qty={residual_qty:g}",
                             )
-                    else:
-                        applog.warning(
-                            "engine.exit",
-                            f"{symbol}: partial PIS close accepted with no protective floor available for residual qty={residual_qty:g}",
-                        )
 
-                # Keep peak/trough/stop/TP memory alive until the closing
-                # fill is drained: _drain_fills reads them to stamp true
-                # mfe/mae onto the trade record and cleans the maps up
-                # afterwards. Deleting here (before the fill existed) made
-                # every PIS-exited trade report mfe == mae == final move.
-                return []
+                    # Keep peak/trough/stop/TP memory alive until the closing
+                    # fill is drained: _drain_fills reads them to stamp true
+                    # mfe/mae onto the trade record and cleans the maps up
+                    # afterwards. Deleting here (before the fill existed) made
+                    # every PIS-exited trade report mfe == mae == final move.
+                    return []
             # Synchronize ratcheted protective stop floor to broker truth first,
             # then update the local lot.  Updating only _lot.stop_loss made the
             # PIS floor look protected locally while Alpaca's original OTO stop

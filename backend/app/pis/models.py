@@ -266,7 +266,19 @@ class PISConfig:
     hyper_runner_decay_rate: float = 0.05
     giveback_pct_maturing: float = 0.25
     min_breathing_room_r: float = 0.35
-    min_locked_r: float = 0.05
+    # =============================================================================
+    # [MODIFIED 2026-10-23]: Calibrate min_locked_r to 0.25 (Green Floor Lock)
+    # ORIGINAL INTENT: min_locked_r was 0.05, which locked in pennies ($0.32-$0.66) at peak >= 1R.
+    # REASON FOR CHANGE: Enforce a solid +0.25R green profit floor once peak reaches 1.0R,
+    # harmonizing with BetaDesk BOT_GREEN_FLOOR_R=0.25 and guaranteeing meaningful dollar profits.
+    # SAFE ROLLBACK: Previous line preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # min_locked_r: float = 0.05
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    min_locked_r: float = 0.25
+    # =============================================================================
     health_weakening_threshold: float = 0.55
     health_distribution_threshold: float = 0.35
     health_accelerating_threshold: float = 0.68
@@ -293,7 +305,22 @@ class PISConfig:
     # SAFE ROLLBACK: The original code is removed; rollback via git history.
     # -----------------------------------------------------------------------------
     # [NEW CODE]:
-    breakeven_trigger_r: float = 0.40
+    # =============================================================================
+    # [MODIFIED 2026-10-23]: Calibrate breakeven_trigger_r from 0.40 to 0.80 & Add min_bank_profit_usd
+    # ORIGINAL INTENT: breakeven_trigger_r = 0.40 moved stops into 1-minute bar noise prematurely,
+    # causing 6 out of 14 winning trades to be stopped out for $0.32 to $11 micro-scratches.
+    # REASON FOR CHANGE: Arming breakeven at 0.80R provides trades breathing room to develop into
+    # multi-R runners (matching BetaDesk BOT_BE_ARM_R=0.80). min_bank_profit_usd ($100 floor)
+    # avoids micro-scaleouts on small positions.
+    # SAFE ROLLBACK: Previous lines preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # breakeven_trigger_r: float = 0.40
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    breakeven_trigger_r: float = 0.80
+    min_bank_profit_usd: float = 100.0
+    # =============================================================================
     breakeven_trigger_atr_mult: float = 2.50
     breakeven_atr_mult_breakout: float = 1.50
     breakeven_atr_mult_reversion: float = 2.50
