@@ -359,6 +359,21 @@ class RiskConfigUpdateBody(BaseModel):
     harvest_risk_multiplier: float | None = None
     scanner_watchlist_ttl: int | None = None
     max_daily_turnover_multiple: float | None = None
+    # =============================================================================
+    # [ADDED 2026-10-23]: Sub-$5 Penny Stock & Directional Geometry Risk Parameters
+    # ORIGINAL INTENT: RiskConfigUpdateBody whitelisted known RiskConfig fields with extra='forbid'.
+    # REASON FOR CHANGE: Expose penny stock noise-floor cushioning, notional caps, dollar risk caps,
+    # and order share ceiling parameters for runtime updates.
+    # SAFE ROLLBACK: Remove lines below.
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    min_stop_floor_atr_mult: float | None = None
+    max_stop_atr_mult: float | None = None
+    sub5_max_notional_pct: float | None = None
+    sub5_max_risk_dollars: float | None = None
+    sub5_slippage_buffer: float | None = None
+    max_order_shares: int | None = None
+    # =============================================================================
 
 
 @router.put("/settings/risk")

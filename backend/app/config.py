@@ -162,6 +162,24 @@ class RiskConfig(BaseModel):
     # =============================================================================
     min_specialist_auc: float = Field(0.53, ge=0.50, le=1.0)
     min_stop_pct: float = Field(0.5, ge=0.0, le=5.0)
+    # =============================================================================
+    # [ADDED 2026-10-23]: Volatility Noise Floor Cushioning & Sub-$5 Penny Stock Safeguards
+    # ORIGINAL INTENT: Unbounded penny stock risk and micro-stops allowed 8,500+ shares of $2
+    # stocks with 3-cent stops (HTZ, MGNX), causing 2-cent spread slips to blow up into -$430 losses.
+    # REASON FOR CHANGE: User directive: "we can trade penny stocks, we shouldnt make those losses".
+    # Volatility noise floor cushions stops to at least 0.60 ATR, while sub-$5 caps limit notional
+    # to 10% equity ($10k) and risk to $250 with an 85% slippage buffer.
+    # SAFE ROLLBACK: Remove the fields below.
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    min_stop_floor_atr_mult: float = Field(0.60, ge=0.0, le=2.0)
+    # max_stop_atr_mult = 0.0 disables artificial stop ceiling (matches Betadesk)
+    max_stop_atr_mult: float = Field(0.0, ge=0.0)
+    sub5_max_notional_pct: float = Field(10.0, ge=1.0, le=50.0)
+    sub5_max_risk_dollars: float = Field(250.0, ge=50.0, le=2000.0)
+    sub5_slippage_buffer: float = Field(0.85, ge=0.50, le=1.0)
+    max_order_shares: int = Field(5000, ge=100, le=50000)
+    # =============================================================================
     score_threshold_trend: float = Field(55.0, ge=0.0, le=100.0)    # was 55.0
     score_threshold_range: float = Field(70.0, ge=0.0, le=100.0)    # was 70.0
     score_threshold_volatile: float = Field(65.0, ge=0.0, le=100.0) # was 65.0
@@ -351,6 +369,12 @@ class Settings(BaseSettings):
     data_gap_threshold_secs: float = Field(120.0, validation_alias="DATA_GAP_THRESHOLD_SECS")
     min_specialist_auc: float = Field(0.53, validation_alias="MIN_SPECIALIST_AUC")
     min_stop_pct: float = Field(0.5, validation_alias="MIN_STOP_PCT")
+    min_stop_floor_atr_mult: float = Field(0.60, validation_alias="MIN_STOP_FLOOR_ATR_MULT")
+    max_stop_atr_mult: float = Field(0.0, validation_alias="MAX_STOP_ATR_MULT")
+    sub5_max_notional_pct: float = Field(10.0, validation_alias="SUB5_MAX_NOTIONAL_PCT")
+    sub5_max_risk_dollars: float = Field(250.0, validation_alias="SUB5_MAX_RISK_DOLLARS")
+    sub5_slippage_buffer: float = Field(0.85, validation_alias="SUB5_SLIPPAGE_BUFFER")
+    max_order_shares: int = Field(5000, validation_alias="MAX_ORDER_SHARES")
     kelly_fraction_cap: float = Field(0.15, validation_alias="KELLY_FRACTION_CAP")
     max_positions_per_sector: int = Field(2, validation_alias="MAX_POSITIONS_PER_SECTOR")
     max_correlation_penalty: float = Field(0.5, validation_alias="MAX_CORRELATION_PENALTY")

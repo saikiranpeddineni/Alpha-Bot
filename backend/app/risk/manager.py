@@ -422,10 +422,50 @@ class RiskManager:
         elif atr is not None and atr > 0:
             take_profit = price + 2.0 * atr if signal.action == SignalAction.ENTER_LONG else price - 2.0 * atr
 
+        # =============================================================================
+        # [MODIFIED 2026-10-23]: Volatility Noise Floor Stop Cushioning & Width Ceiling
+        # ORIGINAL INTENT: Used min_distance = max(price * 0.0005, 0.01), allowing micro-stops
+        # (e.g. HTZ $0.03 stop on $2.22 = 1.35%, MGNX $0.05 stop on $2.43 = 2.06%).
+        # REASON FOR CHANGE: Micro-stops on volatile sub-$5 penny stocks are instantly wiped out
+        # by normal bid-ask bounce and 1-minute candle wicks (HTZ ATR was $0.19, MGNX was $0.185).
+        # Furthermore, the tiny stop distance in the denominator artificially multiplied share count
+        # (8,586 shares on HTZ), turning 2 cents of normal spread slippage into a -$429.30 blowout.
+        # Cushioning stop distance to min max(0.60 * atr, price * min_floor_frac, 0.01) provides
+        # structural room to catch momentum breakouts without whipsaws, while risk parity
+        # automatically sizes shares down to guarantee losses stay capped at the risk budget.
+        # SAFE ROLLBACK: Previous lines preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # stop_distance = abs(price - stop_loss)
+        # min_distance = max(price * 0.0005, 0.01)
+        # if stop_distance < min_distance:
+        #     return RiskDecision(False, f"stop too tight ({stop_distance:.4f})")
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
         stop_distance = abs(price - stop_loss)
+        if atr is not None and atr > 0:
+            min_floor_frac = (cfg.min_stop_pct / 100.0) if getattr(cfg, "min_stop_pct", 0.0) > 0 else 0.0045
+            min_stop_mult = getattr(cfg, "min_stop_floor_atr_mult", 0.60) or 0.60
+            min_noise = max(min_stop_mult * atr, price * min_floor_frac, 0.01)
+            if stop_distance < min_noise:
+                stop_distance = min_noise
+                stop_loss = round(price - stop_distance, 4) if signal.action == SignalAction.ENTER_LONG else round(price + stop_distance, 4)
+
         min_distance = max(price * 0.0005, 0.01)
         if stop_distance < min_distance:
             return RiskDecision(False, f"stop too tight ({stop_distance:.4f})")
+
+        # max_stop_atr_mult = 0.0 disables ceiling (matches Betadesk)
+        max_stop_atr = getattr(cfg, "max_stop_atr_mult", 0.0)
+        if max_stop_atr is None:
+            max_stop_atr = 0.0
+        if max_stop_atr > 0 and atr is not None and atr > 0:
+            if stop_distance > max_stop_atr * atr:
+                return RiskDecision(
+                    False,
+                    f"stop wider than {max_stop_atr:g}x ATR ({stop_distance / atr:.1f}x) -- no nearby invalidation",
+                )
+        # =============================================================================
 
         raw_risk_mult = getattr(signal, "risk_multiplier", 1.0)
         try:
@@ -504,21 +544,71 @@ class RiskManager:
             risk_amount = ctx.equity * kelly_used
             qty = int(risk_amount / stop_distance)
 
+        # =============================================================================
+        # [MODIFIED 2026-10-23]: Sub-$5 Penny Stock Dollar Risk Cap, Notional Cap & Share Ceiling
+        # ORIGINAL INTENT: Unbounded risk budget and max_position_pct (up to 20% = $20,000) allowed
+        # 8,500+ shares of sub-$5 stocks (HTZ, MGNX) with no share ceiling or dollar risk cap.
+        # REASON FOR CHANGE: Sizing $19,000 into a $2.22 stock with a 3-cent stop created extreme
+        # spread leverage where 2 cents of slippage destroyed $171 extra. Capping sub-$5 dollar risk
+        # to $250 (with 15% slippage buffer = $212.50), notional to 10% equity ($10,000), and shares
+        # to 5,000 (10,000 for sub-$2) guarantees full penny stock trading without blowout losses.
+        # SAFE ROLLBACK: Previous sizing lines preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # qty_unconstrained = qty
+        # max_notional = ctx.equity * cfg.max_position_pct / 100.0
+        # qty_after_notional = min(qty, int(max_notional / price))
+        # qty_after_cash = qty_after_notional
+        # if signal.action == SignalAction.ENTER_LONG:
+        #     qty_after_cash = min(qty_after_notional, int(max(0.0, ctx.cash) / price))
+        #
+        # binding = "none"
+        # if qty_after_notional < qty_unconstrained:
+        #     binding = f"max_notional_cap ({max_notional:,.0f})"
+        # if qty_after_cash < qty_after_notional:
+        #     binding = f"cash_cap ({ctx.cash:,.0f})"
+        #
+        # qty = qty_after_cash
+        # final_notional = qty * price
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        if price < 5.0:
+            sub5_risk_cap = getattr(cfg, "sub5_max_risk_dollars", 250.0) or 250.0
+            sub5_buffer = getattr(cfg, "sub5_slippage_buffer", 0.85) or 0.85
+            risk_amount = min(risk_amount, sub5_risk_cap * sub5_buffer)
+            qty = int(risk_amount / stop_distance) if stop_distance > 0 else 0
+
         qty_unconstrained = qty
-        max_notional = ctx.equity * cfg.max_position_pct / 100.0
+        max_notional_pct = cfg.max_position_pct
+        if price < 5.0:
+            sub5_notional_pct = getattr(cfg, "sub5_max_notional_pct", 10.0) or 10.0
+            max_notional_pct = min(max_notional_pct, sub5_notional_pct)
+
+        max_notional = ctx.equity * max_notional_pct / 100.0
         qty_after_notional = min(qty, int(max_notional / price))
         qty_after_cash = qty_after_notional
         if signal.action == SignalAction.ENTER_LONG:
             qty_after_cash = min(qty_after_notional, int(max(0.0, ctx.cash) / price))
+
+        max_shares = getattr(cfg, "max_order_shares", 5000) or 5000
+        if price < 2.0:
+            max_shares = min(max_shares * 2, 10000)
+        elif price < 5.0:
+            max_shares = min(max_shares, 5000)
+
+        qty_after_shares = min(qty_after_cash, max_shares) if max_shares > 0 else qty_after_cash
 
         binding = "none"
         if qty_after_notional < qty_unconstrained:
             binding = f"max_notional_cap ({max_notional:,.0f})"
         if qty_after_cash < qty_after_notional:
             binding = f"cash_cap ({ctx.cash:,.0f})"
+        if qty_after_shares < qty_after_cash:
+            binding = f"max_shares_cap ({max_shares})"
 
-        qty = qty_after_cash
+        qty = qty_after_shares
         final_notional = qty * price
+        # =============================================================================
         applog.info(
             "risk",
             f"[sizing] {symbol} allocator_target={f'${risk_amount:,.0f}' if kelly_override is not None else 'n/a (fixed-risk)'} "

@@ -528,10 +528,32 @@ class SignalPipeline:
             # =============================================================================
             # -----------------------------------------------------------------------------
             # [NEW CODE]:
-            if is_warmup_reduced and not meta_pred.approved:
-                sig.ml_gate_decision = "REJECT"
-                rejected.append((sig, f"Warmup reduced evaluation requires meta approval, got {meta_pred.decision} [{meta_pred.source}]"))
-                continue
+            # =============================================================================
+            # [MODIFIED 2026-10-23]: Disallow NO_MODEL BYPASS on Warmup Reduced Sub-$5 Penny Stocks
+            # ORIGINAL INTENT: Warmup reduced evaluation required meta_pred.approved, but when NO_MODEL
+            # was present, meta_pred defaulted to approved=True (decision=BYPASS), allowing unvalidated
+            # penny stock setups into execution during short bar warmups.
+            # REASON FOR CHANGE: Prevent explosive unvalidated losses on sub-$5 penny stocks (e.g. HTZ)
+            # during morning warmup unless an authoritative meta model has explicitly approved them.
+            # SAFE ROLLBACK: The original code is preserved below as comments.
+            # -----------------------------------------------------------------------------
+            # [PREVIOUS CODE - PRESERVED]:
+            # if is_warmup_reduced and not meta_pred.approved:
+            #     sig.ml_gate_decision = "REJECT"
+            #     rejected.append((sig, f"Warmup reduced evaluation requires meta approval, got {meta_pred.decision} [{meta_pred.source}]"))
+            #     continue
+            # -----------------------------------------------------------------------------
+            # [NEW CODE]:
+            if is_warmup_reduced:
+                if not meta_pred.approved:
+                    sig.ml_gate_decision = "REJECT"
+                    rejected.append((sig, f"Warmup reduced evaluation requires meta approval, got {meta_pred.decision} [{meta_pred.source}]"))
+                    continue
+                if entry_price > 0 and entry_price < 5.0 and (meta_pred.source == "NO_MODEL" or meta_pred.decision == "BYPASS"):
+                    sig.ml_gate_decision = "REJECT"
+                    rejected.append((sig, f"Warmup reduced path disallows unverified penny stocks without trained meta-model ({symbol} @ ${entry_price:.2f}, source={meta_pred.source})"))
+                    continue
+            # =============================================================================
             if not meta_pred.approved:
                 rejected.append((sig, f"Meta-label {meta_pred.decision} [{meta_pred.source}]: {meta_pred.reason}"))
                 continue
