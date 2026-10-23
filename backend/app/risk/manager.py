@@ -207,16 +207,39 @@ class RiskManager:
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
         symbol = trade.symbol.upper()
+        # =============================================================================
+        # [MODIFIED 2026-10-24]: Strict Symbol Max Daily Loss Lockout & Mega-Win Cooldown
+        # ORIGINAL INTENT: Allowed 2 losses before quarantine, and flat 5-minute win cooldown.
+        # This permitted MGNX to re-enter for a 2nd loss (-$261.12), and PHAT to re-short 7 minutes
+        # after a +4.6R runner into an immediate reversal (-$188.79).
+        # REASON FOR CHANGE: Enforce max_daily_losses = 1 to prevent whipsaw revenge trading on the same
+        # symbol, and enforce 45m cooldown after >= 3.0R mega-winners to prevent exhausted-runner re-entry.
+        # SAFE ROLLBACK: The original code is preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # if trade.pnl <= 0:
+        #     self.symbol_loss_counts[symbol] = self.symbol_loss_counts.get(symbol, 0) + 1
+        #     max_daily_losses = getattr(self.config, "symbol_max_daily_losses", 2)
+        #     if self.symbol_loss_counts[symbol] >= max_daily_losses:
+        #         self.symbol_cooldowns[symbol] = now_dt + timedelta(minutes=390)
+        #     else:
+        #         cd_mins = max(20, int(getattr(self.config, "symbol_cooldown_minutes", 20) or 20))
+        #         self.symbol_cooldowns[symbol] = now_dt + timedelta(minutes=cd_mins)
+        # else:
+        #     win_cd_mins = int(getattr(self.config, "symbol_win_cooldown_minutes", 5) or 5)
+        #     self.symbol_cooldowns[symbol] = now_dt + timedelta(minutes=win_cd_mins)
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
         if trade.pnl <= 0:
             self.symbol_loss_counts[symbol] = self.symbol_loss_counts.get(symbol, 0) + 1
-            max_daily_losses = getattr(self.config, "symbol_max_daily_losses", 2)
+            max_daily_losses = getattr(self.config, "symbol_max_daily_losses", 1) or 1
 
             if self.symbol_loss_counts[symbol] >= max_daily_losses:
                 # Quarantined for the remainder of the session (390m)
                 self.symbol_cooldowns[symbol] = now_dt + timedelta(minutes=390)
                 applog.warning(
                     "risk",
-                    f"{symbol} hit {self.symbol_loss_counts[symbol]} losses today -- quarantined for remainder of session to eliminate chop",
+                    f"{symbol} hit {self.symbol_loss_counts[symbol]} loss(es) today -- quarantined for remainder of session to eliminate whipsaw losses",
                 )
             else:
                 cd_mins = max(20, int(getattr(self.config, "symbol_cooldown_minutes", 20) or 20))
@@ -242,18 +265,27 @@ class RiskManager:
             active_cooldowns = [t for t in self.strategy_cooldowns.values() if t > now_dt]
             self.cooldown_until = max(active_cooldowns) if active_cooldowns else None
         else:
-            # On winning trade: enforce 5-minute consolidation cooldown before allowing second-leg breakout
-            win_cd_mins = int(getattr(self.config, "symbol_win_cooldown_minutes", 5) or 5)
+            trade_r = float(getattr(trade, "r_multiple", 0.0) or 0.0)
+            mega_r_floor = float(getattr(self.config, "mega_win_cooldown_r", 3.0) or 3.0)
+            if trade_r >= mega_r_floor:
+                win_cd_mins = int(getattr(self.config, "mega_win_cooldown_minutes", 45) or 45)
+                applog.info(
+                    "risk",
+                    f"Mega-win on {symbol} (+{trade_r:.2f}R | +${trade.pnl:.2f}) -- locking ticker for {win_cd_mins}m to prevent exhausted-runner re-entry",
+                )
+            else:
+                win_cd_mins = int(getattr(self.config, "symbol_win_cooldown_minutes", 5) or 5)
+                applog.info(
+                    "risk",
+                    f"Win on {symbol} (+${trade.pnl:.2f}) -- locking ticker for {win_cd_mins}m consolidation before permitting second-leg continuation",
+                )
             self.symbol_cooldowns[symbol] = now_dt + timedelta(minutes=win_cd_mins)
-            applog.info(
-                "risk",
-                f"Win on {symbol} (+${trade.pnl:.2f}) -- locking ticker for {win_cd_mins}m consolidation before permitting second-leg continuation",
-            )
             self.strategy_consecutive_losses[strategy] = 0
             self.consecutive_losses = max(self.strategy_consecutive_losses.values(), default=0)
             self.strategy_cooldowns = {k: v for k, v in self.strategy_cooldowns.items() if v > now_dt}
             active_cooldowns = list(self.strategy_cooldowns.values())
             self.cooldown_until = max(active_cooldowns) if active_cooldowns else None
+        # =============================================================================
         # =============================================================================
 
     def roll_session(self, session_date) -> None:  # noqa: ANN001

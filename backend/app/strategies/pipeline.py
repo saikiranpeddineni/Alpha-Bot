@@ -319,7 +319,21 @@ class SignalPipeline:
                     # 0.5 ATR econ gate). Measuring a post-pullback reclaim
                     # against session VWAP double-penalizes the exact setup the
                     # re-arm path exists for (today: 40/49 re-arm rejects here).
-                    skip_location_veto = bool(getattr(_strat_cls, "skip_location_veto", False))
+                    # =============================================================================
+                    # [MODIFIED 2026-10-24]: Enforce Location Veto in RANGE Regime for Pullback Entries
+                    # ORIGINAL INTENT: skip_location_veto exempted pullback_rearm across all market conditions.
+                    # In RANGE tape, extended continuation entries > 3 ATR from VWAP reverse immediately,
+                    # resulting in 0/4 losses today (-$669.76 on HTZ, STLA, IREN, SQQQ).
+                    # REASON FOR CHANGE: Confine skip_location_veto exemption to confirmed trending regimes (TREND_UP/TREND_DOWN);
+                    # in RANGE tape, all continuation setups must respect VWAP location discipline.
+                    # SAFE ROLLBACK: The original code is preserved below as comments.
+                    # -----------------------------------------------------------------------------
+                    # [PREVIOUS CODE - PRESERVED]:
+                    # skip_location_veto = bool(getattr(_strat_cls, "skip_location_veto", False))
+                    # -----------------------------------------------------------------------------
+                    # [NEW CODE]:
+                    skip_location_veto = bool(getattr(_strat_cls, "skip_location_veto", False)) and (regime in (Regime.TREND_UP, Regime.TREND_DOWN))
+                    # =============================================================================
                     if not is_structural_breakout and not skip_location_veto:
                         stretch = ((b_cl - vwap_px) / atr_loc) if sig.action == SignalAction.ENTER_LONG \
                             else ((vwap_px - b_cl) / atr_loc)
@@ -624,11 +638,30 @@ class SignalPipeline:
                 meta_prob = None
             if meta_prob is not None and not math.isfinite(meta_prob):
                 meta_prob = None
+            # =============================================================================
+            # [MODIFIED 2026-10-24]: Calibrate High-Agreement Rescue Floor in RANGE Regime
+            # ORIGINAL INTENT: raw_score_floor_met = raw_score >= threshold required raw_score >= 70.0
+            # in RANGE tape. With regime weight 0.55, 37 verified winners (+111.4 R, avg MFE +4.77%) with
+            # ML confidence >= 0.78 and raw scores 65-69 (e.g. RHI, MGNX short, NU, CRDO) were rejected.
+            # REASON FOR CHANGE: Set effective_raw_floor = 65.0 in RANGE tape so high-conviction trades
+            # with authentic meta PASS are safely executed at 0.65 risk multiplier.
+            # SAFE ROLLBACK: The original code is preserved below as comments.
+            # -----------------------------------------------------------------------------
+            # [PREVIOUS CODE - PRESERVED]:
+            # raw_score_floor_met = (
+            #     math.isfinite(raw_score)
+            #     and 0.0 <= raw_score <= 100.0
+            #     and raw_score >= threshold
+            # )
+            # -----------------------------------------------------------------------------
+            # [NEW CODE]:
+            effective_raw_floor = 65.0 if regime == Regime.RANGE else threshold
             raw_score_floor_met = (
                 math.isfinite(raw_score)
                 and 0.0 <= raw_score <= 100.0
-                and raw_score >= threshold
+                and raw_score >= effective_raw_floor
             )
+            # =============================================================================
             admission_score_below_floor = (
                 math.isfinite(admission_score)
                 and math.isfinite(threshold)
@@ -655,7 +688,7 @@ class SignalPipeline:
                 sig.ml_gate_decision = "HIGH_AGREEMENT_RESCUE"
                 applog.info(
                     "pipeline",
-                    f"{symbol} {sig.strategy}: HIGH_AGREEMENT_RESCUE (ml={ml:.4f}>={rescue_ml_min}, meta={meta_prob:.4f}>={rescue_meta_min}, raw_score={raw_score:.1f}>={threshold:.1f}, admission_score={admission_score:.1f}<{threshold:.1f}, risk_mult={rescue_risk_mult})",
+                    f"{symbol} {sig.strategy}: HIGH_AGREEMENT_RESCUE (ml={ml:.4f}>={rescue_ml_min}, meta={meta_prob:.4f}>={rescue_meta_min}, raw_score={raw_score:.1f}>={effective_raw_floor:.1f}, admission_score={admission_score:.1f}<{threshold:.1f}, risk_mult={rescue_risk_mult})",
                 )
 
             if not approved:

@@ -180,9 +180,26 @@ class RiskConfig(BaseModel):
     sub5_slippage_buffer: float = Field(0.85, ge=0.50, le=1.0)
     max_order_shares: int = Field(5000, ge=100, le=50000)
     # =============================================================================
-    score_threshold_trend: float = Field(55.0, ge=0.0, le=100.0)    # was 55.0
-    score_threshold_range: float = Field(70.0, ge=0.0, le=100.0)    # was 70.0
-    score_threshold_volatile: float = Field(65.0, ge=0.0, le=100.0) # was 65.0
+    # =============================================================================
+    # [MODIFIED 2026-10-24]: Calibrate score_threshold_range from 70.0 to 65.0 & Add Repeat-Loss / Runner Safeguards
+    # ORIGINAL INTENT: score_threshold_range was 70.0. With 0.55 regime multiplier on breakout setups,
+    # admission score topped out at 55.0, deadlocking the gate and rejecting 37 verified winners (+111.4 R).
+    # Also added symbol_max_daily_losses (prevents MGNX repeat loss) and mega_win_cooldown (prevents PHAT giveback).
+    # SAFE ROLLBACK: The original code is preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # score_threshold_trend: float = Field(55.0, ge=0.0, le=100.0)    # was 55.0
+    # score_threshold_range: float = Field(70.0, ge=0.0, le=100.0)    # was 70.0
+    # score_threshold_volatile: float = Field(65.0, ge=0.0, le=100.0) # was 65.0
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    score_threshold_trend: float = Field(55.0, ge=0.0, le=100.0)
+    score_threshold_range: float = Field(65.0, ge=0.0, le=100.0)
+    score_threshold_volatile: float = Field(65.0, ge=0.0, le=100.0)
+    symbol_max_daily_losses: int = Field(1, ge=1, le=10)
+    mega_win_cooldown_r: float = Field(3.0, ge=1.0, le=10.0)
+    mega_win_cooldown_minutes: int = Field(45, ge=5, le=240)
+    # =============================================================================
     score_threshold_event: float = Field(75.0, ge=0.0, le=100.0)    # was 75.0
     kelly_fraction_cap: float = Field(0.20, ge=0.01, le=0.50)       # was 0.15
     max_positions_per_sector: int = Field(5, ge=1, le=10)           # was 2
@@ -375,6 +392,13 @@ class Settings(BaseSettings):
     sub5_max_risk_dollars: float = Field(250.0, validation_alias="SUB5_MAX_RISK_DOLLARS")
     sub5_slippage_buffer: float = Field(0.85, validation_alias="SUB5_SLIPPAGE_BUFFER")
     max_order_shares: int = Field(5000, validation_alias="MAX_ORDER_SHARES")
+    # =============================================================================
+    # [ADDED 2026-10-24]: Settings validation aliases for repeat-loss and mega-win cooldowns
+    # -----------------------------------------------------------------------------
+    symbol_max_daily_losses: int = Field(1, validation_alias="SYMBOL_MAX_DAILY_LOSSES")
+    mega_win_cooldown_r: float = Field(3.0, validation_alias="MEGA_WIN_COOLDOWN_R")
+    mega_win_cooldown_minutes: int = Field(45, validation_alias="MEGA_WIN_COOLDOWN_MINUTES")
+    # =============================================================================
     kelly_fraction_cap: float = Field(0.15, validation_alias="KELLY_FRACTION_CAP")
     max_positions_per_sector: int = Field(2, validation_alias="MAX_POSITIONS_PER_SECTOR")
     max_correlation_penalty: float = Field(0.5, validation_alias="MAX_CORRELATION_PENALTY")

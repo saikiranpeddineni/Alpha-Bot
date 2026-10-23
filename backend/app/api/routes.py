@@ -374,6 +374,12 @@ class RiskConfigUpdateBody(BaseModel):
     sub5_slippage_buffer: float | None = None
     max_order_shares: int | None = None
     # =============================================================================
+    # [ADDED 2026-10-24]: Repeat-Loss & Mega-Win Cooldown Parameters
+    # -----------------------------------------------------------------------------
+    symbol_max_daily_losses: int | None = None
+    mega_win_cooldown_r: float | None = None
+    mega_win_cooldown_minutes: int | None = None
+    # =============================================================================
 
 
 @router.put("/settings/risk")
