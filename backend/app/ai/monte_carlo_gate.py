@@ -333,3 +333,54 @@ class MonteCarloGate:
         out.append("          +" + "-" * len(bands))
         out.append("* median   : middle half of the paths   . 90 % of the paths   - stop and target")
         return "\n".join(out)
+
+    def evaluate_in_trade_exit(
+        self,
+        current_price: float,
+        stop_loss: float,
+        take_profit: float,
+        is_long: bool,
+        df: pd.DataFrame,
+        bars_left: int = 30,
+        min_continuation_prob: float = 0.25,
+        min_continuation_r: float = 0.0,
+    ) -> tuple[bool, dict[str, Any], str]:
+        """Evaluate whether an active open position should exit early based on decaying odds.
+
+        Returns:
+            (should_exit: bool, stats: dict, reason: str)
+            should_exit is True when mathematical probability of reaching target before close
+            falls below min_continuation_prob or expected R turns negative.
+        """
+        pool = self.extract_ratio_pool(df)
+        if pool is None:
+            return False, {}, "fail-soft: pool unavailable"
+
+        stats = self.simulate(
+            entry=current_price,
+            stop=stop_loss,
+            target=take_profit,
+            is_long=is_long,
+            pool=pool,
+            steps=max(5, bars_left),
+        )
+
+        p_target = stats["p_target"]
+        avg_r = stats["avg_r"]
+
+        # Decay Exit Condition 1: Target-First odds collapsed
+        if p_target < min_continuation_prob:
+            reason = (
+                f"Time Machine early exit: Target probability collapsed to {p_target:.1%} < {min_continuation_prob:.1%} "
+                f"(Stop prob: {stats['p_stop']:.1%}, Neither: {stats['p_neither']:.1%})"
+            )
+            return True, stats, reason
+
+        # Decay Exit Condition 2: Negative Expected R
+        if avg_r < min_continuation_r:
+            reason = (
+                f"Time Machine early exit: Expected R turned negative ({avg_r:+.2f}R < {min_continuation_r:+.2f}R)"
+            )
+            return True, stats, reason
+
+        return False, stats, f"Time Machine hold: Target-First {p_target:.1%}, ExpR {avg_r:+.2f}R"

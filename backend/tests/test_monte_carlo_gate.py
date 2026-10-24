@@ -99,3 +99,22 @@ def test_monte_carlo_gate_approves_favorable_setup(sample_bars_df):
     assert passed is True
     assert "Monte Carlo approved" in reason
     assert stats["p_target"] > 0.0
+
+
+def test_monte_carlo_gate_in_trade_exit_trigger(sample_bars_df):
+    gate = MonteCarloGate(n_replays=1000)
+
+    # When price is stalled far from target ($140) with tight stop ($99.98) and only 10 bars left
+    should_exit, stats, reason = gate.evaluate_in_trade_exit(
+        current_price=100.0,
+        stop_loss=99.98,
+        take_profit=140.0,
+        is_long=True,
+        df=sample_bars_df,
+        bars_left=10,
+        min_continuation_prob=0.25,
+    )
+
+    assert should_exit is True
+    assert "Time Machine early exit" in reason
+    assert stats["p_target"] < 0.25
