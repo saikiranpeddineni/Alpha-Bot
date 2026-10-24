@@ -191,11 +191,21 @@ class RiskConfig(BaseModel):
     #   4. enable_monte_carlo_gate: 2,000-session bootstrap path odds verification.
     # SAFE ROLLBACK: Remove fields below to revert to previous behavior.
     # -----------------------------------------------------------------------------
+    # =============================================================================
+    # [MODIFIED 2026-10-25]: Enable Native Bracket Targets & Monte Carlo Pre-Trade Gate
+    # ORIGINAL INTENT: Fields were added with default False during initial module staging.
+    # REASON FOR CHANGE: Activate native broker brackets and Monte Carlo gating as active production defaults.
+    # SAFE ROLLBACK: Previous lines preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # enable_native_bracket_targets: bool = Field(False)
+    # enable_monte_carlo_gate: bool = Field(False)
+    # -----------------------------------------------------------------------------
     # [NEW CODE]:
     max_loss_per_trade_usd: float = Field(0.0, ge=0.0, le=100_000.0)
-    enable_native_bracket_targets: bool = Field(False)
+    enable_native_bracket_targets: bool = Field(True)
     use_or_midpoint_stop: bool = Field(True)
-    enable_monte_carlo_gate: bool = Field(False)
+    enable_monte_carlo_gate: bool = Field(True)
     monte_carlo_min_win_prob: float = Field(0.35, ge=0.0, le=1.0)
     monte_carlo_min_expected_r: float = Field(0.05, ge=-1.0, le=10.0)
     # =============================================================================
@@ -412,6 +422,23 @@ class Settings(BaseSettings):
     sub5_max_risk_dollars: float = Field(250.0, validation_alias="SUB5_MAX_RISK_DOLLARS")
     sub5_slippage_buffer: float = Field(0.85, validation_alias="SUB5_SLIPPAGE_BUFFER")
     max_order_shares: int = Field(5000, validation_alias="MAX_ORDER_SHARES")
+    # =============================================================================
+    # [MODIFIED 2026-10-25]: Day Trader Suite Settings with Environment Aliases
+    # ORIGINAL INTENT: Day Trader fields were only defined in RiskConfig.
+    # REASON FOR CHANGE: Expose settings in Settings with validation_alias for .env support.
+    # SAFE ROLLBACK: Remove fields below to revert to RiskConfig defaults.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # (Fields did not previously exist on Settings)
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    max_loss_per_trade_usd: float = Field(0.0, validation_alias="MAX_LOSS_PER_TRADE_USD")
+    enable_native_bracket_targets: bool = Field(True, validation_alias="ENABLE_NATIVE_BRACKET_TARGETS")
+    use_or_midpoint_stop: bool = Field(True, validation_alias="USE_OR_MIDPOINT_STOP")
+    enable_monte_carlo_gate: bool = Field(True, validation_alias="ENABLE_MONTE_CARLO_GATE")
+    monte_carlo_min_win_prob: float = Field(0.35, validation_alias="MONTE_CARLO_MIN_WIN_PROB")
+    monte_carlo_min_expected_r: float = Field(0.05, validation_alias="MONTE_CARLO_MIN_EXPECTED_R")
+    # =============================================================================
     # =============================================================================
     # [ADDED 2026-10-24]: Settings validation aliases for repeat-loss and mega-win cooldowns
     # -----------------------------------------------------------------------------
