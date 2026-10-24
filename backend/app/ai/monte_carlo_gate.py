@@ -167,6 +167,24 @@ class MonteCarloGate:
 
         avg_r = float(np.mean(r_outcomes))
 
+        # =============================================================================
+        # [MODIFIED 2026-10-25]: Add Percentile Bands Calculation for ASCII Fan Chart
+        # ORIGINAL INTENT: Returned p_target, p_stop, p_neither, avg_r.
+        # REASON FOR CHANGE: Step 6 of Day Trader Suite requires rendering ASCII probability fan chart.
+        # SAFE ROLLBACK: Remove bands key.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # return {
+        #     "p_target": round(p_target, 4),
+        #     "p_stop": round(p_stop, 4),
+        #     "p_neither": round(p_neither, 4),
+        #     "avg_r": round(avg_r, 4),
+        #     "r_target": round(r_target, 2),
+        #     "replays": self.n_replays,
+        # }
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        bands = np.percentile(p_paths, [5, 25, 50, 75, 95], axis=0).T.tolist()
         return {
             "p_target": round(p_target, 4),
             "p_stop": round(p_stop, 4),
@@ -174,7 +192,9 @@ class MonteCarloGate:
             "avg_r": round(avg_r, 4),
             "r_target": round(r_target, 2),
             "replays": self.n_replays,
+            "bands": bands,
         }
+        # =============================================================================
 
     def evaluate_signal(
         self,
@@ -222,3 +242,57 @@ class MonteCarloGate:
         # Setup passed odds gate
         reason = f"Monte Carlo approved: Target-First {p_target:.1%}, Stop-First {stats['p_stop']:.1%}, ExpR {avg_r:+.2f}R"
         return True, stats, reason
+
+    @staticmethod
+    def render_fan_chart(
+        stats: dict[str, Any],
+        symbol: str,
+        entry: float,
+        stop: float,
+        target: float,
+        date_str: str = "2026-10-19",
+        entry_time: str = "10:15",
+        height: int = 15,
+    ) -> str:
+        """Render ASCII fan chart of Monte Carlo bands."""
+        bands = stats.get("bands")
+        if not bands:
+            return ""
+
+        lo = min([b[0] for b in bands] + [stop, target, entry])
+        hi = max([b[4] for b in bands] + [stop, target, entry])
+        pad = (hi - lo) * 0.04 or 0.01
+        lo, hi = lo - pad, hi + pad
+        step = (hi - lo) / max(1, height - 1)
+
+        def row(price: float) -> int:
+            return max(0, min(height - 1, int(round((hi - price) / step))))
+
+        grid = [[" "] * len(bands) for _ in range(height)]
+        for j, b in enumerate(bands):
+            r5, r25, r50, r75, r95 = [row(x) for x in b]
+            for r in range(r95, r5 + 1):
+                grid[r][j] = "."
+            for r in range(r75, r25 + 1):
+                grid[r][j] = ":"
+            grid[r50][j] = "*"
+
+        marks = {row(target): "target", row(stop): "stop"}
+        if row(entry) not in marks:
+            marks[row(entry)] = "entry"
+
+        for r in (row(target), row(stop)):
+            grid[r] = ["-" if ch == " " else ch for ch in grid[r]]
+
+        out = [
+            f"{symbol} {date_str}, {stats.get('replays', 2000):,} replay paths from {entry_time} entry"
+        ]
+        for r in range(height):
+            label = marks.get(r)
+            price_val = target if label == "target" else stop if label == "stop" else entry if label == "entry" else (hi - r * step)
+            left = f"{price_val:9.2f} |" if (label or r in (0, height - 1)) else "          |"
+            out.append(left + "".join(grid[r]) + (f"  {label}" if label else ""))
+
+        out.append("          +" + "-" * len(bands))
+        out.append("* median   : middle half of the paths   . 90 % of the paths   - stop and target")
+        return "\n".join(out)

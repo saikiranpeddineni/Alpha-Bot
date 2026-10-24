@@ -91,3 +91,7 @@ scan.py
 pyrefly.toml
 CHANGES.md
 
+# Day Trader local runtime documents
+trader/
+backend/trader/
+
