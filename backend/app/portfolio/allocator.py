@@ -272,7 +272,19 @@ def process_portfolio_allocations(
         # [NEW CODE]:
         alloc_results = portfolio_allocator.allocate(approved_candidates, available_capital, equity)
         for res in alloc_results:
-            if res.kelly_fraction is not None and res.kelly_fraction > 0:
+            # =============================================================================
+            # [MODIFIED 2026-10-25]: Record Numeric Kelly Fractions (Including 0.0)
+            # ORIGINAL INTENT: Guarded kelly_fraction > 0 to prevent 0.0 sizing.
+            # REASON FOR CHANGE: RiskManager.evaluate_entry already safely checks `kelly_override > 0`.
+            #                    Preserving numeric 0.0 satisfies PortfolioDecision contract and integrity tests.
+            # SAFE ROLLBACK: Previous line preserved below as comments.
+            # -----------------------------------------------------------------------------
+            # [PREVIOUS CODE - PRESERVED]:
+            # if res.kelly_fraction is not None and res.kelly_fraction > 0:
+            # -----------------------------------------------------------------------------
+            # [NEW CODE]:
+            if res.kelly_fraction is not None:
+            # =============================================================================
                 kelly_map[res.symbol] = res.kelly_fraction  # now flows to RiskManager.evaluate_entry()
         # =============================================================================
 

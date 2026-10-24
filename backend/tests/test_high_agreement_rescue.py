@@ -86,7 +86,18 @@ def _process(pipeline: SignalPipeline, signal: Signal):
 
 
 def test_rescue_denied_when_raw_trade_score_floor_is_not_met():
-    pipeline = _pipeline(raw_score=65.0, meta_probability=0.90)
+    # =============================================================================
+    # [MODIFIED 2026-10-25]: Align with 2026-10-24 Calibration of score_threshold_range to 65.0
+    # ORIGINAL INTENT: raw_score=65.0 tested rejection against old 70.0 floor.
+    # REASON FOR CHANGE: With threshold calibrated to 65.0, raw_score=60.0 tests floor denial.
+    # SAFE ROLLBACK: Previous line preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # pipeline = _pipeline(raw_score=65.0, meta_probability=0.90)
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    pipeline = _pipeline(raw_score=60.0, meta_probability=0.90)
+    # =============================================================================
     signal = _signal()
 
     accepted, rejected = _process(pipeline, signal)
@@ -150,6 +161,19 @@ def test_rescue_telemetry_reports_raw_and_admission_scores_consistently():
 
     messages = [call.args[1] for call in info.call_args_list if len(call.args) >= 2]
     rescue_message = next(message for message in messages if "HIGH_AGREEMENT_RESCUE" in message)
-    assert "raw_score=80.5>=70.0" in rescue_message
-    assert "admission_score=56.3<70.0" in rescue_message
-    assert "raw_score=80.5<70.0" not in rescue_message
+    # =============================================================================
+    # [MODIFIED 2026-10-25]: Align Telemetry String Assertions with 65.0 Calibration
+    # ORIGINAL INTENT: Asserted hardcoded 70.0 floor strings in log messages.
+    # REASON FOR CHANGE: Calibrated score_threshold_range is 65.0, so logs output 65.0.
+    # SAFE ROLLBACK: Previous lines preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # assert "raw_score=80.5>=70.0" in rescue_message
+    # assert "admission_score=56.3<70.0" in rescue_message
+    # assert "raw_score=80.5<70.0" not in rescue_message
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    assert "raw_score=80.5>=65.0" in rescue_message
+    assert "admission_score=56.3<65.0" in rescue_message
+    assert "raw_score=80.5<65.0" not in rescue_message
+    # =============================================================================
