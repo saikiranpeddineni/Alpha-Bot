@@ -19,6 +19,26 @@ ET = ZoneInfo("America/New_York")
 
 MARKET_OPEN = time(9, 30)
 MARKET_CLOSE = time(16, 0)
+EARLY_MARKET_CLOSE = time(13, 0)
+
+# =============================================================================
+# [MODIFIED 2026-10-25]: 2026-2027 NYSE 1:00 PM Early Close Registry
+# ORIGINAL INTENT: Rely purely on exchange_calendars library for early close detection.
+# REASON FOR CHANGE: Day Trader Suite trader-alerts module defines explicit NYSE early closes;
+#                    guarantees early close detection if exchange_calendars is offline or out-of-range.
+# SAFE ROLLBACK: Remove NYSE_EARLY_CLOSE or delete references.
+# -----------------------------------------------------------------------------
+# [PREVIOUS CODE - PRESERVED]:
+# (Constant did not previously exist)
+# -----------------------------------------------------------------------------
+# [NEW CODE]:
+NYSE_EARLY_CLOSE: dict[str, str] = {
+    "2026-11-27": "day after Thanksgiving (1:00 PM ET early close)",
+    "2026-12-24": "Christmas Eve (1:00 PM ET early close)",
+    "2027-11-26": "day after Thanksgiving (1:00 PM ET early close)",
+    "2027-12-24": "Christmas Eve (1:00 PM ET early close)",
+}
+# =============================================================================
 
 _XNYS = xcals.get_calendar("XNYS")
 
@@ -98,6 +118,18 @@ class MarketClock:
     def session_date(self, dt: datetime | None = None) -> date:
         return self.to_et(dt or self.now_utc()).date()
 
+    def is_early_close(self, dt: datetime | None = None) -> bool:
+        """True if the session containing ``dt`` is an early close (1:00 PM ET)."""
+        et = self.to_et(dt or self.now_utc())
+        date_str = et.date().isoformat()
+        if date_str in NYSE_EARLY_CLOSE:
+            return True
+        try:
+            close_dt = self.session_close(dt)
+            return close_dt.time() <= EARLY_MARKET_CLOSE
+        except Exception:
+            return False
+
     def status(self, dt: datetime | None = None) -> dict:
         dt = dt or self.now_utc()
         open_now = self.is_open(dt)
@@ -119,7 +151,32 @@ def get_xnys_session_close(entry_dt: datetime) -> datetime:
         entry_dt = entry_dt.replace(tzinfo=UTC)
     et_dt = entry_dt.astimezone(ET)
     session_date = et_dt.date().isoformat()
-    if not _XNYS.is_session(session_date):
-        raise ValueError(f"{session_date} is not an XNYS trading session")
-    close_ts = _XNYS.session_close(session_date)
-    return close_ts.to_pydatetime().astimezone(ET)
+    # =============================================================================
+    # [MODIFIED 2026-10-25]: Robust Early Close & Calendar Exception Guard
+    # ORIGINAL INTENT: Looked up _XNYS.is_session and _XNYS.session_close directly.
+    # REASON FOR CHANGE: When querying dates near or beyond calendar horizon (e.g. 2027),
+    #                    _XNYS raises NotSessionError. NYSE_EARLY_CLOSE provides authoritative 13:00 close.
+    # SAFE ROLLBACK: Revert to direct _XNYS query below.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # if not _XNYS.is_session(session_date):
+    #     raise ValueError(f"{session_date} is not an XNYS trading session")
+    # close_ts = _XNYS.session_close(session_date)
+    # return close_ts.to_pydatetime().astimezone(ET)
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    if session_date in NYSE_EARLY_CLOSE:
+        return et_dt.replace(hour=EARLY_MARKET_CLOSE.hour, minute=EARLY_MARKET_CLOSE.minute, second=0, microsecond=0)
+
+    try:
+        if not _XNYS.is_session(session_date):
+            raise ValueError(f"{session_date} is not an XNYS trading session")
+        close_ts = _XNYS.session_close(session_date)
+        return close_ts.to_pydatetime().astimezone(ET)
+    except ValueError:
+        raise
+    except Exception as exc:
+        if et_dt.date().weekday() < 5:
+            return et_dt.replace(hour=MARKET_CLOSE.hour, minute=MARKET_CLOSE.minute, second=0, microsecond=0)
+        raise ValueError(f"{session_date} is not an XNYS trading session: {exc}")
+    # =============================================================================

@@ -720,7 +720,62 @@ class TradingEngineEvaluationMixin:
                     pass
                 continue
 
+            # =============================================================================
+            # [MODIFIED 2026-10-25]: Hook Pre-Trade Monte Carlo Replay Gate (Time Machine)
+            # ORIGINAL INTENT: Accepted candidates immediately appended to candidate_entries.
+            # REASON FOR CHANGE: Day Trader Suite Time Machine module replays 2,000 bootstrap
+            #                    paths, vetoing setups with Target-First prob < 35% or ExpR < 0.05R.
+            # SAFE ROLLBACK: Set enable_monte_carlo_gate = False in config or environment.
+            # -----------------------------------------------------------------------------
+            # [PREVIOUS CODE - PRESERVED]:
+            # candidate_entries.append((sig, df))
+            # -----------------------------------------------------------------------------
+            # [NEW CODE]:
+            mc_gate_enabled = False
+            try:
+                from app.config import get_settings
+                cfg_obj = get_settings()
+                mc_gate_enabled = getattr(cfg_obj, "enable_monte_carlo_gate", False)
+            except Exception:
+                mc_gate_enabled = False
+
+            if mc_gate_enabled:
+                try:
+                    from app.ai.monte_carlo_gate import MonteCarloGate
+                    min_prob = float(getattr(cfg_obj, "monte_carlo_min_win_prob", 0.35))
+                    min_exp_r = float(getattr(cfg_obj, "monte_carlo_min_expected_r", 0.05))
+                    mc_gate = MonteCarloGate(min_win_prob=min_prob, min_expected_r=min_exp_r)
+                    passed_mc, mc_stats, mc_reason = mc_gate.evaluate_signal(sig, df)
+
+                    if not passed_mc:
+                        applog.info("monte_carlo", f"{symbol} {sig.strategy}: {mc_reason}")
+                        try:
+                            from app.core.shadow_ledger import shadow_ledger
+                            shadow_ledger.record(
+                                symbol=symbol,
+                                action=str(sig.action.value if hasattr(sig.action, "value") else sig.action),
+                                strategy=sig.strategy,
+                                gate="monte_carlo",
+                                reason=mc_reason,
+                                price=sig.price,
+                                stop_loss=sig.stop_loss,
+                                take_profit=sig.take_profit,
+                                atr14=float(df["atr14"].iloc[-1]) if "atr14" in df.columns and len(df) else None,
+                                confidence=sig.confidence,
+                                sig=sig,
+                            )
+                        except Exception:
+                            pass
+                        continue
+                    else:
+                        sig.monte_carlo_p_target = mc_stats.get("p_target")
+                        sig.monte_carlo_expected_r = mc_stats.get("avg_r")
+                        applog.debug("monte_carlo", f"{symbol} {sig.strategy}: {mc_reason}")
+                except Exception as mc_err:
+                    applog.warning("monte_carlo", f"{symbol} {sig.strategy}: fail-soft on monte carlo evaluation: {mc_err}")
+
             candidate_entries.append((sig, df))
+            # =============================================================================
         # =============================================================================
         return candidate_entries
 

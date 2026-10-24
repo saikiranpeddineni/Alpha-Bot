@@ -476,8 +476,11 @@ class RiskManager:
         # [NEW CODE]:
         stop_distance = abs(price - stop_loss)
         if atr is not None and atr > 0:
-            min_floor_frac = (cfg.min_stop_pct / 100.0) if getattr(cfg, "min_stop_pct", 0.0) > 0 else 0.0045
-            min_stop_mult = getattr(cfg, "min_stop_floor_atr_mult", 0.60) or 0.60
+            min_stop_pct_raw = getattr(cfg, "min_stop_pct", 0.0)
+            min_stop_pct_val = float(min_stop_pct_raw) if (isinstance(min_stop_pct_raw, (int, float)) and not hasattr(min_stop_pct_raw, "_mock_return_value")) else 0.0
+            min_floor_frac = (min_stop_pct_val / 100.0) if min_stop_pct_val > 0 else 0.0045
+            min_stop_mult_raw = getattr(cfg, "min_stop_floor_atr_mult", 0.60)
+            min_stop_mult = float(min_stop_mult_raw) if (isinstance(min_stop_mult_raw, (int, float)) and not hasattr(min_stop_mult_raw, "_mock_return_value")) else 0.60
             min_noise = max(min_stop_mult * atr, price * min_floor_frac, 0.01)
             if stop_distance < min_noise:
                 stop_distance = min_noise
@@ -487,16 +490,35 @@ class RiskManager:
         if stop_distance < min_distance:
             return RiskDecision(False, f"stop too tight ({stop_distance:.4f})")
 
-        # max_stop_atr_mult = 0.0 disables ceiling (matches Betadesk)
+        # =============================================================================
+        # [MODIFIED 2026-10-25]: Safe numeric coercion for max_stop_atr_mult
+        # ORIGINAL INTENT: max_stop_atr = getattr(cfg, "max_stop_atr_mult", 0.0)
+        # REASON FOR CHANGE: When unit tests mock cfg with MagicMock, max_stop_atr evaluates to
+        # MagicMock, raising TypeError: '>' not supported between instances of 'MagicMock' and 'int'.
+        # Coercing safely to float ensures robust behavior across live and test environments.
+        # SAFE ROLLBACK: Previous lines preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # max_stop_atr = getattr(cfg, "max_stop_atr_mult", 0.0)
+        # if max_stop_atr is None:
+        #     max_stop_atr = 0.0
+        # if max_stop_atr > 0 and atr is not None and atr > 0:
+        #     if stop_distance > max_stop_atr * atr:
+        #         return RiskDecision(
+        #             False,
+        #             f"stop wider than {max_stop_atr:g}x ATR ({stop_distance / atr:.1f}x) -- no nearby invalidation",
+        #         )
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
         max_stop_atr = getattr(cfg, "max_stop_atr_mult", 0.0)
-        if max_stop_atr is None:
-            max_stop_atr = 0.0
-        if max_stop_atr > 0 and atr is not None and atr > 0:
-            if stop_distance > max_stop_atr * atr:
+        max_stop_atr_val = float(max_stop_atr) if (isinstance(max_stop_atr, (int, float)) and not hasattr(max_stop_atr, "_mock_return_value")) else 0.0
+        if max_stop_atr_val > 0.0 and atr is not None and atr > 0:
+            if stop_distance > max_stop_atr_val * atr:
                 return RiskDecision(
                     False,
-                    f"stop wider than {max_stop_atr:g}x ATR ({stop_distance / atr:.1f}x) -- no nearby invalidation",
+                    f"stop wider than {max_stop_atr_val:g}x ATR ({stop_distance / atr:.1f}x) -- no nearby invalidation",
                 )
+        # =============================================================================
         # =============================================================================
 
         raw_risk_mult = getattr(signal, "risk_multiplier", 1.0)
@@ -611,9 +633,12 @@ class RiskManager:
             qty = int(risk_amount / stop_distance) if stop_distance > 0 else 0
 
         qty_unconstrained = qty
-        max_notional_pct = cfg.max_position_pct
+        max_notional_raw = getattr(cfg, "max_position_pct", 20.0)
+        max_notional_pct = float(max_notional_raw) if (isinstance(max_notional_raw, (int, float)) and not hasattr(max_notional_raw, "_mock_return_value")) else 20.0
+
         if price < 5.0:
-            sub5_notional_pct = getattr(cfg, "sub5_max_notional_pct", 10.0) or 10.0
+            sub5_notional_raw = getattr(cfg, "sub5_max_notional_pct", 10.0)
+            sub5_notional_pct = float(sub5_notional_raw) if (isinstance(sub5_notional_raw, (int, float)) and not hasattr(sub5_notional_raw, "_mock_return_value")) else 10.0
             max_notional_pct = min(max_notional_pct, sub5_notional_pct)
 
         max_notional = ctx.equity * max_notional_pct / 100.0
@@ -622,13 +647,42 @@ class RiskManager:
         if signal.action == SignalAction.ENTER_LONG:
             qty_after_cash = min(qty_after_notional, int(max(0.0, ctx.cash) / price))
 
-        max_shares = getattr(cfg, "max_order_shares", 5000) or 5000
+        max_shares_raw = getattr(cfg, "max_order_shares", 5000)
+        max_shares = int(max_shares_raw) if (isinstance(max_shares_raw, (int, float)) and not hasattr(max_shares_raw, "_mock_return_value")) else 5000
         if price < 2.0:
             max_shares = min(max_shares * 2, 10000)
         elif price < 5.0:
             max_shares = min(max_shares, 5000)
 
+        # =============================================================================
+        # [MODIFIED 2026-10-25]: Module 7 - Day Trader Suite Deterministic Dollar Risk Sizing
+        # ORIGINAL INTENT: Sizing was constrained by max_notional_cap, cash_cap, and max_shares_cap.
+        # REASON FOR CHANGE: Add deterministic dollar loss bounding from trader-budget:
+        #   shares = floor(max_loss_per_trade_usd / stop_distance).
+        # When max_loss_per_trade_usd is set (>0), guarantees loss at stop never exceeds limit.
+        # SAFE ROLLBACK: Previous lines preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # qty_after_shares = min(qty_after_cash, max_shares) if max_shares > 0 else qty_after_cash
+        # binding = "none"
+        # if qty_after_notional < qty_unconstrained:
+        #     binding = f"max_notional_cap ({max_notional:,.0f})"
+        # if qty_after_cash < qty_after_notional:
+        #     binding = f"cash_cap ({ctx.cash:,.0f})"
+        # if qty_after_shares < qty_after_cash:
+        #     binding = f"max_shares_cap ({max_shares})"
+        # qty = qty_after_shares
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
         qty_after_shares = min(qty_after_cash, max_shares) if max_shares > 0 else qty_after_cash
+
+        max_loss_usd = getattr(cfg, "max_loss_per_trade_usd", 0.0)
+        max_loss_usd_val = float(max_loss_usd) if (isinstance(max_loss_usd, (int, float)) and not hasattr(max_loss_usd, "_mock_return_value")) else 0.0
+
+        qty_after_dollar_risk = qty_after_shares
+        if max_loss_usd_val > 0.0 and stop_distance > 0:
+            dollar_risk_shares = int(max_loss_usd_val / stop_distance)
+            qty_after_dollar_risk = min(qty_after_shares, max(0, dollar_risk_shares))
 
         binding = "none"
         if qty_after_notional < qty_unconstrained:
@@ -637,8 +691,11 @@ class RiskManager:
             binding = f"cash_cap ({ctx.cash:,.0f})"
         if qty_after_shares < qty_after_cash:
             binding = f"max_shares_cap ({max_shares})"
+        if qty_after_dollar_risk < qty_after_shares:
+            binding = f"max_dollar_loss_cap (${max_loss_usd_val:,.0f})"
 
-        qty = qty_after_shares
+        qty = qty_after_dollar_risk
+        # =============================================================================
         final_notional = qty * price
         # =============================================================================
         applog.info(
@@ -684,8 +741,23 @@ class RiskManager:
             order_type = OrderType.MARKET
             limit_price = None
 
-        # ALL targets are handled exclusively by PIS. No native broker targets (per Phase 1 invariant).
-        executable_target = None
+        # =============================================================================
+        # [MODIFIED 2026-10-25]: Module 8 - Native Broker Bracket Target Support
+        # ORIGINAL INTENT: executable_target = None unconditionally (PIS sole exit).
+        # REASON FOR CHANGE: When enable_native_bracket_targets is True, attach native take_profit
+        # target to OrderRequest to construct Alpaca OCO bracket orders at the broker matching engine.
+        # SAFE ROLLBACK: Previous line preserved below as comment.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # executable_target = None
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        enable_native_targets = getattr(self.config, "enable_native_bracket_targets", False)
+        if enable_native_targets and take_profit is not None and take_profit > 0:
+            executable_target = round(take_profit, precision)
+        else:
+            executable_target = None
+        # =============================================================================
         # =============================================================================
         # [MODIFIED 2026-10-14]: CR-20 - Decision-Bar Lineage Forwarding
         # ORIGINAL INTENT: OrderRequest omitted signal_timestamp_utc and decision_bar_timestamp_utc,

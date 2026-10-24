@@ -180,6 +180,26 @@ class RiskConfig(BaseModel):
     sub5_slippage_buffer: float = Field(0.85, ge=0.50, le=1.0)
     max_order_shares: int = Field(5000, ge=100, le=50000)
     # =============================================================================
+    # [ADDED 2026-10-25]: Day Trader Skill Suite (v2) Quantitative Integration Hooks
+    # ORIGINAL INTENT: Sizing was purely fractional equity/Kelly without a hard dollar loss ceiling;
+    # stops and targets were managed solely in software without native broker bracket integration;
+    # candidate signals passed to the broker without pre-trade empirical Monte Carlo simulation.
+    # REASON FOR CHANGE: Integrate Day Trader Suite modules (Modules 5, 6, 7, 8):
+    #   1. max_loss_per_trade_usd: Deterministic dollar loss ceiling (e.g. $50-$250).
+    #   2. enable_native_bracket_targets: Server-side Alpaca OCO brackets for stop & target.
+    #   3. use_or_midpoint_stop: Geometric Opening Range midpoint stop calculation.
+    #   4. enable_monte_carlo_gate: 2,000-session bootstrap path odds verification.
+    # SAFE ROLLBACK: Remove fields below to revert to previous behavior.
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    max_loss_per_trade_usd: float = Field(0.0, ge=0.0, le=100_000.0)
+    enable_native_bracket_targets: bool = Field(False)
+    use_or_midpoint_stop: bool = Field(True)
+    enable_monte_carlo_gate: bool = Field(False)
+    monte_carlo_min_win_prob: float = Field(0.35, ge=0.0, le=1.0)
+    monte_carlo_min_expected_r: float = Field(0.05, ge=-1.0, le=10.0)
+    # =============================================================================
+    # =============================================================================
     # =============================================================================
     # [MODIFIED 2026-10-24]: Calibrate score_threshold_range from 70.0 to 65.0 & Add Repeat-Loss / Runner Safeguards
     # ORIGINAL INTENT: score_threshold_range was 70.0. With 0.55 regime multiplier on breakout setups,

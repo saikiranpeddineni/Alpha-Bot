@@ -1,0 +1,224 @@
+"""Pre-Trade Monte Carlo Replay Gate (Time Machine).
+
+Inspired by Jake Schincariol's Day Trader Skill suite (trader-timemachine).
+Replays 2,000 to 10,000 bootstrap intraday paths before executing an order,
+evaluating whether the empirical distribution of recent price bars gives
+sufficient statistical probability of reaching take_profit before hitting stop_loss.
+
+Rules:
+1. Replays paths using empirical 5-minute (or 1-minute) relative bar returns
+   (high/prev_close, low/prev_close, close/prev_close).
+2. Stop is checked before target on every bar (conservative call).
+3. If Target-First probability < min_win_prob (e.g. 35%) OR Expected R < min_expected_r (e.g. 0.05R),
+   the setup is vetoed before risking real capital.
+"""
+
+from __future__ import annotations
+
+import math
+from typing import Any
+import numpy as np
+import pandas as pd
+
+from app.core.applog import applog
+from app.core.domain import Signal, SignalAction
+
+
+class MonteCarloGate:
+    """Pre-trade Monte Carlo bootstrap simulator and admission gate."""
+
+    def __init__(
+        self,
+        min_win_prob: float = 0.35,
+        min_expected_r: float = 0.05,
+        n_replays: int = 2000,
+        default_steps: int = 50,
+        seed: int = 19,
+    ) -> None:
+        self.min_win_prob = float(min_win_prob)
+        self.min_expected_r = float(min_expected_r)
+        self.n_replays = int(n_replays)
+        self.default_steps = int(default_steps)
+        self.seed = int(seed)
+
+    def extract_ratio_pool(self, df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+        """Extract empirical relative bar returns (high_ratio, low_ratio, close_ratio) from DataFrame."""
+        if df is None or len(df) < 15:
+            return None
+
+        try:
+            # Resample 1m bars to 5m bars if sufficient data, else use 1m
+            if len(df) >= 30 and isinstance(df.index, pd.DatetimeIndex):
+                bars_5m = df.resample("5min").agg({
+                    "open": "first",
+                    "high": "max",
+                    "low": "min",
+                    "close": "last",
+                }).dropna()
+                frame = bars_5m if len(bars_5m) >= 12 else df
+            else:
+                frame = df
+
+            closes = frame["close"].to_numpy(dtype=np.float64)
+            highs = frame["high"].to_numpy(dtype=np.float64)
+            lows = frame["low"].to_numpy(dtype=np.float64)
+
+            prev_closes = closes[:-1]
+            if len(prev_closes) < 10:
+                return None
+
+            h_ratios = highs[1:] / prev_closes
+            l_ratios = lows[1:] / prev_closes
+            c_ratios = closes[1:] / prev_closes
+
+            # Sanity filter against zero/NaN/infinite ratios
+            valid_mask = (
+                np.isfinite(h_ratios)
+                & np.isfinite(l_ratios)
+                & np.isfinite(c_ratios)
+                & (h_ratios > 0.5)
+                & (h_ratios < 2.0)
+                & (l_ratios > 0.5)
+                & (l_ratios < 2.0)
+                & (c_ratios > 0.5)
+                & (c_ratios < 2.0)
+            )
+
+            if np.sum(valid_mask) < 10:
+                return None
+
+            return h_ratios[valid_mask], l_ratios[valid_mask], c_ratios[valid_mask]
+        except Exception as exc:
+            applog.debug("monte_carlo", f"Failed to extract ratio pool: {exc}")
+            return None
+
+    def simulate(
+        self,
+        entry: float,
+        stop: float,
+        target: float,
+        is_long: bool,
+        pool: tuple[np.ndarray, np.ndarray, np.ndarray],
+        steps: int | None = None,
+    ) -> dict[str, Any]:
+        """Run vectorised Monte Carlo bootstrap replays."""
+        h_pool, l_pool, c_pool = pool
+        n_samples = len(h_pool)
+        n_steps = steps or self.default_steps
+
+        risk = abs(entry - stop)
+        if risk <= 1e-6:
+            return {
+                "p_target": 0.0,
+                "p_stop": 1.0,
+                "p_neither": 0.0,
+                "avg_r": -1.0,
+                "replays": self.n_replays,
+            }
+
+        r_target = abs(target - entry) / risk
+
+        rng = np.random.default_rng(self.seed)
+        indices = rng.integers(0, n_samples, size=(self.n_replays, n_steps))
+
+        p_paths = np.empty((self.n_replays, n_steps + 1), dtype=np.float64)
+        p_paths[:, 0] = entry
+        h_paths = np.empty((self.n_replays, n_steps), dtype=np.float64)
+        l_paths = np.empty((self.n_replays, n_steps), dtype=np.float64)
+
+        for t in range(n_steps):
+            step_idx = indices[:, t]
+            h_paths[:, t] = p_paths[:, t] * h_pool[step_idx]
+            l_paths[:, t] = p_paths[:, t] * l_pool[step_idx]
+            p_paths[:, t + 1] = p_paths[:, t] * c_pool[step_idx]
+
+        if is_long:
+            hit_stop = l_paths <= stop
+            hit_target = h_paths >= target
+        else:
+            hit_stop = h_paths >= stop
+            hit_target = l_paths <= target
+
+        # First bar where stop or target was breached
+        stop_first_bar = np.where(hit_stop.any(axis=1), np.argmax(hit_stop, axis=1), n_steps + 999)
+        target_first_bar = np.where(hit_target.any(axis=1), np.argmax(hit_target, axis=1), n_steps + 999)
+
+        # Conservative convention: if both touched in same bar, stop takes precedence
+        is_stop = (stop_first_bar <= target_first_bar) & (stop_first_bar < n_steps)
+        is_target = (target_first_bar < stop_first_bar) & (target_first_bar < n_steps)
+        is_neither = ~is_stop & ~is_target
+
+        p_target = float(np.mean(is_target))
+        p_stop = float(np.mean(is_stop))
+        p_neither = float(np.mean(is_neither))
+
+        # Calculate realized R distribution across all paths
+        r_outcomes = np.empty(self.n_replays, dtype=np.float64)
+        r_outcomes[is_stop] = -1.0
+        r_outcomes[is_target] = r_target
+
+        if np.any(is_neither):
+            terminal_prices = p_paths[is_neither, -1]
+            if is_long:
+                neither_r = (terminal_prices - entry) / risk
+            else:
+                neither_r = (entry - terminal_prices) / risk
+            r_outcomes[is_neither] = neither_r
+
+        avg_r = float(np.mean(r_outcomes))
+
+        return {
+            "p_target": round(p_target, 4),
+            "p_stop": round(p_stop, 4),
+            "p_neither": round(p_neither, 4),
+            "avg_r": round(avg_r, 4),
+            "r_target": round(r_target, 2),
+            "replays": self.n_replays,
+        }
+
+    def evaluate_signal(
+        self,
+        sig: Signal,
+        df: pd.DataFrame,
+    ) -> tuple[bool, dict[str, Any], str]:
+        """Evaluate signal against pre-trade Monte Carlo odds."""
+        if sig.stop_loss is None or sig.take_profit is None or sig.price is None:
+            # Cannot simulate without concrete geometry
+            return True, {}, "bypassed: missing price/stop/target bounds"
+
+        is_long = sig.action == SignalAction.ENTER_LONG
+
+        pool = self.extract_ratio_pool(df)
+        if pool is None:
+            # Fall soft if insufficient historical intraday bars for empirical bootstrap
+            return True, {}, "fail-soft: insufficient intraday bars for empirical pool"
+
+        stats = self.simulate(
+            entry=float(sig.price),
+            stop=float(sig.stop_loss),
+            target=float(sig.take_profit),
+            is_long=is_long,
+            pool=pool,
+        )
+
+        p_target = stats["p_target"]
+        avg_r = stats["avg_r"]
+
+        # Veto conditions
+        if p_target < self.min_win_prob:
+            reason = (
+                f"Monte Carlo veto: Target-First prob {p_target:.1%} < {self.min_win_prob:.1%} "
+                f"(Stop-First: {stats['p_stop']:.1%}, Neither: {stats['p_neither']:.1%})"
+            )
+            return False, stats, reason
+
+        if avg_r < self.min_expected_r:
+            reason = (
+                f"Monte Carlo veto: Expected R {avg_r:+.2f}R < {self.min_expected_r:+.2f}R "
+                f"(Target-First: {p_target:.1%}, Stop-First: {stats['p_stop']:.1%})"
+            )
+            return False, stats, reason
+
+        # Setup passed odds gate
+        reason = f"Monte Carlo approved: Target-First {p_target:.1%}, Stop-First {stats['p_stop']:.1%}, ExpR {avg_r:+.2f}R"
+        return True, stats, reason

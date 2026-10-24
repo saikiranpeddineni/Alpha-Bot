@@ -116,6 +116,18 @@ class OpeningRangeBreakout(Strategy):
         "require_vwap_alignment": True,  # Longs >= VWAP, Shorts <= VWAP
         "avoid_counter_trend_regime": True, # Reject Long in TREND_DOWN, Short in TREND_UP
         "vwap_fade_bars": 2,             # 2 consecutive closes beyond VWAP cuts failed breakouts
+        # =============================================================================
+        # [MODIFIED 2026-10-25]: Exit Planner Geometric Midpoint Stop Configuration
+        # ORIGINAL INTENT: Structural stop anchored to the opposite side of the full opening range.
+        # REASON FOR CHANGE: Day Trader Suite Exit Planner module sets midpoint stop (High+Low)/2.
+        # SAFE ROLLBACK: Set "use_or_midpoint_stop": False to revert to full range stop.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # (Parameter was not present in default_params)
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        "use_or_midpoint_stop": True,    # Day Trader Exit Planner geometric midpoint stop (High+Low)/2
+        # =============================================================================
     }
     # =============================================================================
 
@@ -395,7 +407,21 @@ class OpeningRangeBreakout(Strategy):
                 return None
             if acceptance_long < min_acceptance:
                 return None
-            structural_stop = or_low
+            # =============================================================================
+            # [MODIFIED 2026-10-25]: Exit Planner Geometric Midpoint Stop for Longs
+            # ORIGINAL INTENT: Structural stop anchored to or_low (opposite side of range).
+            # REASON FOR CHANGE: Day Trader Suite Exit Planner module sets midpoint stop (High+Low)/2.
+            # SAFE ROLLBACK: Set "use_or_midpoint_stop": False to revert to full range stop.
+            # -----------------------------------------------------------------------------
+            # [PREVIOUS CODE - PRESERVED]:
+            # structural_stop = or_low
+            # -----------------------------------------------------------------------------
+            # [NEW CODE]:
+            if p.get("use_or_midpoint_stop", True):
+                structural_stop = (or_high + or_low) / 2.0
+            else:
+                structural_stop = or_low
+            # =============================================================================
             safety_stop = close - float(p.get("atr_stop_mult", 1.5)) * atr
             stop = max(structural_stop, safety_stop)
             min_stop_cushion = close * float(p.get("min_stop_cushion_pct", 0.0045))
@@ -436,7 +462,21 @@ class OpeningRangeBreakout(Strategy):
                 return None
             if acceptance_short < min_acceptance:
                 return None
-            structural_stop = or_high
+            # =============================================================================
+            # [MODIFIED 2026-10-25]: Exit Planner Geometric Midpoint Stop for Shorts
+            # ORIGINAL INTENT: Structural stop anchored to or_high (opposite side of range).
+            # REASON FOR CHANGE: Day Trader Suite Exit Planner module sets midpoint stop (High+Low)/2.
+            # SAFE ROLLBACK: Set "use_or_midpoint_stop": False to revert to full range stop.
+            # -----------------------------------------------------------------------------
+            # [PREVIOUS CODE - PRESERVED]:
+            # structural_stop = or_high
+            # -----------------------------------------------------------------------------
+            # [NEW CODE]:
+            if p.get("use_or_midpoint_stop", True):
+                structural_stop = (or_high + or_low) / 2.0
+            else:
+                structural_stop = or_high
+            # =============================================================================
             safety_stop = close + float(p.get("atr_stop_mult", 1.5)) * atr
             stop = min(structural_stop, safety_stop)
             min_stop_cushion = close * float(p.get("min_stop_cushion_pct", 0.0045))
