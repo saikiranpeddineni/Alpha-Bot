@@ -342,6 +342,7 @@ def run_pipeline() -> None:
     print("\n[STEP 6] Time Machine: 10,000 Monte Carlo Session Replays")
     s6_stats, s6_chart = pipeline.step6_time_machine(symbol="TSLA", entry_price=364.18, stop_price=358.32, target_price=370.04, replays=10000)
     print(f" -> Target First: {s6_stats['p_target']:.1%} | Stop First: {s6_stats['p_stop']:.1%} | Neither: {s6_stats['p_neither']:.1%} | ExpR: {s6_stats['avg_r']:+.2f}R")
+    print(f" -> Post-Exit Future Projections: Median Close: ${s6_stats.get('median_close', 0):.2f} | Top 5% Runner Peak: ${s6_stats.get('max_excursion_p95', 0):.2f} | Beyond-Target Prob: {s6_stats.get('runner_prob_beyond_target', 0):.1%}")
     print("\n" + s6_chart + "\n")
 
     # Step 7

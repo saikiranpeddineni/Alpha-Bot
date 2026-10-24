@@ -184,6 +184,37 @@ class MonteCarloGate:
         # }
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
+        # =============================================================================
+        # [MODIFIED 2026-10-25]: Add Post-Exit Future Prediction & Terminal Close Distribution
+        # ORIGINAL INTENT: Returned p_target, p_stop, p_neither, avg_r, bands.
+        # REASON FOR CHANGE: Explicitly evaluate post-exit price continuation, runner probability,
+        #                    and 5th/50th/95th percentile terminal close distributions.
+        # SAFE ROLLBACK: Revert return dictionary below to previous version.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # bands = np.percentile(p_paths, [5, 25, 50, 75, 95], axis=0).T.tolist()
+        # return {
+        #     "p_target": round(p_target, 4),
+        #     "p_stop": round(p_stop, 4),
+        #     "p_neither": round(p_neither, 4),
+        #     "avg_r": round(avg_r, 4),
+        #     "r_target": round(r_target, 2),
+        #     "replays": self.n_replays,
+        #     "bands": bands,
+        # }
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        terminal_prices = p_paths[:, -1]
+        median_close = float(np.median(terminal_prices))
+        p5_close = float(np.percentile(terminal_prices, 5))
+        p95_close = float(np.percentile(terminal_prices, 95))
+        if is_long:
+            runner_prob = float(np.mean(terminal_prices > target))
+            max_excursion_p95 = float(np.percentile(np.max(h_paths, axis=1), 95))
+        else:
+            runner_prob = float(np.mean(terminal_prices < target))
+            max_excursion_p95 = float(np.percentile(np.min(l_paths, axis=1), 5))
+
         bands = np.percentile(p_paths, [5, 25, 50, 75, 95], axis=0).T.tolist()
         return {
             "p_target": round(p_target, 4),
@@ -193,7 +224,13 @@ class MonteCarloGate:
             "r_target": round(r_target, 2),
             "replays": self.n_replays,
             "bands": bands,
+            "median_close": round(median_close, 2),
+            "p5_close": round(p5_close, 2),
+            "p95_close": round(p95_close, 2),
+            "runner_prob_beyond_target": round(runner_prob, 4),
+            "max_excursion_p95": round(max_excursion_p95, 2),
         }
+        # =============================================================================
         # =============================================================================
 
     def evaluate_signal(
