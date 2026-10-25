@@ -5,7 +5,7 @@ import { useStore } from "../store";
 import { HeartbeatIndicator } from "./HeartbeatIndicator";
 import { Modal } from "./Modal";
 
-export function TopBar(props: { onBacktest: () => void; onReplay: () => void; onSettings: () => void }) {
+export function TopBar(props: { onBacktest: () => void; onSettings: () => void }) {
   const status = useStore((s) => s.status);
   const account = useStore((s) => s.account);
   const connected = useStore((s) => s.connected);
@@ -88,7 +88,6 @@ export function TopBar(props: { onBacktest: () => void; onReplay: () => void; on
           {busy ? "…" : running ? "■ Stop" : "▶ Start"}
         </button>
         <button className="btn" onClick={props.onBacktest}>Backtest</button>
-        <button className="btn" onClick={props.onReplay}>Replay</button>
         <button className="btn icon" onClick={props.onSettings} title="Settings">⚙</button>
       </div>
 

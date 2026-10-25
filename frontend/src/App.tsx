@@ -1,10 +1,8 @@
 import { useEffect, useState } from "react";
 import { api } from "./api";
-import "./replay.css";
 import "./mobile-premium.css";
 import "./mobile-finish.css";
 import { BacktestModal } from "./components/BacktestModal";
-import { ReplayModal } from "./components/ReplayModal";
 import { BottomTabs } from "./components/BottomTabs";
 import { PriceChart } from "./components/PriceChart";
 import { SettingsModal } from "./components/SettingsModal";
@@ -25,7 +23,6 @@ export default function App() {
   const toast = useStore((s) => s.toast);
   const connected = useStore((s) => s.connected);
   const [showBacktest, setShowBacktest] = useState(false);
-  const [showReplay, setShowReplay] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [bootError, setBootError] = useState<string | null>(null);
   const [isMobile, setIsMobile] = useState(window.innerWidth < 1024);
@@ -80,7 +77,6 @@ export default function App() {
               <MobileMore
                 onSettings={() => setShowSettings(true)}
                 onBacktest={() => setShowBacktest(true)}
-                onReplay={() => setShowReplay(true)}
               />
             )}
           </>}
@@ -93,7 +89,6 @@ export default function App() {
           <MobileNavButton active={mobileTab === "more"} label="More" icon="•••" onClick={() => setMobileTab("more")} />
         </nav>
         {showBacktest && <BacktestModal onClose={() => setShowBacktest(false)} />}
-        {showReplay && <ReplayModal onClose={() => setShowReplay(false)} />}
         {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
         {toast && <div className={`toast ${toast.kind}`} role={toast.kind === "error" ? "alert" : "status"} aria-live="polite">{toast.text}</div>}
       </div>
@@ -101,13 +96,12 @@ export default function App() {
   }
 
   return <div className="app">
-    <TopBar onBacktest={() => setShowBacktest(true)} onReplay={() => setShowReplay(true)} onSettings={() => setShowSettings(true)} />
+    <TopBar onBacktest={() => setShowBacktest(true)} onSettings={() => setShowSettings(true)} />
     <div style={{ display: "flex", flexDirection: "column", minHeight: 0 }}>
       <SystemStatusBanner status={status} connected={connected} bootError={bootError} onRetry={retryBootstrap} />
       {status ? <div className="main" style={{ flex: 1, minHeight: 0 }}><div className="left-col"><Watchlist /><TrainerPanel /></div><div className="center"><PriceChart /><BottomTabs /></div><SidePanel /></div> : <ConnectionEmpty onRetry={retryBootstrap} />}
     </div>
     {showBacktest && <BacktestModal onClose={() => setShowBacktest(false)} />}
-    {showReplay && <ReplayModal onClose={() => setShowReplay(false)} />}
     {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
     {toast && <div className={`toast ${toast.kind}`} role={toast.kind === "error" ? "alert" : "status"} aria-live="polite">{toast.text}</div>}
   </div>;
@@ -165,7 +159,7 @@ function MobileNavButton({ active, label, icon, onClick }: { active: boolean; la
   );
 }
 
-function MobileMore({ onSettings, onBacktest, onReplay }: { onSettings: () => void; onBacktest: () => void; onReplay: () => void }) {
+function MobileMore({ onSettings, onBacktest }: { onSettings: () => void; onBacktest: () => void }) {
   return (
     <div className="mobile-page">
       <div className="mobile-page-title">
@@ -180,10 +174,6 @@ function MobileMore({ onSettings, onBacktest, onReplay }: { onSettings: () => vo
         <button onClick={onBacktest}>
           <b>Backtest</b>
           <span>Historical strategy research</span>
-        </button>
-        <button onClick={onReplay}>
-          <b>Replay</b>
-          <span>Deterministic session replay</span>
         </button>
       </div>
       <div className="mobile-more-stack">

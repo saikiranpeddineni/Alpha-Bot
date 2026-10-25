@@ -23,11 +23,26 @@ TRADING_DAYS = 252
 MIN_DAILY_RETURNS_FOR_RATIOS = 10
 
 
+# =============================================================================
+# [MODIFIED 2026-10-25]: Timezone-safe equity series index construction
+# ORIGINAL INTENT: Used pd.DatetimeIndex(ts) which can raise on mixed tz-aware / naive timestamps.
+# REASON FOR CHANGE: Betadesk parity - use pd.to_datetime(ts, utc=True) for robust UTC normalization.
+# SAFE ROLLBACK: Preserved below.
+# -----------------------------------------------------------------------------
+# [PREVIOUS CODE - PRESERVED]:
+# def _equity_series(curve: list[tuple[datetime, float]]) -> pd.Series:
+#     if not curve:
+#         return pd.Series(dtype=float)
+#     ts, eq = zip(*curve, strict=True)
+#     return pd.Series(eq, index=pd.DatetimeIndex(ts), dtype=float).sort_index()
+# -----------------------------------------------------------------------------
+# [NEW CODE]:
 def _equity_series(curve: list[tuple[datetime, float]]) -> pd.Series:
     if not curve:
         return pd.Series(dtype=float)
     ts, eq = zip(*curve, strict=True)
-    return pd.Series(eq, index=pd.DatetimeIndex(ts), dtype=float).sort_index()
+    return pd.Series(eq, index=pd.to_datetime(ts, utc=True), dtype=float).sort_index()
+# =============================================================================
 
 
 def max_drawdown_pct(equity: pd.Series) -> float:
@@ -69,6 +84,33 @@ def compute_metrics(
     gross_loss = abs(sum(t.pnl for t in losses))
     r_values = [t.r_multiple for t in trades if t.r_multiple is not None]
 
+    # =============================================================================
+    # [MODIFIED 2026-10-25]: Peak-vs-Realized Efficiency Metrics (Betadesk Parity)
+    # ORIGINAL INTENT: Only tracked avg_r without capturing peak excursion surrender.
+    # REASON FOR CHANGE: Report harvest efficiency (realized_r / peak_r) and round-trip count
+    # for full telemetry compatibility with Betadesk backtest reporting.
+    # SAFE ROLLBACK: Preserved below.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # return {
+    #     "starting_equity": round(starting_equity, 2),
+    #     "final_equity": round(final_equity, 2),
+    #     "total_return_pct": round(total_return_pct, 2),
+    #     ...
+    # }
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    peak_r_values = [getattr(t, "peak_r", None) for t in trades if getattr(t, "peak_r", None) is not None]
+    harvest_ratios = [
+        getattr(t, "r_multiple") / getattr(t, "peak_r")
+        for t in trades
+        if getattr(t, "r_multiple", None) is not None and getattr(t, "peak_r", None) and getattr(t, "peak_r") > 0
+    ]
+    round_trips = sum(
+        1 for t in trades
+        if getattr(t, "peak_r", None) is not None and getattr(t, "peak_r") >= 1.0 and (getattr(t, "r_multiple", None) is None or getattr(t, "r_multiple") <= 0.2)
+    )
+
     return {
         "starting_equity": round(starting_equity, 2),
         "final_equity": round(final_equity, 2),
@@ -84,8 +126,12 @@ def compute_metrics(
         "profit_factor": round(gross_win / gross_loss, 2) if gross_loss > 0 else None,
         "expectancy": round((gross_win - gross_loss) / len(trades), 2) if trades else 0.0,
         "avg_r": round(float(np.mean(r_values)), 2) if r_values else None,
+        "avg_peak_r": round(float(np.mean(peak_r_values)), 2) if peak_r_values else None,
+        "harvest_efficiency": round(float(np.mean(harvest_ratios)), 2) if harvest_ratios else None,
+        "round_trip_trades": round_trips,
         "avg_win": round(gross_win / len(wins), 2) if wins else 0.0,
         "avg_loss": round(-gross_loss / len(losses), 2) if losses else 0.0,
         "best_trade": round(max((t.pnl for t in trades), default=0.0), 2),
         "worst_trade": round(min((t.pnl for t in trades), default=0.0), 2),
     }
+    # =============================================================================

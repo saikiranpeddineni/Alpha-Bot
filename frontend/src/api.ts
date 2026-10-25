@@ -127,11 +127,12 @@ export const api = {
 
   runBacktest: (body: {
     symbols: string[];
-    days: number;
-    starting_cash?: number;
-    use_dynamic_scanner?: boolean;
+    days?: number | null;
     start_date?: string | null;
     end_date?: string | null;
+    starting_cash?: number;
+    use_ml_gate?: boolean;
+    disable_scanner?: boolean;
   }) => request<BacktestResult>("/api/backtest", { method: "POST", body: JSON.stringify(body) }),
   backtests: () => request<BacktestSummary[]>("/api/backtests"),
   backtest: (id: string) => request<BacktestResult>(`/api/backtests/${id}`),

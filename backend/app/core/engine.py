@@ -587,10 +587,26 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
         applog.warning("engine", "STALE-POSITION GUARD: stranded positions flattened at open")
         return True
 
-    async def _tick(self) -> None:
+    # =============================================================================
+    # [MODIFIED 2026-10-25]: Support Deterministic Replay Clock in _tick (Betadesk Parity)
+    # ORIGINAL INTENT: Unconditionally resolved wall-clock `now = utcnow()`, preventing
+    # historical backtest runs from stepping through historical timestamps.
+    # REASON FOR CHANGE: Enable authoritative TradingEngine execution in backtests where
+    # `now` is provided or clock is ReplayClock, while preserving wall-clock default for live.
+    # SAFE ROLLBACK: Preserved below.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # async def _tick(self) -> None:
+    #     assert self.data and self.broker and self.risk and self.portfolio and self.pipeline
+    #     self._tick_count += 1
+    #     now = utcnow()
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    async def _tick(self, now: datetime | None = None) -> None:
         assert self.data and self.broker and self.risk and self.portfolio and self.pipeline
         self._tick_count += 1
-        now = utcnow()
+        now = now or utcnow()
+    # =============================================================================
         now_et = now.astimezone(ET)
         today_date = now_et.date()
         et_mins = now_et.hour * 60 + now_et.minute
@@ -1653,7 +1669,18 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
 
     def _broadcast_tick(self, account, now: datetime, new_closed: dict, positions: list) -> None:  # noqa: ANN001
         assert self.portfolio is not None
-        if getattr(self, "_skip_broadcast", False):
+        # =============================================================================
+        # [MODIFIED 2026-10-25]: Suppress broadcast ticks when engine.silent is True
+        # ORIGINAL INTENT: Only checked _skip_broadcast attribute.
+        # REASON FOR CHANGE: Backtesting sets engine.silent = True to avoid heavy publish payloads.
+        # SAFE ROLLBACK: Preserved below.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # if getattr(self, "_skip_broadcast", False):
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        if getattr(self, "_skip_broadcast", False) or getattr(self, "silent", False):
+        # =============================================================================
             # Fast replay: publish() is a no-op sink; only the data-health
             # timestamp has downstream readers and must stay fresh.
             if new_closed:

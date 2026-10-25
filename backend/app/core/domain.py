@@ -73,6 +73,10 @@ class Signal(BaseModel):
     discovery_source: str | None = None
     scanner_score: float | None = None
     scanner_auc: float | None = None
+    monte_carlo_p_target: float | None = None
+    monte_carlo_p_stop: float | None = None
+    monte_carlo_expected_r: float | None = None
+    monte_carlo_verdict: str | None = None
 
     # =============================================================================
     # [MODIFIED 2026-10-14]: CR-08 & CR-20 - Signal timestamp property alias
@@ -211,6 +215,8 @@ class TradeRecord(BaseModel):
     pnl: float
     pnl_pct: float
     r_multiple: float | None = None
+    initial_risk_per_share: float | None = None
+    peak_r: float | None = None
     strategy: str = "manual"
     exit_reason: str = ""
     candidate_id: str | None = None
