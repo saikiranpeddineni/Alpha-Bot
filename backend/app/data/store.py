@@ -36,27 +36,81 @@ class BarCache:
             )
             self._conn.commit()
 
-    def upsert(self, symbol: str, timeframe: str, df: pd.DataFrame) -> int:
+    # =============================================================================
+    # [MODIFIED 2026-10-25]: Provider-Aware Schema Compatibility in BarCache.upsert
+    # ORIGINAL INTENT: Hardcoded 8-column insert without provider column.
+    # REASON FOR CHANGE: When bars_cache.db contains a legacy or Betadesk 'provider' column,
+    # hardcoded 8-column insert raises sqlite3.IntegrityError: NOT NULL constraint failed: bars.provider.
+    # Dynamically detecting table columns prevents crash and guarantees seamless cache persistence.
+    # SAFE ROLLBACK: Previous method preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # def upsert(self, symbol: str, timeframe: str, df: pd.DataFrame) -> int:
+    #     if df.empty:
+    #         return 0
+    #     rows = [
+    #         (
+    #             symbol.upper(),
+    #             timeframe,
+    #             int(row.Index.timestamp()),
+    #             float(row.open), float(row.high), float(row.low),
+    #             float(row.close), float(row.volume),
+    #         )
+    #         for row in df.itertuples(index=True)
+    #     ]
+    #     with self._lock:
+    #         self._conn.executemany(
+    #             "INSERT OR REPLACE INTO bars (symbol, tf, ts, open, high, low, close, volume) "
+    #             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    #             rows,
+    #         )
+    #         self._conn.commit()
+    #     return len(rows)
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    def upsert(self, symbol: str, timeframe: str, df: pd.DataFrame, provider: str = "default") -> int:
         if df.empty:
             return 0
-        rows = [
-            (
-                symbol.upper(),
-                timeframe,
-                int(row.Index.timestamp()),
-                float(row.open), float(row.high), float(row.low),
-                float(row.close), float(row.volume),
-            )
-            for row in df.itertuples(index=True)
-        ]
         with self._lock:
-            self._conn.executemany(
-                "INSERT OR REPLACE INTO bars (symbol, tf, ts, open, high, low, close, volume) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                rows,
-            )
+            cursor = self._conn.execute("PRAGMA table_info(bars)")
+            cols = [r[1] for r in cursor.fetchall()]
+            has_provider = "provider" in cols
+            if has_provider:
+                rows = [
+                    (
+                        provider.lower(),
+                        symbol.upper(),
+                        timeframe,
+                        int(row.Index.timestamp()),
+                        float(row.open), float(row.high), float(row.low),
+                        float(row.close), float(row.volume),
+                    )
+                    for row in df.itertuples(index=True)
+                ]
+                self._conn.executemany(
+                    "INSERT OR REPLACE INTO bars (provider, symbol, tf, ts, open, high, low, close, volume) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    rows,
+                )
+            else:
+                rows = [
+                    (
+                        symbol.upper(),
+                        timeframe,
+                        int(row.Index.timestamp()),
+                        float(row.open), float(row.high), float(row.low),
+                        float(row.close), float(row.volume),
+                    )
+                    for row in df.itertuples(index=True)
+                ]
+                self._conn.executemany(
+                    "INSERT OR REPLACE INTO bars (symbol, tf, ts, open, high, low, close, volume) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    rows,
+                )
             self._conn.commit()
         return len(rows)
+    # =============================================================================
 
     def query(
         self,

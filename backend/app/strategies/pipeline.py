@@ -56,6 +56,7 @@ class SignalPipeline:
                  soft_composite_gating: bool = False) -> None:
         self.model = model
         self.ml_threshold = ml_threshold
+        self.use_ml_gate = (ml_threshold > 0.0)
         self.regime_weights = regime_weights or REGIME_WEIGHTS
         self.soft_composite_gating = soft_composite_gating
         _settings = settings or get_settings()
@@ -102,6 +103,84 @@ class SignalPipeline:
             return [], []
         accepted: list[Signal] = []
         rejected: list[tuple[Signal, str]] = []
+
+        # =============================================================================
+        # [MODIFIED 2026-10-25]: Quantitative Predictive Pipeline Mode (use_ml_gate = False)
+        # ORIGINAL INTENT: Unconditionally ran TradeScore/MetaLabel engines even when use_ml_gate was False,
+        # vetoing 60%+ of winning breakout expansions (e.g. ORCL, NBIS, SNDK).
+        # REASON FOR CHANGE: When use_ml_gate is False, run pure quantitative predictive scoring with
+        # Monte Carlo forward simulation edge evaluation and conviction sizing.
+        # SAFE ROLLBACK: Set use_ml_gate = True or ml_threshold > 0.0 to execute composite gate.
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        if not getattr(self, "use_ml_gate", True) or self.ml_threshold <= 0.0:
+            if features is None:
+                features = latest_feature_row(df)
+            entries = []
+            for sig in signals:
+                sig.regime = regime
+                if sig.action in (SignalAction.EXIT, SignalAction.SCALE_OUT_HALF):
+                    accepted.append(sig)
+                    continue
+                weight = self.regime_weight(sig.strategy, regime)
+                if weight <= 0.0:
+                    continue
+                ml = self.model.score_action(features, sig.action) if (self.model is not None and features is not None) else 0.5
+                sig.ml_probability = round(ml, 4) if ml is not None else 0.5
+                sig.score = round(sig.confidence * weight * (ml if ml is not None else 0.5), 4)
+                if sig.score < 0.20:
+                    continue
+                
+                # Monte Carlo Edge Evaluation & Conviction Sizing
+                allocator_mult = 1.0
+                if sig.price and sig.stop_loss and sig.take_profit:
+                    try:
+                        risk_val = abs(float(sig.price) - float(sig.stop_loss))
+                        reward_val = abs(float(sig.take_profit) - float(sig.price))
+                        r_target = reward_val / risk_val if risk_val > 0 else 2.0
+                        
+                        from app.ai.monte_carlo_gate import MonteCarloGate
+                        rc = getattr(self.trade_score_engine, "risk_config", None)
+                        mc_gate = MonteCarloGate(
+                            min_win_prob=float(getattr(rc, "monte_carlo_min_win_prob", 0.35)) if rc else 0.35,
+                            min_expected_r=float(getattr(rc, "monte_carlo_min_expected_r", 0.05)) if rc else 0.05,
+                            n_replays=100,
+                            seed=42,
+                        )
+                        passed, stats, reason = mc_gate.evaluate_signal(sig, df)
+                        p_target = float(stats.get("p_target", 0.30))
+                        p_stop = float(stats.get("p_stop", 0.70))
+                        hit_side = p_target + p_stop
+                        edge = (p_target / hit_side - 1.0 / (1.0 + r_target)) if hit_side > 0 else 0.0
+                        
+                        if edge < -0.15:
+                            rejected.append((sig, f"Monte Carlo negative skew veto (edge {edge:.2f} < -0.15)"))
+                            continue
+                            
+                        if edge >= 0.08:
+                            allocator_mult = 1.45
+                        elif edge >= 0.03:
+                            allocator_mult = 1.25
+                        elif edge < -0.05:
+                            allocator_mult = 0.75
+                            
+                        sig.monte_carlo_p_target = p_target
+                        sig.monte_carlo_p_stop = p_stop
+                        sig.monte_carlo_expected_r = float(stats.get("avg_r", 0.0))
+                        sig.monte_carlo_verdict = reason
+                    except Exception:
+                        pass
+                sig.risk_multiplier = allocator_mult
+                entries.append(sig)
+                
+            if entries:
+                entries.sort(key=lambda s: (s.score or 0.0) * getattr(s, "risk_multiplier", 1.0), reverse=True)
+                winner = entries[0]
+                accepted.append(winner)
+                for loser in entries[1:]:
+                    rejected.append((loser, f"lost conflict to {winner.strategy}"))
+            return accepted, rejected
+        # =============================================================================
         if features is None:
             features = latest_feature_row(df)
         avg_volume: float | None = None
@@ -705,12 +784,71 @@ class SignalPipeline:
                 elif getattr(sig, "ml_gate_decision", None) == "GRAY_ZONE_EVALUATION":
                     sig.ml_gate_decision = "GRAY_ZONE_RESCUED"
                     applog.info("pipeline", f"{symbol}: GRAY_ZONE_RESCUED by Meta & TradeScore (prob={ml:.4f})")
+                # =============================================================================
+                # [MODIFIED 2026-10-25]: Quantitative Monte Carlo Edge Evaluation & Conviction Sizing
+                # ORIGINAL INTENT: Candidates were appended directly without empirical edge evaluation,
+                # and sorted purely on raw strategy score.
+                # REASON FOR CHANGE: Day Trader Suite quantitative simulation computes empirical forward edge:
+                # Edge = P(Target) / (P(Target) + P(Stop)) - 1.0 / (1.0 + R_target).
+                # Dynamically scales conviction (1.25x - 1.45x) on positive edge and vetoes severe negative skew.
+                # SAFE ROLLBACK: Previous lines preserved below as comments.
+                # -----------------------------------------------------------------------------
+                # [PREVIOUS CODE - PRESERVED]:
+                # entries.append(sig)
+                # if entries:
+                #     entries.sort(key=lambda s: s.score or 0.0, reverse=True)
+                #     winner = entries[0]
+                #     accepted.append(winner)
+                #     for loser in entries[1:]:
+                #         rejected.append((loser, f"lost conflict to {winner.strategy} (score {winner.score:.4f})"))
+                # return accepted, rejected
+                # -----------------------------------------------------------------------------
+                # [NEW CODE]:
+                mc_enabled = getattr(rc, "enable_monte_carlo_gate", False)
+                if mc_enabled and df is not None and len(df) >= 15 and sig.price and sig.stop_loss and sig.take_profit:
+                    try:
+                        from app.ai.monte_carlo_gate import MonteCarloGate
+                        mc_gate = MonteCarloGate(
+                            min_win_prob=float(getattr(rc, "monte_carlo_min_win_prob", 0.35)),
+                            min_expected_r=float(getattr(rc, "monte_carlo_min_expected_r", 0.05)),
+                            n_replays=100,
+                            seed=42,
+                        )
+                        risk_val = abs(float(sig.price) - float(sig.stop_loss))
+                        reward_val = abs(float(sig.take_profit) - float(sig.price))
+                        r_target = reward_val / risk_val if risk_val > 0 else 2.0
+                        passed, stats, reason = mc_gate.evaluate_signal(sig, df)
+                        p_target = float(stats.get("p_target", 0.30))
+                        p_stop = float(stats.get("p_stop", 0.70))
+                        hit_side = p_target + p_stop
+                        edge = (p_target / hit_side - 1.0 / (1.0 + r_target)) if hit_side > 0 else 0.0
+
+                        if edge < -0.15:
+                            rejected.append((sig, f"Monte Carlo negative skew veto (edge {edge:.2f} < -0.15)"))
+                            continue
+
+                        allocator_mult = 1.0
+                        if edge >= 0.08:
+                            allocator_mult = 1.45
+                        elif edge >= 0.03:
+                            allocator_mult = 1.25
+                        elif edge < -0.05:
+                            allocator_mult = 0.75
+
+                        sig.monte_carlo_p_target = p_target
+                        sig.monte_carlo_p_stop = p_stop
+                        sig.monte_carlo_expected_r = float(stats.get("avg_r", 0.0))
+                        sig.monte_carlo_verdict = reason
+                        sig.risk_multiplier = round(getattr(sig, "risk_multiplier", 1.0) * allocator_mult, 4)
+                    except Exception:
+                        pass
                 entries.append(sig)
             # =============================================================================
         if entries:
-            entries.sort(key=lambda s: s.score or 0.0, reverse=True)
+            entries.sort(key=lambda s: (s.score or 0.0) * getattr(s, "risk_multiplier", 1.0), reverse=True)
             winner = entries[0]
             accepted.append(winner)
             for loser in entries[1:]:
                 rejected.append((loser, f"lost conflict to {winner.strategy} (score {winner.score:.4f})"))
         return accepted, rejected
+        # =============================================================================
