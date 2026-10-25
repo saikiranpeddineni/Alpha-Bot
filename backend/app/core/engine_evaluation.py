@@ -733,8 +733,10 @@ class TradingEngineEvaluationMixin:
             # [NEW CODE]:
             mc_gate_enabled = False
             try:
-                from app.config import get_settings
-                cfg_obj = get_settings()
+                cfg_obj = getattr(self, "risk_config", None) or getattr(self, "settings", None)
+                if cfg_obj is None:
+                    from app.config import get_settings
+                    cfg_obj = get_settings()
                 mc_gate_enabled = getattr(cfg_obj, "enable_monte_carlo_gate", False)
             except Exception:
                 mc_gate_enabled = False
