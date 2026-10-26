@@ -329,6 +329,36 @@ table.grid th {
   white-space: nowrap;
   z-index: 1;
 }
+
+/* =============================================================================
+   [MODIFIED 2026-10-26]: Column Resizer Handle for Interactive Grid Headers
+   ORIGINAL INTENT: Table headers were non-adjustable static cells.
+   REASON FOR CHANGE: Allow user to click and drag header boundaries to resize
+   table columns smoothly to fit custom content like symbol lists.
+   SAFE ROLLBACK: Added without modifying base table.grid layout.
+   ============================================================================= */
+table.grid th .col-resizer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 8px;
+  height: 100%;
+  cursor: col-resize;
+  user-select: none;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+table.grid th .col-resizer:hover > .resizer-bar,
+table.grid th .col-resizer.active > .resizer-bar {
+  background-color: var(--accent, #6366f1) !important;
+  opacity: 1 !important;
+  width: 3px !important;
+}
+table.grid th.resizable {
+  position: relative;
+}
 table.grid td {
   padding: 6px 10px;
   border-bottom: 1px solid var(--border);

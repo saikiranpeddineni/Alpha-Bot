@@ -20,6 +20,25 @@ const METRIC_LABELS: [string, string, boolean][] = [
   ["final_equity", "Final equity $", false],
 ];
 
+interface ColumnDef {
+  key: string;
+  label: string;
+  align?: "left" | "right";
+  defaultWidth: number;
+  minWidth: number;
+}
+
+const HISTORY_COLUMNS: ColumnDef[] = [
+  { key: "time", label: "Time", defaultWidth: 125, minWidth: 85 },
+  { key: "symbols", label: "Symbols", defaultWidth: 260, minWidth: 110 },
+  { key: "days", label: "Days", defaultWidth: 55, minWidth: 40 },
+  { key: "return", label: "Return", align: "right", defaultWidth: 80, minWidth: 55 },
+  { key: "maxDd", label: "Max DD", align: "right", defaultWidth: 75, minWidth: 55 },
+  { key: "trades", label: "Trades", align: "right", defaultWidth: 65, minWidth: 45 },
+  { key: "winRate", label: "Win Rate", align: "right", defaultWidth: 75, minWidth: 55 },
+  { key: "action", label: "", align: "right", defaultWidth: 65, minWidth: 50 },
+];
+
 export function BacktestModal(props: { onClose: () => void }) {
   const status = useStore((s) => s.status);
   const progress = useStore((s) => s.backtestProgress);
@@ -41,6 +60,44 @@ export function BacktestModal(props: { onClose: () => void }) {
   const [history, setHistory] = useState<BacktestSummary[]>([]);
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [draftSymbol, setDraftSymbol] = useState("");
+
+  const [colWidths, setColWidths] = useState<Record<string, number>>(() => {
+    const initial: Record<string, number> = {};
+    HISTORY_COLUMNS.forEach((col) => {
+      initial[col.key] = col.defaultWidth;
+    });
+    return initial;
+  });
+  const [resizingCol, setResizingCol] = useState<string | null>(null);
+
+  function handleResizeStart(key: string, e: React.MouseEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    const startX = e.clientX;
+    const startWidth = colWidths[key] ?? 100;
+    const colDef = HISTORY_COLUMNS.find((c) => c.key === key);
+    const minW = colDef?.minWidth ?? 40;
+
+    setResizingCol(key);
+
+    const onMouseMove = (moveEvent: MouseEvent) => {
+      const delta = moveEvent.clientX - startX;
+      const newWidth = Math.max(minW, startWidth + delta);
+      setColWidths((prev) => ({
+        ...prev,
+        [key]: newWidth,
+      }));
+    };
+
+    const onMouseUp = () => {
+      setResizingCol(null);
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+    };
+
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
+  }
 
   useEffect(() => {
     if (activeTab === "history" && history.length === 0) {
@@ -349,19 +406,111 @@ export function BacktestModal(props: { onClose: () => void }) {
         )}
           </>
         ) : (
-          <div className="history-list">
+          <div className="history-list" style={{ overflowX: "auto", maxHeight: "60vh", overflowY: "auto" }}>
             {loadingHistory && <div className="muted">Loading history...</div>}
             {!loadingHistory && history.length === 0 && <div className="muted">No backtest history found.</div>}
             {!loadingHistory && history.length > 0 && (
-              <table className="grid">
+              /* =============================================================================
+                 [MODIFIED 2026-10-26]: Resizable Columns & Full Symbol Wrapping in History Tab
+                 ORIGINAL INTENT: History table used fixed cells with whiteSpace: nowrap and
+                 textOverflow: ellipsis on symbols (maxWidth: 220px), truncating long symbol lists.
+                 REASON FOR CHANGE: User requested full visibility of all ticker symbols without
+                 truncation, plus adjustable drag-handle column widths to customize table spacing
+                 without expanding the outer modal size.
+                 SAFE ROLLBACK: The original table implementation is preserved below as comments.
+                 -----------------------------------------------------------------------------
+                 [PREVIOUS CODE - PRESERVED]:
+                 <table className="grid">
+                   <thead>
+                     <tr>
+                       <th>Time</th><th>Symbols</th><th>Days</th><th className="r">Return</th>
+                       <th className="r">Max DD</th><th className="r">Trades</th><th className="r">Win Rate</th><th></th>
+                     </tr>
+                   </thead>
+                   <tbody>
+                     {history.map(h => {
+                       const symDisplay = Array.isArray(h.symbols) && h.symbols.length > 0
+                         ? h.symbols.join(", ")
+                         : (typeof h.symbols === "string" && h.symbols ? h.symbols : "All / Default");
+                       const retDisplay = h.total_return_pct != null
+                         ? `${h.total_return_pct >= 0 ? "+" : ""}${h.total_return_pct.toFixed(2)}%`
+                         : "—";
+                       const retClass = h.total_return_pct != null && h.total_return_pct >= 0 ? "pos" : "neg";
+                       const ddDisplay = h.max_drawdown_pct != null ? `${h.max_drawdown_pct.toFixed(2)}%` : "—";
+                       const wrDisplay = h.win_rate != null
+                         ? (h.win_rate <= 1.0 ? (h.win_rate * 100).toFixed(1) : h.win_rate.toFixed(1)) + "%"
+                         : "—";
+
+                       return (
+                         <tr key={h.id}>
+                           <td className="muted">{fmtDateTime(h.created_at)}</td>
+                           <td style={{ maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={symDisplay}>
+                             {symDisplay}
+                           </td>
+                           <td>{h.days ?? "—"}</td>
+                           <td className={`r num ${retClass}`}>{retDisplay}</td>
+                           <td className="r num">{ddDisplay}</td>
+                           <td className="r num">{h.total_trades ?? 0}</td>
+                           <td className="r num">{wrDisplay}</td>
+                           <td className="r"><button className="btn sm ghost" onClick={() => loadRun(h.id)}>View</button></td>
+                         </tr>
+                       );
+                     })}
+                   </tbody>
+                 </table>
+                 -----------------------------------------------------------------------------
+                 [NEW CODE]:
+              ============================================================================= */
+              <table
+                className="grid"
+                style={{
+                  tableLayout: "fixed",
+                  width: "100%",
+                  minWidth: Object.values(colWidths).reduce((a, b) => a + b, 0),
+                  borderCollapse: "collapse",
+                }}
+              >
+                <colgroup>
+                  {HISTORY_COLUMNS.map((col) => (
+                    <col key={col.key} style={{ width: colWidths[col.key] }} />
+                  ))}
+                </colgroup>
                 <thead>
                   <tr>
-                    <th>Time</th><th>Symbols</th><th>Days</th><th className="r">Return</th>
-                    <th className="r">Max DD</th><th className="r">Trades</th><th className="r">Win Rate</th><th></th>
+                    {HISTORY_COLUMNS.map((col, idx) => (
+                      <th
+                        key={col.key}
+                        className={`resizable ${col.align === "right" ? "r" : ""}`}
+                        style={{
+                          width: colWidths[col.key],
+                          paddingRight: idx < HISTORY_COLUMNS.length - 1 ? 12 : 8,
+                          verticalAlign: "middle",
+                        }}
+                      >
+                        <span>{col.label}</span>
+                        <div
+                          className={`col-resizer ${resizingCol === col.key ? "active" : ""}`}
+                          title="Drag horizontally to adjust column width"
+                          onMouseDown={(e) => handleResizeStart(col.key, e)}
+                        >
+                          <div
+                            className="resizer-bar"
+                            style={{
+                              width: 2,
+                              height: "60%",
+                              backgroundColor: "var(--border, #333)",
+                              opacity: 0.4,
+                              borderRadius: 1,
+                              transition: "all 0.15s ease",
+                            }}
+                          />
+                        </div>
+                      </th>
+                    ))}
                   </tr>
                 </thead>
                 <tbody>
-                  {history.map(h => {
+                  {history.map((h) => {
                     const symDisplay = Array.isArray(h.symbols) && h.symbols.length > 0
                       ? h.symbols.join(", ")
                       : (typeof h.symbols === "string" && h.symbols ? h.symbols : "All / Default");
@@ -376,16 +525,29 @@ export function BacktestModal(props: { onClose: () => void }) {
 
                     return (
                       <tr key={h.id}>
-                        <td className="muted">{fmtDateTime(h.created_at)}</td>
-                        <td style={{ maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={symDisplay}>
+                        <td className="muted" style={{ verticalAlign: "top" }}>{fmtDateTime(h.created_at)}</td>
+                        <td
+                          style={{
+                            width: colWidths.symbols,
+                            whiteSpace: "normal",
+                            wordBreak: "break-word",
+                            overflowWrap: "anywhere",
+                            lineHeight: 1.35,
+                            verticalAlign: "top",
+                            fontSize: 11,
+                          }}
+                          title={symDisplay}
+                        >
                           {symDisplay}
                         </td>
-                        <td>{h.days ?? "—"}</td>
-                        <td className={`r num ${retClass}`}>{retDisplay}</td>
-                        <td className="r num">{ddDisplay}</td>
-                        <td className="r num">{h.total_trades ?? 0}</td>
-                        <td className="r num">{wrDisplay}</td>
-                        <td className="r"><button className="btn sm ghost" onClick={() => loadRun(h.id)}>View</button></td>
+                        <td style={{ verticalAlign: "top" }}>{h.days ?? "—"}</td>
+                        <td className={`r num ${retClass}`} style={{ verticalAlign: "top" }}>{retDisplay}</td>
+                        <td className="r num" style={{ verticalAlign: "top" }}>{ddDisplay}</td>
+                        <td className="r num" style={{ verticalAlign: "top" }}>{h.total_trades ?? 0}</td>
+                        <td className="r num" style={{ verticalAlign: "top" }}>{wrDisplay}</td>
+                        <td className="r" style={{ verticalAlign: "top" }}>
+                          <button className="btn sm ghost" onClick={() => loadRun(h.id)}>View</button>
+                        </td>
                       </tr>
                     );
                   })}
