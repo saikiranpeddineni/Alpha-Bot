@@ -47,8 +47,24 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     """Append feature columns to an (enriched) bar frame."""
     if df.empty:
         return df
+    # =============================================================================
+    # [MODIFIED 2026-10-26]: Deduplicate DatetimeIndex in compute_features
+    # ORIGINAL INTENT: Checked regime_val in df.columns directly without index validation.
+    # REASON FOR CHANGE: If duplicate timestamps exist in df, downstream Series loc assignments
+    # (e.g. regime_val.loc[mask_trend_up] = 1.0) raise 'cannot reindex on an axis with duplicate labels'.
+    # Deduplicating the DatetimeIndex ensures unique axis labels for all feature computations.
+    # SAFE ROLLBACK: The original code is preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    #     if "regime_val" in df.columns:
+    #         return df
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    if df.index.has_duplicates:
+        df = df[~df.index.duplicated(keep="last")]
     if "regime_val" in df.columns:
         return df
+    # =============================================================================
 
     out = df if is_enriched(df) else enrich(df)
     # =============================================================================
@@ -97,7 +113,20 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def latest_feature_row(df: pd.DataFrame) -> pd.Series | None:
     """Feature vector for the most recent bar, or None during warmup."""
+    # =============================================================================
+    # [MODIFIED 2026-10-26]: Deduplicate DatetimeIndex in latest_feature_row
+    # ORIGINAL INTENT: Directly called compute_features(df) on potentially duplicate raw bars.
+    # REASON FOR CHANGE: Ensures input df has unique DatetimeIndex before computing features and forward returns.
+    # SAFE ROLLBACK: The original code is preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    #     feats = compute_features(df)
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    if df.index.has_duplicates:
+        df = df[~df.index.duplicated(keep="last")]
     feats = compute_features(df)
+    # =============================================================================
     if feats.empty:
         return None
     row = feats.iloc[-1]
@@ -121,7 +150,22 @@ def build_training_set(
         y (Series): Binary label
         w (Series): Sample weights scaled by profit magnitude to maximize recall
     """
+    # =============================================================================
+    # [MODIFIED 2026-10-26]: Deduplicate DatetimeIndex in build_training_set
+    # ORIGINAL INTENT: Directly called compute_features(df) without validating input DatetimeIndex.
+    # REASON FOR CHANGE: If duplicate timestamps exist in df, forward return alignment and
+    # boolean indexing fail with 'cannot reindex on an axis with duplicate labels'.
+    # Deduplicating the DatetimeIndex ensures unique axis labels for the training set.
+    # SAFE ROLLBACK: The original code is preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    #     feats = compute_features(df)
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    if df.index.has_duplicates:
+        df = df[~df.index.duplicated(keep="last")]
     feats = compute_features(df)
+    # =============================================================================
     if feats.empty:
         return pd.DataFrame(columns=FEATURE_COLUMNS), pd.Series(dtype=int), pd.Series(dtype=float)
     fwd_ret = feats["close"].shift(-horizon_bars) / feats["close"] - 1.0

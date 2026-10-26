@@ -169,10 +169,29 @@ class BarCache:
             rows = self._conn.execute(sql, params).fetchall()
         if not rows:
             return empty_bars()
+        # =============================================================================
+        # [MODIFIED 2026-10-26]: Deduplicate DatetimeIndex on Multi-Provider Overlaps
+        # ORIGINAL INTENT: Returned raw rows converted to DatetimeIndex directly without deduplication.
+        # REASON FOR CHANGE: When bars_cache.db contains entries from multiple providers (e.g. 'alpaca'
+        # and 'default' for TSLA), SQL queries return duplicate timestamps, causing downstream pandas
+        # reindexing/joining crashes ("cannot reindex on an axis with duplicate labels"). Deduplicating
+        # keeping the latest bar guarantees a clean, strictly monotonic series.
+        # SAFE ROLLBACK: Previous lines preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # df = pd.DataFrame(rows, columns=["ts", *BAR_COLUMNS])
+        # df["ts"] = pd.to_datetime(df["ts"], unit="s", utc=True)
+        # df = df.set_index("ts")
+        # return df
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
         df = pd.DataFrame(rows, columns=["ts", *BAR_COLUMNS])
         df["ts"] = pd.to_datetime(df["ts"], unit="s", utc=True)
         df = df.set_index("ts")
+        if df.index.has_duplicates:
+            df = df[~df.index.duplicated(keep="last")]
         return df
+        # =============================================================================
 
     def coverage(self, symbol: str, timeframe: str) -> tuple[datetime, datetime] | None:
         with self._lock:

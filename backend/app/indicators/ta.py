@@ -185,7 +185,20 @@ def enrich(df: pd.DataFrame) -> pd.DataFrame:
     # operations per call. Note: a *view* of an enriched frame is enriched.
     if is_enriched(df):
         return df
-    out = df.copy()
+    # =============================================================================
+    # [MODIFIED 2026-10-26]: Deduplicate DatetimeIndex in enrich
+    # ORIGINAL INTENT: Created a copy of df directly and performed indicator joins.
+    # REASON FOR CHANGE: Duplicate timestamps in raw bar frames cause downstream join
+    # operations (MACD, Bollinger Bands) to crash with duplicate label errors or produce
+    # cartesian products. Deduplicating by keeping the latest bar prevents crashes across all consumers.
+    # SAFE ROLLBACK: The original code is preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    #     out = df.copy()
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    out = df[~df.index.duplicated(keep="last")].copy() if df.index.has_duplicates else df.copy()
+    # =============================================================================
     for col in ("open", "high", "low", "close", "volume"):
         if col in out.columns:
             out[col] = out[col].astype(float)

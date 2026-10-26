@@ -540,10 +540,28 @@ class MarketScanner:
             async with semaphore:
                 symbol = candidate["symbol"]
                 try:
+                    # =============================================================================
+                    # [MODIFIED 2026-10-26]: Deduplicate History Index in Scanner ML Validation
+                    # ORIGINAL INTENT: Fetched bar history from self.data.history and checked length directly.
+                    # REASON FOR CHANGE: If live data feeds or multi-provider caches return duplicate timestamp labels,
+                    # downstream build_training_set and feature indexing crash with 'cannot reindex on an axis with duplicate labels'.
+                    # Deduplicating the DatetimeIndex guarantees clean feature extraction and ML model training.
+                    # SAFE ROLLBACK: The original code is preserved below as comments.
+                    # -----------------------------------------------------------------------------
+                    # [PREVIOUS CODE - PRESERVED]:
+                    #                     df = await self.data.history(symbol, "1Min", start, end, prefer_cache=True)
+                    #                     if len(df) < 500:
+                    #                         candidate["auc"] = 0.0
+                    #                         return candidate
+                    # -----------------------------------------------------------------------------
+                    # [NEW CODE]:
                     df = await self.data.history(symbol, "1Min", start, end, prefer_cache=True)
+                    if df.index.has_duplicates:
+                        df = df[~df.index.duplicated(keep="last")]
                     if len(df) < 500:
                         candidate["auc"] = 0.0
                         return candidate
+                    # =============================================================================
 
                     X, y, _ = build_training_set(df)
                     if len(X) < 100:
