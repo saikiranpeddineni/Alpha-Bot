@@ -437,14 +437,33 @@ class PortfolioTracker:
         # "EMA9>EMA20..."). Any reason outside the exit vocabulary is noise, not
         # attribution -- run it through the same stop/unspecified synthesis.
         # Attribution-only: pnl, fills, and sizing are untouched.
+        # =============================================================================
+        # [MODIFIED 2026-10-25]: Add "momentum" to _EXIT_VOCABULARY
+        # ORIGINAL INTENT: _EXIT_VOCABULARY lacked "momentum", causing VWAP fade exits to be
+        # mislabeled as "unspecified_exit:orb".
+        # REASON FOR CHANGE: Retain proper strategy attribution for momentum faded exits.
+        # SAFE ROLLBACK: Preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        #         _EXIT_VOCABULARY = (
+        #             "pis exit reason:", "scale_out", "runner", "protection", "thesis",
+        #             "healthy", "max_r", "target", "eod", "doa", "stagnation", "time",
+        #             "distribution", "ceiling", "giveback", "invalidated", "degraded",
+        #             "breach", "ratchet", "trail", "fallback", "critical",
+        #             "stop_loss", "take_profit", "end of day", "manual", "flatten",
+        #             "daily loss halt", "hard halt", "unspecified_exit",
+        #         )
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
         _EXIT_VOCABULARY = (
             "pis exit reason:", "scale_out", "runner", "protection", "thesis",
             "healthy", "max_r", "target", "eod", "doa", "stagnation", "time",
             "distribution", "ceiling", "giveback", "invalidated", "degraded",
             "breach", "ratchet", "trail", "fallback", "critical",
             "stop_loss", "take_profit", "end of day", "manual", "flatten",
-            "daily loss halt", "hard halt", "unspecified_exit",
+            "daily loss halt", "hard halt", "unspecified_exit", "momentum",
         )
+        # =============================================================================
         resolved_exit_reason = (fill.reason or "").strip()
         if not resolved_exit_reason or resolved_exit_reason == "exit" or \
                 not resolved_exit_reason.lower().startswith(_EXIT_VOCABULARY):

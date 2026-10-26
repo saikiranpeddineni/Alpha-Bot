@@ -171,6 +171,25 @@ async def run_backtest(
     fetch_start = params.start - timedelta(days=5)
 
     t_load = time.time()
+    # =============================================================================
+    # [MODIFIED 2026-10-25]: Index Deduplication for Historical Replay Bars
+    # ORIGINAL INTENT: Passed raw history directly to compute_features(raw).
+    # REASON FOR CHANGE: If bars cache contains overlapping session records or duplicate timestamps,
+    # pandas reindex in ta.enrich raises ValueError: cannot reindex on an axis with duplicate labels.
+    # Deduplicating on index preserving the latest bar ensures clean, non-regressive feature generation.
+    # SAFE ROLLBACK: Previous lines preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # for symbol in sorted(all_symbols):
+    #     raw = await data.history(symbol, "1Min", fetch_start, params.end)
+    #     if raw.empty or len(raw) < 60:
+    #         if symbol in params.symbols:
+    #             warnings.append(f"{symbol}: insufficient data ({len(raw)} bars) -- skipped")
+    #             applog.warning("backtest", warnings[-1])
+    #         continue
+    #     frames[symbol] = compute_features(raw)
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
     for symbol in sorted(all_symbols):
         raw = await data.history(symbol, "1Min", fetch_start, params.end)
         if raw.empty or len(raw) < 60:
@@ -178,7 +197,10 @@ async def run_backtest(
                 warnings.append(f"{symbol}: insufficient data ({len(raw)} bars) -- skipped")
                 applog.warning("backtest", warnings[-1])
             continue
+        if raw.index.has_duplicates:
+            raw = raw[~raw.index.duplicated(keep="last")]
         frames[symbol] = compute_features(raw)
+    # =============================================================================
     print(
         f"[load] {len(frames)} symbols, {sum(len(f) for f in frames.values()):,} bars, "
         f"{time.time() - t_load:.1f}s",

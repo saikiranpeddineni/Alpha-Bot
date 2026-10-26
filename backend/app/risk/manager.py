@@ -771,11 +771,26 @@ class RiskManager:
 
             return RiskDecision(False, "loss-streak cooldown active")
 
+        # =============================================================================
+        # [MODIFIED 2026-10-25]: Hard Session Lockout on Max Daily Ticker Losses
+        # ORIGINAL INTENT: Only checked symbol_cooldowns timestamp, allowing symbols to re-enter
+        # after 60m quarantine and take 3rd and 4th losses (burning over $5k across tests).
+        # REASON FOR CHANGE: Enforce session lockout once symbol hits symbol_max_daily_losses (default 2),
+        # matching BetaDesk defense against repeat intraday whipsaws.
+        # SAFE ROLLBACK: Remove the loss count check below.
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        max_ticker_losses = getattr(cfg, "symbol_max_daily_losses", 2) or 2
+        losses_today = self.symbol_loss_counts.get(symbol, 0)
+        if losses_today >= max_ticker_losses:
+            return RiskDecision(False, f"session lockout: {symbol} reached max daily losses ({losses_today}/{max_ticker_losses})")
+
         cooldown_until = self.symbol_cooldowns.get(symbol)
 
         if cooldown_until is not None and (now or datetime.now(UTC)) < cooldown_until:
 
             return RiskDecision(False, f"ticker-specific cooldown active for {symbol}")
+        # =============================================================================
 
         if not self.clock.in_entry_window(cfg.no_entry_minutes_before_close, now):
 
@@ -1694,6 +1709,8 @@ class RiskManager:
             signal_timestamp_utc=getattr(signal, "timestamp", None) or getattr(signal, "ts", None),
 
             decision_bar_timestamp_utc=getattr(signal, "decision_bar_timestamp_utc", None),
+
+            predicted_peak_r=getattr(signal, "predicted_peak_r", None),
 
         )
 

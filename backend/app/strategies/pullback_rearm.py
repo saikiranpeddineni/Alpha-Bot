@@ -21,8 +21,22 @@ logger = logging.getLogger("alphadesk")
 
 @register
 class PullbackRearm(Strategy):
+        # =============================================================================
+    # [MODIFIED 2026-10-25]: Mark experimental PullbackRearm as enabled_by_default = False
+    # ORIGINAL INTENT: Strategy was enabled by default across all engine runs.
+    # REASON FOR CHANGE: PullbackRearm is a specialized continuation strategy that should only
+    # be active when explicitly requested in strategy suite configuration.
+    # SAFE ROLLBACK: Set enabled_by_default = True.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    #     name = "pullback_rearm"
+    #     description = "Pullback re-arm continuation entry following extreme/chase exhaustion"
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
     name = "pullback_rearm"
     description = "Pullback re-arm continuation entry following extreme/chase exhaustion"
+    enabled_by_default = False
+    # =============================================================================
 
     is_breakout = False
     is_structural_breakout = False

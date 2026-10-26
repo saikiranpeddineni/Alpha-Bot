@@ -20,8 +20,22 @@ ET = ZoneInfo("America/New_York")
 
 @register
 class LiquiditySweep(Strategy):
+        # =============================================================================
+    # [MODIFIED 2026-10-25]: Mark experimental LiquiditySweep as enabled_by_default = False
+    # ORIGINAL INTENT: Strategy was enabled by default across all engine runs.
+    # REASON FOR CHANGE: LiquiditySweep is an experimental reversal strategy that should only
+    # be active when explicitly requested in strategy suite configuration.
+    # SAFE ROLLBACK: Set enabled_by_default = True.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    #     name = "liquidity_sweep"
+    #     description = "Trades false breakouts beyond session highs/lows with tight stops"
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
     name = "liquidity_sweep"
     description = "Trades false breakouts beyond session highs/lows with tight stops"
+    enabled_by_default = False
+    # =============================================================================
 
     is_breakout = False
     is_mean_reversion = True

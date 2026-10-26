@@ -592,14 +592,38 @@ async def post_backtest(body: BacktestBody, request: Request) -> dict:
             applog.error("backtest", f"Backtest failed: {exc}")
             raise HTTPException(status_code=500, detail=f"Backtest failed: {exc}") from exc
         payload = result.model_dump(mode="json")
+        # =============================================================================
+        # [MODIFIED 2026-10-26]: Comprehensive Backtest Summary with Date-Range Fallback
+        # ORIGINAL INTENT: Recorded only 4 basic metrics and body.days (None during date-range mode).
+        # REASON FOR CHANGE: Populate days accurately from (end - start).days when body.days is None,
+        # and include profit_factor, expectancy, and final_equity for rich historical audit.
+        # SAFE ROLLBACK: Previous summary block preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # summary = {
+        #     "symbols": params.symbols,
+        #     "days": body.days,
+        #     "total_return_pct": result.metrics.get("total_return_pct"),
+        #     "max_drawdown_pct": result.metrics.get("max_drawdown_pct"),
+        #     "total_trades": result.metrics.get("total_trades"),
+        #     "win_rate": result.metrics.get("win_rate"),
+        # }
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        effective_days = body.days if body.days is not None else max(1, round((end - start).total_seconds() / 86400, 1))
         summary = {
             "symbols": params.symbols,
-            "days": body.days,
+            "days": effective_days,
             "total_return_pct": result.metrics.get("total_return_pct"),
             "max_drawdown_pct": result.metrics.get("max_drawdown_pct"),
             "total_trades": result.metrics.get("total_trades"),
             "win_rate": result.metrics.get("win_rate"),
+            "profit_factor": result.metrics.get("profit_factor"),
+            "expectancy": result.metrics.get("expectancy"),
+            "avg_r": result.metrics.get("avg_r"),
+            "final_equity": result.metrics.get("final_equity"),
         }
+        # =============================================================================
         _db(request).save_backtest(result.id, result.created_at, summary, payload)
         hub.publish("backtest_progress", {"progress": 1.0})
         return payload

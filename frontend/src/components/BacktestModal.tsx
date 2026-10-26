@@ -221,11 +221,80 @@ export function BacktestModal(props: { onClose: () => void }) {
           </div>
         )}
 
+        {/* =============================================================================
+            [MODIFIED 2026-10-26]: Defend Against Blank Screen on History Tab & Result View
+            ORIGINAL INTENT: Assumed h.symbols is always an array, h.days is always defined,
+            and result.warnings is always an array.
+            REASON FOR CHANGE: If legacy or custom backtest summaries omit symbols or warnings,
+            calling .join() or .length threw an uncaught TypeError in React, crashing the
+            component tree and causing the screen to turn completely blank.
+            SAFE ROLLBACK: Original JSX preserved below as comments.
+            -----------------------------------------------------------------------------
+            [PREVIOUS CODE - PRESERVED]:
+            {result && (
+              <div style={{ marginTop: 14 }}>
+                <div className="metric-grid">
+                  {METRIC_LABELS.map(([key, label, colorize]) => {
+                    const v = result.metrics[key];
+                    const cls = colorize && typeof v === "number" ? (v >= 0 ? "pos" : "neg") : "";
+                    return (
+                      <div className="metric-card" key={key}>
+                        <div className="k">{label}</div>
+                        <div className={`v num ${cls}`}>{v ?? "—"}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div style={{ border: "1px solid var(--border)", borderRadius: 8, padding: "6px 4px" }}>
+                  <EquityChart curve={result.equity_curve} height={180} />
+                </div>
+                {result.warnings.length > 0 && (
+                  <div className="muted" style={{ marginTop: 8, fontSize: 11 }}>
+                    {result.warnings.map((w, i) => (
+                      <div key={i}>⚠ {w}</div>
+                    ))}
+                  </div>
+                )}
+                <div style={{ maxHeight: 220, overflowY: "auto", marginTop: 12, border: "1px solid var(--border)", borderRadius: 8 }}>
+                  <table className="grid">
+                    <thead>
+                      <tr>
+                        <th>Entry Time</th><th>Exit Time</th><th>Symbol</th><th>Side</th><th className="r">Qty</th>
+                        <th className="r">Entry</th><th className="r">Exit</th><th className="r">P&L</th>
+                        <th className="r">R</th><th>Strategy</th><th>Exit</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {result.trades.map((t) => (
+                        <tr key={t.id}>
+                          <td className="num faint" style={{ whiteSpace: "nowrap" }}>{fmtDateTime(t.entry_at)}</td>
+                          <td className="num faint" style={{ whiteSpace: "nowrap" }}>{fmtDateTime(t.exit_at)}</td>
+                          <td><b>{t.symbol}</b></td>
+                          <td><span className={`side-tag ${t.side}`}>{t.side}</span></td>
+                          <td className="r num">{t.qty}</td>
+                          <td className="r num">{t.entry_price.toFixed(2)}</td>
+                          <td className="r num">{t.exit_price.toFixed(2)}</td>
+                          <td className={`r num ${t.pnl >= 0 ? "pos" : "neg"}`}>{t.pnl.toFixed(2)}</td>
+                          <td className="r num">{t.r_multiple?.toFixed(1) ?? "—"}</td>
+                          <td className="muted">{t.strategy}</td>
+                          <td className="muted">{t.exit_reason}</td>
+                        </tr>
+                      ))}
+                      {result.trades.length === 0 && (
+                        <tr><td colSpan={11} className="muted">No trades in this run</td></tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+            -----------------------------------------------------------------------------
+            [NEW CODE]: */}
         {result && (
           <div style={{ marginTop: 14 }}>
             <div className="metric-grid">
               {METRIC_LABELS.map(([key, label, colorize]) => {
-                const v = result.metrics[key];
+                const v = result.metrics ? result.metrics[key] : null;
                 const cls = colorize && typeof v === "number" ? (v >= 0 ? "pos" : "neg") : "";
                 return (
                   <div className="metric-card" key={key}>
@@ -236,9 +305,9 @@ export function BacktestModal(props: { onClose: () => void }) {
               })}
             </div>
             <div style={{ border: "1px solid var(--border)", borderRadius: 8, padding: "6px 4px" }}>
-              <EquityChart curve={result.equity_curve} height={180} />
+              <EquityChart curve={result.equity_curve || []} height={180} />
             </div>
-            {result.warnings.length > 0 && (
+            {result.warnings && result.warnings.length > 0 && (
               <div className="muted" style={{ marginTop: 8, fontSize: 11 }}>
                 {result.warnings.map((w, i) => (
                   <div key={i}>⚠ {w}</div>
@@ -255,22 +324,22 @@ export function BacktestModal(props: { onClose: () => void }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {result.trades.map((t) => (
+                  {(result.trades || []).map((t) => (
                     <tr key={t.id}>
                       <td className="num faint" style={{ whiteSpace: "nowrap" }}>{fmtDateTime(t.entry_at)}</td>
                       <td className="num faint" style={{ whiteSpace: "nowrap" }}>{fmtDateTime(t.exit_at)}</td>
                       <td><b>{t.symbol}</b></td>
                       <td><span className={`side-tag ${t.side}`}>{t.side}</span></td>
                       <td className="r num">{t.qty}</td>
-                      <td className="r num">{t.entry_price.toFixed(2)}</td>
-                      <td className="r num">{t.exit_price.toFixed(2)}</td>
-                      <td className={`r num ${t.pnl >= 0 ? "pos" : "neg"}`}>{t.pnl.toFixed(2)}</td>
-                      <td className="r num">{t.r_multiple?.toFixed(1) ?? "—"}</td>
+                      <td className="r num">{typeof t.entry_price === "number" ? t.entry_price.toFixed(2) : t.entry_price}</td>
+                      <td className="r num">{typeof t.exit_price === "number" ? t.exit_price.toFixed(2) : t.exit_price}</td>
+                      <td className={`r num ${t.pnl >= 0 ? "pos" : "neg"}`}>{typeof t.pnl === "number" ? t.pnl.toFixed(2) : t.pnl}</td>
+                      <td className="r num">{typeof t.r_multiple === "number" ? t.r_multiple.toFixed(1) : "—"}</td>
                       <td className="muted">{t.strategy}</td>
                       <td className="muted">{t.exit_reason}</td>
                     </tr>
                   ))}
-                  {result.trades.length === 0 && (
+                  {(!result.trades || result.trades.length === 0) && (
                     <tr><td colSpan={11} className="muted">No trades in this run</td></tr>
                   )}
                 </tbody>
@@ -292,18 +361,34 @@ export function BacktestModal(props: { onClose: () => void }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {history.map(h => (
-                    <tr key={h.id}>
-                      <td className="muted">{fmtDateTime(h.created_at)}</td>
-                      <td>{h.symbols.join(", ")}</td>
-                      <td>{h.days}</td>
-                      <td className={`r num ${h.total_return_pct && h.total_return_pct >= 0 ? "pos" : "neg"}`}>{h.total_return_pct?.toFixed(2) ?? "—"}%</td>
-                      <td className="r num">{h.max_drawdown_pct?.toFixed(2) ?? "—"}%</td>
-                      <td className="r num">{h.total_trades ?? 0}</td>
-                      <td className="r num">{h.win_rate ? (h.win_rate * 100).toFixed(1) + "%" : "—"}</td>
-                      <td className="r"><button className="btn sm ghost" onClick={() => loadRun(h.id)}>View</button></td>
-                    </tr>
-                  ))}
+                  {history.map(h => {
+                    const symDisplay = Array.isArray(h.symbols) && h.symbols.length > 0
+                      ? h.symbols.join(", ")
+                      : (typeof h.symbols === "string" && h.symbols ? h.symbols : "All / Default");
+                    const retDisplay = h.total_return_pct != null
+                      ? `${h.total_return_pct >= 0 ? "+" : ""}${h.total_return_pct.toFixed(2)}%`
+                      : "—";
+                    const retClass = h.total_return_pct != null && h.total_return_pct >= 0 ? "pos" : "neg";
+                    const ddDisplay = h.max_drawdown_pct != null ? `${h.max_drawdown_pct.toFixed(2)}%` : "—";
+                    const wrDisplay = h.win_rate != null
+                      ? (h.win_rate <= 1.0 ? (h.win_rate * 100).toFixed(1) : h.win_rate.toFixed(1)) + "%"
+                      : "—";
+
+                    return (
+                      <tr key={h.id}>
+                        <td className="muted">{fmtDateTime(h.created_at)}</td>
+                        <td style={{ maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={symDisplay}>
+                          {symDisplay}
+                        </td>
+                        <td>{h.days ?? "—"}</td>
+                        <td className={`r num ${retClass}`}>{retDisplay}</td>
+                        <td className="r num">{ddDisplay}</td>
+                        <td className="r num">{h.total_trades ?? 0}</td>
+                        <td className="r num">{wrDisplay}</td>
+                        <td className="r"><button className="btn sm ghost" onClick={() => loadRun(h.id)}>View</button></td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             )}

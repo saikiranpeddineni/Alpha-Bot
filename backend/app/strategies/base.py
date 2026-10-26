@@ -101,6 +101,22 @@ def create_strategies(overrides: dict[str, dict] | None = None) -> list[Strategy
     overrides = overrides or {}
     out: list[Strategy] = []
     for name, cls in REGISTRY.items():
+        # =============================================================================
+        # [MODIFIED 2026-10-25]: Strategy Suite Alignment & enabled_by_default respect
+        # ORIGINAL INTENT: Unconditionally defaulted enabled=True for all registered strategies.
+        # REASON FOR CHANGE: Experimental strategies (pullback_rearm, liquidity_sweep) and unmentioned
+        # strategies in backtest suites were forced active, triggering 115+ unwanted trades.
+        # SAFE ROLLBACK: Preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        #         cfg = overrides.get(name, {})
+        #         out.append(cls(params=cfg.get("params"), enabled=cfg.get("enabled", True)))
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
         cfg = overrides.get(name, {})
-        out.append(cls(params=cfg.get("params"), enabled=cfg.get("enabled", True)))
+        default_on = getattr(cls, "enabled_by_default", True)
+        if overrides and name not in overrides:
+            default_on = False
+        out.append(cls(params=cfg.get("params"), enabled=cfg.get("enabled", default_on)))
+        # =============================================================================
     return out

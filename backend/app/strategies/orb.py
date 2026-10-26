@@ -853,25 +853,58 @@ class OpeningRangeBreakout(Strategy):
 
 
 
-        # Daily drift filter: don't buy far below 20-day SMA or short far above it
-
-        drift_long_ok = drift_short_ok = True
-
-        daily_sma = float(ctx.daily_sma20) if getattr(ctx, "daily_sma20", None) else 0.0
-
-        if p.get("use_daily_drift_filter", True) and daily_sma > 0:
-
-            buf = daily_sma * (float(p.get("drift_buffer_pct", 1.0)) / 100.0)
-
-            drift_long_ok = close > daily_sma - buf
-
-            drift_short_ok = close < daily_sma + buf
-
-
-
         min_risk_atr = float(p.get("min_risk_atr", 0.0))
 
         vwap_val = float(last.get("vwap", 0.0)) if pd.notna(last.get("vwap")) else None
+
+        # =============================================================================
+        # [MODIFIED 2026-10-25]: Calibrate Intraday ORB Drift Filter with VWAP Momentum Override
+        # ORIGINAL INTENT: Blocked all long breakouts if close <= daily_sma20 - (1% buffer).
+        # REASON FOR CHANGE: Forensic audit proved the 1% daily buffer blocked valid morning expansions
+        # on names trading slightly below their 20-day mean (e.g. COHR at 13:52, costing +$2,885 profit).
+        # Breakouts establishing above opening range high with positive intraday VWAP are valid momentum.
+        # SAFE ROLLBACK: Preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        #         # Daily drift filter: don't buy far below 20-day SMA or short far above it
+        #         drift_long_ok = drift_short_ok = True
+        #         daily_sma = float(ctx.daily_sma20) if getattr(ctx, "daily_sma20", None) else 0.0
+        #         if p.get("use_daily_drift_filter", True) and daily_sma > 0:
+        #             buf = daily_sma * (float(p.get("drift_buffer_pct", 1.0)) / 100.0)
+        #             drift_long_ok = close > daily_sma - buf
+        #             drift_short_ok = close < daily_sma + buf
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        # =============================================================================
+        # [MODIFIED 2026-10-26]: Restore Strict Structural Daily Drift Filter (No Falling Knife Longs)
+        # ORIGINAL INTENT: The daily drift filter checked `close > daily_sma - buf` with drift_buffer_pct (default 1.0%).
+        # A previous experimental modification added `or is_above_vwap` with 4.0% buffer, which inadvertently
+        # permitted severely depressed downtrending equities (MSTR, INTC, SHOP, LRCX 10-20% below SMA20) to buy
+        # long breakouts on minor 1-minute VWAP crossings, suffering severe losses.
+        # REASON FOR CHANGE: Restoring the structural daily drift check ensures the bot does not buy long breakouts
+        # on stocks trading far below their 20-day mean, while permitting short breakdowns when below range low.
+        # SAFE ROLLBACK: Preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # drift_long_ok = drift_short_ok = True
+        # daily_sma = float(ctx.daily_sma20) if getattr(ctx, "daily_sma20", None) else 0.0
+        # if p.get("use_daily_drift_filter", True) and daily_sma > 0:
+        #     buf_pct = float(p.get("drift_buffer_pct", 4.0))
+        #     buf = daily_sma * (buf_pct / 100.0)
+        #     is_above_vwap = (vwap_val is not None and close >= vwap_val)
+        #     drift_long_ok = (close > daily_sma - buf) or is_above_vwap
+        #     drift_short_ok = close < daily_sma + buf
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        drift_long_ok = drift_short_ok = True
+        daily_sma = float(ctx.daily_sma20) if getattr(ctx, "daily_sma20", None) else 0.0
+        if p.get("use_daily_drift_filter", True) and daily_sma > 0:
+            buf_pct = float(p.get("drift_buffer_pct", 1.0))
+            buf = daily_sma * (buf_pct / 100.0)
+            drift_long_ok = close > (daily_sma - buf)
+            drift_short_ok = close < (daily_sma + buf)
+        # =============================================================================
+        # =============================================================================
 
         require_vwap = bool(p.get("require_vwap_alignment", True))
 
@@ -984,8 +1017,18 @@ class OpeningRangeBreakout(Strategy):
                 scale_out_target=round(target, 4),
 
                 trail_stop_dist=round(abs(close - stop), 4),
-
-                omit_take_profit=True,
+                # =============================================================================
+                # [MODIFIED 2026-10-26]: Enable Native Take Profit Bracket Around Peak R
+                # ORIGINAL INTENT: omit_take_profit=True wiped out take_profit in RiskManager.
+                # REASON FOR CHANGE: User directive: Predict peak R and exit around that peak R.
+                # SAFE ROLLBACK: Set omit_take_profit=True below.
+                # -----------------------------------------------------------------------------
+                # [PREVIOUS CODE - PRESERVED]:
+                # omit_take_profit=True,
+                # -----------------------------------------------------------------------------
+                # [NEW CODE]:
+                omit_take_profit=False,
+                # =============================================================================
 
             )
 
@@ -1102,8 +1145,18 @@ class OpeningRangeBreakout(Strategy):
                 scale_out_target=round(target, 4),
 
                 trail_stop_dist=round(abs(close - stop), 4),
-
-                omit_take_profit=True,
+                # =============================================================================
+                # [MODIFIED 2026-10-26]: Enable Native Take Profit Bracket Around Peak R
+                # ORIGINAL INTENT: omit_take_profit=True wiped out take_profit in RiskManager.
+                # REASON FOR CHANGE: User directive: Predict peak R and exit around that peak R.
+                # SAFE ROLLBACK: Set omit_take_profit=True below.
+                # -----------------------------------------------------------------------------
+                # [PREVIOUS CODE - PRESERVED]:
+                # omit_take_profit=True,
+                # -----------------------------------------------------------------------------
+                # [NEW CODE]:
+                omit_take_profit=False,
+                # =============================================================================
 
             )
 

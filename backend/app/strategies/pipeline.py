@@ -153,8 +153,9 @@ class SignalPipeline:
                         hit_side = p_target + p_stop
                         edge = (p_target / hit_side - 1.0 / (1.0 + r_target)) if hit_side > 0 else 0.0
                         
-                        if edge < -0.15:
-                            rejected.append((sig, f"Monte Carlo negative skew veto (edge {edge:.2f} < -0.15)"))
+                        pred_peak_r = float(stats.get("predicted_peak_r", 2.2))
+                        if pred_peak_r < 1.0 or edge < -0.15:
+                            rejected.append((sig, f"Monte Carlo forward prediction veto (pred_peak_r {pred_peak_r:.2f}R < 1.0 or edge {edge:.2f} < -0.15)"))
                             continue
                             
                         if edge >= 0.08:
@@ -168,6 +169,7 @@ class SignalPipeline:
                         sig.monte_carlo_p_stop = p_stop
                         sig.monte_carlo_expected_r = float(stats.get("avg_r", 0.0))
                         sig.monte_carlo_verdict = reason
+                        sig.predicted_peak_r = pred_peak_r
                     except Exception:
                         pass
                 sig.risk_multiplier = allocator_mult
@@ -804,27 +806,69 @@ class SignalPipeline:
                 # return accepted, rejected
                 # -----------------------------------------------------------------------------
                 # [NEW CODE]:
-                mc_enabled = getattr(rc, "enable_monte_carlo_gate", False)
-                if mc_enabled and df is not None and len(df) >= 15 and sig.price and sig.stop_loss and sig.take_profit:
+                # =============================================================================
+                # [MODIFIED 2026-10-25]: Forward Ticker Prediction & Peak R Multiple Attachment
+                # ORIGINAL INTENT: Ran Monte Carlo only if enable_monte_carlo_gate was True, and did not
+                # attach predicted_peak_r for downstream execution ratchet.
+                # REASON FOR CHANGE: User directive: Predict ticker future before entering trade, veto
+                # negative expectancy (< 1.0 peak R or negative edge), and attach predicted_peak_r for exit.
+                # SAFE ROLLBACK: Preserved below.
+                # -----------------------------------------------------------------------------
+                # [NEW CODE]:
+                if df is not None and len(df) >= 15 and sig.price and sig.stop_loss and sig.take_profit:
                     try:
                         from app.ai.monte_carlo_gate import MonteCarloGate
                         mc_gate = MonteCarloGate(
-                            min_win_prob=float(getattr(rc, "monte_carlo_min_win_prob", 0.35)),
-                            min_expected_r=float(getattr(rc, "monte_carlo_min_expected_r", 0.05)),
+                            min_win_prob=0.30,
+                            min_expected_r=-0.05,
                             n_replays=100,
                             seed=42,
                         )
                         risk_val = abs(float(sig.price) - float(sig.stop_loss))
                         reward_val = abs(float(sig.take_profit) - float(sig.price))
                         r_target = reward_val / risk_val if risk_val > 0 else 2.0
+                        # =============================================================================
+                        # [MODIFIED 2026-10-26]: Wire Peak R Targets & Strict Future Expectancy Veto
+                        # ORIGINAL INTENT: Veto threshold was loose (< 1.0R), ignored `passed`, and did not wire
+                        # take_profit and scale_out_target to predicted peak R excursion.
+                        # REASON FOR CHANGE: User directive: Predict ticker future before entering, predict peak R,
+                        # and exit around that peak R. Attach calibrated target brackets.
+                        # SAFE ROLLBACK: Previous block preserved below as comments.
+                        # -----------------------------------------------------------------------------
+                        # [PREVIOUS CODE - PRESERVED]:
+                        # passed, stats, reason = mc_gate.evaluate_signal(sig, df)
+                        # p_target = float(stats.get("p_target", 0.30))
+                        # p_stop = float(stats.get("p_stop", 0.70))
+                        # hit_side = p_target + p_stop
+                        # edge = (p_target / hit_side - 1.0 / (1.0 + r_target)) if hit_side > 0 else 0.0
+                        # pred_peak_r = float(stats.get("predicted_peak_r", 2.2))
+                        # if pred_peak_r < 1.0 or edge < -0.15:
+                        #     rejected.append((sig, f"Monte Carlo forward prediction veto (pred_peak_r {pred_peak_r:.2f}R < 1.0 or edge {edge:.2f} < -0.15)"))
+                        #     continue
+                        # allocator_mult = 1.0
+                        # if edge >= 0.08:
+                        #     allocator_mult = 1.45
+                        # elif edge >= 0.03:
+                        #     allocator_mult = 1.25
+                        # elif edge < -0.05:
+                        #     allocator_mult = 0.75
+                        # sig.monte_carlo_p_target = p_target
+                        # sig.monte_carlo_p_stop = p_stop
+                        # sig.monte_carlo_expected_r = float(stats.get("avg_r", 0.0))
+                        # sig.monte_carlo_verdict = reason
+                        # sig.predicted_peak_r = pred_peak_r
+                        # sig.risk_multiplier = round(getattr(sig, "risk_multiplier", 1.0) * allocator_mult, 4)
+                        # -----------------------------------------------------------------------------
+                        # [NEW CODE]:
                         passed, stats, reason = mc_gate.evaluate_signal(sig, df)
                         p_target = float(stats.get("p_target", 0.30))
                         p_stop = float(stats.get("p_stop", 0.70))
                         hit_side = p_target + p_stop
                         edge = (p_target / hit_side - 1.0 / (1.0 + r_target)) if hit_side > 0 else 0.0
+                        pred_peak_r = float(stats.get("predicted_peak_r", 2.2))
 
-                        if edge < -0.15:
-                            rejected.append((sig, f"Monte Carlo negative skew veto (edge {edge:.2f} < -0.15)"))
+                        if not passed or pred_peak_r < 1.40 or edge < -0.04 or p_target < 0.22:
+                            rejected.append((sig, f"Future Prediction veto (pred_peak_r={pred_peak_r:.2f}R, edge={edge:.2f}, p_target={p_target:.2f})"))
                             continue
 
                         allocator_mult = 1.0
@@ -839,10 +883,22 @@ class SignalPipeline:
                         sig.monte_carlo_p_stop = p_stop
                         sig.monte_carlo_expected_r = float(stats.get("avg_r", 0.0))
                         sig.monte_carlo_verdict = reason
+                        sig.predicted_peak_r = pred_peak_r
                         sig.risk_multiplier = round(getattr(sig, "risk_multiplier", 1.0) * allocator_mult, 4)
+
+                        # Wire Exit Bracket Targets Directly Around Predicted Peak R
+                        sig.omit_take_profit = False
+                        if sig.action == SignalAction.ENTER_LONG:
+                            sig.take_profit = round(float(sig.price) + (pred_peak_r * risk_val), 2)
+                            sig.scale_out_target = round(float(sig.price) + (0.70 * pred_peak_r * risk_val), 2)
+                        else:
+                            sig.take_profit = round(float(sig.price) - (pred_peak_r * risk_val), 2)
+                            sig.scale_out_target = round(float(sig.price) - (0.70 * pred_peak_r * risk_val), 2)
+                        # =============================================================================
                     except Exception:
                         pass
                 entries.append(sig)
+                # =============================================================================
             # =============================================================================
         if entries:
             entries.sort(key=lambda s: (s.score or 0.0) * getattr(s, "risk_multiplier", 1.0), reverse=True)

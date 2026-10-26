@@ -323,13 +323,75 @@ class Database:
             )
             s.commit()
 
+    # =============================================================================
+    # [MODIFIED 2026-10-26]: Robust Legacy-Resilient Backtest History Deserialization
+    # ORIGINAL INTENT: Unpacked raw `json.loads(r.summary)` directly into response dict.
+    # REASON FOR CHANGE: Legacy and custom backtest runs may lack `symbols` or `days` in `summary`,
+    # causing frontend `.symbols.join()` to throw uncaught TypeError and blank the screen.
+    # This update safely ensures `symbols` is always a list and `days` is populated from params.
+    # SAFE ROLLBACK: Previous list_backtests preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # def list_backtests(self, limit: int = 50) -> list[dict]:
+    #     with self._session() as s:
+    #         stmt = select(BacktestRow).order_by(BacktestRow.created_at.desc()).limit(limit)
+    #         return [
+    #             {"id": r.id, "created_at": r.created_at.isoformat(), **json.loads(r.summary)}
+    #             for r in s.scalars(stmt)
+    #         ]
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
     def list_backtests(self, limit: int = 50) -> list[dict]:
         with self._session() as s:
             stmt = select(BacktestRow).order_by(BacktestRow.created_at.desc()).limit(limit)
-            return [
-                {"id": r.id, "created_at": r.created_at.isoformat(), **json.loads(r.summary)}
-                for r in s.scalars(stmt)
-            ]
+            out = []
+            for r in s.scalars(stmt):
+                raw_summary = {}
+                try:
+                    if r.summary:
+                        raw_summary = json.loads(r.summary)
+                except Exception:
+                    raw_summary = {}
+
+                payload = {}
+                try:
+                    if r.payload:
+                        payload = json.loads(r.payload)
+                except Exception:
+                    payload = {}
+
+                symbols = raw_summary.get("symbols")
+                if not symbols:
+                    symbols = payload.get("params", {}).get("symbols")
+                if not symbols:
+                    symbols = []
+                elif isinstance(symbols, str):
+                    symbols = [s.strip() for s in symbols.split(",") if s.strip()]
+
+                days = raw_summary.get("days")
+                if not days:
+                    days = payload.get("params", {}).get("days")
+                if not days:
+                    start_val = payload.get("params", {}).get("start")
+                    end_val = payload.get("params", {}).get("end")
+                    if start_val and end_val:
+                        try:
+                            s_dt = datetime.fromisoformat(str(start_val).replace("Z", "+00:00"))
+                            e_dt = datetime.fromisoformat(str(end_val).replace("Z", "+00:00"))
+                            days = max(1, (e_dt - s_dt).days)
+                        except Exception:
+                            days = None
+
+                created_iso = r.created_at.isoformat() if hasattr(r.created_at, "isoformat") else str(r.created_at)
+                out.append({
+                    "id": r.id,
+                    "created_at": created_iso,
+                    **raw_summary,
+                    "symbols": symbols,
+                    "days": days,
+                })
+            return out
+    # =============================================================================
 
     def get_backtest(self, run_id: str) -> dict | None:
         with self._session() as s:
