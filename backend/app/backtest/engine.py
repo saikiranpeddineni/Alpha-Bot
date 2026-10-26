@@ -283,7 +283,26 @@ async def run_backtest(
         db.set_setting("risk_config", params.risk.model_dump())
 
     engine = TradingEngine(settings, db)
+    # =============================================================================
+    # [MODIFIED 2026-10-26]: Calibrated ML Gate Activation in Backtest Wire-up
+    # ORIGINAL INTENT: Passed risk_cfg.ml_confidence_threshold directly without checking if 0.0.
+    # REASON FOR CHANGE: If .env or config defaults had ml_confidence_threshold == 0.0, passing it
+    # disabled the ML gate even when params.use_ml_gate was True. Defaulting to 0.48 when use_ml_gate
+    # is True guarantees live ML filtering parity.
+    # SAFE ROLLBACK: Previous lines preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # risk_cfg = params.risk or RiskConfig()
+    # ...
+    # engine.pipeline = SignalPipeline(model, risk_cfg.ml_confidence_threshold if params.use_ml_gate else 0.0)
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
     risk_cfg = params.risk or RiskConfig()
+    if params.use_ml_gate and (not getattr(risk_cfg, "ml_confidence_threshold", None) or risk_cfg.ml_confidence_threshold <= 0.0):
+        risk_cfg.ml_confidence_threshold = 0.48
+    elif not params.use_ml_gate:
+        risk_cfg.ml_confidence_threshold = 0.0
+
     if getattr(engine, "gemini_council", None):
         engine.gemini_council.api_key = ""
         engine.gemini_council.enabled = bool(getattr(risk_cfg, "enable_ai_agent_gate", False))
@@ -329,7 +348,9 @@ async def run_backtest(
         engine._scanner = engine.scanner
         engine._scanner_data = engine.data
 
-    engine.pipeline = SignalPipeline(model, risk_cfg.ml_confidence_threshold if params.use_ml_gate else 0.0)
+    ml_thresh = risk_cfg.ml_confidence_threshold if params.use_ml_gate else 0.0
+    engine.pipeline = SignalPipeline(model, ml_thresh)
+    # =============================================================================
     engine.strategies = create_strategies(params.strategies)
 
     engine.state = EngineState.RUNNING
