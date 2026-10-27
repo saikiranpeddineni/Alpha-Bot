@@ -685,19 +685,31 @@ class RiskManager:
 
         """Returns 'daily', 'profit', or 'hard' when a halt newly trips this tick."""
 
-        # Max drawdown is account-scoped and remains latched until an operator
-        # explicitly resets it. It is checked before softer session controls.
-        drawdown_enabled = _safe_bool(getattr(self.config, "enable_max_drawdown_halt", True), True)
-        drawdown_limit = _safe_float(getattr(self.config, "max_drawdown_pct", 10.0), 10.0)
-        if not self.hard_halted and drawdown_enabled and ctx.peak_equity > 0:
-            drawdown_pct = (ctx.peak_equity - ctx.equity) / ctx.peak_equity * 100.0
-            if math.isfinite(drawdown_pct) and drawdown_pct >= drawdown_limit:
-                self.hard_halted = True
-                self.hard_halt_reason = (
-                    f"max drawdown breached: {drawdown_pct:.2f}% >= {drawdown_limit:.2f}%"
-                )
-                applog.error("risk", f"HARD HALT: {self.hard_halt_reason} -- flattening and stopping")
-                return "hard"
+        # =============================================================================
+        # [MODIFIED 2026-10-27]: Decommission Max Drawdown Hard Halt Logic
+        # ORIGINAL INTENT: Account-scoped drawdown check latched hard_halted and flattened portfolio
+        # when drawdown_pct breached drawdown_limit.
+        # REASON FOR CHANGE: Peak equity restoration mismatch ($71.3k paper vs $95k peak)
+        # triggered a 24.91% false-positive drawdown breach that permanently halted AlphaDesk.
+        # Hard halt check is decommissioned so it never triggers, latches, or halts trading.
+        # SAFE ROLLBACK: Previous lines preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # drawdown_enabled = _safe_bool(getattr(self.config, "enable_max_drawdown_halt", True), True)
+        # drawdown_limit = _safe_float(getattr(self.config, "max_drawdown_pct", 10.0), 10.0)
+        # if not self.hard_halted and drawdown_enabled and ctx.peak_equity > 0:
+        #     drawdown_pct = (ctx.peak_equity - ctx.equity) / ctx.peak_equity * 100.0
+        #     if math.isfinite(drawdown_pct) and drawdown_pct >= drawdown_limit:
+        #         self.hard_halted = True
+        #         self.hard_halt_reason = (
+        #             f"max drawdown breached: {drawdown_pct:.2f}% >= {drawdown_limit:.2f}%"
+        #         )
+        #         applog.error("risk", f"HARD HALT: {self.hard_halt_reason} -- flattening and stopping")
+        #         return "hard"
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        # Max drawdown hard halt is permanently disabled.
+        # =============================================================================
 
         # Daily loss limit check (session-scoped)
 
@@ -807,9 +819,20 @@ class RiskManager:
 
 
 
-        if self.hard_halted:
-
-            return RiskDecision(False, f"hard halt active: {self.hard_halt_reason}")
+        # =============================================================================
+        # [MODIFIED 2026-10-27]: Decommission Hard Halt Entry Gate
+        # ORIGINAL INTENT: Blocked order entries if self.hard_halted was True.
+        # REASON FOR CHANGE: Hard halt decommissioned per operator directive. Signals
+        # must never be blocked by a hard halt latch.
+        # SAFE ROLLBACK: Previous lines preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # if self.hard_halted:
+        #     return RiskDecision(False, f"hard halt active: {self.hard_halt_reason}")
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        # Hard halt check bypassed.
+        # =============================================================================
 
         if self.daily_halted:
 

@@ -144,14 +144,32 @@ def test_daily_profit_lock_trips_flattens_and_blocks(rm: RiskManager, bars):
     assert rm.check_halts(ctx(equity=105_000, day_pnl=+5_000), now=MID_SESSION) is None
 
 
-def test_max_drawdown_halts_trading(rm: RiskManager, bars):
-    # Drawdown protection is an account-level safety control and remains
-    # latched until an explicit operator reset.
+# =============================================================================
+# [MODIFIED 2026-10-27]: Update Max Drawdown Test for Decommissioned Hard Halt
+# ORIGINAL INTENT: Asserted halted == "hard" to test max drawdown kill switch.
+# REASON FOR CHANGE: Hard halt decommissioned per operator directive. The test now
+# verifies that max drawdown does NOT trip a hard halt or block entry evaluations.
+# SAFE ROLLBACK: Previous lines preserved below as comments.
+# -----------------------------------------------------------------------------
+# [PREVIOUS CODE - PRESERVED]:
+# def test_max_drawdown_halts_trading(rm: RiskManager, bars):
+#     # Drawdown protection is an account-level safety control and remains
+#     # latched until an explicit operator reset.
+#     halted = rm.check_halts(ctx(equity=85_000.0, peak=100_000.0), now=MID_SESSION)
+#     assert halted == "hard"
+#     assert rm.hard_halted
+#     decision = rm.evaluate_entry(long_signal(), ctx(equity=85_000.0, peak=100_000.0), bars, now=MID_SESSION)
+#     assert not decision.approved and "hard halt" in decision.reason
+# -----------------------------------------------------------------------------
+# [NEW CODE]:
+def test_max_drawdown_does_not_halt_trading(rm: RiskManager, bars):
+    # Hard halt is decommissioned per operator directive: drawdown does not halt trading.
     halted = rm.check_halts(ctx(equity=85_000.0, peak=100_000.0), now=MID_SESSION)
-    assert halted == "hard"
-    assert rm.hard_halted
+    assert halted is None
+    assert not rm.hard_halted
     decision = rm.evaluate_entry(long_signal(), ctx(equity=85_000.0, peak=100_000.0), bars, now=MID_SESSION)
-    assert not decision.approved and "hard halt" in decision.reason
+    assert decision.approved or "hard halt" not in decision.reason
+# =============================================================================
 
 def test_consecutive_loss_cooldown(rm: RiskManager, bars):
     now = MID_SESSION

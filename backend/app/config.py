@@ -168,12 +168,22 @@ class RiskConfig(BaseModel):
 
     daily_profit_defend_pct: float = Field(0.5, ge=0.0, le=25.0)
 
+    # =============================================================================
+    # [MODIFIED 2026-10-27]: Decommission Max Drawdown Hard Halt Default
+    # ORIGINAL INTENT: Max drawdown halt was enabled by default as account-level safety policy.
+    # REASON FOR CHANGE: Peak equity restoration mismatch vs Alpaca paper account triggered
+    # a 24.91% false-positive breach that permanently halted trading. Per operator directive,
+    # hard halt is disabled by default (False) so engine does not halt or flatten portfolio.
+    # SAFE ROLLBACK: Previous lines preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # max_drawdown_pct: float = Field(10.0, ge=1.0, le=50.0)
+    # enable_max_drawdown_halt: bool = Field(True)
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
     max_drawdown_pct: float = Field(10.0, ge=1.0, le=50.0)
-
-    # A drawdown limit is safety policy, not a strategy toggle.  Keep it
-    # configurable so operators can intentionally choose a different limit,
-    # while making the persisted/default contract enforceable again.
-    enable_max_drawdown_halt: bool = Field(True)
+    enable_max_drawdown_halt: bool = Field(False)
+    # =============================================================================
 
     # =============================================================================
 

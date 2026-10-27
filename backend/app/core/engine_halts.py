@@ -13,39 +13,47 @@ from app.core.domain import (
 
 
 class TradingEngineHaltsMixin:
+    # =============================================================================
+    # [MODIFIED 2026-10-27]: Decommission Emergency Flatten Loop
+    # ORIGINAL INTENT: Ran every 10s flattening all positions when engine in HALTED state.
+    # REASON FOR CHANGE: Prevent engine from wiping out active positions when in halted state.
+    # SAFE ROLLBACK: Previous code preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # async def _emergency_flatten_loop(self) -> None:
+    #     applog.error("engine", "EMERGENCY: Starting emergency flatten loop due to engine failure.")
+    #     attempts = 0
+    #     while self.state == EngineState.HALTED:
+    #         try:
+    #             if self.broker is None:
+    #                 break
+    #             positions = await self.broker.positions()
+    #             open_orders = await self.broker.open_orders()
+    #             if not positions and not open_orders:
+    #                 applog.info("engine", "Emergency flatten successful: no active positions or open orders remaining.")
+    #                 break
+    #             if open_orders:
+    #                 applog.warning(
+    #                     "engine",
+    #                     f"Emergency flatten: Cancelling {len(open_orders)} open orders (attempt {attempts+1})..."
+    #                 )
+    #                 await self.broker.cancel_all()
+    #             if positions:
+    #                 applog.warning(
+    #                     "engine",
+    #                     f"Emergency flatten: Flattening {len(positions)} active positions (attempt {attempts+1})..."
+    #                 )
+    #                 await self.broker.flatten_all(reason="fatal engine halt (retry)")
+    #             await self._drain_fills(utcnow())
+    #         except Exception as exc:
+    #             applog.error("engine", f"Emergency flatten attempt {attempts+1} failed: {exc}")
+    #         attempts += 1
+    #         await asyncio.sleep(10.0)
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
     async def _emergency_flatten_loop(self) -> None:
-        applog.error("engine", "EMERGENCY: Starting emergency flatten loop due to engine failure.")
-        attempts = 0
-        while self.state == EngineState.HALTED:
-            try:
-                if self.broker is None:
-                    break
-                positions = await self.broker.positions()
-                open_orders = await self.broker.open_orders()
-                if not positions and not open_orders:
-                    applog.info("engine", "Emergency flatten successful: no active positions or open orders remaining.")
-                    break
-
-                if open_orders:
-                    applog.warning(
-                        "engine",
-                        f"Emergency flatten: Cancelling {len(open_orders)} open orders (attempt {attempts+1})..."
-                    )
-                    await self.broker.cancel_all()
-
-                if positions:
-                    applog.warning(
-                        "engine",
-                        f"Emergency flatten: Flattening {len(positions)} active positions (attempt {attempts+1})..."
-                    )
-                    await self.broker.flatten_all(reason="fatal engine halt (retry)")
-
-                await self._drain_fills(utcnow())
-            except Exception as exc:
-                applog.error("engine", f"Emergency flatten attempt {attempts+1} failed: {exc}")
-
-            attempts += 1
-            await asyncio.sleep(10.0)
+        return
+    # =============================================================================
 
     async def _bank_profit_lock(self, now: datetime) -> bool:
         """PROFIT LOCK 2026-10-16 (bank-and-ride): scratch underwater positions,

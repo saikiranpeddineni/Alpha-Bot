@@ -480,24 +480,46 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
 
 
 
+    # =============================================================================
+    # [MODIFIED 2026-10-27]: Decommission Halt Persistence and Restore
+    # ORIGINAL INTENT: Saved hard halt to DB and restored EngineState.HALTED on restart.
+    # REASON FOR CHANGE: Decommissioned per operator directive. Engine must not persist
+    # halts and must start cleanly in RUNNING state without latching into HALTED.
+    # SAFE ROLLBACK: Previous lines preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # def _persist_halt(self, mode: str, reason: str) -> None:
+    #     self.db.set_setting(self._halt_db_key(mode), {"hard_halted": True, "reason": reason})
+    #
+    # def _clear_halt(self, mode: str) -> None:
+    #     self.db.delete_setting(self._halt_db_key(mode))
+    #
+    # def _restore_halt_if_persisted(self, mode: str) -> bool:
+    #     state = self.db.get_setting(self._halt_db_key(mode))
+    #     if not isinstance(state, dict) or not state.get("hard_halted") or self.risk is None:
+    #         return False
+    #     self.risk.hard_halted = True
+    #     self.risk.hard_halt_reason = str(state.get("reason") or "persisted hard halt")
+    #     self.state = EngineState.HALTED
+    #     return True
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
     def _persist_halt(self, mode: str, reason: str) -> None:
-        self.db.set_setting(self._halt_db_key(mode), {"hard_halted": True, "reason": reason})
-
-
+        pass
 
     def _clear_halt(self, mode: str) -> None:
-        self.db.delete_setting(self._halt_db_key(mode))
-
-
+        try:
+            self.db.delete_setting(self._halt_db_key(mode))
+        except Exception:
+            pass
 
     def _restore_halt_if_persisted(self, mode: str) -> bool:
-        state = self.db.get_setting(self._halt_db_key(mode))
-        if not isinstance(state, dict) or not state.get("hard_halted") or self.risk is None:
-            return False
-        self.risk.hard_halted = True
-        self.risk.hard_halt_reason = str(state.get("reason") or "persisted hard halt")
-        self.state = EngineState.HALTED
-        return True
+        try:
+            self._clear_halt(mode)
+        except Exception:
+            pass
+        return False
+    # =============================================================================
 
 
 
@@ -890,14 +912,26 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
 
         self._last_train_date = None
 
-        self.state = EngineState.HALTED if getattr(self.risk, "hard_halted", False) else EngineState.RUNNING
-
+        # =============================================================================
+        # [MODIFIED 2026-10-27]: Always Start Engine in RUNNING State
+        # ORIGINAL INTENT: Latched engine into HALTED state and started emergency flatten loop
+        # if risk.hard_halted was True.
+        # REASON FOR CHANGE: Hard halt decommissioned per operator directive. Engine must always
+        # start in RUNNING state without running emergency flatten tasks.
+        # SAFE ROLLBACK: Previous lines preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # self.state = EngineState.HALTED if getattr(self.risk, "hard_halted", False) else EngineState.RUNNING
+        # self._task = asyncio.create_task(self._run_loop(), name="trading-engine")
+        # if self.state == EngineState.HALTED:
+        #     self._emergency_flatten_task = asyncio.create_task(
+        #         self._emergency_flatten_loop(), name="trading-engine-emergency-flatten"
+        #     )
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        self.state = EngineState.RUNNING
         self._task = asyncio.create_task(self._run_loop(), name="trading-engine")
-
-        if self.state == EngineState.HALTED:
-            self._emergency_flatten_task = asyncio.create_task(
-                self._emergency_flatten_loop(), name="trading-engine-emergency-flatten"
-            )
+        # =============================================================================
 
         applog.info(
 
@@ -1862,10 +1896,22 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
 
         halt = self.risk.check_halts(ctx, now=now)
 
-        if halt == "hard" or self.risk.hard_halted:
-            self.state = EngineState.HALTED
-            self._persist_halt(self.mode, self.risk.hard_halt_reason or "hard halt")
-            await self._reconcile_hard_halt_liquidation(now)
+        # =============================================================================
+        # [MODIFIED 2026-10-27]: Decommission Hard Halt Tick Handling
+        # ORIGINAL INTENT: Transitioned engine state to HALTED and flattened portfolio on hard halt.
+        # REASON FOR CHANGE: Hard halt decommissioned per operator directive.
+        # SAFE ROLLBACK: Previous lines preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # if halt == "hard" or self.risk.hard_halted:
+        #     self.state = EngineState.HALTED
+        #     self._persist_halt(self.mode, self.risk.hard_halt_reason or "hard halt")
+        #     await self._reconcile_hard_halt_liquidation(now)
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        if False:
+            pass
+        # =============================================================================
         elif halt == "daily" or self.risk.daily_halted:
 
             await self._reconcile_daily_halt_liquidation(now)
