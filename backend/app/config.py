@@ -170,6 +170,11 @@ class RiskConfig(BaseModel):
 
     max_drawdown_pct: float = Field(10.0, ge=1.0, le=50.0)
 
+    # A drawdown limit is safety policy, not a strategy toggle.  Keep it
+    # configurable so operators can intentionally choose a different limit,
+    # while making the persisted/default contract enforceable again.
+    enable_max_drawdown_halt: bool = Field(True)
+
     # =============================================================================
 
     # [MODIFIED 2026-10-23]: Asymmetric Re-Entry Lockout & Cooldown Calibration
@@ -826,6 +831,8 @@ class Settings(BaseSettings):
     daily_profit_defend_pct: float = Field(0.5, validation_alias="DAILY_PROFIT_DEFEND_PCT")
 
     max_drawdown_pct: float = Field(10.0, validation_alias="MAX_DRAWDOWN_PCT")
+
+    enable_max_drawdown_halt: bool = Field(True, validation_alias="ENABLE_MAX_DRAWDOWN_HALT")
 
     symbol_cooldown_minutes: int = Field(10, validation_alias="COOLDOWN_MINUTES")                   # was 30
 

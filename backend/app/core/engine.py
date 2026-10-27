@@ -378,6 +378,8 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
 
         self.reconciliation_failed = False
 
+        self._startup_reconciliation_failed = False
+
         # Replay fast-path flag: set by ReplayRuntime to skip live-ops telemetry
 
         # (heartbeat monitors, equity persistence, hourly sector scans) that has
@@ -466,7 +468,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
 
     # ------------------------------------------------------------------
 
-    # halt persistence helpers (kill switch retired)
+    # halt persistence helpers
 
     # ------------------------------------------------------------------
 
@@ -479,20 +481,23 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
 
 
     def _persist_halt(self, mode: str, reason: str) -> None:
-
-        pass
+        self.db.set_setting(self._halt_db_key(mode), {"hard_halted": True, "reason": reason})
 
 
 
     def _clear_halt(self, mode: str) -> None:
-
-        pass
+        self.db.delete_setting(self._halt_db_key(mode))
 
 
 
     def _restore_halt_if_persisted(self, mode: str) -> bool:
-
-        return False
+        state = self.db.get_setting(self._halt_db_key(mode))
+        if not isinstance(state, dict) or not state.get("hard_halted") or self.risk is None:
+            return False
+        self.risk.hard_halted = True
+        self.risk.hard_halt_reason = str(state.get("reason") or "persisted hard halt")
+        self.state = EngineState.HALTED
+        return True
 
 
 
@@ -660,8 +665,6 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
 
         self.risk.core_watchlist = self.core_watchlist
 
-
-
         restore_mode = None
 
         restore_account_id = None
@@ -697,6 +700,11 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
                 self.risk.restore_risk_state(checkpoint["risk_state"])
 
                 applog.info("engine", f"#43: Restored safety-critical risk state from {restore_mode} checkpoint")
+
+        # The dedicated halt marker is the final authority. A checkpoint
+        # written just before a halt was tripped must not clear it on restart.
+        if self._restore_halt_if_persisted(mode):
+            applog.error("engine", f"Restored persisted hard halt for {mode}; exits-only liquidation remains active")
 
 
 
@@ -771,6 +779,8 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
         except Exception as exc:
 
             self.reconciliation_failed = True
+
+            self._startup_reconciliation_failed = True
 
             applog.error("engine", f"Failed to restore and reconcile active positions: {exc}")
 
@@ -880,9 +890,14 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
 
         self._last_train_date = None
 
-        self.state = EngineState.RUNNING
+        self.state = EngineState.HALTED if getattr(self.risk, "hard_halted", False) else EngineState.RUNNING
 
         self._task = asyncio.create_task(self._run_loop(), name="trading-engine")
+
+        if self.state == EngineState.HALTED:
+            self._emergency_flatten_task = asyncio.create_task(
+                self._emergency_flatten_loop(), name="trading-engine-emergency-flatten"
+            )
 
         applog.info(
 
@@ -1744,7 +1759,20 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
 
             positions = await self.broker.positions()
 
-            self._reconcile_positions(positions)
+            if self._startup_reconciliation_failed:
+                # Only startup recovery is allowed to reconstruct local lots
+                # from broker truth. Normal ticks remain observational.
+                self._reconcile_positions(positions)
+                # A test/durable adapter may decline to reconcile while the
+                # broker snapshot is available. Keep the startup latch until
+                # the reconciliation method actually clears the failure.
+                if not self.reconciliation_failed:
+                    self._startup_reconciliation_failed = False
+
+            # Runtime broker snapshots are authoritative observations for the
+            # safety gate, not permission to overwrite the durable local lot
+            # ledger. Startup reconstruction remains the only reconciliation
+            # path that creates local lots from broker positions.
 
         except Exception as exc:
 
@@ -1834,7 +1862,11 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
 
         halt = self.risk.check_halts(ctx, now=now)
 
-        if halt == "daily" or self.risk.daily_halted:
+        if halt == "hard" or self.risk.hard_halted:
+            self.state = EngineState.HALTED
+            self._persist_halt(self.mode, self.risk.hard_halt_reason or "hard halt")
+            await self._reconcile_hard_halt_liquidation(now)
+        elif halt == "daily" or self.risk.daily_halted:
 
             await self._reconcile_daily_halt_liquidation(now)
 
@@ -3026,7 +3058,9 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
 
                 if nack_fill is not None:
 
-                    nack_fill(fill)
+                    result = nack_fill(fill)
+                    if inspect.isawaitable(result):
+                        await result
 
                 raise
 
@@ -3034,7 +3068,9 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
 
             if ack_fill is not None:
 
-                ack_fill(fill)
+                result = ack_fill(fill)
+                if inspect.isawaitable(result):
+                    await result
 
 
 
@@ -3104,11 +3140,36 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
 
                         self._release_pending_close(symbol, "lot gone")
 
+            if trade is None and callable(getattr(self.portfolio, "checkpoint", None)):
+                # Partial/opening fills also change the local lot ledger. Save
+                # them so a restart cannot lose the position while retaining a
+                # later closed-trade row.
+                await asyncio.to_thread(
+                    self.db.save_portfolio_checkpoint_with_trade,
+                    self.mode,
+                    self.portfolio.checkpoint(
+                        account_id=getattr(self.broker, "account_id", None),
+                        risk_state=self.risk.get_risk_state() if self.risk else {},
+                    ),
+                    None,
+                )
+
             if trade is not None:
 
                 self.perf_tracker.update(trade, now=now)
 
-                await asyncio.to_thread(self.db.save_trade, trade, self.mode)
+                # Keep the durable checkpoint and closed-trade row in one
+                # transaction. This is required for paper fills, which do not
+                # have broker execution watermarks to use as the atomic boundary.
+                await asyncio.to_thread(
+                    self.db.save_portfolio_checkpoint_with_trade,
+                    self.mode,
+                    self.portfolio.checkpoint(
+                        account_id=getattr(self.broker, "account_id", None),
+                        risk_state=self.risk.get_risk_state() if self.risk else {},
+                    ),
+                    trade,
+                )
 
                 self.publish("trade", trade.model_dump(mode="json"))
 
@@ -4564,6 +4625,18 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
         if self.risk is not None:
 
             self.risk.reset_hard_halt()
+
+            # Clear the durable risk snapshot as well as the halt marker. A
+            # restart must not resurrect a halt that the operator explicitly
+            # reset in memory.
+            if self.portfolio is not None and self.mode in {"paper", "live"}:
+                self.db.save_portfolio_checkpoint(
+                    self.mode,
+                    self.portfolio.checkpoint(
+                        account_id=getattr(self.broker, "account_id", None),
+                        risk_state=self.risk.get_risk_state(),
+                    ),
+                )
 
         # --- #115 fix: clear the durable DB record so the next start() proceeds normally.
 
@@ -6299,6 +6372,8 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
 
             self.reconciliation_mismatch = True
 
+            self.reconciliation_failed = True
+
             self.allow_new_entries = False
 
             if self.system_health != "HALTED":
@@ -6322,6 +6397,9 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
                 applog.info("engine.heartbeat", "Broker/local reconciliation restored; clearing reconciliation SAFE_MODE latch")
 
             self.reconciliation_mismatch = False
+
+            if not self._startup_reconciliation_failed:
+                self.reconciliation_failed = False
 
             diagnostics["positions_reconciled"] = True
 

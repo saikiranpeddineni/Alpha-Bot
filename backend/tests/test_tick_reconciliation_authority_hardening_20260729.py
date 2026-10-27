@@ -8,7 +8,7 @@ from pathlib import Path
 
 def _tick_source() -> str:
     src = (Path(__file__).parents[1] / "app/core/engine.py").read_text(encoding="utf-8")
-    start = src.index("    async def _tick(self)")
+    start = src.index("    async def _tick(self, now")
     end = src.index("    async def _evaluate_symbol", start)
     return src[start:end]
 

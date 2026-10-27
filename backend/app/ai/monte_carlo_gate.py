@@ -320,15 +320,22 @@ class MonteCarloGate:
     ) -> tuple[bool, dict[str, Any], str]:
         """Evaluate signal against pre-trade Monte Carlo odds."""
         if sig.stop_loss is None or sig.take_profit is None or sig.price is None:
-            # Cannot simulate without concrete geometry
-            return True, {}, "bypassed: missing price/stop/target bounds"
+            # An enabled predictive gate must never authorize an entry that it
+            # cannot simulate. The pipeline normally supplies geometry before
+            # reaching this method; this branch protects direct callers.
+            reason = "Monte Carlo failed closed: missing price/stop/target bounds"
+            applog.warning("monte_carlo", f"{sig.symbol}: {reason}")
+            return False, {}, reason
 
         is_long = sig.action == SignalAction.ENTER_LONG
 
         pool = self.extract_ratio_pool(df)
         if pool is None:
-            # Fall soft if insufficient historical intraday bars for empirical bootstrap
-            return True, {}, "fail-soft: insufficient intraday bars for empirical pool"
+            # Insufficient or invalid history is an unknown risk state, not an
+            # approval. Do not fail open when the predictive gate is enabled.
+            reason = "Monte Carlo failed closed: insufficient intraday bars for empirical pool"
+            applog.warning("monte_carlo", f"{sig.symbol}: {reason}")
+            return False, {}, reason
 
         stats = self.simulate(
             entry=float(sig.price),

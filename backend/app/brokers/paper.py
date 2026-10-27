@@ -1119,9 +1119,13 @@ class PaperBroker(Broker):
 
         self._fill_resting(symbol, o, h, low, vol=vol)
 
-        self._advance_trail(symbol, h, low)
-
         self._check_brackets(symbol, o, h, low)
+
+        # Ratchet only after the bar's protective brackets have been evaluated.
+        # Otherwise a high and low on the same bar can move the stop before the
+        # low is checked, creating look-ahead fills and changing stop/target
+        # precedence.
+        self._advance_trail(symbol, h, low)
 
         self._last_price[symbol] = c
 

@@ -104,7 +104,8 @@ async def test_young_submission_remains_guarded_even_after_three_not_found_obser
 def test_tick_reconciles_ambiguous_submissions_before_heartbeat():
     from pathlib import Path
     src = (Path(__file__).parents[1] / "app/core/engine.py").read_text(encoding="utf-8")
-    tick = src[src.index("    async def _tick(self)"):src.index("        # Run pre-market scanner", src.index("    async def _tick(self)"))]
+    tick_start = src.index("    async def _tick(self, now")
+    tick = src[tick_start:src.index("        # Run pre-market scanner", tick_start)]
     assert tick.index("await self._reconcile_pending_submissions(now=now)") < tick.index("await self._check_system_heartbeat(now)")
     assert tick.count("_reconcile_pending_submissions") == 1
 

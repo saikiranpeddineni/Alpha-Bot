@@ -42,6 +42,7 @@ def _pipeline(*, raw_score: float, meta_probability: float, model_probability: f
         enable_entry_chase_veto=False,
         enable_entry_location_veto=False,
         enable_entry_extreme_guard=False,
+        enable_monte_carlo_gate=False,
     )
     pipeline = SignalPipeline(
         model=_Model(model_probability),

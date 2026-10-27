@@ -113,7 +113,7 @@ class SignalPipeline:
         # SAFE ROLLBACK: Set use_ml_gate = True or ml_threshold > 0.0 to execute composite gate.
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
-        if not getattr(self, "use_ml_gate", True) or self.ml_threshold <= 0.0:
+        if not getattr(self, "use_ml_gate", True):
             if features is None:
                 features = latest_feature_row(df)
             entries = []
@@ -133,14 +133,14 @@ class SignalPipeline:
                 
                 # Monte Carlo Edge Evaluation & Conviction Sizing
                 allocator_mult = 1.0
-                if sig.price and sig.stop_loss and sig.take_profit:
+                rc = getattr(self.trade_score_engine, "risk_config", None)
+                if getattr(rc, "enable_monte_carlo_gate", False) and sig.price and sig.stop_loss and sig.take_profit:
                     try:
                         risk_val = abs(float(sig.price) - float(sig.stop_loss))
                         reward_val = abs(float(sig.take_profit) - float(sig.price))
                         r_target = reward_val / risk_val if risk_val > 0 else 2.0
                         
                         from app.ai.monte_carlo_gate import MonteCarloGate
-                        rc = getattr(self.trade_score_engine, "risk_config", None)
                         mc_gate = MonteCarloGate(
                             min_win_prob=float(getattr(rc, "monte_carlo_min_win_prob", 0.35)) if rc else 0.35,
                             min_expected_r=float(getattr(rc, "monte_carlo_min_expected_r", 0.05)) if rc else 0.05,
@@ -170,8 +170,10 @@ class SignalPipeline:
                         sig.monte_carlo_expected_r = float(stats.get("avg_r", 0.0))
                         sig.monte_carlo_verdict = reason
                         sig.predicted_peak_r = pred_peak_r
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        rejected.append((sig, f"Monte Carlo evaluation failed closed: {type(exc).__name__}"))
+                        applog.warning("pipeline", f"{symbol} {sig.strategy}: Monte Carlo evaluation failed closed: {exc}")
+                        continue
                 sig.risk_multiplier = allocator_mult
                 entries.append(sig)
                 
@@ -815,12 +817,20 @@ class SignalPipeline:
                 # SAFE ROLLBACK: Preserved below.
                 # -----------------------------------------------------------------------------
                 # [NEW CODE]:
-                if df is not None and len(df) >= 15 and sig.price and sig.stop_loss and sig.take_profit:
+                rc = self.trade_score_engine.risk_config
+                if (
+                    getattr(rc, "enable_monte_carlo_gate", False)
+                    and df is not None
+                    and len(df) >= 15
+                    and sig.price
+                    and sig.stop_loss
+                    and sig.take_profit
+                ):
                     try:
                         from app.ai.monte_carlo_gate import MonteCarloGate
                         mc_gate = MonteCarloGate(
-                            min_win_prob=0.30,
-                            min_expected_r=-0.05,
+                            min_win_prob=float(getattr(rc, "monte_carlo_min_win_prob", 0.35)),
+                            min_expected_r=float(getattr(rc, "monte_carlo_min_expected_r", 0.05)),
                             n_replays=100,
                             seed=42,
                         )
@@ -895,8 +905,10 @@ class SignalPipeline:
                             sig.take_profit = round(float(sig.price) - (pred_peak_r * risk_val), 2)
                             sig.scale_out_target = round(float(sig.price) - (0.70 * pred_peak_r * risk_val), 2)
                         # =============================================================================
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        rejected.append((sig, f"Monte Carlo evaluation failed closed: {type(exc).__name__}"))
+                        applog.warning("pipeline", f"{symbol} {sig.strategy}: Monte Carlo evaluation failed closed: {exc}")
+                        continue
                 entries.append(sig)
                 # =============================================================================
             # =============================================================================

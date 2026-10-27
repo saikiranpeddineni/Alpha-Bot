@@ -19,7 +19,13 @@ def bar(o: float, h: float, low: float, c: float, v: float = 10_000) -> pd.Serie
 
 @pytest.fixture
 def broker() -> PaperBroker:
-    b = PaperBroker(starting_cash=100_000, slippage_bps=0.0, commission_per_share=0.0, fill_market_on="immediate")
+    b = PaperBroker(
+        starting_cash=100_000,
+        slippage_bps=0.0,
+        commission_per_share=0.0,
+        fill_market_on="immediate",
+        allow_margin=False,
+    )
     b.update_price("AAPL", 100.0, NOW)
     return b
 

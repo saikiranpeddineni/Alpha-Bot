@@ -12,7 +12,7 @@ from pathlib import Path
 def _drain_source() -> str:
     src = (Path(__file__).parents[1] / "app/core/engine.py").read_text(encoding="utf-8")
     start = src.index("    async def _drain_fills")
-    end = src.index("    # ------------------------------------------------------------------\n    # broadcast payloads", start)
+    end = src.index("    # broadcast payloads", start)
     return src[start:end]
 
 

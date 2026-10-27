@@ -45,12 +45,12 @@ def test_asymmetric_cooldown_and_quarantine():
     assert "NCPL" in risk_mgr.symbol_cooldowns
     assert risk_mgr.symbol_cooldowns["NCPL"] > early_attempt
 
-    # 3. Second loss on NCPL -> Session Quarantine (390m)
+    # 3. Second loss on NCPL -> Session Quarantine (60m)
     now2 = now + timedelta(minutes=25)
     trade2 = SimpleNamespace(symbol="NCPL", pnl=-50.0, strategy="orb", closed_at=now2)
     risk_mgr.on_trade_closed(trade2, now2)
     assert risk_mgr.symbol_loss_counts["NCPL"] == 2
-    assert risk_mgr.symbol_cooldowns["NCPL"] == now2 + timedelta(minutes=390)
+    assert risk_mgr.symbol_cooldowns["NCPL"] == now2 + timedelta(minutes=60)
 
     # 4. Attempt after 30m -> still quarantined!
     attempt3 = now2 + timedelta(minutes=30)

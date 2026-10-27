@@ -340,6 +340,7 @@ class RiskConfigUpdateBody(BaseModel):
     daily_profit_lock_pct: float | None = None
     daily_profit_defend_pct: float | None = None
     max_drawdown_pct: float | None = None
+    enable_max_drawdown_halt: bool | None = None
     symbol_cooldown_minutes: int | None = None
     strategy_consecutive_loss_limit: int | None = None
     strategy_cooldown_minutes: int | None = None
@@ -795,4 +796,3 @@ async def post_profit_allocator(body: ProfitAllocatorConfig, request: Request) -
             "total_realized_pnl": round(total_pnl, 2)
         }
     }
-

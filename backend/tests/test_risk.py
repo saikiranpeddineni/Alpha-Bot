@@ -144,13 +144,14 @@ def test_daily_profit_lock_trips_flattens_and_blocks(rm: RiskManager, bars):
     assert rm.check_halts(ctx(equity=105_000, day_pnl=+5_000), now=MID_SESSION) is None
 
 
-def test_max_drawdown_does_not_halt_trading(rm: RiskManager, bars):
-    # Kill switch is retired: even at 10% or greater drawdown, no hard halt is tripped
+def test_max_drawdown_halts_trading(rm: RiskManager, bars):
+    # Drawdown protection is an account-level safety control and remains
+    # latched until an explicit operator reset.
     halted = rm.check_halts(ctx(equity=85_000.0, peak=100_000.0), now=MID_SESSION)
-    assert halted is None
-    assert not rm.hard_halted
+    assert halted == "hard"
+    assert rm.hard_halted
     decision = rm.evaluate_entry(long_signal(), ctx(equity=85_000.0, peak=100_000.0), bars, now=MID_SESSION)
-    assert decision.approved
+    assert not decision.approved and "hard halt" in decision.reason
 
 def test_consecutive_loss_cooldown(rm: RiskManager, bars):
     now = MID_SESSION
@@ -161,10 +162,10 @@ def test_consecutive_loss_cooldown(rm: RiskManager, bars):
     rm.on_trade_closed(losing, now=now)
     assert not rm.in_cooldown(now)
     rm.on_trade_closed(losing, now=now)  # limit = 2
-    assert rm.in_cooldown(now)
+    assert rm.is_strategy_in_cooldown("test", now)
     decision = rm.evaluate_entry(long_signal(), ctx(), bars, now=now)
     assert not decision.approved and "cooldown" in decision.reason
-    assert not rm.in_cooldown(now + timedelta(minutes=31))
+    assert not rm.is_strategy_in_cooldown("test", now + timedelta(minutes=31))
     winner = losing.model_copy(update={"pnl": 50.0})
     rm.cooldown_until = None
     rm.on_trade_closed(winner, now=now)

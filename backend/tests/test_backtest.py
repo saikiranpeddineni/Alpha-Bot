@@ -41,6 +41,9 @@ async def test_backtest_runs_and_reports(data, model, risk_config):
         start=datetime(2026, 1, 5, tzinfo=UTC),
         end=datetime(2026, 1, 9, 23, 59, tzinfo=UTC),
         starting_cash=100_000.0,
+        # Scanner behavior is covered by the scanner/replay suites. Keep this
+        # engine accounting smoke test bounded to its requested universe.
+        disable_scanner=True,
         risk=risk_config,
     )
     result = await run_backtest(data, model, params)

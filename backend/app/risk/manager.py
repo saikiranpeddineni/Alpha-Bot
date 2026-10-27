@@ -73,6 +73,33 @@ PDT_EQUITY_MIN = 25_000.0
 PDT_MAX_DAY_TRADES = 3  # allowed day trades in any rolling 5-business-day window
 
 
+def _safe_float(value: object, default: float) -> float:
+    """Convert runtime/config values without allowing mock or NaN values through."""
+    try:
+        result = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+    return result if math.isfinite(result) else default
+
+
+def _safe_int(value: object, default: int, *, minimum: int = 0) -> int:
+    """Convert integer policy knobs defensively at the runtime boundary."""
+    result = _safe_float(value, float(default))
+    return max(minimum, int(result)) if math.isfinite(result) else default
+
+
+def _safe_bool(value: object, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+    return default
+
+
 
 
 
@@ -236,6 +263,8 @@ class RiskManager:
 
             "symbol_cooldowns": {sym: ts.isoformat() for sym, ts in self.symbol_cooldowns.items()},
 
+            "symbol_loss_counts": dict(self.symbol_loss_counts),
+
             "strategy_cooldowns": {strat: ts.isoformat() for strat, ts in self.strategy_cooldowns.items()},
 
             "hard_halted": self.hard_halted,
@@ -287,6 +316,14 @@ class RiskManager:
                 except Exception:
 
                     pass
+
+        raw_loss_counts = data.get("symbol_loss_counts")
+        if isinstance(raw_loss_counts, dict):
+            self.symbol_loss_counts = {
+                str(symbol).upper(): _safe_int(count, 0)
+                for symbol, count in raw_loss_counts.items()
+                if str(symbol).strip()
+            }
 
         if data.get("strategy_cooldowns"):
 
@@ -477,9 +514,10 @@ class RiskManager:
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
         trade_r_val = float(getattr(trade, "r_multiple", 0.0) or 0.0)
+        pnl_pct = getattr(trade, "pnl_pct", None)
         is_scratch = trade.pnl == 0.0 or (
-            trade.pnl_pct is not None
-            and abs(trade.pnl_pct) <= 0.08
+            pnl_pct is not None
+            and abs(pnl_pct) <= 0.08
             and abs(trade_r_val) <= 0.15
         )
         if trade.pnl <= 0 and not is_scratch:
@@ -647,6 +685,20 @@ class RiskManager:
 
         """Returns 'daily', 'profit', or 'hard' when a halt newly trips this tick."""
 
+        # Max drawdown is account-scoped and remains latched until an operator
+        # explicitly resets it. It is checked before softer session controls.
+        drawdown_enabled = _safe_bool(getattr(self.config, "enable_max_drawdown_halt", True), True)
+        drawdown_limit = _safe_float(getattr(self.config, "max_drawdown_pct", 10.0), 10.0)
+        if not self.hard_halted and drawdown_enabled and ctx.peak_equity > 0:
+            drawdown_pct = (ctx.peak_equity - ctx.equity) / ctx.peak_equity * 100.0
+            if math.isfinite(drawdown_pct) and drawdown_pct >= drawdown_limit:
+                self.hard_halted = True
+                self.hard_halt_reason = (
+                    f"max drawdown breached: {drawdown_pct:.2f}% >= {drawdown_limit:.2f}%"
+                )
+                applog.error("risk", f"HARD HALT: {self.hard_halt_reason} -- flattening and stopping")
+                return "hard"
+
         # Daily loss limit check (session-scoped)
 
 
@@ -771,6 +823,11 @@ class RiskManager:
 
             return RiskDecision(False, "loss-streak cooldown active")
 
+        cooldown_until = self.symbol_cooldowns.get(symbol)
+
+        if cooldown_until is not None and (now or datetime.now(UTC)) < cooldown_until:
+            return RiskDecision(False, f"ticker-specific cooldown active for {symbol}")
+
         # =============================================================================
         # [MODIFIED 2026-10-25]: Hard Session Lockout on Max Daily Ticker Losses
         # ORIGINAL INTENT: Only checked symbol_cooldowns timestamp, allowing symbols to re-enter
@@ -780,16 +837,11 @@ class RiskManager:
         # SAFE ROLLBACK: Remove the loss count check below.
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
-        max_ticker_losses = getattr(cfg, "symbol_max_daily_losses", 2) or 2
+        max_ticker_losses = _safe_int(getattr(cfg, "symbol_max_daily_losses", 2), 2, minimum=1)
         losses_today = self.symbol_loss_counts.get(symbol, 0)
         if losses_today >= max_ticker_losses:
             return RiskDecision(False, f"session lockout: {symbol} reached max daily losses ({losses_today}/{max_ticker_losses})")
 
-        cooldown_until = self.symbol_cooldowns.get(symbol)
-
-        if cooldown_until is not None and (now or datetime.now(UTC)) < cooldown_until:
-
-            return RiskDecision(False, f"ticker-specific cooldown active for {symbol}")
         # =============================================================================
 
         if not self.clock.in_entry_window(cfg.no_entry_minutes_before_close, now):
@@ -1031,7 +1083,13 @@ class RiskManager:
         #         pass
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
-        if getattr(cfg, "min_stop_range_pct", 0.0) > 0 and bars is not None and not bars.empty:
+        min_stop_range_raw = getattr(cfg, "min_stop_range_pct", 0.0)
+        min_stop_range_pct = (
+            float(min_stop_range_raw)
+            if isinstance(min_stop_range_raw, (int, float)) and math.isfinite(float(min_stop_range_raw))
+            else 0.0
+        )
+        if min_stop_range_pct > 0 and bars is not None and not bars.empty:
             try:
                 from zoneinfo import ZoneInfo
                 _et = ZoneInfo("America/New_York")
@@ -1039,7 +1097,7 @@ class RiskManager:
                 today_bars = bars[dates == dates[-1]]
                 if len(today_bars) >= 5:
                     day_range = float(today_bars["high"].max()) - float(today_bars["low"].min())
-                    floor_dist = day_range * (float(cfg.min_stop_range_pct) / 100.0)
+                    floor_dist = day_range * (min_stop_range_pct / 100.0)
                     if floor_dist > 0 and stop_distance < floor_dist:
                         stop_distance = floor_dist
                         stop_loss = round(price - stop_distance, 4) if signal.action == SignalAction.ENTER_LONG else round(price + stop_distance, 4)
@@ -1679,7 +1737,9 @@ class RiskManager:
         # [NEW CODE]:
         runner_strats = {"orb", "momentum", "trend_pullback", "bb_squeeze", "gap_and_go", "relative_strength"}
         final_target = None if (signal.strategy in runner_strats and not getattr(self.config, "enable_native_bracket_targets", False)) else executable_target
-        effective_trail_val = round(max(getattr(signal, "trail_stop_dist", 0.0) or 0.0, stop_distance), 4) if stop_distance > 0 else getattr(signal, "trail_stop_dist", None)
+        raw_trail = getattr(signal, "trail_stop_dist", 0.0)
+        trail_dist = float(raw_trail) if isinstance(raw_trail, (int, float)) and math.isfinite(float(raw_trail)) else 0.0
+        effective_trail_val = round(max(trail_dist, stop_distance), 4) if stop_distance > 0 else (trail_dist or None)
 
         order = OrderRequest(
 

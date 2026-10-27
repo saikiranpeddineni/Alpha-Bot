@@ -212,7 +212,7 @@ def test_behavioral_safety_reentry_after_stop(client):
         object.__setattr__(sig_aapl, "policy_id", "test_policy")
         
         reason = loop.run_until_complete(engine._check_behavioral_safety(sig_aapl, now_ts))
-        assert "re-entry on same symbol AAPL within 30 mins after stop" in reason
+        assert "re-entry on same symbol AAPL within 30 mins after adverse stop-loss" in reason
         
         # Test that a different symbol is NOT blocked
         sig_spy = Signal(

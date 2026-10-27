@@ -166,6 +166,37 @@ class Database:
             )
             s.commit()
 
+    def save_portfolio_checkpoint_with_trade(
+        self, mode: str, checkpoint: dict, trade: TradeRecord | None = None
+    ) -> None:
+        """Atomically persist the current ledger snapshot and an optional close.
+
+        Paper fills do not carry broker execution watermarks, so their old path
+        saved the trade row without advancing the checkpoint. A restart could
+        therefore restore fewer trades than the database contained. Keep the
+        checkpoint and closed-trade row in one transaction for every fill path.
+        """
+        with self._session() as s:
+            s.merge(
+                PortfolioCheckpointRow(
+                    mode=mode,
+                    updated_at=datetime.now(UTC),
+                    payload=json.dumps(checkpoint, default=str),
+                )
+            )
+            if trade is not None:
+                s.merge(
+                    TradeRow(
+                        id=trade.id,
+                        exit_at=trade.exit_at,
+                        symbol=trade.symbol,
+                        pnl=trade.pnl,
+                        mode=mode,
+                        payload=trade.model_dump_json(),
+                    )
+                )
+            s.commit()
+
     def recent_trades(self, mode: str | None = None, limit: int = 200) -> list[dict]:
         with self._session() as s:
             stmt = select(TradeRow).order_by(TradeRow.exit_at.desc()).limit(limit)
@@ -488,4 +519,3 @@ class Database:
         if _ACTIVE_DATABASE is self:
             _ACTIVE_DATABASE = None
         self.engine.dispose()
-

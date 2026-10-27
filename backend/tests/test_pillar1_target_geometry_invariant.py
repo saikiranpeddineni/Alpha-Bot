@@ -46,9 +46,13 @@ def pipeline(monkeypatch):
     settings = get_settings()
     risk_cfg = settings.risk_config()
     risk_cfg.enable_entry_extreme_guard = False
+    # Geometry invariants are independent of predictive admission. Disable the
+    # optional Monte Carlo veto so these tests exercise target/stop handling.
+    risk_cfg.enable_monte_carlo_gate = False
     model = SignalModel(models_dir=MODELS_DIR)
     p = SignalPipeline(model=model, risk_config=risk_cfg, settings=settings)
     p.ml_threshold = 0.0
+    p.use_ml_gate = True
     from app.ai.prediction import MetaPrediction
     monkeypatch.setattr(p.meta_label_engine, "predict", lambda *args, **kwargs: MetaPrediction(
         strategy="test", prob_profitable=0.80, approved=True, threshold=0.55,

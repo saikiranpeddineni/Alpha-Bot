@@ -102,7 +102,10 @@ def test_strategies_endpoints(client):
 
 
 def test_backtest_endpoint(client):
-    r = client.post("/api/backtest", json={"symbols": ["SPY"], "days": 3})
+    # Scanner/replay behavior has dedicated coverage. Keep this API contract
+    # smoke test bounded to the requested symbol so it does not hydrate the
+    # full dynamic universe for a three-day request.
+    r = client.post("/api/backtest", json={"symbols": ["SPY"], "days": 3, "disable_scanner": True})
     assert r.status_code == 200, r.text
     body = r.json()
     assert "metrics" in body and "equity_curve" in body

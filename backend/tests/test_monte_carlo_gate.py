@@ -38,7 +38,7 @@ def test_monte_carlo_gate_pool_extraction(sample_bars_df):
     assert np.all(h_pool >= l_pool)
 
 
-def test_monte_carlo_gate_thin_frame_fail_soft():
+def test_monte_carlo_gate_thin_frame_fails_closed():
     gate = MonteCarloGate()
     thin_df = pd.DataFrame({"close": [100.0, 101.0]})
     pool = gate.extract_ratio_pool(thin_df)
@@ -55,8 +55,8 @@ def test_monte_carlo_gate_thin_frame_fail_soft():
         strategy="orb",
     )
     passed, stats, reason = gate.evaluate_signal(sig, thin_df)
-    assert passed is True
-    assert "fail-soft" in reason
+    assert passed is False
+    assert "failed closed" in reason
 
 
 def test_monte_carlo_gate_vetoes_unfavorable_setup(sample_bars_df):

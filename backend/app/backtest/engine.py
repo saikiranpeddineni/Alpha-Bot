@@ -349,7 +349,12 @@ async def run_backtest(
         engine._scanner_data = engine.data
 
     ml_thresh = risk_cfg.ml_confidence_threshold if params.use_ml_gate else 0.0
-    engine.pipeline = SignalPipeline(model, ml_thresh)
+    engine.pipeline = SignalPipeline(
+        model,
+        ml_thresh,
+        risk_config=risk_cfg,
+        settings=settings,
+    )
     # =============================================================================
     engine.strategies = create_strategies(params.strategies)
 

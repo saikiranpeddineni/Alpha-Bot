@@ -118,7 +118,11 @@ def test_pullback_location_veto_enforced_in_range_regime():
         specialist_auc=0.60, specialist_min_auc=0.53, fallback_reason=None
     )
 
-    pipeline = SignalPipeline(model=mock_model, ml_threshold=0.48)
+    pipeline = SignalPipeline(
+        model=mock_model,
+        ml_threshold=0.48,
+        risk_config=RiskConfig(enable_monte_carlo_gate=False),
+    )
     pipeline.trade_score_engine.risk_config.enable_opening_blackout = False
     pipeline.trade_score_engine.risk_config.enable_entry_chase_veto = False
 
@@ -159,7 +163,11 @@ def test_range_high_agreement_rescue_unlocks_missed_winners():
         specialist_auc=0.60, specialist_min_auc=0.53, fallback_reason=None
     )
 
-    pipeline = SignalPipeline(model=mock_model, ml_threshold=0.48)
+    pipeline = SignalPipeline(
+        model=mock_model,
+        ml_threshold=0.48,
+        risk_config=RiskConfig(enable_monte_carlo_gate=False),
+    )
     pipeline.trade_score_engine.risk_config.enable_opening_blackout = False
 
     # Mock meta prediction with approval
