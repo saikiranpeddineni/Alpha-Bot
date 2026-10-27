@@ -256,3 +256,34 @@ def test_entry_order_type_market_and_limit(risk_config, open_clock, bars):
     if dec_limit.order.take_profit is not None:
         assert dec_limit.order.take_profit > float(bars["close"].iloc[-1]), "Synthesized TP must be above entry"
 
+
+
+# =============================================================================
+# [ADDED 2026-10-27]: Verify Profit Lock Dynamically Unlatches on 0% or Disable
+# ORIGINAL INTENT: Latched profit lock blocked entries even after settings updated to 0.
+# REASON FOR CHANGE: Verify that setting daily_profit_lock_pct = 0.0 or enable = False
+# unlatches the risk manager and allows incoming signals (e.g. VALE) to pass.
+# -----------------------------------------------------------------------------
+def test_profit_lock_unlatches_when_disabled_or_zeroed(rm: RiskManager, bars):
+    # 1. Trip profit lock
+    rm.config.enable_daily_profit_lock = True
+    rm.config.daily_profit_lock_pct = 1.0
+    halted = rm.check_halts(ctx(equity=101_100, day_pnl=+1_100), now=MID_SESSION)
+    assert halted == "profit"
+    assert rm.profit_locked
+
+    # Blocked while locked
+    dec = rm.evaluate_entry(long_signal(symbol="VALE"), ctx(), bars, now=MID_SESSION)
+    assert not dec.approved and "profit lock" in dec.reason
+
+    # 2. Operator updates settings to 0.0
+    rm.config.daily_profit_lock_pct = 0.0
+    dec_unlocked = rm.evaluate_entry(long_signal(symbol="VALE"), ctx(), bars, now=MID_SESSION)
+    assert dec_unlocked.approved or "profit lock" not in dec_unlocked.reason
+    assert not rm.profit_locked
+
+    # 3. Verify manual reset method works
+    rm.profit_locked = True
+    rm.reset_profit_lock()
+    assert not rm.profit_locked
+# =============================================================================

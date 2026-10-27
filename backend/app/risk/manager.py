@@ -355,19 +355,37 @@ class RiskManager:
 
                 self.daily_halt_date = None
 
-        self.profit_locked = bool(data.get("profit_locked", False))
-
-        profit_date = data.get("profit_lock_date")
-
-        if profit_date:
-
-            try:
-
-                self.profit_lock_date = date.fromisoformat(profit_date)
-
-            except (TypeError, ValueError):
-
-                self.profit_lock_date = None
+        # =============================================================================
+        # [MODIFIED 2026-10-27]: Conditional Restore of Daily Profit Lock
+        # ORIGINAL INTENT: Restored profit_locked from checkpoint regardless of config settings.
+        # REASON FOR CHANGE: When operator disables profit lock (lock_pct <= 0 or enable=False),
+        # restoring True from checkpoint locked the engine out of valid trades (e.g. VALE, TSLA).
+        # SAFE ROLLBACK: Previous lines preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # self.profit_locked = bool(data.get("profit_locked", False))
+        # profit_date = data.get("profit_lock_date")
+        # if profit_date:
+        #     try:
+        #         self.profit_lock_date = date.fromisoformat(profit_date)
+        #     except (TypeError, ValueError):
+        #         self.profit_lock_date = None
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        enable_lock = bool(getattr(self.config, "enable_daily_profit_lock", True))
+        lock_pct = float(getattr(self.config, "daily_profit_lock_pct", 0.0) or 0.0)
+        if enable_lock and lock_pct > 0:
+            self.profit_locked = bool(data.get("profit_locked", False))
+            profit_date = data.get("profit_lock_date")
+            if profit_date:
+                try:
+                    self.profit_lock_date = date.fromisoformat(profit_date)
+                except (TypeError, ValueError):
+                    self.profit_lock_date = None
+        else:
+            self.profit_locked = False
+            self.profit_lock_date = None
+        # =============================================================================
 
     # ---- lifecycle hooks ----
 
@@ -675,6 +693,17 @@ class RiskManager:
 
         applog.warning("risk", "Hard halt manually reset -- trading re-enabled")
 
+    # =============================================================================
+    # [ADDED 2026-10-27]: Manual and Dynamic Profit Lock Reset
+    # ORIGINAL INTENT: No method existed to clear profit_locked without a session rollover.
+    # REASON FOR CHANGE: Allows operator or config updates to immediately re-enable trading.
+    # -----------------------------------------------------------------------------
+    def reset_profit_lock(self) -> None:
+        self.profit_locked = False
+        self.profit_lock_date = None
+        applog.info("risk", "Daily profit lock reset -- trading re-enabled")
+    # =============================================================================
+
 
 
     # ---- halt checks (engine calls every tick) ----
@@ -743,33 +772,50 @@ class RiskManager:
 
         # non-positive session start, same guard as the loss halt.
 
+        # =============================================================================
+        # [MODIFIED 2026-10-27]: Profit Lock Dynamic Auto-Unlatch on Config Update
+        # ORIGINAL INTENT: If day gain >= lock_pct, latched self.profit_locked = True.
+        # REASON FOR CHANGE: If operator sets lock_pct <= 0 or disables profit lock, automatically
+        # clear self.profit_locked so trading is immediately resumed without engine restart.
+        # SAFE ROLLBACK: Previous lines preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # enable_lock = bool(getattr(self.config, "enable_daily_profit_lock", True))
+        # lock_pct = float(getattr(self.config, "daily_profit_lock_pct", 0.0) or 0.0)
+        # if enable_lock and lock_pct > 0 and not self.profit_locked and ctx.session_start_equity > 0:
+        #     gain_pct = ctx.day_pnl / ctx.session_start_equity * 100.0
+        #     if gain_pct >= lock_pct:
+        #         self.profit_locked = True
+        #         self.profit_lock_date = self.clock.session_date(now)
+        #         applog.warning("risk", f"PROFIT LOCK: day gain {gain_pct:.2f}% >= {lock_pct:.2f}% -- flattening and banking the session")
+        #         return "profit"
+        # return None
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
         enable_lock = bool(getattr(self.config, "enable_daily_profit_lock", True))
-
         lock_pct = float(getattr(self.config, "daily_profit_lock_pct", 0.0) or 0.0)
 
+        if not enable_lock or lock_pct <= 0:
+            if self.profit_locked:
+                self.profit_locked = False
+                self.profit_lock_date = None
+                applog.info("risk", "Daily profit lock disabled or 0% -- unlatched profit lock")
+            return None
+
         if enable_lock and lock_pct > 0 and not self.profit_locked and ctx.session_start_equity > 0:
-
             gain_pct = ctx.day_pnl / ctx.session_start_equity * 100.0
-
             if gain_pct >= lock_pct:
-
                 self.profit_locked = True
-
                 self.profit_lock_date = self.clock.session_date(now)
-
                 applog.warning(
-
                     "risk",
-
                     f"PROFIT LOCK: day gain {gain_pct:.2f}% >= {lock_pct:.2f}% "
-
                     "-- flattening and banking the session",
-
                 )
-
                 return "profit"
 
         return None
+        # =============================================================================
 
 
 
@@ -838,9 +884,26 @@ class RiskManager:
 
             return RiskDecision(False, "daily loss halt active")
 
-        if self.profit_locked:
-
+        # =============================================================================
+        # [MODIFIED 2026-10-27]: Profit Lock Entry Gate Respects Config
+        # ORIGINAL INTENT: Blocked all entries if self.profit_locked was True.
+        # REASON FOR CHANGE: If operator disables profit lock or sets lock_pct <= 0,
+        # self.profit_locked must not block trades (e.g. VALE, TSLA rejections).
+        # SAFE ROLLBACK: Previous lines preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # if self.profit_locked:
+        #     return RiskDecision(False, "daily profit lock active -- day banked")
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        enable_lock = bool(getattr(cfg, "enable_daily_profit_lock", True))
+        lock_pct = float(getattr(cfg, "daily_profit_lock_pct", 0.0) or 0.0)
+        if not enable_lock or lock_pct <= 0:
+            self.profit_locked = False
+            self.profit_lock_date = None
+        elif self.profit_locked:
             return RiskDecision(False, "daily profit lock active -- day banked")
+        # =============================================================================
 
         if self.is_strategy_in_cooldown(strategy, now):
 

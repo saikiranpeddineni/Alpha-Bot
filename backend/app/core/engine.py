@@ -1928,7 +1928,19 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
 
                 )
 
-        elif halt == "profit" or self.risk.profit_locked:
+        # =============================================================================
+        # [MODIFIED 2026-10-27]: Daily Profit Lock Gate Checks Active Configuration
+        # ORIGINAL INTENT: Executed profit lock banking/defend if self.risk.profit_locked was True.
+        # REASON FOR CHANGE: If operator disables profit lock or sets lock_pct <= 0, do not
+        # execute defend flatten loop.
+        # SAFE ROLLBACK: Previous line preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # elif halt == "profit" or self.risk.profit_locked:
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        elif (halt == "profit" or self.risk.profit_locked) and bool(getattr(self.risk.config, "enable_daily_profit_lock", True)) and float(getattr(self.risk.config, "daily_profit_lock_pct", 0.0) or 0.0) > 0:
+        # =============================================================================
 
             # DAILY PROFIT LOCK 2026-10-16 (bank-and-ride, operator demand):
 
@@ -4671,6 +4683,7 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
         if self.risk is not None:
 
             self.risk.reset_hard_halt()
+            self.risk.reset_profit_lock()
 
             # Clear the durable risk snapshot as well as the halt marker. A
             # restart must not resurrect a halt that the operator explicitly
@@ -4801,6 +4814,26 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
         if self.risk is not None:
 
             self.risk.config = self.risk_config
+            # =============================================================================
+            # [MODIFIED 2026-10-27]: Real-time Unlatch of Profit Lock on Settings Change
+            # ORIGINAL INTENT: Only assigned config, leaving profit_locked latched in memory.
+            # REASON FOR CHANGE: If operator sets lock_pct <= 0 or disables profit lock via UI,
+            # immediately clear profit_locked and persist checkpoint so trading resumes instantly.
+            # -----------------------------------------------------------------------------
+            if not getattr(self.risk_config, "enable_daily_profit_lock", True) or float(getattr(self.risk_config, "daily_profit_lock_pct", 0.0) or 0.0) <= 0:
+                self.risk.reset_profit_lock()
+                if self.portfolio is not None and self.mode in {"paper", "live"}:
+                    try:
+                        self.db.save_portfolio_checkpoint(
+                            self.mode,
+                            self.portfolio.checkpoint(
+                                account_id=getattr(self.broker, "account_id", None),
+                                risk_state=self.risk.get_risk_state(),
+                            ),
+                        )
+                    except Exception:
+                        pass
+            # =============================================================================
 
         if self.pipeline is not None:
 
