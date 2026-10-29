@@ -203,21 +203,91 @@ class TopMoversScanner:
             except (TypeError, ValueError):
                 return 0.0
 
+        # =============================================================================
+        # [MODIFIED 2026-10-30]: Enforce dollar volume & phantom mover filter in _fetch_via_screener
+        # ORIGINAL INTENT: Extracted raw screener gainers/losers checking only price and % change.
+        # REASON FOR CHANGE: Phantom spikes and reverse-split penny stocks (e.g. AXG +14,309% on 100 shares)
+        # passed screener without volume verification. We now verify dollar volume >= _MIN_DOLLAR_VOLUME
+        # via raw payload fields or daily bars to eliminate untradeable phantom prints.
+        # SAFE ROLLBACK: The original code is preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # for raw in gainers_raw:
+        #     sym = str(_value(raw, "symbol", "Symbol") or "").upper()
+        #     price = _float_value(raw, "price", "close")
+        #     change = _float_value(raw, "percent_change", "change_percent", "change")
+        #     if sym and price >= self.min_price and change >= _MIN_GAINER_PCT:
+        #         entries[sym] = MoverEntry(sym, "gainer", change, price)
+        #         gainers.append(sym)
+        #
+        # for raw in losers_raw:
+        #     sym = str(_value(raw, "symbol", "Symbol") or "").upper()
+        #     price = _float_value(raw, "price", "close")
+        #     change = _float_value(raw, "percent_change", "change_percent", "change")
+        #     if sym and price >= self.min_price and change <= _MIN_LOSER_PCT:
+        #         entries[sym] = MoverEntry(sym, "loser", change, price)
+        #         losers.append(sym)
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        raw_candidates: list[tuple[str, str, float, float, float]] = []  # (sym, direction, price, change, raw_vol)
         for raw in gainers_raw:
             sym = str(_value(raw, "symbol", "Symbol") or "").upper()
             price = _float_value(raw, "price", "close")
             change = _float_value(raw, "percent_change", "change_percent", "change")
+            vol = _float_value(raw, "volume", "Volume", "v")
             if sym and price >= self.min_price and change >= _MIN_GAINER_PCT:
-                entries[sym] = MoverEntry(sym, "gainer", change, price)
-                gainers.append(sym)
+                if vol > 0 and (vol * price) < _MIN_DOLLAR_VOLUME:
+                    log.info(f"[TopMovers] Screener dropped {sym}: raw volume {vol:.0f} (${vol * price:,.0f} DV < ${_MIN_DOLLAR_VOLUME:,.0f})")
+                    continue
+                raw_candidates.append((sym, "gainer", price, change, vol))
 
         for raw in losers_raw:
             sym = str(_value(raw, "symbol", "Symbol") or "").upper()
             price = _float_value(raw, "price", "close")
             change = _float_value(raw, "percent_change", "change_percent", "change")
+            vol = _float_value(raw, "volume", "Volume", "v")
             if sym and price >= self.min_price and change <= _MIN_LOSER_PCT:
-                entries[sym] = MoverEntry(sym, "loser", change, price)
+                if vol > 0 and (vol * price) < _MIN_DOLLAR_VOLUME:
+                    log.info(f"[TopMovers] Screener dropped {sym}: raw volume {vol:.0f} (${vol * price:,.0f} DV < ${_MIN_DOLLAR_VOLUME:,.0f})")
+                    continue
+                raw_candidates.append((sym, "loser", price, change, vol))
+
+        # Cross-validate daily liquidity if data manager provides history batch
+        bars_dict: dict[str, object] = {}
+        candidate_syms = [item[0] for item in raw_candidates]
+        if candidate_syms and hasattr(self.data, "multi_history"):
+            try:
+                now_utc = datetime.now(UTC)
+                start_utc = now_utc - timedelta(days=5)
+                res = await self.data.multi_history(candidate_syms, "1Day", start_utc, now_utc, prefer_cache=True)
+                if isinstance(res, dict):
+                    bars_dict = res
+            except Exception as exc:
+                log.debug(f"[TopMovers] multi_history check skipped: {exc}")
+
+        for sym, direction, price, change, raw_vol in raw_candidates:
+            dv = raw_vol * price if raw_vol > 0 else 0.0
+            if sym in bars_dict:
+                df_bar = bars_dict[sym]
+                if df_bar is not None and hasattr(df_bar, "empty") and not df_bar.empty:
+                    today_vol = float(df_bar["volume"].iloc[-1]) if "volume" in df_bar else 0.0
+                    today_dv = today_vol * price
+                    if len(df_bar) >= 2:
+                        hist_dv = float((df_bar["close"].iloc[:-1] * df_bar["volume"].iloc[:-1]).tail(3).mean())
+                    else:
+                        hist_dv = today_dv
+                    eff_dv = max(today_dv, hist_dv)
+                    if eff_dv < _MIN_DOLLAR_VOLUME:
+                        log.info(f"[TopMovers] Filtered out phantom/illiquid mover {sym}: effective DV ${eff_dv:,.0f} < ${_MIN_DOLLAR_VOLUME:,.0f}")
+                        continue
+                    dv = max(dv, eff_dv)
+
+            entries[sym] = MoverEntry(sym, direction, change, price, dv)
+            if direction == "gainer":
+                gainers.append(sym)
+            else:
                 losers.append(sym)
+        # =============================================================================
 
         return TopMoversResult(gainers=gainers, losers=losers, entries=entries, source="screener")
 

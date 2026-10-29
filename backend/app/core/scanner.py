@@ -410,8 +410,53 @@ class MarketScanner:
                         record["FINAL_REJECTION_REASON"] = "PRICE_FILTER"
                         return None
 
+                    # =============================================================================
+                    # [MODIFIED 2026-10-30]: Accurate dollar volume & session liquidity floor
+                    # ORIGINAL INTENT: avg_daily_dollar_vol was computed as avg_vol * price, which
+                    # multiplied historical pre-split share volume by post-split price, and projected
+                    # catalyst liquidity clamped min rvol to 1.0, allowing dead 100-share prints to pass.
+                    # REASON FOR CHANGE: Eliminate phantom prints / reverse-split anomalies (e.g. AXG
+                    # +14,309% on 100 shares) by computing true historical dollar volume, enforcing an
+                    # intraday session liquidity floor, and requiring actual volume for catalyst projection.
+                    # SAFE ROLLBACK: The original code is preserved below as comments.
+                    # -----------------------------------------------------------------------------
+                    # [PREVIOUS CODE - PRESERVED]:
+                    # avg_vol = float(df["volume"].mean())
+                    # avg_daily_dollar_vol = avg_vol * price
+                    # target_daily_dollar_vol = cfg.min_avg_dollar_volume * 390
+                    #
+                    # # Time-normalized RVOL calculation for partial session comparison
+                    # if et_mins >= 9 * 60 + 30 and et_mins <= 16 * 60:
+                    #     session_elapsed_frac = min(1.0, max(0.05, (et_mins - (9 * 60 + 30)) / 390.0))
+                    # else:
+                    #     session_elapsed_frac = 1.0
+                    #
+                    # last_bar_vol = float(df["volume"].iloc[-1])
+                    # normalized_last_vol = last_bar_vol / session_elapsed_frac if session_elapsed_frac > 0 else last_bar_vol
+                    # rvol = float(normalized_last_vol / avg_vol) if avg_vol > 0 else 0.0
+                    #
+                    # # Use Projected Catalyst Liquidity (allow huge intraday runners to pass filter)
+                    # projected_daily_dollar_vol = avg_daily_dollar_vol * max(1.0, rvol)
+                    #
+                    # record["avg_dollar_volume"] = avg_daily_dollar_vol
+                    # record["filter_liquidity"] = {
+                    #     "actual": projected_daily_dollar_vol,
+                    #     "threshold": target_daily_dollar_vol,
+                    #     "result": "PASS" if projected_daily_dollar_vol >= target_daily_dollar_vol else "FAIL"
+                    # }
+                    # if projected_daily_dollar_vol < target_daily_dollar_vol:
+                    #     record["FINAL_REJECTION_REASON"] = "LIQUIDITY_FILTER"
+                    #     return None
+                    # -----------------------------------------------------------------------------
+                    # [NEW CODE]:
                     avg_vol = float(df["volume"].mean())
-                    avg_daily_dollar_vol = avg_vol * price
+                    # True historical dollar volume: close * volume on prior days to prevent split distortion
+                    if len(df) >= 2:
+                        hist_dv_series = df["volume"].iloc[:-1] * df["close"].iloc[:-1]
+                        avg_daily_dollar_vol = float(hist_dv_series.mean()) if not hist_dv_series.empty else 0.0
+                    else:
+                        avg_daily_dollar_vol = float(df["volume"].iloc[0] * df["close"].iloc[0])
+
                     target_daily_dollar_vol = cfg.min_avg_dollar_volume * 390
 
                     # Time-normalized RVOL calculation for partial session comparison
@@ -421,11 +466,29 @@ class MarketScanner:
                         session_elapsed_frac = 1.0
 
                     last_bar_vol = float(df["volume"].iloc[-1])
+                    today_dollar_vol = last_bar_vol * price
                     normalized_last_vol = last_bar_vol / session_elapsed_frac if session_elapsed_frac > 0 else last_bar_vol
                     rvol = float(normalized_last_vol / avg_vol) if avg_vol > 0 else 0.0
 
-                    # Use Projected Catalyst Liquidity (allow huge intraday runners to pass filter)
-                    projected_daily_dollar_vol = avg_daily_dollar_vol * max(1.0, rvol)
+                    # Session Liquidity Floor: if regular market hours have been open for at least 15 min,
+                    # reject dead phantom prints with negligible session trading activity.
+                    if et_mins >= 9 * 60 + 45 and et_mins <= 16 * 60:
+                        min_session_vol = 500.0  # at least 500 shares traded in session
+                        min_session_dv = min(target_daily_dollar_vol * 0.05, 2500.0)  # at least $2,500 session DV
+                        if last_bar_vol < min_session_vol or today_dollar_vol < min_session_dv:
+                            record["filter_liquidity"] = {
+                                "actual": today_dollar_vol,
+                                "threshold": min_session_dv,
+                                "result": "FAIL",
+                            }
+                            record["FINAL_REJECTION_REASON"] = "LIQUIDITY_FILTER"
+                            return None
+
+                    # Use Projected Catalyst Liquidity: only boost if there is active session volume
+                    if rvol >= 1.0 and last_bar_vol >= 1000.0:
+                        projected_daily_dollar_vol = max(avg_daily_dollar_vol * rvol, today_dollar_vol)
+                    else:
+                        projected_daily_dollar_vol = max(avg_daily_dollar_vol, today_dollar_vol)
 
                     record["avg_dollar_volume"] = avg_daily_dollar_vol
                     record["filter_liquidity"] = {
@@ -436,6 +499,7 @@ class MarketScanner:
                     if projected_daily_dollar_vol < target_daily_dollar_vol:
                         record["FINAL_REJECTION_REASON"] = "LIQUIDITY_FILTER"
                         return None
+                    # =============================================================================
 
                     record["FINAL_PASS"] = True
                     record["FINAL_REJECTION_REASON"] = "NONE"
@@ -490,11 +554,33 @@ class MarketScanner:
         from datetime import UTC
         T = as_of or datetime.now(UTC)
 
+        # =============================================================================
+        # [MODIFIED 2026-10-30]: Volume-confirmed momentum weighting in Stage 2
+        # ORIGINAL INTENT: abs(mom3) was ranked directly without verifying volume confirmation.
+        # REASON FOR CHANGE: Dead-volume spikes (e.g. AXG mom3=+7800% on 100 shares) received
+        # 1.0 rank in momentum, driving composite score to 0.6978 despite rvol=0.0081.
+        # Scaling momentum by relative volume confirmation damps unconfirmed phantom spikes.
+        # SAFE ROLLBACK: The original code is preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # rvols = np.array([c["rvol"] for c in candidates])
+        # atrs = np.array([c["atr_pct"] for c in candidates])
+        # gaps = np.array([c["gap_pct"] for c in candidates])
+        # # Audit Fix: Use absolute magnitude so massive shorts aren't pushed to rank 0.0
+        # moms = np.array([abs(c["mom3"]) for c in candidates])
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
         rvols = np.array([c["rvol"] for c in candidates])
         atrs = np.array([c["atr_pct"] for c in candidates])
         gaps = np.array([c["gap_pct"] for c in candidates])
-        # Audit Fix: Use absolute magnitude so massive shorts aren't pushed to rank 0.0
-        moms = np.array([abs(c["mom3"]) for c in candidates])
+        # Volume-confirmed momentum: if relative volume is dead (< 0.15 of average),
+        # the price move is an unconfirmed illiquid/odd-lot spike; zero out momentum
+        # so phantom reverse-split spikes cannot dominate the technical rankings.
+        moms = np.array([
+            abs(c["mom3"]) if c.get("rvol", 1.0) >= 0.15 else 0.0
+            for c in candidates
+        ])
+        # =============================================================================
 
         def _rank(arr: np.ndarray) -> np.ndarray:
             order = arr.argsort()
