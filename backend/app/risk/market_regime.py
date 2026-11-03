@@ -350,25 +350,45 @@ class MarketRiskAggregator:
                     reason=reason,
                 )
             # =============================================================================
-            # [MODIFIED 2026-11-03]: Robust Intraday Uptrend Detection with VWAP/EMA20 Fallback
+            # [MODIFIED 2026-11-03]: Comprehensive Multi-Day & Intraday Session Rebound Detection
             # ORIGINAL INTENT: Checked `len(df_h) >= 20` on hourly resampled bars to identify uptrend
             # and downgrade elevated volatility from PANIC/STRESS to CAUTION.
-            # REASON FOR CHANGE: Early in regular trading sessions or with limited history, `len(df_h)`
-            # is often < 20 (e.g. 1-3 bars), causing `is_uptrend` to evaluate to False even when SPY/QQQ
-            # were strongly green and above VWAP, triggering false PANIC regime locks.
+            # REASON FOR CHANGE: When multi-day pullback occurred (e.g., SPY down from 770 to 754 over 3 days),
+            # `close > sma20` was False. The previous intraday check was placed in an `else` branch (only running
+            # when len(df_h) < 20) and checked 60-day cumulative metrics instead of today's session bars.
+            # Furthermore, strict positive progression (cur_close > today_open and cur_close > today_vwap)
+            # distinguishes genuine green rebound days from flat or declining panic sessions.
             # SAFE ROLLBACK: Previous lines preserved below as comments.
             # -----------------------------------------------------------------------------
             # [PREVIOUS CODE - PRESERVED]:
-            # # Audit Phase 2: Make Volatility Trend-Aware
             # is_uptrend = False
             # try:
             #     if len(df) > 0 and "close" in df.columns:
-            #         # Determine if it's a massive uptrend by checking 20-hour SMA
+            #         # 1. Primary multi-day check: 20-hour SMA when sufficient history exists
             #         df_h = df.resample("1h").agg({"close": "last"}).dropna()
             #         if len(df_h) >= 20:
             #             close = float(df_h["close"].iloc[-1])
             #             sma20 = float(df_h["close"].rolling(20).mean().iloc[-1])
             #             is_uptrend = close > sma20
+            #         else:
+            #             # 2. Intraday fallback when < 20 hourly bars are available:
+            #             # Check price vs Intraday VWAP, EMA20, or Session Open
+            #             last_close = float(df["close"].iloc[-1])
+            #             # A) VWAP alignment
+            #             if "volume" in df.columns and float(df["volume"].sum()) > 0:
+            #                 vwap_series = (df["close"] * df["volume"]).cumsum() / df["volume"].cumsum()
+            #                 if last_close >= float(vwap_series.iloc[-1]):
+            #                     is_uptrend = True
+            #             # B) Intraday EMA20 alignment
+            #             if not is_uptrend and len(df) >= 5:
+            #                 ema20 = float(df["close"].ewm(span=min(20, len(df)), adjust=False).mean().iloc[-1])
+            #                 if last_close >= ema20:
+            #                     is_uptrend = True
+            #             # C) Positive on the session (close >= open)
+            #             if not is_uptrend and "open" in df.columns and len(df) > 0:
+            #                 session_open = float(df["open"].iloc[0])
+            #                 if last_close >= session_open:
+            #                     is_uptrend = True
             # except Exception:
             #     is_uptrend = False
             # -----------------------------------------------------------------------------
@@ -376,31 +396,31 @@ class MarketRiskAggregator:
             is_uptrend = False
             try:
                 if len(df) > 0 and "close" in df.columns:
-                    # 1. Primary multi-day check: 20-hour SMA when sufficient history exists
+                    # 1. Primary multi-day check: 20-hour SMA
                     df_h = df.resample("1h").agg({"close": "last"}).dropna()
                     if len(df_h) >= 20:
                         close = float(df_h["close"].iloc[-1])
                         sma20 = float(df_h["close"].rolling(20).mean().iloc[-1])
-                        is_uptrend = close > sma20
-                    else:
-                        # 2. Intraday fallback when < 20 hourly bars are available:
-                        # Check price vs Intraday VWAP, EMA20, or Session Open
-                        last_close = float(df["close"].iloc[-1])
-                        # A) VWAP alignment
-                        if "volume" in df.columns and float(df["volume"].sum()) > 0:
-                            vwap_series = (df["close"] * df["volume"]).cumsum() / df["volume"].cumsum()
-                            if last_close >= float(vwap_series.iloc[-1]):
-                                is_uptrend = True
-                        # B) Intraday EMA20 alignment
-                        if not is_uptrend and len(df) >= 5:
-                            ema20 = float(df["close"].ewm(span=min(20, len(df)), adjust=False).mean().iloc[-1])
-                            if last_close >= ema20:
-                                is_uptrend = True
-                        # C) Positive on the session (close >= open)
-                        if not is_uptrend and "open" in df.columns and len(df) > 0:
-                            session_open = float(df["open"].iloc[0])
-                            if last_close >= session_open:
-                                is_uptrend = True
+                        if close > sma20:
+                            is_uptrend = True
+
+                    # 2. Intraday session rebound / positive trend check:
+                    # Even during multi-day consolidations/pullbacks, if TODAY's session is strictly positive (green)
+                    # and trading above intraday VWAP, this is an intraday recovery/rally, NOT an intraday crash/panic sell-off.
+                    # Flat sessions or sessions with price <= open do NOT qualify as an uptrend.
+                    if not is_uptrend:
+                        last_dt = df.index[-1]
+                        today_df = df[df.index.date == last_dt.date()] if hasattr(last_dt, "date") else df
+                        if len(today_df) > 0 and "close" in today_df.columns and "open" in today_df.columns:
+                            cur_close = float(today_df["close"].iloc[-1])
+                            today_open = float(today_df["open"].iloc[0])
+                            if cur_close > today_open:
+                                if "volume" in today_df.columns and float(today_df["volume"].sum()) > 0:
+                                    today_vwap = float(((today_df["close"] * today_df["volume"]).cumsum() / today_df["volume"].cumsum()).iloc[-1])
+                                    if cur_close > today_vwap:
+                                        is_uptrend = True
+                                else:
+                                    is_uptrend = True
             except Exception:
                 is_uptrend = False
             # =============================================================================

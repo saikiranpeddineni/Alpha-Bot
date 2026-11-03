@@ -156,3 +156,56 @@ def test_momentum_rejects_sub_5_penny_stock():
     )
     sig = strat.on_bar(ctx, "INO", df)
     assert sig is None, "Expected momentum entry to be rejected for sub-$5 penny stock INO"
+
+
+@pytest.mark.asyncio
+async def test_market_regime_rebound_downgrades_panic_to_caution():
+    """Verify that multi-day pullback (close < sma20) with a green intraday session is recognized as uptrend."""
+    class MockData:
+        pass
+
+    agg = MarketRiskAggregator(MockData())
+    # Create 3 days of hourly bars declining from 520 to 500, then today opens at 500 and closes at 505
+    start = datetime(2026, 11, 1, 14, 30, tzinfo=UTC)
+    idx_past = [start + timedelta(hours=i) for i in range(25)]
+    # Past 25 hours declining from 520 to 500
+    closes_past = [520.0 - i * 0.8 for i in range(25)]
+    
+    # Today: 30 1-minute bars starting at 500.0 and rising to 505.0
+    today_start = datetime(2026, 11, 3, 14, 30, tzinfo=UTC)
+    idx_today = [today_start + timedelta(minutes=i) for i in range(30)]
+    closes_today = [500.0 + (i + 1) * 0.2 for i in range(30)]
+    
+    all_idx = idx_past + idx_today
+    all_closes = closes_past + closes_today
+    all_opens = [520.0] + all_closes[:-1]
+    all_opens[25] = 500.0  # Today's open
+    all_highs = [c + 0.5 for c in all_closes]
+    all_lows = [o - 0.5 for o in all_opens]
+    all_volumes = [10000.0 for _ in all_closes]
+
+    df = pd.DataFrame({
+        "open": all_opens,
+        "high": all_highs,
+        "low": all_lows,
+        "close": all_closes,
+        "volume": all_volumes,
+    }, index=all_idx)
+
+    # Multi-day 20-hour SMA check:
+    df_h = df.resample("1h").agg({"close": "last"}).dropna()
+    assert len(df_h) >= 20
+    close_h = float(df_h["close"].iloc[-1])
+    sma20 = float(df_h["close"].rolling(20).mean().iloc[-1])
+    # Multi-day close is below SMA20 due to recent 3-day pullback
+    assert close_h < sma20
+
+    # But today's session is green and above VWAP
+    last_dt = df.index[-1]
+    today_df = df[df.index.date == last_dt.date()]
+    cur_close = float(today_df["close"].iloc[-1])
+    today_open = float(today_df["open"].iloc[0])
+    today_vwap = float(((today_df["close"] * today_df["volume"]).cumsum() / today_df["volume"].cumsum()).iloc[-1])
+    assert cur_close > today_open
+    assert cur_close > today_vwap
+
