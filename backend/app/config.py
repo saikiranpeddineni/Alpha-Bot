@@ -448,13 +448,28 @@ class RiskConfig(BaseModel):
     enable_monte_carlo_gate: bool = Field(False)
     monte_carlo_min_win_prob: float = Field(0.35, ge=0.0, le=1.0)
     monte_carlo_min_expected_r: float = Field(0.05, ge=-1.0, le=10.0)
-    # Shadow-validated rescue for only high-agreement borderline expectancy;
-    # hard peak-R, edge, and target-first checks remain in MonteCarloGate.
-    enable_monte_carlo_borderline_rescue: bool = Field(False)
-    monte_carlo_rescue_min_confidence: float = Field(0.80, ge=0.0, le=1.0)
-    monte_carlo_rescue_min_ml_probability: float = Field(0.80, ge=0.0, le=1.0)
-    monte_carlo_rescue_min_target_prob: float = Field(0.57, ge=0.0, le=1.0)
+    # =============================================================================
+    # [MODIFIED 2026-11-03]: Harmonize and Calibrate Monte Carlo Borderline Rescue Defaults in RiskConfig
+    # ORIGINAL INTENT: Commit 9bd6470 added borderline rescue fields with default enable_monte_carlo_borderline_rescue=False,
+    # and excessively stringent thresholds (0.80 confidence, 0.80 ML probability, 0.57 target prob), preventing actual rescues.
+    # REASON FOR CHANGE: Harmonize RiskConfig defaults with Settings (enable rescue by default) and calibrate
+    # thresholds to production ML models (min ML probability 0.52, confidence 0.60, target prob 0.50).
+    # SAFE ROLLBACK: The original code is preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # enable_monte_carlo_borderline_rescue: bool = Field(False)
+    # monte_carlo_rescue_min_confidence: float = Field(0.80, ge=0.0, le=1.0)
+    # monte_carlo_rescue_min_ml_probability: float = Field(0.80, ge=0.0, le=1.0)
+    # monte_carlo_rescue_min_target_prob: float = Field(0.57, ge=0.0, le=1.0)
+    # monte_carlo_rescue_min_expected_r: float = Field(0.0, ge=-1.0, le=10.0)
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    enable_monte_carlo_borderline_rescue: bool = Field(True)
+    monte_carlo_rescue_min_confidence: float = Field(0.60, ge=0.0, le=1.0)
+    monte_carlo_rescue_min_ml_probability: float = Field(0.52, ge=0.0, le=1.0)
+    monte_carlo_rescue_min_target_prob: float = Field(0.50, ge=0.0, le=1.0)
     monte_carlo_rescue_min_expected_r: float = Field(0.0, ge=-1.0, le=10.0)
+    # =============================================================================
     # =============================================================================
 
     # =============================================================================
@@ -937,15 +952,30 @@ class Settings(BaseSettings):
 
     monte_carlo_min_expected_r: float = Field(0.05, validation_alias="MONTE_CARLO_MIN_EXPECTED_R")
 
+    # =============================================================================
+    # [MODIFIED 2026-11-03]: Calibrate Monte Carlo Borderline Rescue Defaults in Settings
+    # ORIGINAL INTENT: Commit 9bd6470 added Settings aliases with 0.80 confidence, 0.80 ML probability, 0.57 target prob.
+    # REASON FOR CHANGE: Align Settings with calibrated production thresholds (0.60 confidence, 0.52 ML probability, 0.50 target prob).
+    # SAFE ROLLBACK: The original code is preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # enable_monte_carlo_borderline_rescue: bool = Field(True, validation_alias="ENABLE_MONTE_CARLO_BORDERLINE_RESCUE")
+    # monte_carlo_rescue_min_confidence: float = Field(0.80, validation_alias="MONTE_CARLO_RESCUE_MIN_CONFIDENCE")
+    # monte_carlo_rescue_min_ml_probability: float = Field(0.80, validation_alias="MONTE_CARLO_RESCUE_MIN_ML_PROBABILITY")
+    # monte_carlo_rescue_min_target_prob: float = Field(0.57, validation_alias="MONTE_CARLO_RESCUE_MIN_TARGET_PROB")
+    # monte_carlo_rescue_min_expected_r: float = Field(0.0, validation_alias="MONTE_CARLO_RESCUE_MIN_EXPECTED_R")
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
     enable_monte_carlo_borderline_rescue: bool = Field(True, validation_alias="ENABLE_MONTE_CARLO_BORDERLINE_RESCUE")
 
-    monte_carlo_rescue_min_confidence: float = Field(0.80, validation_alias="MONTE_CARLO_RESCUE_MIN_CONFIDENCE")
+    monte_carlo_rescue_min_confidence: float = Field(0.60, validation_alias="MONTE_CARLO_RESCUE_MIN_CONFIDENCE")
 
-    monte_carlo_rescue_min_ml_probability: float = Field(0.80, validation_alias="MONTE_CARLO_RESCUE_MIN_ML_PROBABILITY")
+    monte_carlo_rescue_min_ml_probability: float = Field(0.52, validation_alias="MONTE_CARLO_RESCUE_MIN_ML_PROBABILITY")
 
-    monte_carlo_rescue_min_target_prob: float = Field(0.57, validation_alias="MONTE_CARLO_RESCUE_MIN_TARGET_PROB")
+    monte_carlo_rescue_min_target_prob: float = Field(0.50, validation_alias="MONTE_CARLO_RESCUE_MIN_TARGET_PROB")
 
     monte_carlo_rescue_min_expected_r: float = Field(0.0, validation_alias="MONTE_CARLO_RESCUE_MIN_EXPECTED_R")
+    # =============================================================================
     # =============================================================================
 
     # =============================================================================

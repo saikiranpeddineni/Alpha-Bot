@@ -141,9 +141,39 @@ class SignalPipeline:
                         r_target = reward_val / risk_val if risk_val > 0 else 2.0
                         
                         from app.ai.monte_carlo_gate import MonteCarloGate
+                        # =============================================================================
+                        # [MODIFIED 2026-11-03]: Wire Monte Carlo Borderline Rescue in Pipeline Early-Filter
+                        # ORIGINAL INTENT: Initialized MonteCarloGate without rescue parameters and vetoed on edge < -0.15.
+                        # REASON FOR CHANGE: Support calibrated borderline rescue in pipeline pre-score path.
+                        # SAFE ROLLBACK: The original code is preserved below as comments.
+                        # -----------------------------------------------------------------------------
+                        # [PREVIOUS CODE - PRESERVED]:
+                        # mc_gate = MonteCarloGate(
+                        #     min_win_prob=float(getattr(rc, "monte_carlo_min_win_prob", 0.35)) if rc else 0.35,
+                        #     min_expected_r=float(getattr(rc, "monte_carlo_min_expected_r", 0.05)) if rc else 0.05,
+                        #     n_replays=100,
+                        #     seed=42,
+                        # )
+                        # passed, stats, reason = mc_gate.evaluate_signal(sig, df)
+                        # p_target = float(stats.get("p_target", 0.30))
+                        # p_stop = float(stats.get("p_stop", 0.70))
+                        # hit_side = p_target + p_stop
+                        # edge = (p_target / hit_side - 1.0 / (1.0 + r_target)) if hit_side > 0 else 0.0
+                        # 
+                        # pred_peak_r = float(stats.get("predicted_peak_r", 2.2))
+                        # if pred_peak_r < 1.0 or edge < -0.15:
+                        #     rejected.append((sig, f"Monte Carlo forward prediction veto (pred_peak_r {pred_peak_r:.2f}R < 1.0 or edge {edge:.2f} < -0.15)"))
+                        #     continue
+                        # -----------------------------------------------------------------------------
+                        # [NEW CODE]:
                         mc_gate = MonteCarloGate(
                             min_win_prob=float(getattr(rc, "monte_carlo_min_win_prob", 0.35)) if rc else 0.35,
                             min_expected_r=float(getattr(rc, "monte_carlo_min_expected_r", 0.05)) if rc else 0.05,
+                            rescue_enabled=bool(getattr(rc, "enable_monte_carlo_borderline_rescue", True)) if rc else True,
+                            rescue_min_confidence=float(getattr(rc, "monte_carlo_rescue_min_confidence", 0.60)) if rc else 0.60,
+                            rescue_min_ml_probability=float(getattr(rc, "monte_carlo_rescue_min_ml_probability", 0.52)) if rc else 0.52,
+                            rescue_min_target_prob=float(getattr(rc, "monte_carlo_rescue_min_target_prob", 0.50)) if rc else 0.50,
+                            rescue_min_expected_r=float(getattr(rc, "monte_carlo_rescue_min_expected_r", 0.0)) if rc else 0.0,
                             n_replays=100,
                             seed=42,
                         )
@@ -154,9 +184,10 @@ class SignalPipeline:
                         edge = (p_target / hit_side - 1.0 / (1.0 + r_target)) if hit_side > 0 else 0.0
                         
                         pred_peak_r = float(stats.get("predicted_peak_r", 2.2))
-                        if pred_peak_r < 1.0 or edge < -0.15:
+                        if not passed and (pred_peak_r < 1.0 or edge < -0.15):
                             rejected.append((sig, f"Monte Carlo forward prediction veto (pred_peak_r {pred_peak_r:.2f}R < 1.0 or edge {edge:.2f} < -0.15)"))
                             continue
+                        # =============================================================================
                             
                         if edge >= 0.08:
                             allocator_mult = 1.45
@@ -828,12 +859,33 @@ class SignalPipeline:
                 ):
                     try:
                         from app.ai.monte_carlo_gate import MonteCarloGate
+                        # =============================================================================
+                        # [MODIFIED 2026-11-03]: Pass Calibrated Borderline Rescue to Main TradeScore Pipeline
+                        # ORIGINAL INTENT: Initialized MonteCarloGate with only win_prob and expected_r.
+                        # REASON FOR CHANGE: Pass rescue parameters so evaluate_signal can approve borderline high-conviction trades.
+                        # SAFE ROLLBACK: The original code is preserved below as comments.
+                        # -----------------------------------------------------------------------------
+                        # [PREVIOUS CODE - PRESERVED]:
+                        # mc_gate = MonteCarloGate(
+                        #     min_win_prob=float(getattr(rc, "monte_carlo_min_win_prob", 0.35)),
+                        #     min_expected_r=float(getattr(rc, "monte_carlo_min_expected_r", 0.05)),
+                        #     n_replays=100,
+                        #     seed=42,
+                        # )
+                        # -----------------------------------------------------------------------------
+                        # [NEW CODE]:
                         mc_gate = MonteCarloGate(
                             min_win_prob=float(getattr(rc, "monte_carlo_min_win_prob", 0.35)),
                             min_expected_r=float(getattr(rc, "monte_carlo_min_expected_r", 0.05)),
+                            rescue_enabled=bool(getattr(rc, "enable_monte_carlo_borderline_rescue", True)),
+                            rescue_min_confidence=float(getattr(rc, "monte_carlo_rescue_min_confidence", 0.60)),
+                            rescue_min_ml_probability=float(getattr(rc, "monte_carlo_rescue_min_ml_probability", 0.52)),
+                            rescue_min_target_prob=float(getattr(rc, "monte_carlo_rescue_min_target_prob", 0.50)),
+                            rescue_min_expected_r=float(getattr(rc, "monte_carlo_rescue_min_expected_r", 0.0)),
                             n_replays=100,
                             seed=42,
                         )
+                        # =============================================================================
                         risk_val = abs(float(sig.price) - float(sig.stop_loss))
                         reward_val = abs(float(sig.take_profit) - float(sig.price))
                         r_target = reward_val / risk_val if risk_val > 0 else 2.0

@@ -164,3 +164,51 @@ def test_monte_carlo_gate_in_trade_exit_trigger(sample_bars_df):
     assert should_exit is True
     assert "Time Machine early exit" in reason
     assert stats["p_target"] < 0.25
+
+
+# =============================================================================
+# [MODIFIED 2026-11-03]: Add Calibrated Production Rescue Thresholds Unit Test
+# ORIGINAL INTENT: test_monte_carlo_borderline_rescue_requires_high_agreement tested 0.80 thresholds.
+# REASON FOR CHANGE: Test calibrated production thresholds (ml_prob >= 0.52, confidence >= 0.60, target_prob >= 0.50).
+# SAFE ROLLBACK: Remove or ignore this test function.
+# -----------------------------------------------------------------------------
+# [NEW CODE]:
+def test_monte_carlo_borderline_rescue_calibrated_thresholds(sample_bars_df, monkeypatch):
+    gate = MonteCarloGate(
+        min_win_prob=0.35,
+        min_expected_r=0.05,
+        rescue_enabled=True,
+        rescue_min_confidence=0.60,
+        rescue_min_ml_probability=0.52,
+        rescue_min_target_prob=0.50,
+    )
+    borderline_stats = {
+        "p_target": 0.52,
+        "p_stop": 0.48,
+        "p_neither": 0.0,
+        "avg_r": 0.02,
+        "r_target": 2.0,
+        "predicted_peak_r": 1.75,
+    }
+    monkeypatch.setattr(gate, "simulate", lambda **_: borderline_stats)
+
+    signal = Signal(
+        symbol="CALIBRATED",
+        action=SignalAction.ENTER_LONG,
+        confidence=0.62,
+        ml_probability=0.53,
+        reason="calibrated borderline",
+        price=100.0,
+        stop_loss=99.0,
+        take_profit=102.0,
+        strategy="orb",
+    )
+    passed, _, reason = gate.evaluate_signal(signal, sample_bars_df)
+    assert passed is True
+    assert "borderline rescue" in reason
+
+    signal.ml_probability = 0.51
+    passed, _, reason = gate.evaluate_signal(signal, sample_bars_df)
+    assert passed is False
+    assert "Expected R" in reason
+# =============================================================================
