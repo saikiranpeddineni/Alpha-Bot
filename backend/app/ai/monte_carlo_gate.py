@@ -397,12 +397,35 @@ class MonteCarloGate:
         if edge < -0.04:
             return False, stats, f"Monte Carlo veto: Negative statistical edge ({edge:+.2f} < -0.04)"
 
-        if p_target < self.min_win_prob:
+        # =============================================================================
+        # [MODIFIED 2026-11-03]: Adaptive Win-Rate Hurdle for Asymmetric Reward-to-Risk Setups
+        # ORIGINAL INTENT: Evaluated a flat `if p_target < self.min_win_prob:` (35%).
+        # REASON FOR CHANGE: For trades with r_target >= 2.0 (e.g. 2.5R ORB), the theoretical
+        # breakeven win rate is 1/(1+r_target) <= 33.3% (28.6% for 2.5R). A fixed 35% win rate
+        # vetoes legitimate asymmetric setups that have positive mathematical edge and positive
+        # expected return (e.g. SOXL +9.24% at 29.6% win rate, CRDO +7.33% at 33.8% win rate).
+        # We adapt the hurdle based on r_target and preserve edge-positive setups.
+        # SAFE ROLLBACK: Previous lines preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # if p_target < self.min_win_prob:
+        #     reason = (
+        #         f"Monte Carlo veto: Target-First prob {p_target:.1%} < {self.min_win_prob:.1%} "
+        #         f"(Stop-First: {stats['p_stop']:.1%}, Neither: {stats['p_neither']:.1%})"
+        #     )
+        #     return False, stats, reason
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        breakeven_win_prob = (1.0 / (1.0 + r_target)) if r_target > 0 else 0.50
+        adaptive_min_win_prob = min(self.min_win_prob, max(0.25, breakeven_win_prob + 0.01))
+        is_win_rate_ok = (p_target >= adaptive_min_win_prob) or (edge >= 0.0 and avg_r >= self.min_expected_r)
+        if not is_win_rate_ok:
             reason = (
-                f"Monte Carlo veto: Target-First prob {p_target:.1%} < {self.min_win_prob:.1%} "
+                f"Monte Carlo veto: Target-First prob {p_target:.1%} < {adaptive_min_win_prob:.1%} "
                 f"(Stop-First: {stats['p_stop']:.1%}, Neither: {stats['p_neither']:.1%})"
             )
             return False, stats, reason
+        # =============================================================================
 
         if avg_r < self.min_expected_r:
             # A very narrow shadow-validated rescue for high-agreement signals.

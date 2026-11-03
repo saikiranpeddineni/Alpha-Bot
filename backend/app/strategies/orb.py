@@ -1034,29 +1034,49 @@ class OpeningRangeBreakout(Strategy):
 
 
 
+        # =============================================================================
+        # [MODIFIED 2026-11-03]: Anti-Counter-Trend Short Firewall & Green Stock Protection
+        # ORIGINAL INTENT: Checked leveraged bull ETFs, require_vwap, and ctx.regime == TREND_UP.
+        # REASON FOR CHANGE: Gaining stocks trading above session open (e.g. LRCX, KLAC, MU, NOK up >+2%)
+        # were shorted into morning pullbacks because close dipped below the 15m range low.
+        # Enforce that shorts are only permitted on equities trading below their session open,
+        # rejecting counter-trend shorts on green stocks or confirmed gainers.
+        # SAFE ROLLBACK: Previous code preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # # Check Short Breakout
+        # leveraged_bull_etfs = {"TQQQ", "UPRO", "SOXL", "SPXL", "FAS", "TECL", "NVDL", "LABU", "BULZ"}
+        # if close < or_low / buffer and volume_ok_short and is_bearish_5m:
+        #     if symbol.upper() in leveraged_bull_etfs:
+        #         return None
+        #     if require_vwap and vwap_val is not None and close > vwap_val:
+        #         return None
+        #     if avoid_counter:
+        #         if ctx.regime == Regime.TREND_UP:
+        #             return None
+        #         if getattr(ctx, "spy_vwap_bias", None) == "above" or getattr(ctx, "spy_regime", None) == Regime.TREND_UP:
+        #             return None
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
         # Check Short Breakout
-
         leveraged_bull_etfs = {"TQQQ", "UPRO", "SOXL", "SPXL", "FAS", "TECL", "NVDL", "LABU", "BULZ"}
-
         if close < or_low / buffer and volume_ok_short and is_bearish_5m:
-
             if symbol.upper() in leveraged_bull_etfs:
-
                 return None
-
-            if require_vwap and vwap_val is not None and close > vwap_val:
-
+            if require_vwap and vwap_val is not None and close >= vwap_val:
                 return None
-
             if avoid_counter:
-
                 if ctx.regime == Regime.TREND_UP:
-
                     return None
-
                 if getattr(ctx, "spy_vwap_bias", None) == "above" or getattr(ctx, "spy_regime", None) == Regime.TREND_UP:
-
                     return None
+            # Do not short stocks trading above session open or flagged as mover gainers
+            session_open = float(df["open"].iloc[0]) if ("open" in df.columns and len(df) > 0) else None
+            if session_open is not None and close >= session_open:
+                return None
+            if getattr(ctx, "mover_bias", None) == "gainer" or getattr(ctx, "is_gainer", False):
+                return None
+        # =============================================================================
 
             if not drift_short_ok:
 

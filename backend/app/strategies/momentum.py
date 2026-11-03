@@ -94,7 +94,19 @@ class MomentumCross(Strategy):
         "climax_bar_tr_atr": 1.8,
         "climax_bar_close_pos": 0.65,
         "use_stacked_ema_filter": True,
+        # =============================================================================
+        # [MODIFIED 2026-11-03]: Minimum Price Filter for Momentum Strategy
+        # ORIGINAL INTENT: No minimum price threshold existed, allowing sub-$5 penny stocks (e.g. INO at $1.90-$2.02)
+        # to trigger capital-heavy allocations on speculative volume spikes.
+        # REASON FOR CHANGE: Enforce a $5.00 minimum price floor to avoid illiquid micro-cap whipsaws and wide spreads.
+        # SAFE ROLLBACK: Set "min_price": 0.0 in params to disable price floor.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # "min_reward_risk": 1.0,
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
         "min_reward_risk": 1.0,
+        "min_price": 5.0,
         # =============================================================================
     }
 
@@ -350,6 +362,10 @@ class MomentumCross(Strategy):
 
         today_date = now_et.date()
         if p.get("max_entries_per_day", 1) > 0 and (symbol, today_date) in self._traded:
+            return None
+
+        # Minimum price floor to prevent penny-stock whipsaws (e.g. INO at $2.02)
+        if close < float(p.get("min_price", 5.0)):
             return None
         # =============================================================================
 
