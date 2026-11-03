@@ -448,6 +448,13 @@ class RiskConfig(BaseModel):
     enable_monte_carlo_gate: bool = Field(False)
     monte_carlo_min_win_prob: float = Field(0.35, ge=0.0, le=1.0)
     monte_carlo_min_expected_r: float = Field(0.05, ge=-1.0, le=10.0)
+    # Shadow-validated rescue for only high-agreement borderline expectancy;
+    # hard peak-R, edge, and target-first checks remain in MonteCarloGate.
+    enable_monte_carlo_borderline_rescue: bool = Field(False)
+    monte_carlo_rescue_min_confidence: float = Field(0.80, ge=0.0, le=1.0)
+    monte_carlo_rescue_min_ml_probability: float = Field(0.80, ge=0.0, le=1.0)
+    monte_carlo_rescue_min_target_prob: float = Field(0.57, ge=0.0, le=1.0)
+    monte_carlo_rescue_min_expected_r: float = Field(0.0, ge=-1.0, le=10.0)
     # =============================================================================
 
     # =============================================================================
@@ -929,6 +936,16 @@ class Settings(BaseSettings):
     monte_carlo_min_win_prob: float = Field(0.35, validation_alias="MONTE_CARLO_MIN_WIN_PROB")
 
     monte_carlo_min_expected_r: float = Field(0.05, validation_alias="MONTE_CARLO_MIN_EXPECTED_R")
+
+    enable_monte_carlo_borderline_rescue: bool = Field(True, validation_alias="ENABLE_MONTE_CARLO_BORDERLINE_RESCUE")
+
+    monte_carlo_rescue_min_confidence: float = Field(0.80, validation_alias="MONTE_CARLO_RESCUE_MIN_CONFIDENCE")
+
+    monte_carlo_rescue_min_ml_probability: float = Field(0.80, validation_alias="MONTE_CARLO_RESCUE_MIN_ML_PROBABILITY")
+
+    monte_carlo_rescue_min_target_prob: float = Field(0.57, validation_alias="MONTE_CARLO_RESCUE_MIN_TARGET_PROB")
+
+    monte_carlo_rescue_min_expected_r: float = Field(0.0, validation_alias="MONTE_CARLO_RESCUE_MIN_EXPECTED_R")
     # =============================================================================
 
     # =============================================================================

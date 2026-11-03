@@ -1570,7 +1570,15 @@ class TradingEngineEvaluationMixin:
 
                     min_exp_r = float(getattr(cfg_obj, "monte_carlo_min_expected_r", 0.05))
 
-                    mc_gate = MonteCarloGate(min_win_prob=min_prob, min_expected_r=min_exp_r)
+                    mc_gate = MonteCarloGate(
+                        min_win_prob=min_prob,
+                        min_expected_r=min_exp_r,
+                        rescue_enabled=bool(getattr(cfg_obj, "enable_monte_carlo_borderline_rescue", False)),
+                        rescue_min_confidence=float(getattr(cfg_obj, "monte_carlo_rescue_min_confidence", 0.80)),
+                        rescue_min_ml_probability=float(getattr(cfg_obj, "monte_carlo_rescue_min_ml_probability", 0.80)),
+                        rescue_min_target_prob=float(getattr(cfg_obj, "monte_carlo_rescue_min_target_prob", 0.57)),
+                        rescue_min_expected_r=float(getattr(cfg_obj, "monte_carlo_rescue_min_expected_r", 0.0)),
+                    )
 
                     passed_mc, mc_stats, mc_reason = mc_gate.evaluate_signal(sig, df)
 

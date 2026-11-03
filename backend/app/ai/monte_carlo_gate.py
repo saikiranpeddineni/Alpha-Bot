@@ -10,13 +10,14 @@ Rules:
    (high/prev_close, low/prev_close, close/prev_close).
 2. Stop is checked before target on every bar (conservative call).
 3. If Target-First probability < min_win_prob (e.g. 35%) OR Expected R < min_expected_r (e.g. 0.05R),
-   the setup is vetoed before risking real capital.
+   the setup is vetoed before risking real capital. A configured high-agreement rescue may
+   soften only the expected-R threshold; the target, edge, and peak-R checks remain hard gates.
 """
 
 from __future__ import annotations
 
-import math
 from typing import Any
+
 import numpy as np
 import pandas as pd
 
@@ -34,12 +35,22 @@ class MonteCarloGate:
         n_replays: int = 2000,
         default_steps: int = 50,
         seed: int = 19,
+        rescue_enabled: bool = False,
+        rescue_min_confidence: float = 0.80,
+        rescue_min_ml_probability: float = 0.80,
+        rescue_min_target_prob: float = 0.57,
+        rescue_min_expected_r: float = 0.0,
     ) -> None:
         self.min_win_prob = float(min_win_prob)
         self.min_expected_r = float(min_expected_r)
         self.n_replays = int(n_replays)
         self.default_steps = int(default_steps)
         self.seed = int(seed)
+        self.rescue_enabled = bool(rescue_enabled)
+        self.rescue_min_confidence = float(rescue_min_confidence)
+        self.rescue_min_ml_probability = float(rescue_min_ml_probability)
+        self.rescue_min_target_prob = float(rescue_min_target_prob)
+        self.rescue_min_expected_r = float(rescue_min_expected_r)
 
     def extract_ratio_pool(self, df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
         """Extract empirical relative bar returns (high_ratio, low_ratio, close_ratio) from DataFrame."""
@@ -394,6 +405,26 @@ class MonteCarloGate:
             return False, stats, reason
 
         if avg_r < self.min_expected_r:
+            # A very narrow shadow-validated rescue for high-agreement signals.
+            # Peak-R, edge, and target-first gates above remain authoritative;
+            # this can only soften the final expected-R threshold.
+            ml_probability = getattr(sig, "ml_probability", None)
+            confidence = getattr(sig, "confidence", None)
+            if (
+                self.rescue_enabled
+                and avg_r >= self.rescue_min_expected_r
+                and p_target >= self.rescue_min_target_prob
+                and ml_probability is not None
+                and float(ml_probability) >= self.rescue_min_ml_probability
+                and confidence is not None
+                and float(confidence) >= self.rescue_min_confidence
+            ):
+                reason = (
+                    f"Monte Carlo borderline rescue: PeakR {pred_peak_r:.2f}R, "
+                    f"Target-First {p_target:.1%}, ExpR {avg_r:+.2f}R, "
+                    f"ML {float(ml_probability):.2f}, confidence {float(confidence):.2f}"
+                )
+                return True, stats, reason
             reason = (
                 f"Monte Carlo veto: Expected R {avg_r:+.2f}R < {self.min_expected_r:+.2f}R "
                 f"(Target-First: {p_target:.1%}, Stop-First: {stats['p_stop']:.1%})"

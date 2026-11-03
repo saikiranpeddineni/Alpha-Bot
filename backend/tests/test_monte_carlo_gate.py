@@ -101,6 +101,52 @@ def test_monte_carlo_gate_approves_favorable_setup(sample_bars_df):
     assert stats["p_target"] > 0.0
 
 
+def test_monte_carlo_borderline_rescue_requires_high_agreement(sample_bars_df, monkeypatch):
+    gate = MonteCarloGate(
+        min_win_prob=0.35,
+        min_expected_r=0.05,
+        rescue_enabled=True,
+        rescue_min_confidence=0.80,
+        rescue_min_ml_probability=0.80,
+        rescue_min_target_prob=0.57,
+    )
+    borderline_stats = {
+        "p_target": 0.58,
+        "p_stop": 0.42,
+        "p_neither": 0.0,
+        "avg_r": 0.03,
+        "r_target": 2.0,
+        "predicted_peak_r": 1.80,
+    }
+    monkeypatch.setattr(gate, "simulate", lambda **_: borderline_stats)
+
+    signal = Signal(
+        symbol="RESCUE",
+        action=SignalAction.ENTER_LONG,
+        confidence=0.82,
+        ml_probability=0.84,
+        reason="borderline",
+        price=100.0,
+        stop_loss=99.0,
+        take_profit=102.0,
+        strategy="orb",
+    )
+    passed, _, reason = gate.evaluate_signal(signal, sample_bars_df)
+    assert passed is True
+    assert "borderline rescue" in reason
+
+    signal.confidence = 0.79
+    passed, _, reason = gate.evaluate_signal(signal, sample_bars_df)
+    assert passed is False
+    assert "Expected R" in reason
+
+    borderline_stats["p_target"] = 0.56
+    signal.confidence = 0.82
+    passed, _, reason = gate.evaluate_signal(signal, sample_bars_df)
+    assert passed is False
+    assert "Expected R" in reason
+
+
 def test_monte_carlo_gate_in_trade_exit_trigger(sample_bars_df):
     gate = MonteCarloGate(n_replays=1000)
 
