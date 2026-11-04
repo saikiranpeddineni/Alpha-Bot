@@ -186,13 +186,63 @@ class BollingerBandSqueeze(Strategy):
                 return None
         # =============================================================================
 
-        # Structural VWAP vs EMA20 trend filter (sibling-proven anchor) to
-        # filter out false breakouts (head-fakes). After the first 30 minutes
-        # the EMA20/session-VWAP relationship is reliable; before that, both
-        # are still catching up to the gap, so structural checks are skipped.
+        # =============================================================================
+        # [MODIFIED 2026-11-04]: Anti-Counter-Trend & Falling Knife Protection for BB Squeeze
+        # ORIGINAL INTENT: Only checked EMA20 vs VWAP after 30 minutes, allowing long squeeze
+        # entries on collapsing stocks trading below VWAP and session open (e.g. ADI on Nov 3).
+        # Also lacked penny stock minimum price filtering.
+        # REASON FOR CHANGE: Forensic audit of Nov 3 showed -$142.08 loss on ADI when BB Squeeze
+        # bought long into an intraday breakdown below VWAP. Breakout long must be >= VWAP and
+        # >= session open; breakdown short must be <= VWAP and <= session open.
+        # SAFE ROLLBACK: The original code is preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # # Structural VWAP vs EMA20 trend filter (sibling-proven anchor) to
+        # # filter out false breakouts (head-fakes). After the first 30 minutes
+        # # the EMA20/session-VWAP relationship is reliable; before that, both
+        # # are still catching up to the gap, so structural checks are skipped.
+        # if p.get("use_trend_filter", True):
+        #     ema20 = float(last.get("ema20", 0.0))
+        #     vwap_px = float(last.get("vwap", 0.0))
+        #     if ema20 > 0 and vwap_px > 0 and mins_since_open > 30:
+        #         structural_uptrend = ema20 > vwap_px
+        #         structural_downtrend = ema20 < vwap_px
+        #         if confirmed_long and structural_downtrend:
+        #             return None
+        #         if confirmed_short and structural_uptrend:
+        #             return None
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        # Universal penny stock rejection: BB Squeeze requires institutional volatility structure
+        if close < 5.0:
+            return None
+
+        # Intraday VWAP, session open, and mover bias alignment
+        vwap_px = float(last.get("vwap", 0.0))
+        session_open = float(df["open"].iloc[0]) if ("open" in df.columns and len(df) > 0) else None
+        is_gainer = getattr(ctx, "mover_bias", None) == "gainer" or getattr(ctx, "is_gainer", False)
+        is_loser = getattr(ctx, "mover_bias", None) == "loser" or getattr(ctx, "is_loser", False)
+
+        # Do not buy long breakout if price is below VWAP or below session open (falling knife)
+        if confirmed_long:
+            if vwap_px > 0 and close < vwap_px:
+                return None
+            if session_open is not None and close < session_open:
+                return None
+            if is_loser:
+                return None
+
+        # Do not short breakdown if price is above VWAP or above session open (counter-trend)
+        if confirmed_short:
+            if vwap_px > 0 and close > vwap_px:
+                return None
+            if session_open is not None and close > session_open:
+                return None
+            if is_gainer:
+                return None
+
         if p.get("use_trend_filter", True):
             ema20 = float(last.get("ema20", 0.0))
-            vwap_px = float(last.get("vwap", 0.0))
             if ema20 > 0 and vwap_px > 0 and mins_since_open > 30:
                 structural_uptrend = ema20 > vwap_px
                 structural_downtrend = ema20 < vwap_px
@@ -200,6 +250,7 @@ class BollingerBandSqueeze(Strategy):
                     return None
                 if confirmed_short and structural_uptrend:
                     return None
+        # =============================================================================
 
             from app.core.domain import Regime
             # =============================================================================

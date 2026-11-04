@@ -10,6 +10,12 @@ from app.strategies.base import StrategyContext
 from app.strategies.momentum import MomentumCross
 from app.strategies.orb import OpeningRangeBreakout
 from app.ai.monte_carlo_gate import MonteCarloGate
+from unittest.mock import MagicMock
+from app.config import RiskConfig
+from app.risk.manager import RiskManager, AccountContext
+from app.strategies.gap_and_go import GapAndGo
+from app.strategies.bb_squeeze import BollingerBandSqueeze
+from app.strategies.pipeline import SignalPipeline
 
 
 @pytest.mark.asyncio
@@ -209,3 +215,132 @@ async def test_market_regime_rebound_downgrades_panic_to_caution():
     assert cur_close > today_open
     assert cur_close > today_vwap
 
+
+
+def test_gap_and_go_rejects_counter_trend_and_penny():
+    strat = GapAndGo()
+    start = datetime(2026, 11, 3, 14, 40, tzinfo=UTC)
+    idx = [start + timedelta(minutes=i) for i in range(10)]
+
+    # 1. Penny stock at $3.00
+    df_penny = pd.DataFrame({
+        "open": [3.0]*10, "high": [3.1]*10, "low": [2.9]*10, "close": [3.0]*10, "volume": [10000.0]*10
+    }, index=idx)
+    from app.indicators.ta import enrich
+    df_penny = enrich(df_penny)
+    ctx_penny = StrategyContext(position=None, equity=100000.0, regime=Regime.TREND_UP, now=idx[-1], mover_change_pct=5.0)
+    assert strat.on_bar(ctx_penny, "PNNY", df_penny) is None
+
+    # 2. Short on gainer trading above session open (PLTR case)
+    df_pltr = pd.DataFrame({
+        "open": [165.0] + [169.0]*9,
+        "high": [171.0]*10,
+        "low": [164.0]*10,
+        "close": [170.0]*10,
+        "volume": [50000.0]*10
+    }, index=idx)
+    df_pltr = enrich(df_pltr)
+    ctx_short_gainer = StrategyContext(position=None, equity=100000.0, regime=Regime.TREND_UP, now=idx[-1], mover_change_pct=-3.0, mover_bias="gainer")
+    assert strat.on_bar(ctx_short_gainer, "PLTR", df_pltr) is None
+
+    # 3. Long on loser trading below session open
+    df_loser = pd.DataFrame({
+        "open": [100.0] + [95.0]*9,
+        "high": [101.0]*10,
+        "low": [94.0]*10,
+        "close": [95.0]*10,
+        "volume": [50000.0]*10
+    }, index=idx)
+    df_loser = enrich(df_loser)
+    ctx_long_loser = StrategyContext(position=None, equity=100000.0, regime=Regime.TREND_DOWN, now=idx[-1], mover_change_pct=3.0, mover_bias="loser")
+    assert strat.on_bar(ctx_long_loser, "LOSR", df_loser) is None
+
+
+def test_bb_squeeze_rejects_sub_vwap_long_and_penny():
+    strat = BollingerBandSqueeze()
+    start = datetime(2026, 11, 3, 15, 30, tzinfo=UTC)
+    idx = [start + timedelta(minutes=i) for i in range(120)]
+
+    # 1. Penny stock < $5.00
+    df_penny = pd.DataFrame({
+        "open": [2.5]*120, "high": [2.6]*120, "low": [2.4]*120, "close": [2.5]*120, "volume": [10000.0]*120
+    }, index=idx)
+    from app.indicators.ta import enrich
+    df_penny = enrich(df_penny)
+    ctx = StrategyContext(position=None, equity=100000.0, regime=Regime.RANGE, now=idx[-1])
+    assert strat.on_bar(ctx, "PNNY", df_penny) is None
+
+    # 2. ADI falling knife case: Price is 420, open was 430, VWAP is 425
+    prices = [430.0] * 30 + [428.0] * 30 + [425.0] * 30 + [420.0] * 30
+    df_adi = pd.DataFrame({
+        "open": [430.0] + prices[:-1],
+        "high": [p + 1.0 for p in prices],
+        "low": [p - 1.0 for p in prices],
+        "close": prices,
+        "volume": [10000.0] * 120
+    }, index=idx)
+    df_adi = enrich(df_adi)
+    ctx_loser = StrategyContext(position=None, equity=100000.0, regime=Regime.RANGE, now=idx[-1], mover_bias="loser")
+    sig = strat.on_bar(ctx_loser, "ADI", df_adi)
+    assert sig is None or sig.action != SignalAction.ENTER_LONG
+
+
+def test_pipeline_rejects_sub_5_penny_stock():
+    mock_model = MagicMock()
+    pipeline = SignalPipeline(model=mock_model, ml_threshold=0.0)
+    sig = Signal(symbol="INO", action=SignalAction.ENTER_LONG, strategy="momentum", reason="test momentum", confidence=0.8, price=2.02, stop_loss=1.91, take_profit=2.30)
+    df = pd.DataFrame({"close": [2.02]*10, "open": [2.05]*10, "high": [2.06]*10, "low": [2.00]*10, "volume": [1000]*10})
+    accepted, rejected = pipeline.process("INO", df, [sig], Regime.TREND_UP)
+    assert len(accepted) == 0
+    assert len(rejected) == 1
+    assert "penny stock" in rejected[0][1].lower()
+
+
+def test_pipeline_rejects_inverse_etf_in_trend_up():
+    mock_model = MagicMock()
+    pipeline = SignalPipeline(model=mock_model, ml_threshold=0.0)
+    sig = Signal(symbol="SOXS", action=SignalAction.ENTER_LONG, strategy="orb", reason="test orb", confidence=0.85, price=53.50, stop_loss=52.50, take_profit=56.00)
+    df = pd.DataFrame({"close": [53.50]*10, "open": [54.00]*10, "high": [54.20]*10, "low": [53.00]*10, "volume": [1000]*10})
+    accepted, rejected = pipeline.process("SOXS", df, [sig], Regime.TREND_UP)
+    assert len(accepted) == 0
+    assert len(rejected) == 1
+    assert "inverse etf long prohibited" in rejected[0][1].lower()
+
+
+def test_leveraged_etf_sizing_scaler():
+    class DummyClock:
+        def now(self):
+            return datetime.now(UTC)
+        def is_open(self, now=None):
+            return True
+        def in_entry_window(self, mins=0, now=None):
+            return True
+
+    cfg = RiskConfig()
+    rm = RiskManager(cfg, DummyClock())
+
+    ctx = AccountContext(
+        equity=100000.0,
+        cash=100000.0,
+        positions=[],
+        day_pnl=0.0,
+        session_start_equity=100000.0,
+        peak_equity=100000.0,
+        day_trades_today=0,
+    )
+
+    df = pd.DataFrame({"close": [50.0]*10, "high": [51.0]*10, "low": [49.0]*10, "volume": [10000]*10})
+
+    # Standard equity at $50
+    sig_std = Signal(symbol="AAPL", action=SignalAction.ENTER_LONG, strategy="orb", reason="test", confidence=0.8, price=50.0, stop_loss=48.0, take_profit=55.0)
+    dec_std = rm.evaluate_entry(sig_std, ctx, df)
+    assert dec_std.approved
+
+    # 3x Leveraged ETF (SOXS) at $50
+    sig_3x = Signal(symbol="SOXS", action=SignalAction.ENTER_LONG, strategy="orb", reason="test", confidence=0.8, price=50.0, stop_loss=48.0, take_profit=55.0)
+    dec_3x = rm.evaluate_entry(sig_3x, ctx, df)
+    assert dec_3x.approved
+
+    # 3x Leveraged ETF position quantity must be significantly smaller than standard (scaled by leverage)
+    assert dec_3x.order is not None and dec_std.order is not None
+    assert dec_3x.order.qty <= int(dec_std.order.qty * 0.6)

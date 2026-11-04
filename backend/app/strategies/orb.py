@@ -912,31 +912,63 @@ class OpeningRangeBreakout(Strategy):
 
 
 
-        # Check Long Breakout
+        # =============================================================================
+        # [MODIFIED 2026-11-04]: Anti-Counter-Trend Long Firewall & Leveraged Inverse ETF Protection
+        # ORIGINAL INTENT: Verified close > or_high and basic trend filters, but allowed long
+        # entries on inverse ETFs (SOXS, SQQQ, QID) during bullish market regimes and on red stocks.
+        # REASON FOR CHANGE: Forensic audit of Nov 3 showed -$460.84 lost on SOXS long trades while
+        # tech and semiconductors were in a massive morning rally. Prohibit inverse ETF longs during
+        # market uptrends, require close > session_open for longs, and enforce $5.00 price floor.
+        # SAFE ROLLBACK: The original code is preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # # Check Long Breakout
+        # if close > or_high * buffer and volume_ok and is_bullish_5m:
+        #     if require_vwap and vwap_val is not None and close < vwap_val:
+        #         return None
+        #     if avoid_counter:
+        #         if ctx.regime == Regime.TREND_DOWN:
+        #             return None
+        #         if getattr(ctx, "spy_regime", None) == Regime.TREND_DOWN and getattr(ctx, "spy_vwap_bias", None) == "below":
+        #             return None
+        #     if not drift_long_ok:
+        #         return None
+        #     if acceptance_long < min_acceptance:
+        #         return None
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        # Universal penny stock rejection: ORB requires institutional liquidity
+        if close < 5.0:
+            return None
 
+        # Check Long Breakout
+        leveraged_inverse_etfs = {"SOXS", "SQQQ", "SPXU", "SDOW", "QID", "DOG", "PSQ", "SH", "FAZ", "TECS", "LABD"}
         if close > or_high * buffer and volume_ok and is_bullish_5m:
+            # Do not buy inverse ETFs during market uptrends (synthetic counter-trend shorting)
+            if symbol.upper() in leveraged_inverse_etfs:
+                if ctx.regime == Regime.TREND_UP or getattr(ctx, "spy_regime", None) == Regime.TREND_UP or getattr(ctx, "spy_vwap_bias", None) == "above":
+                    return None
 
             if require_vwap and vwap_val is not None and close < vwap_val:
-
                 return None
-
             if avoid_counter:
-
                 if ctx.regime == Regime.TREND_DOWN:
-
                     return None
-
                 if getattr(ctx, "spy_regime", None) == Regime.TREND_DOWN and getattr(ctx, "spy_vwap_bias", None) == "below":
-
                     return None
+
+            # Do not buy long breakout if price is below session open or flagged as loser
+            session_open = float(df["open"].iloc[0]) if ("open" in df.columns and len(df) > 0) else None
+            if session_open is not None and close <= session_open:
+                return None
+            if getattr(ctx, "mover_bias", None) == "loser" or getattr(ctx, "is_loser", False):
+                return None
 
             if not drift_long_ok:
-
                 return None
-
             if acceptance_long < min_acceptance:
-
                 return None
+        # =============================================================================
 
             # =============================================================================
 

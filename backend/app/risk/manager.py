@@ -1485,25 +1485,53 @@ class RiskManager:
 
 
 
+        # =============================================================================
+        # [MODIFIED 2026-11-04]: Leveraged ETF (2x/3x) Volatility Scaler & Notional Bounding
+        # ORIGINAL INTENT: Sizing treated 3x leveraged ETFs (SOXS, SOXL, SQQQ, TQQQ) like standard
+        # 1x equities, allowing up to 20% equity ($14,000+) notional allocation.
+        # REASON FOR CHANGE: Forensic audit of Nov 3 showed -$460.84 lost on SOXS due to $14,000+
+        # notional positions on 3x inverse instruments. Sizing must scale down max notional and
+        # risk proportionally by the leverage factor (1/3 for 3x, 1/2 for 2x).
+        # SAFE ROLLBACK: The original code is preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # qty_unconstrained = qty
+        # max_notional_raw = getattr(cfg, "max_position_pct", 20.0)
+        # max_notional_pct = float(max_notional_raw) if (isinstance(max_notional_raw, (int, float)) and not hasattr(max_notional_raw, "_mock_return_value")) else 20.0
+        # if price < 5.0:
+        #     sub5_notional_raw = getattr(cfg, "sub5_max_notional_pct", 10.0)
+        #     sub5_notional_pct = float(sub5_notional_raw) if (isinstance(sub5_notional_raw, (int, float)) and not hasattr(sub5_notional_raw, "_mock_return_value")) else 10.0
+        #     max_notional_pct = min(max_notional_pct, sub5_notional_pct)
+        # max_notional = ctx.equity * max_notional_pct / 100.0
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        LEVERAGED_3X_ETFS = {"SOXL", "SOXS", "TQQQ", "SQQQ", "SPXU", "UPRO", "LABU", "LABD", "TECL", "TECS", "FNGU", "FNGD", "DPST", "YINN", "YANG"}
+        LEVERAGED_2X_ETFS = {"QID", "QLD", "SSO", "SDS", "UVIX", "SVIX"}
+
+        sym_clean = symbol.upper()
+        if sym_clean in LEVERAGED_3X_ETFS:
+            qty = max(1, int(qty / 2.0))
+        elif sym_clean in LEVERAGED_2X_ETFS:
+            qty = max(1, int(qty * 0.70))
+
         qty_unconstrained = qty
-
         max_notional_raw = getattr(cfg, "max_position_pct", 20.0)
-
         max_notional_pct = float(max_notional_raw) if (isinstance(max_notional_raw, (int, float)) and not hasattr(max_notional_raw, "_mock_return_value")) else 20.0
 
-
-
         if price < 5.0:
-
             sub5_notional_raw = getattr(cfg, "sub5_max_notional_pct", 10.0)
-
             sub5_notional_pct = float(sub5_notional_raw) if (isinstance(sub5_notional_raw, (int, float)) and not hasattr(sub5_notional_raw, "_mock_return_value")) else 10.0
-
             max_notional_pct = min(max_notional_pct, sub5_notional_pct)
 
-
+        if sym_clean in LEVERAGED_3X_ETFS:
+            # 3x Leveraged ETF notional capped at 1/3 of standard max (e.g. 6.67% of equity)
+            max_notional_pct = min(max_notional_pct, 6.67)
+        elif sym_clean in LEVERAGED_2X_ETFS:
+            # 2x Leveraged ETF notional capped at 1/2 of standard max (e.g. 10.0% of equity)
+            max_notional_pct = min(max_notional_pct, 10.0)
 
         max_notional = ctx.equity * max_notional_pct / 100.0
+        # =============================================================================
 
         # =============================================================================
 

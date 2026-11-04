@@ -105,6 +105,29 @@ class GapAndGo(Strategy):
             return None
         # =============================================================================
 
+        # =============================================================================
+        # [MODIFIED 2026-11-04]: Anti-Counter-Trend Firewall & Minimum Price Protection
+        # ORIGINAL INTENT: Extracted price/volume features without verifying intraday session
+        # open or mover gainer/loser bias, allowing shorts on gainer leaders (e.g. PLTR, AAPL)
+        # and trading sub-$5 penny stocks.
+        # REASON FOR CHANGE: Forensic post-mortem of Nov 3 showed -$255.92 lost by GapAndGo
+        # shorting PLTR (+4.4%) and AAPL (+1.3%) while positive on the day.
+        # SAFE ROLLBACK: The original code is preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # last_row = df.iloc[-1]
+        # close_px = float(last_row["close"])
+        # open_px = float(last_row["open"])
+        # vwap = float(last_row["vwap"])
+        # ema9 = float(last_row["ema9"])
+        # ema20 = float(last_row["ema20"])
+        # vol_z = float(last_row["vol_z"])
+        # 
+        # # Require high relative volume
+        # if vol_z < p["vol_z_min"]:
+        #     return None
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
         last_row = df.iloc[-1]
         close_px = float(last_row["close"])
         open_px = float(last_row["open"])
@@ -113,9 +136,28 @@ class GapAndGo(Strategy):
         ema20 = float(last_row["ema20"])
         vol_z = float(last_row["vol_z"])
 
+        # Universal penny stock rejection: Gap & Go requires institutional liquidity
+        if close_px < 5.0:
+            return None
+
         # Require high relative volume
         if vol_z < p["vol_z_min"]:
             return None
+
+        # Intraday trend alignment check: protect against fading session direction
+        session_df = df[df.index.tz_convert(ET).date == today]
+        session_open = float(session_df["open"].iloc[0]) if len(session_df) > 0 else open_px
+        is_gainer = getattr(ctx, "mover_bias", None) == "gainer" or getattr(ctx, "is_gainer", False)
+        is_loser = getattr(ctx, "mover_bias", None) == "loser" or getattr(ctx, "is_loser", False)
+
+        # Do not short stocks trading above session open or flagged as mover gainers
+        if is_gap_down and (close_px >= session_open or is_gainer):
+            return None
+
+        # Do not buy gap-up stocks that collapsed below session open or flagged as mover losers
+        if is_gap_up and (close_px <= session_open or is_loser):
+            return None
+        # =============================================================================
 
         # Calculate confidence based on volume and trend alignment
         ema_spread_pct = abs(ema9 - ema20) / ema20 * 100.0

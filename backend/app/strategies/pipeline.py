@@ -99,10 +99,46 @@ class SignalPipeline:
     def process(self, symbol: str, df: pd.DataFrame, signals: list[Signal], regime: Regime,
                 features: pd.Series | None = None, sector_strength: float | None = None) -> tuple[list[Signal], list[tuple[Signal, str]]]:
         """Return accepted and rejected signals."""
+        # =============================================================================
+        # [MODIFIED 2026-11-04]: Universal Penny Stock Floor & Inverse ETF Regime Firewall
+        # ORIGINAL INTENT: Initialized accepted/rejected and passed all signals into downstream
+        # ML/TradeScore gates without universal price filtering or inverse ETF regime checks.
+        # REASON FOR CHANGE: Forensic audit of Nov 3 showed -$214.94 lost on penny stock INO ($2.02)
+        # and -$525.24 lost buying inverse ETFs (SOXS, QID) during broad market uptrend.
+        # SAFE ROLLBACK: The original code is preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # if not signals:
+        #     return [], []
+        # accepted: list[Signal] = []
+        # rejected: list[tuple[Signal, str]] = []
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
         if not signals:
             return [], []
         accepted: list[Signal] = []
         rejected: list[tuple[Signal, str]] = []
+
+        # Universal Penny Stock & Inverse ETF Pre-Filter
+        INVERSE_ETFS = {"SOXS", "SQQQ", "SPXU", "SDOW", "QID", "DOG", "PSQ", "SH", "FAZ", "TECS", "LABD"}
+        valid_signals: list[Signal] = []
+        for sig in signals:
+            if sig.action in (SignalAction.EXIT, SignalAction.SCALE_OUT_HALF):
+                valid_signals.append(sig)
+                continue
+            cur_px = sig.price or (float(df["close"].iloc[-1]) if df is not None and len(df) > 0 else 0.0)
+            if cur_px > 0 and cur_px < 5.0:
+                rejected.append((sig, f"Universal penny stock filter: price ${cur_px:.2f} < $5.00"))
+                continue
+            if symbol.upper() in INVERSE_ETFS and sig.action == SignalAction.ENTER_LONG and regime == Regime.TREND_UP:
+                rejected.append((sig, f"Inverse ETF long prohibited during {regime.value} regime (synthetic counter-trend short)"))
+                continue
+            valid_signals.append(sig)
+
+        signals = valid_signals
+        if not signals:
+            return accepted, rejected
+        # =============================================================================
 
         # =============================================================================
         # [MODIFIED 2026-10-25]: Quantitative Predictive Pipeline Mode (use_ml_gate = False)
