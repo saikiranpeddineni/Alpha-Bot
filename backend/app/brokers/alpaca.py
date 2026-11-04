@@ -734,8 +734,23 @@ class AlpacaBroker(Broker):
 
 
         try:
-            # fix(#50): full paginated sweep — never silently drop fills beyond 500
-            raw = await _paginate_orders(self._client, GetOrdersRequest(status="all", after=after, limit=500), label="get_orders/poll_fills")
+            # =============================================================================
+            # [MODIFIED 2026-11-04]: Ingest Nested Bracket/OTO Child Legs in Fill Polling
+            # ORIGINAL INTENT: Paged orders without nested=True; only examined top-level orders.
+            # REASON FOR CHANGE: Alpaca server-side stop-loss and take-profit child legs on
+            #   bracket and OTO orders are attached under `legs`/`related_orders`. Without
+            #   nested=True and child leg unrolling, stop-loss fills executed by Alpaca were
+            #   invisible to poll_fills(), leaving ghost lots in local DB and triggering
+            #   infinite position reconciliation mismatch streaks (e.g. MRNA, RIOT on 2026-11-04).
+            # SAFE ROLLBACK: The original code is preserved below as comments.
+            # -----------------------------------------------------------------------------
+            # [PREVIOUS CODE - PRESERVED]:
+            # # fix(#50): full paginated sweep — never silently drop fills beyond 500
+            # raw = await _paginate_orders(self._client, GetOrdersRequest(status="all", after=after, limit=500), label="get_orders/poll_fills")
+            # -----------------------------------------------------------------------------
+            # [NEW CODE]:
+            raw = await _paginate_orders(self._client, GetOrdersRequest(status="all", after=after, limit=500, nested=True), label="get_orders/poll_fills")
+            # =============================================================================
 
         except BrokerTimeoutError:
             applog.warning("broker.alpaca", "poll_fills skipped: API call timed out")
@@ -746,7 +761,47 @@ class AlpacaBroker(Broker):
 
         db = Database.active()
         candidates = []
-        for o in raw:
+        # =============================================================================
+        # [MODIFIED 2026-11-04]: Unroll Nested Child Orders (Legs / Related Orders)
+        # ORIGINAL INTENT: Iterated directly over `raw`, ignoring child legs of bracket/OTO orders.
+        # REASON FOR CHANGE: When Alpaca executes a stop-loss child leg, the child order holds
+        #   the fill information. Flattening legs into candidates ensures child fills are emitted.
+        # SAFE ROLLBACK: The original code is preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # for o in raw:
+        #     cumulative = float(o.filled_qty or 0)
+        #     if cumulative <= 0 or not o.filled_avg_price:
+        #         continue
+        #     oid = str(o.id)
+        #     processed = max(
+        #         self._processed_fill_qty.get(oid, 0.0),
+        #         self._emitted_fill_qty.get(oid, 0.0),
+        #     )
+        #     if db:
+        #         processed = max(processed, db.processed_fill_qty(mode=self._broker_mode, account_id=self.account_id, fill_key=oid))
+        #     if cumulative <= processed + 1e-9:
+        #         continue
+        #     candidates.append(o)
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        all_raw_orders = []
+        seen_order_ids: set[str] = set()
+        for parent_o in raw:
+            p_oid = str(getattr(parent_o, "id", ""))
+            if p_oid and p_oid not in seen_order_ids:
+                seen_order_ids.add(p_oid)
+                all_raw_orders.append(parent_o)
+            for key in ("legs", "related_orders"):
+                for child_o in (getattr(parent_o, key, None) or []):
+                    c_oid = str(getattr(child_o, "id", ""))
+                    if c_oid and c_oid not in seen_order_ids:
+                        seen_order_ids.add(c_oid)
+                        if p_oid:
+                            self._order_parent_ids[c_oid] = p_oid
+                        all_raw_orders.append(child_o)
+
+        for o in all_raw_orders:
             cumulative = float(o.filled_qty or 0)
             if cumulative <= 0 or not o.filled_avg_price:
                 continue
@@ -760,6 +815,7 @@ class AlpacaBroker(Broker):
             if cumulative <= processed + 1e-9:
                 continue
             candidates.append(o)
+        # =============================================================================
 
         candidates.sort(key=lambda o: (o.filled_at or o.updated_at or o.submitted_at or datetime.now(UTC), str(o.id)))
         queued = {(f.broker_fill_key, f.cumulative_qty) for f in self._fills}
@@ -781,7 +837,39 @@ class AlpacaBroker(Broker):
             delta = cumulative - processed
             if delta <= 1e-9:
                 continue
+            # =============================================================================
+            # [MODIFIED 2026-11-04]: Inherit Parent Strategy & Reason for Bracket Child Fills
+            # ORIGINAL INTENT: Looked up self._meta only by order ID `oid`.
+            # REASON FOR CHANGE: Child bracket orders (stop-loss, take-profit) generated by
+            #   Alpaca do not exist in local _meta under the child order's ID. Look up parent
+            #   ID from self._order_parent_ids to preserve strategy attribution and assign
+            #   appropriate reason ("stop_loss" / "take_profit").
+            # SAFE ROLLBACK: The original code is preserved below as comments.
+            # -----------------------------------------------------------------------------
+            # [PREVIOUS CODE - PRESERVED]:
+            # strategy, reason = self._meta.get(oid, ("alpaca", ""))
+            # -----------------------------------------------------------------------------
+            # [NEW CODE]:
             strategy, reason = self._meta.get(oid, ("alpaca", ""))
+            parent_id = self._order_parent_ids.get(oid)
+            if parent_id and strategy in ("alpaca", "unknown", ""):
+                p_strat, p_reason = self._meta.get(parent_id, (strategy, reason))
+                if p_strat not in ("alpaca", "unknown", ""):
+                    strategy = p_strat
+                order_type_str = str(getattr(o, "order_type", getattr(o, "type", ""))).lower()
+                if "stop" in order_type_str:
+                    reason = "stop_loss"
+                elif "limit" in order_type_str:
+                    reason = "take_profit"
+                elif not reason and p_reason and p_reason != "entry":
+                    reason = p_reason
+            if not reason:
+                order_type_str = str(getattr(o, "order_type", getattr(o, "type", ""))).lower()
+                if "stop" in order_type_str:
+                    reason = "stop_loss"
+                elif "limit" in order_type_str and parent_id:
+                    reason = "take_profit"
+            # =============================================================================
 
             # fix(#44): incremental execution pricing from change in cumulative notional
             cum_avg_price = float(o.filled_avg_price or 0.0)

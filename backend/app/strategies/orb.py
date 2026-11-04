@@ -512,45 +512,64 @@ class OpeningRangeBreakout(Strategy):
 
             if not is_runner:
 
+                # =============================================================================
+                # [MODIFIED 2026-11-04]: Volatility-Buffered Multi-Bar VWAP Fade Invalidation
+                # ORIGINAL INTENT: Liquidated non-runner positions if close was strictly on the
+                #   wrong side of VWAP for 2 consecutive 1-minute bars without any ATR buffer.
+                # REASON FOR CHANGE: Forensic audit of 2026-11-04 (Trade #10 ISRG) proved that
+                #   a momentary 0.14% dip (69 cents below VWAP on a $477 stock) while maintaining
+                #   a $1.78 buffer above the stop ($471.63) triggered an immediate bottom-tick
+                #   liquidation, costing +$247.37 in upside as ISRG rallied to $483.24.
+                #   Require close to clear VWAP by a dynamic buffer (max(0.05, 0.15 * ATR)) AND require
+                #   at least 3 consecutive confirming bars to avoid whipsaw on routine retests.
+                # SAFE ROLLBACK: The original code is preserved below as comments.
+                # -----------------------------------------------------------------------------
+                # [PREVIOUS CODE - PRESERVED]:
+                # vwap_val = float(last.get("vwap", close)) if pd.notna(last.get("vwap")) else None
+                # if vwap_val is not None and vwap_val > 0:
+                #     if ctx.position.qty > 0 and close < vwap_val:
+                #         self._vwap_fade_count[symbol] = self._vwap_fade_count.get(symbol, 0) + 1
+                #     elif ctx.position.qty < 0 and close > vwap_val:
+                #         self._vwap_fade_count[symbol] = self._vwap_fade_count.get(symbol, 0) + 1
+                #     else:
+                #         self._vwap_fade_count[symbol] = 0
+                #
+                #     fade_bars = int(p.get("vwap_fade_bars", 2))
+                #     if self._vwap_fade_count.get(symbol, 0) >= fade_bars:
+                #         reason = "Momentum faded (Close < VWAP)" if ctx.position.qty > 0 else "Momentum faded (Close > VWAP)"
+                #         return Signal(
+                #             symbol=symbol,
+                #             action=SignalAction.EXIT,
+                #             confidence=1.0,
+                #             strategy=self.name,
+                #             reason=reason,
+                #             price=close,
+                #         )
+                # -----------------------------------------------------------------------------
+                # [NEW CODE]:
                 vwap_val = float(last.get("vwap", close)) if pd.notna(last.get("vwap")) else None
 
                 if vwap_val is not None and vwap_val > 0:
-
-                    if ctx.position.qty > 0 and close < vwap_val:
-
+                    vwap_buffer = max(0.05, 0.15 * atr_val) if (atr_val and atr_val > 0) else 0.05
+                    if ctx.position.qty > 0 and close < (vwap_val - vwap_buffer):
                         self._vwap_fade_count[symbol] = self._vwap_fade_count.get(symbol, 0) + 1
-
-                    elif ctx.position.qty < 0 and close > vwap_val:
-
+                    elif ctx.position.qty < 0 and close > (vwap_val + vwap_buffer):
                         self._vwap_fade_count[symbol] = self._vwap_fade_count.get(symbol, 0) + 1
-
                     else:
-
                         self._vwap_fade_count[symbol] = 0
 
-
-
-                    fade_bars = int(p.get("vwap_fade_bars", 2))
-
+                    fade_bars = int(p.get("vwap_fade_bars", 3))
                     if self._vwap_fade_count.get(symbol, 0) >= fade_bars:
-
                         reason = "Momentum faded (Close < VWAP)" if ctx.position.qty > 0 else "Momentum faded (Close > VWAP)"
-
                         return Signal(
-
                             symbol=symbol,
-
                             action=SignalAction.EXIT,
-
                             confidence=1.0,
-
                             strategy=self.name,
-
                             reason=reason,
-
                             price=close,
-
                         )
+                # =============================================================================
 
             return None
 

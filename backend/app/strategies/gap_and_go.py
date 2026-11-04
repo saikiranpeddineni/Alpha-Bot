@@ -189,7 +189,33 @@ class GapAndGo(Strategy):
                     if is_exhausted_long:
                         return None  # Already extended into session high; pullback re-arm instead
                 # =============================================================================
-                # Confirmed gap & go long
+                # =============================================================================
+                # [MODIFIED 2026-11-04]: Volatility-Proportional ATR Buffer for Gap & Go Long Stops
+                # ORIGINAL INTENT: Placed stop loss with a hardcoded $0.05 offset from EMA20 (ema20 - 0.05).
+                # REASON FOR CHANGE: On high-priced assets (e.g. SYK at $331.48 with ATR $1.04 on 2026-11-04),
+                #   a rigid 5-cent buffer was wiped out by a single normal 1-minute spread wick (low of $327.95
+                #   breached the $328.30 stop by 35c before surging to $334.18, costing +$261.60 in missed gain).
+                #   Scale stop buffer dynamically to max(0.05, 0.25 * atr_px) to protect against auction noise.
+                # SAFE ROLLBACK: The original code is preserved below as comments.
+                # -----------------------------------------------------------------------------
+                # [PREVIOUS CODE - PRESERVED]:
+                # # Confirmed gap & go long
+                # return Signal(
+                #     symbol=symbol,
+                #     action=SignalAction.ENTER_LONG,
+                #     confidence=round(confidence, 4),
+                #     strategy=self.name,
+                #     reason=f"Gap up continuation breakout (vol z {vol_z:.1f})",
+                #     price=close_px,
+                #     score=0.75,
+                #     stop_loss=ema20 - 0.05,
+                #     take_profit=close_px + (close_px - ema20) * reward_risk,
+                # )
+                # -----------------------------------------------------------------------------
+                # [NEW CODE]:
+                atr_val_long = float(last_row.get("atr14", 0.0))
+                stop_buf_long = max(0.05, 0.25 * atr_val_long) if atr_val_long > 0 else 0.05
+                calculated_stop = round(ema20 - stop_buf_long, 4)
                 return Signal(
                     symbol=symbol,
                     action=SignalAction.ENTER_LONG,
@@ -198,9 +224,10 @@ class GapAndGo(Strategy):
                     reason=f"Gap up continuation breakout (vol z {vol_z:.1f})",
                     price=close_px,
                     score=0.75,
-                    stop_loss=ema20 - 0.05,
-                    take_profit=close_px + (close_px - ema20) * reward_risk,
+                    stop_loss=calculated_stop,
+                    take_profit=round(close_px + (close_px - calculated_stop) * reward_risk, 4),
                 )
+                # =============================================================================
 
         # Short Setup (Gap Down)
         elif is_gap_down:
@@ -228,7 +255,30 @@ class GapAndGo(Strategy):
                     if is_exhausted_short:
                         return None  # Already in freefall into session low; pullback re-arm instead
                 # =============================================================================
-                # Confirmed gap & go short
+                # =============================================================================
+                # [MODIFIED 2026-11-04]: Volatility-Proportional ATR Buffer for Gap & Go Short Stops
+                # ORIGINAL INTENT: Placed stop loss with a hardcoded $0.05 offset from EMA20 (ema20 + 0.05).
+                # REASON FOR CHANGE: Symmetrically scale stop buffer to max(0.05, 0.25 * atr_px) on short setups
+                #   to prevent premature stop-outs from normal opening auction spread wicks.
+                # SAFE ROLLBACK: The original code is preserved below as comments.
+                # -----------------------------------------------------------------------------
+                # [PREVIOUS CODE - PRESERVED]:
+                # # Confirmed gap & go short
+                # return Signal(
+                #     symbol=symbol,
+                #     action=SignalAction.ENTER_SHORT,
+                #     confidence=round(confidence, 4),
+                #     strategy=self.name,
+                #     reason=f"Gap down continuation breakdown (vol z {vol_z:.1f})",
+                #     price=close_px,
+                #     score=0.75,
+                #     stop_loss=ema20 + 0.05,
+                #     take_profit=close_px - (ema20 - close_px) * reward_risk,
+                # )
+                # -----------------------------------------------------------------------------
+                # [NEW CODE]:
+                stop_buf_short = max(0.05, 0.25 * atr_px) if atr_px > 0 else 0.05
+                calculated_stop_short = round(ema20 + stop_buf_short, 4)
                 return Signal(
                     symbol=symbol,
                     action=SignalAction.ENTER_SHORT,
@@ -237,6 +287,7 @@ class GapAndGo(Strategy):
                     reason=f"Gap down continuation breakdown (vol z {vol_z:.1f})",
                     price=close_px,
                     score=0.75,
-                    stop_loss=ema20 + 0.05,
-                    take_profit=close_px - (ema20 - close_px) * reward_risk,
+                    stop_loss=calculated_stop_short,
+                    take_profit=round(close_px - (calculated_stop_short - close_px) * reward_risk, 4),
                 )
+                # =============================================================================

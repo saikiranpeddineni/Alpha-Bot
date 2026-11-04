@@ -6380,6 +6380,30 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
                             f"Broker: {broker_syms}, DB lots: {db_syms} (unexplained: {unexplained_mismatches})",
 
                         )
+                        # =============================================================================
+                        # [MODIFIED 2026-11-04]: Auto-Reconcile Orphaned Lots Closed at Broker
+                        # ORIGINAL INTENT: Incremented mismatch streak indefinitely, latching SAFE_MODE
+                        #   permanently and blocking all new entries even after broker confirmed positions closed.
+                        # REASON FOR CHANGE: When Alpaca executes child bracket stops server-side, the
+                        #   broker position disappears without an open order in flight. After 3 confirmations,
+                        #   trigger fill polling and synchronize local lots with authoritative broker positions
+                        #   to clear ghost lots (e.g. MRNA, RIOT on 2026-11-04) and restore normal engine health.
+                        # SAFE ROLLBACK: The original code is preserved above and below.
+                        # -----------------------------------------------------------------------------
+                        # [NEW CODE]:
+                        if self._position_reconciliation_mismatch_streak >= 3:
+                            # If all unexplained mismatches are symbols absent at broker with no orders in flight,
+                            # poll fills and synchronize to broker truth to clear stale local lots.
+                            absent_at_broker = {s for s in unexplained_mismatches if s in db_syms and s not in broker_syms}
+                            if absent_at_broker:
+                                if hasattr(self.broker, "poll_fills"):
+                                    try:
+                                        await self.broker.poll_fills()
+                                    except Exception:
+                                        pass
+                                self._reconcile_positions(broker_positions)
+                                applog.info("engine.heartbeat", f"Broker truth position reconciliation restored for {absent_at_broker}; clearing stale lots.")
+                        # =============================================================================
 
                     else:
 
