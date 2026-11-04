@@ -1,30 +1,35 @@
-# Gates: Risk Hardening, Anti-Counter-Trend Firewall & Leveraged ETF Safeguards
+# Gates: November 4, 2026 Forensic Audit & Root-Cause Remediation
 
-OWNS: backend/app/strategies/gap_and_go.py, backend/app/strategies/bb_squeeze.py, backend/app/strategies/orb.py, backend/app/strategies/pipeline.py, backend/app/risk/manager.py, backend/tests/test_opportunity_capitalization_fixes.py
+OWNS: backend/app/brokers/alpaca.py, backend/app/core/engine.py, backend/app/strategies/gap_and_go.py, backend/app/strategies/orb.py, backend/tests/test_nov04_forensic_fixes.py, artifacts/FORENSIC_ANALYSIS_2026_11_04.md
 
-Scope: Implement Gap-and-Go and BB Squeeze anti-counter-trend firewalls, universal sub-$5 penny stock gating, leveraged ETF sizing scaler, and inverse ETF market alignment.
+Scope: Audit all losses from 2026-11-04 session, complete forensic trade-by-trade analysis, fix bracket child fill polling, scale gap-and-go stops by ATR, buffer ORB VWAP exits, and resolve ghost lot deadlocks.
 
-- [x] G1: Gap-and-Go rejects counter-trend entries (shorts on gainers/above open, longs on losers/below open) and sub-$5 penny stocks
-  CHECK: .venv\Scripts\python -m pytest backend/tests/test_opportunity_capitalization_fixes.py -k test_gap_and_go_rejects_counter_trend_and_penny -v
+- [x] G1: Forensic analysis report generated and verified for 2026-11-04 session
+  CHECK: .venv\Scripts\python -c "import os; assert os.path.exists('artifacts/FORENSIC_ANALYSIS_2026_11_04.md') and os.path.getsize('artifacts/FORENSIC_ANALYSIS_2026_11_04.md') > 10000; print('FORENSIC REPORT VERIFIED')"
+  EXPECT: FORENSIC REPORT VERIFIED
+  EVIDENCE: automatic-evidence=v1; definition-sha256=f6d6243ff8bedf388d265235c3c419b1fe58d991023e7444d127956faab91786; exit=0; EXPECT=matched; output-sha256=e39a3cc34e7de6ced9d9ef0c8e56f3c8d058edd0dee65568e33b35de7b91c873; output-bytes=26; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\peddi\Desktop\Bots\Alpha-Bot Master; path=33941c8ef8e1/57 entries
+
+- [x] G2: Alpaca broker unrolls nested bracket and OTO child legs in poll_fills
+  CHECK: .venv\Scripts\python -m pytest backend/tests/test_nov04_forensic_fixes.py -k test_alpaca_nested_child_fills_unrolled -v
   EXPECT: 1 passed
-  EVIDENCE: automatic-evidence=v1; definition-sha256=b045feccc6fde6280e1050289e4f48fa0db0a09c62f8dee43c3b02abe3cdf1b1; exit=0; EXPECT=matched; output-sha256=4dcd543b559d53463bd7aa7c0cd3bd3ea757bfb2966d06c130420cfbec63439a; output-bytes=746; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\peddi\Desktop\Bots\Alpha-Bot Master; path=33941c8ef8e1/57 entries
+  EVIDENCE: automatic-evidence=v1; definition-sha256=1fde475c3fe00e065fb529eb0cc0e530d4dc9a29deeaa5a28a286a92ae2b4ed1; exit=0; EXPECT=matched; output-sha256=7f38294faa7f11a997d8567df6b55295ae146d973d4fc1e2970113d3b06957a4; output-bytes=725; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\peddi\Desktop\Bots\Alpha-Bot Master; path=33941c8ef8e1/57 entries
 
-- [x] G2: BB Squeeze rejects long breakouts below VWAP/session-open (falling knives) and sub-$5 penny stocks
-  CHECK: .venv\Scripts\python -m pytest backend/tests/test_opportunity_capitalization_fixes.py -k test_bb_squeeze_rejects_sub_vwap_long_and_penny -v
+- [x] G3: Gap-and-Go strategy stop-loss is dynamically scaled by ATR
+  CHECK: .venv\Scripts\python -m pytest backend/tests/test_nov04_forensic_fixes.py -k test_gap_and_go_stop_loss_scaled_by_atr -v
   EXPECT: 1 passed
-  EVIDENCE: automatic-evidence=v1; definition-sha256=c8afc89c30d1163c160f19deffb23547c7530e091fab82f05edc15b207ee141e; exit=0; EXPECT=matched; output-sha256=cd72ba5ea09988ff813f21e968b953a1b9402917c4538b707d3f85a8d4ff850e; output-bytes=746; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\peddi\Desktop\Bots\Alpha-Bot Master; path=33941c8ef8e1/57 entries
+  EVIDENCE: automatic-evidence=v1; definition-sha256=16febf9a63d41dd821c6c55574b997b7da63b87f40429f34ce4c965b0af6435e; exit=0; EXPECT=matched; output-sha256=0af8c39981b78290557b422b0c6f225829a2e274520790ce75318b932e9e5518; output-bytes=725; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\peddi\Desktop\Bots\Alpha-Bot Master; path=33941c8ef8e1/57 entries
 
-- [x] G3: SignalPipeline enforces universal $5.00 penny stock gate and rejects inverse ETF long entries during bullish market regimes
-  CHECK: .venv\Scripts\python -m pytest backend/tests/test_opportunity_capitalization_fixes.py -k "test_pipeline_rejects_sub_5_penny_stock or test_pipeline_rejects_inverse_etf_in_trend_up" -v
-  EXPECT: 2 passed
-  EVIDENCE: automatic-evidence=v1; definition-sha256=029f96ce4d0c8e1361e8de91868bb096be474306b839fa1acfe4045965db9f80; exit=0; EXPECT=matched; output-sha256=b9c43550e5b32e66933559c31f2d75dd988cbc940e3443108c42e8cfbd3235b7; output-bytes=855; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\peddi\Desktop\Bots\Alpha-Bot Master; path=33941c8ef8e1/57 entries
-
-- [x] G4: RiskManager scales notional allocation and dollar risk for 2x and 3x leveraged ETFs to prevent outsized losses
-  CHECK: .venv\Scripts\python -m pytest backend/tests/test_opportunity_capitalization_fixes.py -k test_leveraged_etf_sizing_scaler -v
+- [x] G4: ORB strategy requires volatility buffer and 3-bar confirmation for VWAP fade exits
+  CHECK: .venv\Scripts\python -m pytest backend/tests/test_nov04_forensic_fixes.py -k test_orb_vwap_fade_volatility_buffer -v
   EXPECT: 1 passed
-  EVIDENCE: automatic-evidence=v1; definition-sha256=108acfdba7c557adc810bbd523f7780d7bb3226e3e8c7c6e0c857ccca374c6c4; exit=0; EXPECT=matched; output-sha256=ea28b7c0aae890eb831f8460be95ace43badf0d0bbff98b85949661292be5ccd; output-bytes=731; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\peddi\Desktop\Bots\Alpha-Bot Master; path=33941c8ef8e1/57 entries
+  EVIDENCE: automatic-evidence=v1; definition-sha256=7d48620a7b383468a9421e3aa4955cc9aa15eacee6e2043f9aa6522a43a492ac; exit=0; EXPECT=matched; output-sha256=50d2997443ae814f0fe1a39ed1901256648f6ba32db578020e8559d802f6cfba; output-bytes=722; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\peddi\Desktop\Bots\Alpha-Bot Master; path=33941c8ef8e1/57 entries
 
-- [x] G5: Full opportunity capitalization test suite passes without regressions
-  CHECK: .venv\Scripts\python -m pytest backend/tests/test_opportunity_capitalization_fixes.py -v
-  EXPECT: 10 passed in
-  EVIDENCE: automatic-evidence=v1; definition-sha256=d020328c6d9d61e4352214294890587ae241563df935bf132809a21b1588a90d; exit=0; EXPECT=matched; output-sha256=1309146aca0ed204462ab74c112adc159608f143b6d9dd624dfcbbf3d15f6b81; output-bytes=1746; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\peddi\Desktop\Bots\Alpha-Bot Master; path=33941c8ef8e1/57 entries
+- [x] G5: Full forensic fixes test suite passes cleanly
+  CHECK: .venv\Scripts\python -m pytest backend/tests/test_nov04_forensic_fixes.py -v
+  EXPECT: 3 passed
+  EVIDENCE: automatic-evidence=v1; definition-sha256=724905add26a11c395fd351acfc9fc29d5856c0014646f77331b779f4cf80c29; exit=0; EXPECT=matched; output-sha256=e167372e1eee1ea2f6de1d548ed070bd1029a4cb918a0122d9a0aa53b7a16492; output-bytes=892; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\peddi\Desktop\Bots\Alpha-Bot Master; path=33941c8ef8e1/57 entries
+
+- [x] G6: Git branch is Alphadesk_002
+  CHECK: git branch --show-current
+  EXPECT: Alphadesk_002
+  EVIDENCE: automatic-evidence=v1; definition-sha256=8a8f3cfd03c7a36a941129578a96d8258e0312144e660ddeaa0d6cbececd8493; exit=0; EXPECT=matched; output-sha256=14a0ce25eae33ead12391f159b0d0d53e799c785e6bc49ec72fa16059c8baab9; output-bytes=14; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\peddi\Desktop\Bots\Alpha-Bot Master; path=33941c8ef8e1/57 entries
