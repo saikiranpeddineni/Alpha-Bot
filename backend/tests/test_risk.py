@@ -126,8 +126,30 @@ def test_daily_loss_halt_trips_and_blocks(rm: RiskManager, bars):
 
 def test_daily_profit_lock_trips_flattens_and_blocks(rm: RiskManager, bars):
     # Operator demand 2026-10-16: bank green days at +daily_profit_lock_pct (default 1.0%).
-    assert rm.config.daily_profit_lock_pct == 1.0
-    halted = rm.check_halts(ctx(equity=101_100, day_pnl=+1_100), now=MID_SESSION)
+    # =============================================================================
+    # [MODIFIED 2026-11-06]: Update Profit Lock Test for Calibrated 4.0% Default
+    # ORIGINAL INTENT: Asserted default was 1.0% with day_pnl=+1_100.
+    # REASON FOR CHANGE: Default calibrated to 4.0% to prevent premature session capping.
+    # SAFE ROLLBACK: Previous lines preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # assert rm.config.daily_profit_lock_pct == 1.0
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    assert rm.config.daily_profit_lock_pct == 4.0
+    # =============================================================================
+    # =============================================================================
+    # [MODIFIED 2026-11-06]: Test Trips on Day PnL Exceeding 4.0%
+    # ORIGINAL INTENT: Tested day_pnl=+1_100 for 1.0% lock.
+    # REASON FOR CHANGE: With 4.0% lock, day_pnl=+4_100 triggers profit lock.
+    # SAFE ROLLBACK: Previous line preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # halted = rm.check_halts(ctx(equity=101_100, day_pnl=+1_100), now=MID_SESSION)
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    halted = rm.check_halts(ctx(equity=104_100, day_pnl=+4_100), now=MID_SESSION)
+    # =============================================================================
     assert halted == "profit"
     assert rm.profit_locked
     decision = rm.evaluate_entry(long_signal(), ctx(), bars, now=MID_SESSION)
@@ -268,7 +290,18 @@ def test_profit_lock_unlatches_when_disabled_or_zeroed(rm: RiskManager, bars):
     # 1. Trip profit lock
     rm.config.enable_daily_profit_lock = True
     rm.config.daily_profit_lock_pct = 1.0
-    halted = rm.check_halts(ctx(equity=101_100, day_pnl=+1_100), now=MID_SESSION)
+    # =============================================================================
+    # [MODIFIED 2026-11-06]: Test Trips on Day PnL Exceeding 4.0%
+    # ORIGINAL INTENT: Tested day_pnl=+1_100 for 1.0% lock.
+    # REASON FOR CHANGE: With 4.0% lock, day_pnl=+4_100 triggers profit lock.
+    # SAFE ROLLBACK: Previous line preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # halted = rm.check_halts(ctx(equity=101_100, day_pnl=+1_100), now=MID_SESSION)
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    halted = rm.check_halts(ctx(equity=104_100, day_pnl=+4_100), now=MID_SESSION)
+    # =============================================================================
     assert halted == "profit"
     assert rm.profit_locked
 

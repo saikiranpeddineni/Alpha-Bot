@@ -158,7 +158,18 @@ class RiskConfig(BaseModel):
 
     enable_daily_profit_lock: bool = Field(True)
 
-    daily_profit_lock_pct: float = Field(1.0, ge=0.0, le=25.0)
+    # =============================================================================
+    # [MODIFIED 2026-11-06]: Calibrate Daily Profit Lock Threshold
+    # ORIGINAL INTENT: daily_profit_lock_pct=1.0.
+    # REASON FOR CHANGE: Calibrating to 4.0% (+$2,800 on $70k) captures substantial runs.
+    # SAFE ROLLBACK: Previous line preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # daily_profit_lock_pct: float = Field(1.0, ge=0.0, le=25.0)
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    daily_profit_lock_pct: float = Field(4.0, ge=0.0, le=25.0)
+    # =============================================================================
 
     # PROFIT-LOCK DEFEND 2026-10-16: bank-and-ride mode lets winners run after
 
@@ -166,7 +177,19 @@ class RiskConfig(BaseModel):
 
     # the floor. 0.0 disables the defend (ride into close/EOD as usual).
 
-    daily_profit_defend_pct: float = Field(0.5, ge=0.0, le=25.0)
+    # =============================================================================
+    # [MODIFIED 2026-11-06]: Calibrate Daily Profit Defend Floor Threshold
+    # ORIGINAL INTENT: daily_profit_defend_pct=0.5.
+    # REASON FOR CHANGE: Calibrating defend_pct to 2.5% (+$1,750 on $70k) guarantees
+    #   profit protection if a banked session pulls back from peak equity.
+    # SAFE ROLLBACK: Previous line preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # daily_profit_defend_pct: float = Field(0.5, ge=0.0, le=25.0)
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    daily_profit_defend_pct: float = Field(2.5, ge=0.0, le=25.0)
+    # =============================================================================
 
     # =============================================================================
     # [MODIFIED 2026-10-27]: Decommission Max Drawdown Hard Halt Default
@@ -223,7 +246,21 @@ class RiskConfig(BaseModel):
 
     strategy_cooldown_minutes: int = Field(20, ge=0, le=390)                # 20m strategy pause
 
-    min_bank_profit_usd: float = Field(100.0, ge=0.0)                       # $100 floor on 50% scaleouts
+    # =============================================================================
+    # [MODIFIED 2026-11-06]: Calibrate Partial Scale-out Profit Floor to $25
+    # ORIGINAL INTENT: min_bank_profit_usd=100.0 prevented micro-scaleouts on small positions.
+    # REASON FOR CHANGE: A $100 floor prevented valid partial scale-outs on ETFs and moderate
+    #   share sizes (e.g., SPY $32 gain, UVIX $73 gain, U $68 gain were rejected), forcing the bot
+    #   to hold 100% position size into subsequent adverse reversals. A $25 floor prevents sub-dollar
+    #   churn while capturing meaningful incremental profit slices.
+    # SAFE ROLLBACK: Previous line preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # min_bank_profit_usd: float = Field(100.0, ge=0.0)                       # $100 floor on 50% scaleouts
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    min_bank_profit_usd: float = Field(25.0, ge=0.0)                        # $25 floor on 50% scaleouts
+    # =============================================================================
 
     # =============================================================================
 
@@ -858,9 +895,31 @@ class Settings(BaseSettings):
 
     enable_daily_profit_lock: bool = Field(True)
 
-    daily_profit_lock_pct: float = Field(1.0, validation_alias="DAILY_PROFIT_LOCK_PCT")
+    # =============================================================================
+    # [MODIFIED 2026-11-06]: Sync Settings Daily Profit Lock Default
+    # ORIGINAL INTENT: daily_profit_lock_pct=1.0 in Settings.
+    # REASON FOR CHANGE: Calibrate default to 4.0%.
+    # SAFE ROLLBACK: Previous line preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # daily_profit_lock_pct: float = Field(1.0, validation_alias="DAILY_PROFIT_LOCK_PCT")
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    daily_profit_lock_pct: float = Field(4.0, validation_alias="DAILY_PROFIT_LOCK_PCT")
+    # =============================================================================
 
-    daily_profit_defend_pct: float = Field(0.5, validation_alias="DAILY_PROFIT_DEFEND_PCT")
+    # =============================================================================
+    # [MODIFIED 2026-11-06]: Sync Settings Daily Profit Defend Default
+    # ORIGINAL INTENT: daily_profit_defend_pct=0.5 in Settings.
+    # REASON FOR CHANGE: Calibrate default to 2.5%.
+    # SAFE ROLLBACK: Previous line preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # daily_profit_defend_pct: float = Field(0.5, validation_alias="DAILY_PROFIT_DEFEND_PCT")
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    daily_profit_defend_pct: float = Field(2.5, validation_alias="DAILY_PROFIT_DEFEND_PCT")
+    # =============================================================================
 
     max_drawdown_pct: float = Field(10.0, validation_alias="MAX_DRAWDOWN_PCT")
 
@@ -1210,7 +1269,18 @@ class Settings(BaseSettings):
 
     symbol_max_daily_losses: int = Field(2, validation_alias="SYMBOL_MAX_DAILY_LOSSES")
 
-    min_bank_profit_usd: float = Field(100.0, validation_alias="BOT_MIN_BANK_PROFIT_USD")
+    # =============================================================================
+    # [MODIFIED 2026-11-06]: Sync Settings min_bank_profit_usd Floor to $25
+    # ORIGINAL INTENT: min_bank_profit_usd was 100.0 in Settings.
+    # REASON FOR CHANGE: Calibrate floor to 25.0 to allow partial profit scale-outs on ETF/medium positions.
+    # SAFE ROLLBACK: Previous line preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # min_bank_profit_usd: float = Field(100.0, validation_alias="BOT_MIN_BANK_PROFIT_USD")
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    min_bank_profit_usd: float = Field(25.0, validation_alias="BOT_MIN_BANK_PROFIT_USD")
+    # =============================================================================
 
     # =============================================================================
 

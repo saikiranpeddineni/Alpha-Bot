@@ -319,7 +319,18 @@ class PISConfig:
     # -----------------------------------------------------------------------------
     # [NEW CODE]:
     breakeven_trigger_r: float = 0.80
-    min_bank_profit_usd: float = 100.0
+    # =============================================================================
+    # [MODIFIED 2026-11-06]: Calibrate PIS min_bank_profit_usd Floor to $25
+    # ORIGINAL INTENT: min_bank_profit_usd was 100.0.
+    # REASON FOR CHANGE: Lowering floor to 25.0 allows valid partial scale-outs on ETF/medium positions.
+    # SAFE ROLLBACK: Previous line preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # min_bank_profit_usd: float = 100.0
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    min_bank_profit_usd: float = 25.0
+    # =============================================================================
     # =============================================================================
     breakeven_trigger_atr_mult: float = 2.50
     breakeven_atr_mult_breakout: float = 1.50

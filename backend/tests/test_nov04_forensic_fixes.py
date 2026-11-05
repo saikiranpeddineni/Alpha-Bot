@@ -19,9 +19,22 @@ def test_orb_vwap_fade_volatility_buffer():
 
     # Simulated position: entered at 477.46, stop at 471.63
     mock_pos = SimpleNamespace(qty=29, avg_entry_price=477.46, strategy="orb")
-    ctx = StrategyContext(position=mock_pos, equity=100000.0, regime=Regime.TREND_UP, now=datetime.now(UTC))
-
-    idx = [datetime.now(UTC) + timedelta(minutes=i) for i in range(20)]
+    # =============================================================================
+    # [MODIFIED 2026-11-06]: Deterministic Morning Time for Test Isolation
+    # ORIGINAL INTENT: Used datetime.now(UTC) for ctx.now and test bar timestamps.
+    # REASON FOR CHANGE: If tests run after 15:55 ET, ORB triggers EOD exit instead of testing
+    #   the VWAP fade buffer. Using a fixed 10:00 AM ET timestamp ensures deterministic isolation.
+    # SAFE ROLLBACK: Previous lines preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # ctx = StrategyContext(position=mock_pos, equity=100000.0, regime=Regime.TREND_UP, now=datetime.now(UTC))
+    # idx = [datetime.now(UTC) + timedelta(minutes=i) for i in range(20)]
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    test_now = datetime(2026, 11, 4, 15, 0, tzinfo=UTC)
+    ctx = StrategyContext(position=mock_pos, equity=100000.0, regime=Regime.TREND_UP, now=test_now)
+    idx = [test_now + timedelta(minutes=i) for i in range(20)]
+    # =============================================================================
     # Close is 473.80, VWAP is 474.00, ATR is 2.0 (so buffer = 0.15 * 2.0 = 0.30 -> threshold is 473.70)
     # 473.80 is > 473.70, so within buffer -> should NOT count as fade bar
     df = pd.DataFrame({

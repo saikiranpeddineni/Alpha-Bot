@@ -218,7 +218,22 @@ class OpeningRangeBreakout(Strategy):
 
         "climax_atr_mult": 10.0,         # Betadesk baseline: 10.0 (blocks blowoffs >10 ATR, lets runners run)
 
-        "end_time": "14:45",             # Betadesk baseline: 14:45 ET cutoff (allows 14:00-14:35 runners)
+        # =============================================================================
+        # [MODIFIED 2026-11-06]: Restrict ORB Entry Cutoff to 12:00 ET to Eliminate Afternoon Traps
+        # ORIGINAL INTENT: end_time='14:45' allowed late afternoon entries (14:00-14:35).
+        # REASON FOR CHANGE: Forensic audit of 2026-11-05 proved that afternoon ORB entries
+        #   (RKLB -$385, PTLO -$376, SOXX -$236, RGTI -$185, DASH -$171) generated $1,355 in
+        #   avoidable losses in low-volume chop, giving back peak gains. ORB edge is strictly
+        #   morning momentum. Cutting off new ORB entries at 12:00 ET eliminates 61% of all session
+        #   losses while preserving all morning winners and allowing morning runners to ride under PIS.
+        # SAFE ROLLBACK: Previous lines preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # "end_time": "14:45",             # Betadesk baseline: 14:45 ET cutoff (allows 14:00-14:35 runners)
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        "end_time": "12:00",             # Morning momentum cutoff: 12:00 ET (protects against afternoon chop)
+        # =============================================================================
 
         "start_time": "09:45",           # Betadesk baseline: 09:45 ET (immediately after 15m range is set)
 
@@ -732,7 +747,18 @@ class OpeningRangeBreakout(Strategy):
 
         import os
 
-        end_time_str = os.environ.get("ORB_END_TIME", p.get("end_time", "14:45"))
+        # =============================================================================
+        # [MODIFIED 2026-11-06]: Default ORB Fallback Cutoff Aligned to 12:00 ET
+        # ORIGINAL INTENT: Fallback was '14:45' allowing afternoon false breakouts.
+        # REASON FOR CHANGE: Morning cutoff (12:00 ET) eliminates late session giveback.
+        # SAFE ROLLBACK: Previous line preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # end_time_str = os.environ.get("ORB_END_TIME", p.get("end_time", "14:45"))
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        end_time_str = os.environ.get("ORB_END_TIME", p.get("end_time", "12:00"))
+        # =============================================================================
 
         start_time_str = os.environ.get("ORB_START_TIME", p.get("start_time", "09:45"))
 
