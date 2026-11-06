@@ -6391,18 +6391,67 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
                         # SAFE ROLLBACK: The original code is preserved above and below.
                         # -----------------------------------------------------------------------------
                         # [NEW CODE]:
+                        # =============================================================================
+                        # [MODIFIED 2026-11-06]: Bi-Directional Auto-Reconciliation of Orphaned & Split Positions
+                        # ORIGINAL INTENT: Only reconciled when symbols were absent at broker (s in db_syms and s not in broker_syms).
+                        # REASON FOR CHANGE: When Alpaca executed a 3:1 forward split on SOXX on 2026-11-05,
+                        # Alpaca held -216 orphaned shares absent in DB lots. The unidirectional reconciliation
+                        # ignored broker-held orphans, allowing an unmanaged short position to sit unprotected
+                        # overnight and crash -$15.2k next morning. Now bi-directional: cleans up ghost DB lots,
+                        # synchronizes split quantity mismatches, and immediately liquidates orphan broker positions.
+                        # SAFE ROLLBACK: Previous lines preserved below as comments.
+                        # -----------------------------------------------------------------------------
+                        # [PREVIOUS CODE - PRESERVED]:
+                        # if self._position_reconciliation_mismatch_streak >= 3:
+                        #     absent_at_broker = {s for s in unexplained_mismatches if s in db_syms and s not in broker_syms}
+                        #     if absent_at_broker:
+                        #         if hasattr(self.broker, "poll_fills"):
+                        #             try:
+                        #                 await self.broker.poll_fills()
+                        #             except Exception:
+                        #                 pass
+                        #         self._reconcile_positions(broker_positions)
+                        #         applog.info("engine.heartbeat", f"Broker truth position reconciliation restored for {absent_at_broker}; clearing stale lots.")
+                        # -----------------------------------------------------------------------------
+                        # [NEW CODE]:
                         if self._position_reconciliation_mismatch_streak >= 3:
-                            # If all unexplained mismatches are symbols absent at broker with no orders in flight,
-                            # poll fills and synchronize to broker truth to clear stale local lots.
+                            if hasattr(self.broker, "poll_fills"):
+                                try:
+                                    await self.broker.poll_fills()
+                                except Exception:
+                                    pass
+
+                            # Case 1: Ghost DB lots (closed at broker, but lingered locally)
                             absent_at_broker = {s for s in unexplained_mismatches if s in db_syms and s not in broker_syms}
                             if absent_at_broker:
-                                if hasattr(self.broker, "poll_fills"):
-                                    try:
-                                        await self.broker.poll_fills()
-                                    except Exception:
-                                        pass
                                 self._reconcile_positions(broker_positions)
-                                applog.info("engine.heartbeat", f"Broker truth position reconciliation restored for {absent_at_broker}; clearing stale lots.")
+                                applog.info("engine.heartbeat", f"Broker truth position reconciliation restored for {absent_at_broker}; clearing stale local lots.")
+
+                            # Case 2: Quantity mismatch on active positions (e.g. stock split or partial fill divergence)
+                            qty_mismatch = {s for s in unexplained_mismatches if s in broker_syms and s in db_syms}
+                            if qty_mismatch:
+                                self._reconcile_positions(broker_positions)
+                                applog.warning(
+                                    "engine.heartbeat",
+                                    f"Broker truth quantity resynchronized for {qty_mismatch}: "
+                                    f"broker={[broker_syms[s] for s in qty_mismatch]}, DB lots={[db_syms[s] for s in qty_mismatch]}."
+                                )
+
+                            # Case 3: Orphan positions held at broker with NO local lot (e.g. split remnants or external trades)
+                            orphan_at_broker = {s for s in unexplained_mismatches if s in broker_syms and s not in db_syms}
+                            if orphan_at_broker:
+                                self._reconcile_positions(broker_positions)
+                                for orphan_sym in orphan_at_broker:
+                                    applog.error(
+                                        "engine.heartbeat",
+                                        f"CRITICAL: Orphan position at broker detected for {orphan_sym} (broker holds {broker_syms.get(orphan_sym)} with no active DB lot). "
+                                        f"Initiating immediate emergency guarded liquidation to prevent unmanaged overnight exposure."
+                                    )
+                                    try:
+                                        await self._close_position_guarded(orphan_sym, reason="orphan_broker_reconciliation_liquidation")
+                                    except Exception as exc:
+                                        applog.error("engine.heartbeat", f"Failed to liquidate orphan position {orphan_sym}: {exc}")
+                        # =============================================================================
                         # =============================================================================
 
                     else:

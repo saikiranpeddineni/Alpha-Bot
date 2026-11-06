@@ -1456,7 +1456,23 @@ class TradingEngineEvaluationMixin:
 
                     applog.info("engine", f"{symbol}: Executing strategy EXIT signal ({sig.strategy}: {sig.reason})")
 
-                    await self._close_position_guarded(symbol, reason=sig.reason, qty=abs(position.qty))
+                    # =============================================================================
+                    # [MODIFIED 2026-11-06]: Pass qty=None on Full EXIT to Guarantee 100% Broker Liquidation
+                    # ORIGINAL INTENT: Passed qty=abs(position.qty) which submitted a partial market
+                    # order for the cached local lot size.
+                    # REASON FOR CHANGE: Forensic audit of Nov 05-06 SOXX trade proved that when a stock
+                    # split occurs at the broker, the local lot size (108) is smaller than the broker
+                    # position (-324). Passing an explicit qty left 216 short shares open at the broker,
+                    # resulting in an unmanaged overnight position and a -$15,211.60 loss. Passing qty=None
+                    # instructs the broker adapter to invoke full server-side liquidation.
+                    # SAFE ROLLBACK: Previous line preserved below as comments.
+                    # -----------------------------------------------------------------------------
+                    # [PREVIOUS CODE - PRESERVED]:
+                    # await self._close_position_guarded(symbol, reason=sig.reason, qty=abs(position.qty))
+                    # -----------------------------------------------------------------------------
+                    # [NEW CODE]:
+                    await self._close_position_guarded(symbol, reason=sig.reason, qty=None)
+                    # =============================================================================
 
                 return []
 

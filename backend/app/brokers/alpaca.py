@@ -154,6 +154,8 @@ class AlpacaBroker(Broker):
         except ImportError as exc:  # pragma: no cover
             raise RuntimeError("alpaca-py is not installed; run the install script") from exc
         self.is_paper = paper
+        self._api_key = api_key
+        self._api_secret = api_secret
         self._client = TradingClient(api_key, api_secret, paper=paper)
         self._fills: list[Fill] = []
         self._emitted_fill_ids: set[str] = set()
@@ -1039,28 +1041,72 @@ class AlpacaBroker(Broker):
                 from alpaca.trading.enums import OrderSide, TimeInForce
                 from alpaca.trading.requests import MarketOrderRequest
 
+                # =============================================================================
+                # [MODIFIED 2026-11-06]: Enforce Full Server-Side Liquidation on Full Exits & Split Remnants
+                # ORIGINAL INTENT: When qty was passed, blindly submitted a partial market order for
+                # requested qty without comparing against authoritative broker pos.qty.
+                # REASON FOR CHANGE: On 2026-11-05 SOXX underwent a 3-for-1 forward split increasing short
+                # position to -324. A full exit passing qty=108 closed only 108 shares, leaving -216 orphaned
+                # short shares that crashed -$15.2k next morning. Now, if qty >= broker_qty OR if reason
+                # indicates a full position exit, invoke self._client.close_position() to guarantee 100%
+                # liquidation of all broker exposure.
+                # SAFE ROLLBACK: Previous logic preserved below as comments.
+                # -----------------------------------------------------------------------------
+                # [PREVIOUS CODE - PRESERVED]:
+                # pos = await _call(self._client.get_open_position, symbol.upper(), label=f"get_open_position/{symbol}")
+                # is_long = float(pos.qty) > 0
+                # opposite_side = OrderSide.SELL if is_long else OrderSide.BUY
+                #
+                # qty_str = str(int(qty)) if float(qty).is_integer() else str(round(qty, 4))
+                # close_cid = f"ad-close-{symbol.upper()}-{uuid.uuid4().hex[:12]}"
+                # raw = await _call(
+                #     self._client.submit_order,
+                #     MarketOrderRequest(
+                #         symbol=symbol.upper(),
+                #         qty=qty_str,
+                #         side=opposite_side,
+                #         time_in_force=TimeInForce.DAY,
+                #         client_order_id=close_cid,
+                #     ),
+                #     label=f"close_position_partial_market/{symbol}"
+                # )
+                # else:
+                #     raw = await _call(self._client.close_position, symbol.upper(), label=f"close_position/{symbol}")
+                # -----------------------------------------------------------------------------
+                # [NEW CODE]:
                 pos = await _call(self._client.get_open_position, symbol.upper(), label=f"get_open_position/{symbol}")
+                broker_qty = abs(float(pos.qty))
                 is_long = float(pos.qty) > 0
                 opposite_side = OrderSide.SELL if is_long else OrderSide.BUY
 
-                qty_str = str(int(qty)) if float(qty).is_integer() else str(round(qty, 4))
-                # Idempotent client_order_id: a timeout-retry of this exact close
-                # reuses the same id, so Alpaca deduplicates instead of double-
-                # closing (which would flip the position to the opposite side).
-                close_cid = f"ad-close-{symbol.upper()}-{uuid.uuid4().hex[:12]}"
-                raw = await _call(
-                    self._client.submit_order,
-                    MarketOrderRequest(
-                        symbol=symbol.upper(),
-                        qty=qty_str,
-                        side=opposite_side,
-                        time_in_force=TimeInForce.DAY,
-                        client_order_id=close_cid,
-                    ),
-                    label=f"close_position_partial_market/{symbol}"
-                )
+                full_exit_keywords = ("exit", "stop", "eod", "flatten", "faded", "halt", "breach", "kill", "close", "reconciliation")
+                reason_indicates_full = any(kw in (reason or "").lower() for kw in full_exit_keywords) and "scale_out" not in (reason or "").lower() and "partial" not in (reason or "").lower()
+
+                if float(qty) >= (broker_qty - 1e-4) or reason_indicates_full:
+                    if abs(broker_qty - float(qty)) > 1e-4:
+                        applog.warning(
+                            "broker.alpaca",
+                            f"CRITICAL DISCREPANCY on {symbol} close: requested qty={qty}, but broker holds {pos.qty} "
+                            f"(possible stock split or fill mismatch). Executing native full server-side liquidation to guarantee 100% position closure."
+                        )
+                    raw = await _call(self._client.close_position, symbol.upper(), label=f"close_position_full/{symbol}")
+                else:
+                    qty_str = str(int(qty)) if float(qty).is_integer() else str(round(qty, 4))
+                    close_cid = f"ad-close-{symbol.upper()}-{uuid.uuid4().hex[:12]}"
+                    raw = await _call(
+                        self._client.submit_order,
+                        MarketOrderRequest(
+                            symbol=symbol.upper(),
+                            qty=qty_str,
+                            side=opposite_side,
+                            time_in_force=TimeInForce.DAY,
+                            client_order_id=close_cid,
+                        ),
+                        label=f"close_position_partial_market/{symbol}"
+                    )
             else:
                 raw = await _call(self._client.close_position, symbol.upper(), label=f"close_position/{symbol}")
+                # =============================================================================
             # Broker-generated closes bypass submit(), so use the symbol's
             # owning entry strategy when the close fill is later polled.  The
             # engine persists the PIS exit reason separately; keeping the
@@ -1123,3 +1169,27 @@ class AlpacaBroker(Broker):
         except Exception as exc:
             applog.error("broker.alpaca", f"flatten failed: {exc}")
             raise
+
+    async def get_recent_split_activities(self, days: int = 3) -> list[dict]:
+        """Fetch recent stock split corporate actions from Alpaca account activities."""
+        try:
+            import requests
+            base_url = "https://paper-api.alpaca.markets" if self.is_paper else "https://api.alpaca.markets"
+            headers = {
+                "APCA-API-KEY-ID": self._api_key,
+                "APCA-API-SECRET-KEY": self._api_secret,
+            }
+            resp = await asyncio.to_thread(
+                requests.get,
+                f"{base_url}/v2/account/activities/SPLIT",
+                headers=headers,
+                params={"direction": "desc", "page_size": 50},
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                return resp.json()
+            applog.warning("broker.alpaca", f"Failed to fetch split activities: HTTP {resp.status_code}")
+            return []
+        except Exception as exc:
+            applog.warning("broker.alpaca", f"Exception fetching split activities: {exc}")
+            return []
