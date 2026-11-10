@@ -203,6 +203,7 @@ class OpeningRangeBreakout(Strategy):
         "reward_risk": 2.5,              # Betadesk calibrated take profit target (was 2.0)
 
         "chop_reward_risk": 0.75,        # Betadesk 2-tier take-profit: 0.75R in chop regimes
+        "trending_reward_risk": 3.5,    # 3-tier take-profit: 3.5R expansion in confirmed trend regimes
 
         "trailing_stop_atr_mult": 1.5,   # activates dynamic trailing stop
 
@@ -1065,11 +1066,29 @@ class OpeningRangeBreakout(Strategy):
 
             self._pending[key] = ctx.now
 
+            # =============================================================================
+            # [MODIFIED 2026-11-10]: 3-Tier Regime Target Expansion for ORB Longs
+            # ORIGINAL INTENT: Used 0.75R for chop, 2.5R flat for all other regimes.
+            # REASON FOR CHANGE: In confirmed TREND_UP tape, 2.5R capped winners prematurely.
+            #   Expanding target to 3.5R allows trend runners to capture 5%-10% expansions.
+            # SAFE ROLLBACK: Previous lines preserved below as comments.
+            # -----------------------------------------------------------------------------
+            # [PREVIOUS CODE - PRESERVED]:
+            # is_chop = (ctx.regime in (Regime.RANGE, Regime.VOLATILE))
+            # rr_mult = float(p.get("chop_reward_risk", 0.75)) if is_chop else float(p.get("reward_risk", 2.5))
+            # target = close + rr_mult * risk
+            # -----------------------------------------------------------------------------
+            # [NEW CODE]:
             is_chop = (ctx.regime in (Regime.RANGE, Regime.VOLATILE))
-
-            rr_mult = float(p.get("chop_reward_risk", 0.75)) if is_chop else float(p.get("reward_risk", 2.5))
-
+            is_trending = (ctx.regime == Regime.TREND_UP)
+            if is_chop:
+                rr_mult = float(p.get("chop_reward_risk", 0.75))
+            elif is_trending:
+                rr_mult = float(p.get("trending_reward_risk", 3.5))
+            else:
+                rr_mult = float(p.get("reward_risk", 2.5))
             target = close + rr_mult * risk
+            # =============================================================================
 
             self._targets[symbol] = round(target, 4)
 
@@ -1213,11 +1232,29 @@ class OpeningRangeBreakout(Strategy):
 
             self._pending[key] = ctx.now
 
+            # =============================================================================
+            # [MODIFIED 2026-11-10]: 3-Tier Regime Target Expansion for ORB Shorts
+            # ORIGINAL INTENT: Used 0.75R for chop, 2.5R flat for all other regimes.
+            # REASON FOR CHANGE: In confirmed TREND_DOWN tape, 2.5R capped winners prematurely.
+            #   Expanding target to 3.5R allows breakdown runners to capture multi-R expansions.
+            # SAFE ROLLBACK: Previous lines preserved below as comments.
+            # -----------------------------------------------------------------------------
+            # [PREVIOUS CODE - PRESERVED]:
+            # is_chop = (ctx.regime in (Regime.RANGE, Regime.VOLATILE))
+            # rr_mult = float(p.get("chop_reward_risk", 0.75)) if is_chop else float(p.get("reward_risk", 2.5))
+            # target = close - rr_mult * risk
+            # -----------------------------------------------------------------------------
+            # [NEW CODE]:
             is_chop = (ctx.regime in (Regime.RANGE, Regime.VOLATILE))
-
-            rr_mult = float(p.get("chop_reward_risk", 0.75)) if is_chop else float(p.get("reward_risk", 2.5))
-
+            is_trending = (ctx.regime == Regime.TREND_DOWN)
+            if is_chop:
+                rr_mult = float(p.get("chop_reward_risk", 0.75))
+            elif is_trending:
+                rr_mult = float(p.get("trending_reward_risk", 3.5))
+            else:
+                rr_mult = float(p.get("reward_risk", 2.5))
             target = close - rr_mult * risk
+            # =============================================================================
 
             self._targets[symbol] = round(target, 4)
 

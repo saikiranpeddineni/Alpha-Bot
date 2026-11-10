@@ -338,19 +338,45 @@ class PISConfig:
     progressive_lock_cap_trigger_r: float = 0.85
     progressive_lock_start_frac: float = 0.20
     progressive_lock_end_frac: float = 0.45
-    progressive_lock_trail_atr_mult: float = 1.00
+    # =============================================================================
+    # [MODIFIED 2026-11-10]: De-choke PIS Protection Breathing Room & DOA Threshold
+    # ORIGINAL INTENT: progressive_lock_trail_atr_mult=1.00, profit_guard_peak_r=0.60,
+    #   and doa_r_threshold=-0.25 caused early giveback guards and DOA scratches on normal pullbacks.
+    # REASON FOR CHANGE: Forensic audit proved premature exits chopped winning trades in 1-minute noise.
+    #   Calibrating progressive trail to 1.50 ATR, profit guard arming to 1.20R, and DOA threshold to
+    #   -0.45R gives trades breathing room to develop into 5%-10% multi-R runners.
+    # SAFE ROLLBACK: Previous lines preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # progressive_lock_trail_atr_mult: float = 1.00
+    # enable_profit_giveback_guard: bool = True
+    # profit_guard_peak_r: float = 0.60
+    # profit_guard_max_giveback_pct: float = 0.55
+    # profit_guard_pct_tier1: float = 0.55  # peak < 1.0R
+    # profit_guard_pct_tier2: float = 0.40  # 1.0 <= peak < 2.0R
+    # profit_guard_pct_tier3: float = 0.30  # peak >= 2.0R
+    # profit_guard_min_giveback_atr_r: float = 0.75
+    # profit_guard_exit_ratio: float = 0.50
+    # weak_trend_scale_out_r: float = 1.00
+    # enable_doa_stagnation_harvest: bool = True
+    # doa_stagnation_bars: int = 12
+    # doa_r_threshold: float = -0.25
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    progressive_lock_trail_atr_mult: float = 1.50
     enable_profit_giveback_guard: bool = True
-    profit_guard_peak_r: float = 0.60
+    profit_guard_peak_r: float = 1.20
     profit_guard_max_giveback_pct: float = 0.55
     profit_guard_pct_tier1: float = 0.55  # peak < 1.0R
     profit_guard_pct_tier2: float = 0.40  # 1.0 <= peak < 2.0R
     profit_guard_pct_tier3: float = 0.30  # peak >= 2.0R
     profit_guard_min_giveback_atr_r: float = 0.75
     profit_guard_exit_ratio: float = 0.50
-    weak_trend_scale_out_r: float = 1.00
+    weak_trend_scale_out_r: float = 1.20
     enable_doa_stagnation_harvest: bool = True
-    doa_stagnation_bars: int = 12
-    doa_r_threshold: float = -0.25
+    doa_stagnation_bars: int = 15
+    doa_r_threshold: float = -0.45
+    # =============================================================================
     # Causal peak capture: after a runner has demonstrated a material high-water
     # excursion, require completed-bar reversal confirmation and a meaningful
     # giveback before harvesting the remaining quantity.  This deliberately does

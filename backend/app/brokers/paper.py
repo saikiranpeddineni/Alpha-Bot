@@ -1031,14 +1031,93 @@ class PaperBroker(Broker):
     #                 if pos.stop_loss is None or ratchet_stop < pos.stop_loss:
     #                     pos.stop_loss = ratchet_stop
     # -----------------------------------------------------------------------------
+    # =============================================================================
+    # [MODIFIED 2026-11-10]: De-choke Predictive Trailing Stop Ratchet in Paper Broker
+    # ORIGINAL INTENT: Armed breakeven (+0.05R) at +0.65R and choked trailing distance to
+    #   0.35R and 0.15R, which choked 92.7% of trades within 1-minute noise into +0.04% to +0.20% scratches.
+    # REASON FOR CHANGE: Forensic audit of 1,919 trades proved premature trailing stops created
+    #   "panic exits". Arming breakeven at +1.20R and widening runner trailing cushion to 0.60R
+    #   and 0.35R allows multi-R winners breathing room to expand toward 5%-10%+ target runs.
+    # SAFE ROLLBACK: Previous method preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # def _advance_trail(self, symbol: str, h: float, low: float) -> None:
+    #     """Multi-tier predictive exit ratchet anchored around predicted peak R."""
+    #     pos = self._positions.get(symbol)
+    #     if pos is None:
+    #         return
+    #
+    #     pred_r = getattr(pos, "predicted_peak_r", None) or 2.2
+    #     init_risk = pos.initial_risk or pos.trail_stop_dist or 0.0
+    #     if init_risk <= 0:
+    #         return
+    #
+    #     if pos.qty > 0:  # long
+    #         new_high = max(pos.trail_high or pos.avg_entry_price, h)
+    #         pos.trail_high = new_high
+    #         current_r = (new_high - pos.avg_entry_price) / init_risk
+    #
+    #         # Tier 1: Halve risk once trade moves +0.45R into profit
+    #         if current_r >= 0.45:
+    #             half_risk_stop = round(pos.avg_entry_price - (init_risk * 0.40), 2)
+    #             if pos.stop_loss is None or half_risk_stop > pos.stop_loss:
+    #                 pos.stop_loss = half_risk_stop
+    #
+    #         # Tier 2: Breakeven lock once trade reaches +0.65R or (0.50 * pred_r)
+    #         if current_r >= min(0.65, pred_r * 0.50):
+    #             be_stop = round(pos.avg_entry_price + (init_risk * 0.05), 2)
+    #             if pos.stop_loss is None or be_stop > pos.stop_loss:
+    #                 pos.stop_loss = be_stop
+    #
+    #         # Tier 3: Lock in profit as price approaches predicted peak R
+    #         if current_r >= pred_r * 0.75:
+    #             lock_stop = round(new_high - (init_risk * 0.35), 2)
+    #             if pos.stop_loss is None or lock_stop > pos.stop_loss:
+    #                 pos.stop_loss = lock_stop
+    #
+    #         # Tier 4: Harvest around predicted peak R
+    #         if current_r >= pred_r * 0.95:
+    #             peak_stop = round(new_high - (init_risk * 0.15), 2)
+    #             if pos.stop_loss is None or peak_stop > pos.stop_loss:
+    #                 pos.stop_loss = peak_stop
+    #
+    #     else:  # short
+    #         new_low = min(pos.trail_high or pos.avg_entry_price, low)
+    #         pos.trail_high = new_low
+    #         current_r = (pos.avg_entry_price - new_low) / init_risk
+    #
+    #         # Tier 1: Halve risk
+    #         if current_r >= 0.45:
+    #             half_risk_stop = round(pos.avg_entry_price + (init_risk * 0.40), 2)
+    #             if pos.stop_loss is None or half_risk_stop < pos.stop_loss:
+    #                 pos.stop_loss = half_risk_stop
+    #
+    #         # Tier 2: Breakeven
+    #         if current_r >= min(0.65, pred_r * 0.50):
+    #             be_stop = round(pos.avg_entry_price - (init_risk * 0.05), 2)
+    #             if pos.stop_loss is None or be_stop < pos.stop_loss:
+    #                 pos.stop_loss = be_stop
+    #
+    #         # Tier 3: Lock in profit
+    #         if current_r >= pred_r * 0.75:
+    #             lock_stop = round(new_low + (init_risk * 0.35), 2)
+    #             if pos.stop_loss is None or lock_stop < pos.stop_loss:
+    #                 pos.stop_loss = lock_stop
+    #
+    #         # Tier 4: Harvest around predicted peak R
+    #         if current_r >= pred_r * 0.95:
+    #             peak_stop = round(new_low + (init_risk * 0.15), 2)
+    #             if pos.stop_loss is None or peak_stop < pos.stop_loss:
+    #                 pos.stop_loss = peak_stop
+    # -----------------------------------------------------------------------------
     # [NEW CODE]:
     def _advance_trail(self, symbol: str, h: float, low: float) -> None:
-        """Multi-tier predictive exit ratchet anchored around predicted peak R."""
+        """De-choked multi-tier predictive exit ratchet anchored around predicted peak R."""
         pos = self._positions.get(symbol)
         if pos is None:
             return
 
-        pred_r = getattr(pos, "predicted_peak_r", None) or 2.2
+        pred_r = getattr(pos, "predicted_peak_r", None) or 2.5
         init_risk = pos.initial_risk or pos.trail_stop_dist or 0.0
         if init_risk <= 0:
             return
@@ -1048,27 +1127,27 @@ class PaperBroker(Broker):
             pos.trail_high = new_high
             current_r = (new_high - pos.avg_entry_price) / init_risk
 
-            # Tier 1: Halve risk once trade moves +0.45R into profit
-            if current_r >= 0.45:
-                half_risk_stop = round(pos.avg_entry_price - (init_risk * 0.40), 2)
+            # Tier 1: Halve risk once trade moves solidly (+0.80R) into profit
+            if current_r >= 0.80:
+                half_risk_stop = round(pos.avg_entry_price - (init_risk * 0.50), 2)
                 if pos.stop_loss is None or half_risk_stop > pos.stop_loss:
                     pos.stop_loss = half_risk_stop
 
-            # Tier 2: Breakeven lock once trade reaches +0.65R or (0.50 * pred_r)
-            if current_r >= min(0.65, pred_r * 0.50):
-                be_stop = round(pos.avg_entry_price + (init_risk * 0.05), 2)
+            # Tier 2: Breakeven lock (+0.10R) only after +1.20R excursion to allow normal consolidation
+            if current_r >= max(1.20, pred_r * 0.55):
+                be_stop = round(pos.avg_entry_price + (init_risk * 0.10), 2)
                 if pos.stop_loss is None or be_stop > pos.stop_loss:
                     pos.stop_loss = be_stop
 
-            # Tier 3: Lock in profit as price approaches predicted peak R
-            if current_r >= pred_r * 0.75:
-                lock_stop = round(new_high - (init_risk * 0.35), 2)
+            # Tier 3: Lock in profit as price matures (>= 0.85 * pred_r) with 0.60R breathing room
+            if current_r >= pred_r * 0.85:
+                lock_stop = round(new_high - (init_risk * 0.60), 2)
                 if pos.stop_loss is None or lock_stop > pos.stop_loss:
                     pos.stop_loss = lock_stop
 
-            # Tier 4: Harvest around predicted peak R
-            if current_r >= pred_r * 0.95:
-                peak_stop = round(new_high - (init_risk * 0.15), 2)
+            # Tier 4: Harvest around extreme expansion (>= 1.10 * pred_r) with 0.35R breathing room
+            if current_r >= pred_r * 1.10:
+                peak_stop = round(new_high - (init_risk * 0.35), 2)
                 if pos.stop_loss is None or peak_stop > pos.stop_loss:
                     pos.stop_loss = peak_stop
 
@@ -1077,27 +1156,27 @@ class PaperBroker(Broker):
             pos.trail_high = new_low
             current_r = (pos.avg_entry_price - new_low) / init_risk
 
-            # Tier 1: Halve risk
-            if current_r >= 0.45:
-                half_risk_stop = round(pos.avg_entry_price + (init_risk * 0.40), 2)
+            # Tier 1: Halve risk once trade moves solidly (+0.80R) into profit
+            if current_r >= 0.80:
+                half_risk_stop = round(pos.avg_entry_price + (init_risk * 0.50), 2)
                 if pos.stop_loss is None or half_risk_stop < pos.stop_loss:
                     pos.stop_loss = half_risk_stop
 
-            # Tier 2: Breakeven
-            if current_r >= min(0.65, pred_r * 0.50):
-                be_stop = round(pos.avg_entry_price - (init_risk * 0.05), 2)
+            # Tier 2: Breakeven lock (+0.10R) only after +1.20R excursion
+            if current_r >= max(1.20, pred_r * 0.55):
+                be_stop = round(pos.avg_entry_price - (init_risk * 0.10), 2)
                 if pos.stop_loss is None or be_stop < pos.stop_loss:
                     pos.stop_loss = be_stop
 
-            # Tier 3: Lock in profit
-            if current_r >= pred_r * 0.75:
-                lock_stop = round(new_low + (init_risk * 0.35), 2)
+            # Tier 3: Lock in profit as price matures (>= 0.85 * pred_r) with 0.60R breathing room
+            if current_r >= pred_r * 0.85:
+                lock_stop = round(new_low + (init_risk * 0.60), 2)
                 if pos.stop_loss is None or lock_stop < pos.stop_loss:
                     pos.stop_loss = lock_stop
 
-            # Tier 4: Harvest around predicted peak R
-            if current_r >= pred_r * 0.95:
-                peak_stop = round(new_low + (init_risk * 0.15), 2)
+            # Tier 4: Harvest around extreme expansion (>= 1.10 * pred_r) with 0.35R breathing room
+            if current_r >= pred_r * 1.10:
+                peak_stop = round(new_low + (init_risk * 0.35), 2)
                 if pos.stop_loss is None or peak_stop < pos.stop_loss:
                     pos.stop_loss = peak_stop
     # =============================================================================

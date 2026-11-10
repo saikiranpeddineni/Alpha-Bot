@@ -534,7 +534,21 @@ class SignalPipeline:
                         else:
                             prox = None
                             limit_lbl = ""
-                        max_prox = float(getattr(rc, "entry_max_extreme_proximity_atr", 3.0))
+                        # =============================================================================
+                        # [MODIFIED 2026-11-10]: Calibrate Entry Extreme Proximity Guard Threshold
+                        # ORIGINAL INTENT: max_prox fallback was 3.0 ATR, which rejected any momentum
+                        #   setup within 3.0 ATR of the session extreme (blocking 203 valid breakouts).
+                        # REASON FOR CHANGE: A 3.0 ATR exclusion band eliminates standard breakout entries
+                        #   whose daily range is only 2-4 ATR. Calibrating to 0.5 ATR strictly catches
+                        #   exhaustion wick chases at the extreme without blocking trending setups.
+                        # SAFE ROLLBACK: Previous line preserved below as comments.
+                        # -----------------------------------------------------------------------------
+                        # [PREVIOUS CODE - PRESERVED]:
+                        # max_prox = float(getattr(rc, "entry_max_extreme_proximity_atr", 3.0))
+                        # -----------------------------------------------------------------------------
+                        # [NEW CODE]:
+                        max_prox = float(getattr(rc, "entry_max_extreme_proximity_atr", 0.5))
+                        # =============================================================================
                         if prox is not None and prox <= max_prox:
                             sig.ml_gate_decision = "REJECT"
                             rejected.append((sig, f"Entry veto: chasing session extreme ({prox:.1f} ATR from {limit_lbl} <= {max_prox:.1f})"))

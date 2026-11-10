@@ -1241,12 +1241,23 @@ class TradingEngineEvaluationMixin:
                 economic_signals = []
 
                 for sig in signals:
-
-                    if sig.action == SignalAction.EXIT:
-
+                    # =============================================================================
+                    # [MODIFIED 2026-11-10]: Exempt SCALE_OUT_HALF from Opportunity Entry Cost Gate
+                    # ORIGINAL INTENT: Only exempted SignalAction.EXIT, causing SCALE_OUT_HALF to be
+                    #   falsely evaluated as a new entry and rejected as "cost-aware opportunity economics" (343x).
+                    # REASON FOR CHANGE: Scale-out is an exit-side position risk reduction, not a new entry.
+                    # SAFE ROLLBACK: Previous lines preserved below as comments.
+                    # -----------------------------------------------------------------------------
+                    # [PREVIOUS CODE - PRESERVED]:
+                    # if sig.action == SignalAction.EXIT:
+                    #     economic_signals.append(sig)
+                    #     continue
+                    # -----------------------------------------------------------------------------
+                    # [NEW CODE]:
+                    if sig.action in (SignalAction.EXIT, SignalAction.SCALE_OUT_HALF):
                         economic_signals.append(sig)
-
                         continue
+                    # =============================================================================
 
                     candidate = evaluator.evaluate(
 

@@ -530,14 +530,37 @@ class RiskManager:
         #     self.symbol_loss_counts[symbol] = self.symbol_loss_counts.get(symbol, 0) + 1
         #     max_daily_losses = getattr(self.config, "symbol_max_daily_losses", 1) or 1
         # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # trade_r_val = float(getattr(trade, "r_multiple", 0.0) or 0.0)
+        # pnl_pct = getattr(trade, "pnl_pct", None)
+        # is_scratch = trade.pnl == 0.0 or (
+        #     pnl_pct is not None
+        #     and abs(pnl_pct) <= 0.08
+        #     and abs(trade_r_val) <= 0.15
+        # )
+        # if trade.pnl <= 0 and not is_scratch:
+        #     self.symbol_loss_counts[symbol] = self.symbol_loss_counts.get(symbol, 0) + 1
+        #     max_daily_losses = getattr(self.config, "symbol_max_daily_losses", 2) or 2
+        # -----------------------------------------------------------------------------
+        # =============================================================================
+        # [MODIFIED 2026-11-10]: Calibrate Scratch Neutrality to 0.30% / 0.25R
+        # ORIGINAL INTENT: The 0.08% boundary was too narrow, treating -0.09% to -0.20%
+        #   scratches as full catastrophic losses, prematurely locking out tickers.
+        # REASON FOR CHANGE: Calibrating scratch neutrality to <= 0.30% loss or <= 0.25R
+        #   preserves symbol liquidity so afternoon runners are not locked out by micro-noise.
+        # SAFE ROLLBACK: Previous lines preserved above as comments.
+        # -----------------------------------------------------------------------------
         # [NEW CODE]:
-        trade_r_val = float(getattr(trade, "r_multiple", 0.0) or 0.0)
+        has_r = getattr(trade, "r_multiple", None) is not None
+        trade_r_val = float(trade.r_multiple) if has_r else None
         pnl_pct = getattr(trade, "pnl_pct", None)
-        is_scratch = trade.pnl == 0.0 or (
-            pnl_pct is not None
-            and abs(pnl_pct) <= 0.08
-            and abs(trade_r_val) <= 0.15
-        )
+        is_scratch = False
+        if trade.pnl == 0.0:
+            is_scratch = True
+        elif pnl_pct is not None and abs(pnl_pct) <= 0.30:
+            is_scratch = True
+        elif trade_r_val is not None and abs(trade_r_val) <= 0.25 and (pnl_pct is None or abs(pnl_pct) <= 0.50):
+            is_scratch = True
         if trade.pnl <= 0 and not is_scratch:
             self.symbol_loss_counts[symbol] = self.symbol_loss_counts.get(symbol, 0) + 1
             max_daily_losses = getattr(self.config, "symbol_max_daily_losses", 2) or 2

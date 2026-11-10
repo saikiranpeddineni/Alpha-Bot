@@ -31,11 +31,23 @@ class MonteCarloGate:
     def __init__(
         self,
         min_win_prob: float = 0.35,
-        min_expected_r: float = 0.05,
+        # =============================================================================
+        # [MODIFIED 2026-11-10]: Calibrate MonteCarloGate Default Hurdle to 0.00R & Enable Rescue
+        # ORIGINAL INTENT: min_expected_r default was 0.05, rescue_enabled was False.
+        # REASON FOR CHANGE: Calibrating min_expected_r to 0.00R admits edge-positive setups.
+        # SAFE ROLLBACK: Previous lines preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # min_expected_r: float = 0.05,
+        # rescue_enabled: bool = False,
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        min_expected_r: float = 0.00,
         n_replays: int = 2000,
         default_steps: int = 50,
         seed: int = 19,
-        rescue_enabled: bool = False,
+        rescue_enabled: bool = True,
+        # =============================================================================
         rescue_min_confidence: float = 0.80,
         rescue_min_ml_probability: float = 0.80,
         rescue_min_target_prob: float = 0.57,

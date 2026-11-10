@@ -484,7 +484,18 @@ class RiskConfig(BaseModel):
     min_stop_range_pct: float = Field(25.0, ge=0.0, le=100.0)
     enable_monte_carlo_gate: bool = Field(False)
     monte_carlo_min_win_prob: float = Field(0.35, ge=0.0, le=1.0)
-    monte_carlo_min_expected_r: float = Field(0.05, ge=-1.0, le=10.0)
+    # =============================================================================
+    # [MODIFIED 2026-11-10]: Calibrate Monte Carlo min_expected_r to 0.00
+    # ORIGINAL INTENT: min_expected_r was 0.05, which vetoed positive expectancy trades (+0.01R to +0.04R).
+    # REASON FOR CHANGE: Calibrating hurdle to 0.00R admits mathematically edge-positive setups.
+    # SAFE ROLLBACK: Previous line preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # monte_carlo_min_expected_r: float = Field(0.05, ge=-1.0, le=10.0)
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    monte_carlo_min_expected_r: float = Field(0.00, ge=-1.0, le=10.0)
+    # =============================================================================
     # =============================================================================
     # [MODIFIED 2026-11-03]: Harmonize and Calibrate Monte Carlo Borderline Rescue Defaults in RiskConfig
     # ORIGINAL INTENT: Commit 9bd6470 added borderline rescue fields with default enable_monte_carlo_borderline_rescue=False,
@@ -743,7 +754,18 @@ class RiskConfig(BaseModel):
 
     enable_entry_extreme_guard: bool = Field(True)
 
-    entry_max_extreme_proximity_atr: float = Field(1.0, ge=0.5, le=20.0)
+    # =============================================================================
+    # [MODIFIED 2026-11-10]: Calibrate RiskConfig entry_max_extreme_proximity_atr to 0.5
+    # ORIGINAL INTENT: entry_max_extreme_proximity_atr was 1.0 (with 3.0 fallback in pipeline).
+    # REASON FOR CHANGE: Calibrating default to 0.5 ATR permits momentum breakouts while guarding blowoff tops.
+    # SAFE ROLLBACK: Previous line preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # entry_max_extreme_proximity_atr: float = Field(1.0, ge=0.5, le=20.0)
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    entry_max_extreme_proximity_atr: float = Field(0.5, ge=0.1, le=20.0)
+    # =============================================================================
 
     # Entry consensus (breakout strategies): MEASURED & FALSIFIED on Aug 10-21
 
@@ -1009,7 +1031,18 @@ class Settings(BaseSettings):
 
     monte_carlo_min_win_prob: float = Field(0.35, validation_alias="MONTE_CARLO_MIN_WIN_PROB")
 
-    monte_carlo_min_expected_r: float = Field(0.05, validation_alias="MONTE_CARLO_MIN_EXPECTED_R")
+    # =============================================================================
+    # [MODIFIED 2026-11-10]: Sync Settings monte_carlo_min_expected_r to 0.00
+    # ORIGINAL INTENT: monte_carlo_min_expected_r was 0.05 in Settings.
+    # REASON FOR CHANGE: Calibrate default to 0.00 to match edge-positive admission.
+    # SAFE ROLLBACK: Previous line preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # monte_carlo_min_expected_r: float = Field(0.05, validation_alias="MONTE_CARLO_MIN_EXPECTED_R")
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    monte_carlo_min_expected_r: float = Field(0.00, validation_alias="MONTE_CARLO_MIN_EXPECTED_R")
+    # =============================================================================
 
     # =============================================================================
     # [MODIFIED 2026-11-03]: Calibrate Monte Carlo Borderline Rescue Defaults in Settings
