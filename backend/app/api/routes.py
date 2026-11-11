@@ -380,6 +380,13 @@ class RiskConfigUpdateBody(BaseModel):
     # [ADDED 2026-10-24]: Repeat-Loss & Mega-Win Cooldown Parameters
     # -----------------------------------------------------------------------------
     symbol_max_daily_losses: int | None = None
+    # =============================================================================
+    # [ADDED 2026-11-12]: Expose symbol_max_daily_trades & symbol_win_cooldown_minutes
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    symbol_max_daily_trades: int | None = None
+    symbol_win_cooldown_minutes: int | None = None
+    # =============================================================================
     mega_win_cooldown_r: float | None = None
     mega_win_cooldown_minutes: int | None = None
     # =============================================================================

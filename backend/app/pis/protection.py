@@ -178,7 +178,18 @@ class AdaptiveProtectionPlanner:
             if any(s in strat_name for s in ("reversion", "sweep", "pullback")):
                 atr_mult = getattr(self.config, "breakeven_atr_mult_reversion", 2.50)
             elif any(s in strat_name for s in ("momentum", "orb", "squeeze", "breakout", "gap")):
-                atr_mult = getattr(self.config, "breakeven_atr_mult_breakout", 1.50)
+                # =============================================================================
+                # [MODIFIED 2026-11-12]: Widen Default PIS Breakout Ratchet Trigger to 2.50 ATR
+                # ORIGINAL INTENT: Fallback was 1.50 ATR.
+                # REASON FOR CHANGE: Forensic audit proved 1.50 ATR choked breakout runners in 1-min noise.
+                # SAFE ROLLBACK: Previous line preserved below as comments.
+                # -----------------------------------------------------------------------------
+                # [PREVIOUS CODE - PRESERVED]:
+                # atr_mult = getattr(self.config, "breakeven_atr_mult_breakout", 1.50)
+                # -----------------------------------------------------------------------------
+                # [NEW CODE]:
+                atr_mult = getattr(self.config, "breakeven_atr_mult_breakout", 2.50)
+                # =============================================================================
             else:
                 atr_mult = getattr(self.config, "breakeven_trigger_atr_mult", 2.50)
 

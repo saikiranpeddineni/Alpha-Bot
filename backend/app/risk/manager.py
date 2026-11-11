@@ -240,6 +240,15 @@ class RiskManager:
         # [NEW CODE]:
 
         self.symbol_loss_counts: dict[str, int] = {}
+        # =============================================================================
+        # [ADDED 2026-11-12]: Ticker Daily Trade Count Tracker
+        # ORIGINAL INTENT: Bot only tracked loss counts, allowing winning symbols to be cycled 6+ times.
+        # REASON FOR CHANGE: Enforce symbol_max_daily_trades = 2 to stop overtrading churn.
+        # SAFE ROLLBACK: Remove dictionary.
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        self.symbol_trade_counts: dict[str, int] = {}
+        # =============================================================================
 
         self._pdt_warned = False
         self.core_watchlist: list[str] | None = None
@@ -311,6 +320,12 @@ class RiskManager:
             "symbol_cooldowns": {sym: ts.isoformat() for sym, ts in self.symbol_cooldowns.items()},
 
             "symbol_loss_counts": dict(self.symbol_loss_counts),
+            # =============================================================================
+            # [ADDED 2026-11-12]: Serialize symbol_trade_counts
+            # -----------------------------------------------------------------------------
+            # [NEW CODE]:
+            "symbol_trade_counts": dict(self.symbol_trade_counts),
+            # =============================================================================
 
             "strategy_cooldowns": {strat: ts.isoformat() for strat, ts in self.strategy_cooldowns.items()},
 
@@ -369,6 +384,13 @@ class RiskManager:
             self.symbol_loss_counts = {
                 str(symbol).upper(): _safe_int(count, 0)
                 for symbol, count in raw_loss_counts.items()
+                if str(symbol).strip()
+            }
+        raw_trade_counts = data.get("symbol_trade_counts")
+        if isinstance(raw_trade_counts, dict):
+            self.symbol_trade_counts = {
+                str(symbol).upper(): _safe_int(count, 0)
+                for symbol, count in raw_trade_counts.items()
                 if str(symbol).strip()
             }
 
@@ -519,6 +541,15 @@ class RiskManager:
         # [NEW CODE]:
 
         symbol = trade.symbol.upper()
+        # =============================================================================
+        # [ADDED 2026-11-12]: Increment Symbol Daily Trade Count
+        # ORIGINAL INTENT: No daily trade count per symbol was tracked.
+        # REASON FOR CHANGE: Enforce symbol_max_daily_trades limit.
+        # SAFE ROLLBACK: Remove increment.
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        self.symbol_trade_counts[symbol] = self.symbol_trade_counts.get(symbol, 0) + 1
+        # =============================================================================
 
         # =============================================================================
 
@@ -689,7 +720,22 @@ class RiskManager:
 
             else:
 
-                win_cd_mins = int(getattr(self.config, "symbol_win_cooldown_minutes", 5) or 5)
+                # =============================================================================
+                # [MODIFIED 2026-11-12]: Safe Win Cooldown Sizing & Zero Support
+                # ORIGINAL INTENT: Used (getattr(...) or 5), preventing 0-cooldown and falling back to 5.
+                # REASON FOR CHANGE: Support 0 cooldown when configured, and default fallback to 30m.
+                # SAFE ROLLBACK: Previous lines preserved below as comments.
+                # -----------------------------------------------------------------------------
+                # [PREVIOUS CODE - PRESERVED]:
+                # win_cd_mins = int(getattr(self.config, "symbol_win_cooldown_minutes", 5) or 5)
+                # self.symbol_cooldowns[symbol] = now_dt + timedelta(minutes=win_cd_mins)
+                # -----------------------------------------------------------------------------
+                # [NEW CODE]:
+                raw_wcd = getattr(self.config, "symbol_win_cooldown_minutes", 30)
+                win_cd_mins = 30 if raw_wcd is None else int(raw_wcd)
+                if win_cd_mins > 0:
+                    self.symbol_cooldowns[symbol] = now_dt + timedelta(minutes=win_cd_mins)
+                # =============================================================================
 
                 applog.info(
 
@@ -698,8 +744,6 @@ class RiskManager:
                     f"Win on {symbol} (+${trade.pnl:.2f}) -- locking ticker for {win_cd_mins}m consolidation before permitting second-leg continuation",
 
                 )
-
-            self.symbol_cooldowns[symbol] = now_dt + timedelta(minutes=win_cd_mins)
 
             self.strategy_consecutive_losses[strategy] = 0
 
@@ -752,6 +796,10 @@ class RiskManager:
         if hasattr(self, "symbol_loss_counts"):
 
             self.symbol_loss_counts.clear()
+
+        if hasattr(self, "symbol_trade_counts"):
+
+            self.symbol_trade_counts.clear()
 
 
 
@@ -998,6 +1046,20 @@ class RiskManager:
         losses_today = self.symbol_loss_counts.get(symbol, 0)
         if losses_today >= max_ticker_losses:
             return RiskDecision(False, f"session lockout: {symbol} reached max daily losses ({losses_today}/{max_ticker_losses})")
+
+        # =============================================================================
+        # [MODIFIED 2026-11-12]: Enforce Max Daily Trades Per Symbol
+        # ORIGINAL INTENT: Only max daily losses was checked. Symbols with micro-profits could
+        #   be entered repeatedly all day long (e.g. META 6 times).
+        # REASON FOR CHANGE: Enforce symbol_max_daily_trades (default 2) to prevent excessive churn.
+        # SAFE ROLLBACK: Remove trade count check below.
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        max_ticker_trades = _safe_int(getattr(cfg, "symbol_max_daily_trades", 2), 2, minimum=1)
+        trades_today = self.symbol_trade_counts.get(symbol, 0)
+        if trades_today >= max_ticker_trades:
+            return RiskDecision(False, f"session lockout: {symbol} reached max daily trades ({trades_today}/{max_ticker_trades})")
+        # =============================================================================
 
         # =============================================================================
 

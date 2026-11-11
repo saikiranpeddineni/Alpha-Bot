@@ -238,7 +238,21 @@ class RiskConfig(BaseModel):
 
     symbol_cooldown_minutes: int = Field(20, ge=0, le=390)                  # 20m cooldown on loss
 
-    symbol_win_cooldown_minutes: int = Field(5, ge=0, le=390)               # 5m consolidation on win
+    # =============================================================================
+    # [MODIFIED 2026-11-12]: Calibrate Win Cooldown & Daily Symbol Trades Limit
+    # ORIGINAL INTENT: symbol_win_cooldown_minutes was 5m, and no daily trade cap per symbol existed.
+    # REASON FOR CHANGE: Micro-winners allowed immediate re-entry 5 minutes later, cycling the same
+    #   ticker up to 6 times per day (e.g. META), burning commissions and churn.
+    #   Extending win cooldown to 30m and capping symbol trades at 2/day stops churn loops.
+    # SAFE ROLLBACK: Previous lines preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # symbol_win_cooldown_minutes: int = Field(5, ge=0, le=390)               # 5m consolidation on win
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    symbol_win_cooldown_minutes: int = Field(30, ge=0, le=390)              # 30m consolidation on win
+    symbol_max_daily_trades: int = Field(2, ge=1, le=20)                    # max 2 trades per symbol per day
+    # =============================================================================
 
     symbol_max_daily_losses: int = Field(2, ge=1, le=10)                    # session quarantine after 2 losses
 
@@ -1155,11 +1169,21 @@ class Settings(BaseSettings):
 
     # -----------------------------------------------------------------------------
 
+    # =============================================================================
+    # [MODIFIED 2026-11-12]: Realistic Broker Commission Modeling for Paper Trading
+    # ORIGINAL INTENT: Set to 0.0, which made paper trading and simulations commission-blind.
+    # REASON FOR CHANGE: Without realistic commission modeling ($0.005/share, $1.00 min),
+    #   the system cannot account for execution churn or evaluate real net profitability.
+    # SAFE ROLLBACK: Previous lines preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # paper_commission_per_share: float = Field(0.0, validation_alias="PAPER_COMMISSION_PER_SHARE")
+    # paper_minimum_commission: float = Field(0.0, validation_alias="PAPER_MINIMUM_COMMISSION")
+    # -----------------------------------------------------------------------------
     # [NEW CODE]:
-
-    paper_commission_per_share: float = Field(0.0, validation_alias="PAPER_COMMISSION_PER_SHARE")
-
-    paper_minimum_commission: float = Field(0.0, validation_alias="PAPER_MINIMUM_COMMISSION")
+    paper_commission_per_share: float = Field(0.005, validation_alias="PAPER_COMMISSION_PER_SHARE")
+    paper_minimum_commission: float = Field(1.00, validation_alias="PAPER_MINIMUM_COMMISSION")
+    # =============================================================================
 
     poll_interval_sec: float = Field(5.0, validation_alias="POLL_INTERVAL_SEC")
 
@@ -1323,7 +1347,19 @@ class Settings(BaseSettings):
 
     # [NEW CODE]:
 
-    symbol_win_cooldown_minutes: int = Field(5, validation_alias="SYMBOL_WIN_COOLDOWN_MINUTES")
+    # =============================================================================
+    # [MODIFIED 2026-11-12]: Expose symbol_win_cooldown_minutes & symbol_max_daily_trades
+    # ORIGINAL INTENT: symbol_win_cooldown_minutes was 5.
+    # REASON FOR CHANGE: Expose 30m win cooldown and symbol_max_daily_trades=2 to env.
+    # SAFE ROLLBACK: Previous line preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # symbol_win_cooldown_minutes: int = Field(5, validation_alias="SYMBOL_WIN_COOLDOWN_MINUTES")
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    symbol_win_cooldown_minutes: int = Field(30, validation_alias="SYMBOL_WIN_COOLDOWN_MINUTES")
+    symbol_max_daily_trades: int = Field(2, validation_alias="SYMBOL_MAX_DAILY_TRADES")
+    # =============================================================================
 
     symbol_max_daily_losses: int = Field(2, validation_alias="SYMBOL_MAX_DAILY_LOSSES")
 

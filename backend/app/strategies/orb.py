@@ -440,39 +440,45 @@ class OpeningRangeBreakout(Strategy):
 
 
 
-            # 1. 50% Scale-Out at Target / Chop Target
-
-            target = self._targets.get(symbol)
-
-            is_chop = (ctx.regime in (Regime.RANGE, Regime.VOLATILE))
-
-            entry_px = ctx.position.avg_entry_price
-
+            # =============================================================================
+            # [MODIFIED 2026-11-12]: Deactivate 0.75R Chop Defense Scale-Out in ORB
+            # ORIGINAL INTENT: When regime was RANGE or VOLATILE, take quick 50% profit at 0.75R
+            #   to defend against choppy reversal whipsaws.
+            # REASON FOR CHANGE: Forensic audit proved intraday trading is almost perpetually flagged
+            #   as RANGE or VOLATILE, prematurely dumping 50% of positions at 0.75R across 10 trades.
+            #   This doubled order tickets/commissions while capping overall trade expectancy.
+            #   Deactivating 0.75R chop slicing allows ORB trades to achieve full 2.0R target potential
+            #   while trailing stops/VWAP exits protect capital.
+            # SAFE ROLLBACK: The original chop defense logic is preserved below as comments.
+            # -----------------------------------------------------------------------------
+            # [PREVIOUS CODE - PRESERVED]:
+            # target = self._targets.get(symbol)
+            # is_chop = (ctx.regime in (Regime.RANGE, Regime.VOLATILE))
+            # entry_px = ctx.position.avg_entry_price
+            # atr_val = float(last.get("atr14", close * 0.01)) if pd.notna(last.get("atr14")) else (close * 0.01)
+            # risk_val = abs(entry_px - ctx.position.stop_loss) if getattr(ctx.position, "stop_loss", None) else atr_val
+            # chop_target = (entry_px + 0.75 * risk_val) if ctx.position.qty > 0 else (entry_px - 0.75 * risk_val)
+            #
+            # should_scale_out = False
+            # scale_reason = "Scaled out 50% at 2R"
+            # if (symbol, today) not in self._scaled_out:
+            #     if target and ((ctx.position.qty > 0 and close >= target) or (ctx.position.qty < 0 and close <= target)):
+            #         should_scale_out = True
+            #         scale_reason = "Scaled out 50% at 0.75R (Chop Defense)" if is_chop else "Scaled out 50% at 2R"
+            #     elif is_chop and ((ctx.position.qty > 0 and close >= chop_target) or (ctx.position.qty < 0 and close <= chop_target)):
+            #         should_scale_out = True
+            #         scale_reason = "Scaled out 50% at 0.75R (Chop Defense)"
+            # -----------------------------------------------------------------------------
+            # [NEW CODE]:
             atr_val = float(last.get("atr14", close * 0.01)) if pd.notna(last.get("atr14")) else (close * 0.01)
-
-            risk_val = abs(entry_px - ctx.position.stop_loss) if getattr(ctx.position, "stop_loss", None) else atr_val
-
-            chop_target = (entry_px + 0.75 * risk_val) if ctx.position.qty > 0 else (entry_px - 0.75 * risk_val)
-
-
-
+            target = self._targets.get(symbol)
             should_scale_out = False
-
             scale_reason = "Scaled out 50% at 2R"
-
             if (symbol, today) not in self._scaled_out:
-
                 if target and ((ctx.position.qty > 0 and close >= target) or (ctx.position.qty < 0 and close <= target)):
-
                     should_scale_out = True
-
-                    scale_reason = "Scaled out 50% at 0.75R (Chop Defense)" if is_chop else "Scaled out 50% at 2R"
-
-                elif is_chop and ((ctx.position.qty > 0 and close >= chop_target) or (ctx.position.qty < 0 and close <= chop_target)):
-
-                    should_scale_out = True
-
-                    scale_reason = "Scaled out 50% at 0.75R (Chop Defense)"
+                    scale_reason = "Scaled out 50% at 2R"
+            # =============================================================================
 
 
 

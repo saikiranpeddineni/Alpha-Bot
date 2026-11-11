@@ -333,7 +333,20 @@ class PISConfig:
     # =============================================================================
     # =============================================================================
     breakeven_trigger_atr_mult: float = 2.50
-    breakeven_atr_mult_breakout: float = 1.50
+    # =============================================================================
+    # [MODIFIED 2026-11-12]: Widen PIS Breakout Ratchet Trigger to 2.50 ATR
+    # ORIGINAL INTENT: breakeven_atr_mult_breakout was set to 1.50 to quickly lock breakouts.
+    # REASON FOR CHANGE: Forensic audit proved 1.50 ATR triggered ratchets at only +0.15R-+0.25R,
+    #   suffocating 20 of 33 trades on normal 1-minute candle noise into micro-winners.
+    #   Widening to 2.50 ATR gives breakouts sufficient room to develop into multi-R runners.
+    # SAFE ROLLBACK: Previous line preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # breakeven_atr_mult_breakout: float = 1.50
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    breakeven_atr_mult_breakout: float = 2.50
+    # =============================================================================
     breakeven_atr_mult_reversion: float = 2.50
     progressive_lock_cap_trigger_r: float = 0.85
     progressive_lock_start_frac: float = 0.20
