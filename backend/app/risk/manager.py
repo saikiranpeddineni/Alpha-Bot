@@ -709,6 +709,8 @@ class RiskManager:
             if trade_r >= mega_r_floor:
 
                 win_cd_mins = int(getattr(self.config, "mega_win_cooldown_minutes", 45) or 45)
+                if win_cd_mins > 0:
+                    self.symbol_cooldowns[symbol] = now_dt + timedelta(minutes=win_cd_mins)
 
                 applog.info(
 
@@ -1480,10 +1482,15 @@ class RiskManager:
         strat_mult = self.get_strategy_risk_multiplier(strategy, stats)
         if math.isfinite(strat_mult) and strat_mult > 0:
             risk_mult *= strat_mult
+            raw_exp = getattr(stats, "rolling_expectancy_r", 0.0)
+            try:
+                exp_r_val = float(raw_exp) if (isinstance(raw_exp, (int, float)) and not hasattr(raw_exp, "_mock_return_value")) else 0.0
+            except Exception:
+                exp_r_val = 0.0
             applog.debug(
                 "risk",
                 f"{symbol} {strategy}: dynamic risk multiplier={strat_mult:.2f} (rolling_exp_r="
-                f"{getattr(stats, 'rolling_expectancy_r', 0.0):.2f})",
+                f"{exp_r_val:.2f})",
             )
         # =============================================================================
 

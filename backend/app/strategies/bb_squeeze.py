@@ -35,14 +35,19 @@ class BollingerBandSqueeze(Strategy):
         # ORIGINAL INTENT: reward_risk was 2.0 without any minimum profit margin percentage.
         # REASON FOR CHANGE: User directive: "make sure we make huge profits with great margins and not small trades,
         #   min profit should be more than 3-4%". Raising reward_risk to 2.5 and adding min_profit_pct (0.035).
+        #   Preserve atr_stop_mult: 2.0 and trailing_stop_atr_mult: 1.5.
         # SAFE ROLLBACK: Previous line preserved below as comments.
         # -----------------------------------------------------------------------------
         # [PREVIOUS CODE - PRESERVED]:
+        # "atr_stop_mult": 2.0,
         # "reward_risk": 2.0,
+        # "trailing_stop_atr_mult": 1.5,
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
+        "atr_stop_mult": 2.0,
         "reward_risk": 2.5,
         "min_profit_pct": 0.035,
+        "trailing_stop_atr_mult": 1.5,
         # =============================================================================
         "use_trend_filter": True,
         # =============================================================================

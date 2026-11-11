@@ -519,7 +519,7 @@ class MarketScanner:
                     # -----------------------------------------------------------------------------
                     # [NEW CODE]:
                     min_atr_pct = getattr(cfg, "min_scanner_atr_pct", 0.0)
-                    benchmark_exempt = {"SPY", "QQQ", "IWM", "DIA"}
+                    benchmark_exempt = {"SPY", "QQQ", "IWM", "DIA"}.union(set(self.core_watchlist)).union(set(LARGE_CAP_ANCHORS))
                     if min_atr_pct > 0.0 and symbol not in benchmark_exempt and atr_pct < min_atr_pct:
                         record["FINAL_PASS"] = False
                         record["FINAL_REJECTION_REASON"] = "LOW_VOLATILITY"
