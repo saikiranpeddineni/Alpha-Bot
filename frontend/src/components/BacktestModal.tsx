@@ -526,20 +526,53 @@ export function BacktestModal(props: { onClose: () => void }) {
                     return (
                       <tr key={h.id}>
                         <td className="muted" style={{ verticalAlign: "top" }}>{fmtDateTime(h.created_at)}</td>
+                        {/* =============================================================================
+                        // [MODIFIED 2026-11-11]: Clamp Backtest Run Symbols to 2 Lines
+                        // ORIGINAL INTENT: Rendered full wrapped symbol list, which blew out row heights
+                        //   to 11+ lines when universes exceeded 30 symbols.
+                        // REASON FOR CHANGE: Limit to 2 lines with text truncation while keeping full list
+                        //   accessible via native hover title.
+                        // SAFE ROLLBACK: The original code is preserved below as comments.
+                        // -----------------------------------------------------------------------------
+                        // [PREVIOUS CODE - PRESERVED]:
+                        // <td
+                        //   style={{
+                        //     width: colWidths.symbols,
+                        //     whiteSpace: "normal",
+                        //     wordBreak: "break-word",
+                        //     overflowWrap: "anywhere",
+                        //     lineHeight: 1.35,
+                        //     verticalAlign: "top",
+                        //     fontSize: 11,
+                        //   }}
+                        //   title={symDisplay}
+                        // >
+                        //   {symDisplay}
+                        // </td>
+                        // -----------------------------------------------------------------------------
+                        // [NEW CODE]: */}
                         <td
                           style={{
                             width: colWidths.symbols,
-                            whiteSpace: "normal",
-                            wordBreak: "break-word",
-                            overflowWrap: "anywhere",
                             lineHeight: 1.35,
                             verticalAlign: "top",
                             fontSize: 11,
                           }}
                           title={symDisplay}
                         >
-                          {symDisplay}
+                          <div
+                            style={{
+                              display: "-webkit-box",
+                              WebkitLineClamp: 2,
+                              WebkitBoxOrient: "vertical",
+                              overflow: "hidden",
+                              wordBreak: "break-word",
+                            }}
+                          >
+                            {symDisplay}
+                          </div>
                         </td>
+                        {/* ============================================================================= */}
                         <td style={{ verticalAlign: "top" }}>{h.days ?? "—"}</td>
                         <td className={`r num ${retClass}`} style={{ verticalAlign: "top" }}>{retDisplay}</td>
                         <td className="r num" style={{ verticalAlign: "top" }}>{ddDisplay}</td>

@@ -190,13 +190,43 @@ export function SettingsModal(props: { onClose: () => void }) {
             Loading current risk values…
           </div>
         )}
+        {/* =============================================================================
+        // [MODIFIED 2026-11-11]: Add Label htmlFor and Input ID for Form Accessibility
+        // ORIGINAL INTENT: Unassociated label and input elements.
+        // REASON FOR CHANGE: Add htmlFor, id, and name to eliminate browser accessibility warnings.
+        // SAFE ROLLBACK: The original code is preserved below as comments.
+        // -----------------------------------------------------------------------------
+        // [PREVIOUS CODE - PRESERVED]:
+        // <div className="form-grid">
+        //   {FIELDS.map((f) => (
+        //     <div className="field" key={f.key} title={f.help}>
+        //       <label style={{ display: "flex", alignItems: "center", gap: "4px", cursor: "help" }}>
+        //         {f.label} <span style={{ color: "var(--faint)" }}>ⓘ</span>
+        //       </label>
+        //       <input
+        //         type="number"
+        //         className="num"
+        //         step={f.step ?? 1}
+        //         value={draft[f.key] ?? ""}
+        //         required
+        //         aria-invalid={draft[f.key] !== undefined && (!draft[f.key].trim() || !Number.isFinite(Number(draft[f.key])))}
+        //         onChange={(e) => setDraft({ ...draft, [f.key]: e.target.value })}
+        //       />
+        //       <span className="hint">{f.hint}</span>
+        //     </div>
+        //   ))}
+        // </div>
+        // -----------------------------------------------------------------------------
+        // [NEW CODE]: */}
         <div className="form-grid">
           {FIELDS.map((f) => (
             <div className="field" key={f.key} title={f.help}>
-              <label style={{ display: "flex", alignItems: "center", gap: "4px", cursor: "help" }}>
+              <label htmlFor={`field-${f.key}`} style={{ display: "flex", alignItems: "center", gap: "4px", cursor: "help" }}>
                 {f.label} <span style={{ color: "var(--faint)" }}>ⓘ</span>
               </label>
               <input
+                id={`field-${f.key}`}
+                name={f.key}
                 type="number"
                 className="num"
                 step={f.step ?? 1}
@@ -209,16 +239,37 @@ export function SettingsModal(props: { onClose: () => void }) {
             </div>
           ))}
         </div>
+        {/* ============================================================================= */}
 
         <div style={{ marginTop: 18, borderTop: "1px solid var(--border)", paddingTop: 12 }}>
-          <label style={{ display: "block", marginBottom: 6, fontWeight: 600, fontSize: 13 }}>
+          {/* =============================================================================
+          // [MODIFIED 2026-11-11]: Add Select Label htmlFor and ID for Accessibility
+          // ORIGINAL INTENT: Unassociated label and select elements.
+          // REASON FOR CHANGE: Add htmlFor, id, and name attributes.
+          // SAFE ROLLBACK: The original code is preserved below as comments.
+          // -----------------------------------------------------------------------------
+          // [PREVIOUS CODE - PRESERVED]:
+          // <label style={{ display: "block", marginBottom: 6, fontWeight: 600, fontSize: 13 }}>
+          //   UI Heartbeat Indicator Style
+          // </label>
+          // <select
+          //   value={heartbeatStyle}
+          //   onChange={(e) => setHeartbeatStyle(e.target.value as any)}
+          //   style={{ width: "100%", padding: "6px 10px" }}
+          // >
+          // -----------------------------------------------------------------------------
+          // [NEW CODE]: */}
+          <label htmlFor="settings-heartbeat-style" style={{ display: "block", marginBottom: 6, fontWeight: 600, fontSize: 13 }}>
             UI Heartbeat Indicator Style
           </label>
           <select
+            id="settings-heartbeat-style"
+            name="heartbeat_style"
             value={heartbeatStyle}
             onChange={(e) => setHeartbeatStyle(e.target.value as any)}
             style={{ width: "100%", padding: "6px 10px" }}
           >
+          {/* ============================================================================= */}
             <option value="ekg">EKG Waveform + Status Dot (Recommended Default)</option>
             <option value="heart">EKG Waveform + Micro Heart + Status Dot</option>
             <option value="minimal">Minimal Status Dot Only</option>

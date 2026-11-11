@@ -201,20 +201,49 @@ function StrategyRow({ strategy, onToggle, onSaveParams }: StrategyRowProps) {
       {expanded && (
         <form onSubmit={handleSave} style={{ padding: "8px 12px 14px", background: "var(--panel-2)", borderTop: "1px solid var(--border)" }}>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px" }}>
-            {Object.keys(strategy.params || {}).map((key) => (
-              <div key={key} className="field" title={helpTexts[key] || key}>
-                <label style={{ display: "flex", alignItems: "center", gap: "4px", cursor: "help" }}>
-                  {key} <span style={{ color: "var(--faint)" }}>ⓘ</span>
-                </label>
-                <input
-                  type="text"
-                  className="num"
-                  style={{ width: "100%", padding: "4px 8px", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: "4px", color: "var(--text)" }}
-                  value={params[key] || ""}
-                  onChange={(e) => handleParamChange(key, e.target.value)}
-                />
-              </div>
-            ))}
+            {/* =============================================================================
+            // [MODIFIED 2026-11-11]: Add Form Input Labels and IDs for Accessibility
+            // ORIGINAL INTENT: Unassociated label and input elements.
+            // REASON FOR CHANGE: Add htmlFor, id, and name to eliminate browser accessibility warnings.
+            // SAFE ROLLBACK: The original code is preserved below as comments.
+            // -----------------------------------------------------------------------------
+            // [PREVIOUS CODE - PRESERVED]:
+            // {Object.keys(strategy.params || {}).map((key) => (
+            //   <div key={key} className="field" title={helpTexts[key] || key}>
+            //     <label style={{ display: "flex", alignItems: "center", gap: "4px", cursor: "help" }}>
+            //       {key} <span style={{ color: "var(--faint)" }}>ⓘ</span>
+            //     </label>
+            //     <input
+            //       type="text"
+            //       className="num"
+            //       style={{ width: "100%", padding: "4px 8px", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: "4px", color: "var(--text)" }}
+            //       value={params[key] || ""}
+            //       onChange={(e) => handleParamChange(key, e.target.value)}
+            //     />
+            //   </div>
+            // ))}
+            // -----------------------------------------------------------------------------
+            // [NEW CODE]: */}
+            {Object.keys(strategy.params || {}).map((key) => {
+              const inputId = `strat-${strategy.name}-${key}`;
+              return (
+                <div key={key} className="field" title={helpTexts[key] || key}>
+                  <label htmlFor={inputId} style={{ display: "flex", alignItems: "center", gap: "4px", cursor: "help" }}>
+                    {key} <span style={{ color: "var(--faint)" }}>ⓘ</span>
+                  </label>
+                  <input
+                    id={inputId}
+                    name={key}
+                    type="text"
+                    className="num"
+                    style={{ width: "100%", padding: "4px 8px", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: "4px", color: "var(--text)" }}
+                    value={params[key] || ""}
+                    onChange={(e) => handleParamChange(key, e.target.value)}
+                  />
+                </div>
+              );
+            })}
+            {/* ============================================================================= */}
           </div>
           <div style={{ display: "flex", justifyContent: "flex-end", marginTop: "10px" }}>
             <button type="submit" className="btn sm primary" disabled={saving} style={{ padding: "4px 12px" }}>
@@ -254,7 +283,28 @@ export function StrategiesPanel() {
   return (
     <div className="panel" style={{ flexShrink: 0 }}>
       <div className="panel-head"><span>Strategies</span></div>
-      <div>
+      {/* =============================================================================
+      // [MODIFIED 2026-11-11]: Scrollable Strategies Container
+      // ORIGINAL INTENT: Strategy rows were rendered in an unbounded container, causing
+      //   accordion expansion with 13 fields to displace sidebar widgets off-screen.
+      // REASON FOR CHANGE: Enforce max-height with internal scrolling.
+      // SAFE ROLLBACK: The original code is preserved below as comments.
+      // -----------------------------------------------------------------------------
+      // [PREVIOUS CODE - PRESERVED]:
+      // <div>
+      //   {strategies.map((s) => (
+      //     <StrategyRow
+      //       key={s.name}
+      //       strategy={s}
+      //       onToggle={toggle}
+      //       onSaveParams={saveParams}
+      //     />
+      //   ))}
+      //   {strategies.length === 0 && <div className="empty-state">Loading strategies…</div>}
+      // </div>
+      // -----------------------------------------------------------------------------
+      // [NEW CODE]: */}
+      <div style={{ maxHeight: "420px", overflowY: "auto", overflowX: "hidden" }}>
         {strategies.map((s) => (
           <StrategyRow
             key={s.name}
@@ -265,6 +315,7 @@ export function StrategiesPanel() {
         ))}
         {strategies.length === 0 && <div className="empty-state">Loading strategies…</div>}
       </div>
+      {/* ============================================================================= */}
     </div>
   );
 }

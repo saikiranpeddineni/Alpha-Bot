@@ -57,6 +57,7 @@ const REASON_META: Record<string, { label: string; hint: string; marketSide?: bo
 export function HeartbeatIndicator() {
   const connected = useStore((s) => s.connected);
   const status = useStore((s) => s.status);
+  const orders = useStore((s) => s.orders);
   const heartbeat = useStore((s) => s.heartbeat);
   const styleMode = useStore((s) => s.heartbeatStyle);
 
@@ -112,7 +113,25 @@ export function HeartbeatIndicator() {
     degraded_reasons: [] as string[],
   };
 
-  const timestamps = heartbeat?.timestamps || {};
+  // =============================================================================
+  // [MODIFIED 2026-11-11]: Add Subsystem Timestamp Fallbacks
+  // ORIGINAL INTENT: Read heartbeat?.timestamps directly, leaving Subsystem Timestamps
+  //   as dashes if backend telemetry timestamps dict was sparse.
+  // REASON FOR CHANGE: Fall back to status.scanner, status.trainer/model, and store orders
+  //   so user can observe actual scan, model training, and order execution times.
+  // SAFE ROLLBACK: The original code is preserved below as comments.
+  // -----------------------------------------------------------------------------
+  // [PREVIOUS CODE - PRESERVED]:
+  // const timestamps = heartbeat?.timestamps || {};
+  // -----------------------------------------------------------------------------
+  // [NEW CODE]:
+  const rawTimestamps = heartbeat?.timestamps || {};
+  const timestamps = {
+    last_scan: rawTimestamps.last_scan || status?.scanner?.last_completed_at,
+    last_strategy: rawTimestamps.last_strategy || status?.trainer?.last_trained || status?.model?.trained_at,
+    last_order: rawTimestamps.last_order || (orders && orders.length > 0 ? orders[0]?.submitted_at : null),
+  };
+  // =============================================================================
   const lastEvent = heartbeat?.event;
   const reasons: string[] = stats.degraded_reasons || [];
   const isDegraded = health === "DEGRADED" || health === "SAFE_MODE";

@@ -124,7 +124,18 @@ body {
   flex-shrink: 0;
 }
 
-.panel-body { flex: 1; min-height: 0; overflow: auto; }
+/* =============================================================================
+// [MODIFIED 2026-11-11]: Add Bottom Padding to Panel Body to Prevent Table Row Clipping
+// ORIGINAL INTENT: .panel-body was flush with scroll boundary.
+// REASON FOR CHANGE: Add 16px bottom padding so bottom-most table rows are not vertically clipped.
+// SAFE ROLLBACK: The original code is preserved below as comments.
+// -----------------------------------------------------------------------------
+// [PREVIOUS CODE - PRESERVED]:
+// .panel-body { flex: 1; min-height: 0; overflow: auto; }
+// -----------------------------------------------------------------------------
+// [NEW CODE]: */
+.panel-body { flex: 1; min-height: 0; overflow: auto; padding-bottom: 16px; }
+/* ============================================================================= */
 
 /* ============ top bar ============ */
 
