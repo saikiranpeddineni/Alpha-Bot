@@ -241,13 +241,60 @@ class RiskManager:
 
         self.symbol_loss_counts: dict[str, int] = {}
 
-        # =============================================================================
-
         self._pdt_warned = False
-
         self.core_watchlist: list[str] | None = None
+        # =============================================================================
+        # [ADDED 2026-11-11]: Strategy Performance Tracker Reference for Dynamic Scaling
+        # ORIGINAL INTENT: RiskManager had no reference to per-strategy rolling statistics.
+        # REASON FOR CHANGE: Enable dynamic strategy risk scaling based on rolling expectancy in R
+        # and rolling Sharpe ratio, enforcing a 50% cap on Momentum until rolling expectancy turns positive.
+        # SAFE ROLLBACK: Remove self.perf_tracker and get_strategy_risk_multiplier.
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        self.perf_tracker: Any = None
 
+    def get_strategy_risk_multiplier(self, strategy: str, stats: Any | None = None) -> float:
+        """Dynamically scale strategy risk based on rolling expectancy and Sharpe ratio.
 
+        Enforces a 50% risk cap on Momentum until rolling expectancy turns positive.
+        """
+        strat_key = strategy.lower()
+        if stats is None and getattr(self, "perf_tracker", None) is not None:
+            stats = (
+                self.perf_tracker.get_strategy_stats(strat_key)
+                or (self.perf_tracker.get_stats(strat_key) if hasattr(self.perf_tracker, "get_stats") else None)
+            )
+
+        cfg_multipliers = getattr(self.config, "strategy_risk_multipliers", None) or {}
+        base_mult = float(cfg_multipliers.get(strat_key, 1.0))
+        if not math.isfinite(base_mult) or base_mult <= 0:
+            base_mult = 1.0
+
+        if strat_key == "momentum":
+            # Mandatory R2 Guardrail: 50% risk cap on Momentum until rolling expectancy turns positive
+            if stats is None or getattr(stats, "trades", 0) < 5 or getattr(stats, "rolling_expectancy_r", 0.0) <= 0:
+                return min(0.50, base_mult)
+            # Rolling expectancy is positive: scale up toward 1.0 based on expectancy and Sharpe
+            exp_r = float(stats.rolling_expectancy_r)
+            sharpe = float(getattr(stats, "rolling_sharpe", 0.0))
+            scale_boost = min(0.50, 0.50 * min(1.0, exp_r))
+            if sharpe > 1.0:
+                scale_boost = min(0.50, scale_boost + 0.10)
+            return min(1.0, 0.50 + scale_boost)
+
+        # Other strategies: dynamic scaling if stats available
+        if stats is not None and getattr(stats, "_recent_r", None) and len(stats._recent_r) >= 5:
+            exp_r = float(stats.rolling_expectancy_r)
+            sharpe = float(getattr(stats, "rolling_sharpe", 0.0))
+            if exp_r < 0:
+                # Underperforming: dynamically scale down toward 0.50 floor
+                return max(0.50, base_mult * max(0.50, 1.0 + exp_r))
+            elif exp_r > 0.30 and sharpe > 1.5:
+                # Strong performance: allow moderate expansion up to 1.25x
+                return min(1.25, base_mult * 1.25)
+
+        return base_mult
+    # =============================================================================
 
     def get_risk_state(self) -> dict:
 
@@ -1302,18 +1349,40 @@ class RiskManager:
             return RiskDecision(False, "invalid risk multiplier")
 
         # =============================================================================
-        # [ADDED 2026-11-11]: B1 - Apply Strategy-Specific Risk Multiplier Cap
-        # ORIGINAL INTENT: Risk multiplier only came from signal-level attributes.
-        # REASON FOR CHANGE: Momentum has historical negative expectancy (-$6,104 Net P&L).
-        #   Multiplying by configured strategy_risk_multipliers (default 0.50 for momentum)
-        #   limits capital allocation to underperforming strategies.
-        # SAFE ROLLBACK: Remove strat_risk_mult logic.
+        # [MODIFIED 2026-11-11]: Dynamic Strategy Risk Scaling & Momentum 50% Cap
+        # ORIGINAL INTENT: Statically applied strat_risk_multipliers from config (default 0.50 for momentum).
+        # REASON FOR CHANGE: R2 requirement to dynamically scale strategy risk allocation based on
+        # rolling expectancy and Sharpe ratio, maintaining the 50% risk cap on Momentum until
+        # rolling expectancy turns positive.
+        # SAFE ROLLBACK: The original code is preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # strat_risk_multipliers = getattr(cfg, "strategy_risk_multipliers", None) or {}
+        # strat_mult = float(strat_risk_multipliers.get(strategy.lower(), 1.0))
+        # if math.isfinite(strat_mult) and strat_mult > 0:
+        #     risk_mult *= strat_mult
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
-        strat_risk_multipliers = getattr(cfg, "strategy_risk_multipliers", None) or {}
-        strat_mult = float(strat_risk_multipliers.get(strategy.lower(), 1.0))
+        perf_tracker = (
+            getattr(self, "perf_tracker", None)
+            or getattr(ctx, "perf_tracker", None)
+            or getattr(signal, "perf_tracker", None)
+        )
+        stats = getattr(signal, "strategy_stats", None)
+        if stats is None and perf_tracker is not None:
+            stats = (
+                perf_tracker.get_strategy_stats(strategy)
+                or (perf_tracker.get_stats(strategy) if hasattr(perf_tracker, "get_stats") else None)
+            )
+
+        strat_mult = self.get_strategy_risk_multiplier(strategy, stats)
         if math.isfinite(strat_mult) and strat_mult > 0:
             risk_mult *= strat_mult
+            applog.debug(
+                "risk",
+                f"{symbol} {strategy}: dynamic risk multiplier={strat_mult:.2f} (rolling_exp_r="
+                f"{getattr(stats, 'rolling_expectancy_r', 0.0):.2f})",
+            )
         # =============================================================================
 
         # =============================================================================

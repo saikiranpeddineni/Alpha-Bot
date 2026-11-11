@@ -27,6 +27,92 @@ from app.core.domain import TradeRecord
 
 
 @dataclass
+# =============================================================================
+# [MODIFIED 2026-11-11]: Add rolling expectancy in R and rolling Sharpe ratio to StrategyStats
+# ORIGINAL INTENT: StrategyStats tracked trade counts, dollar expectancy, and 20-trade rolling profit factor,
+# but lacked rolling expectancy in R and rolling Sharpe ratio.
+# REASON FOR CHANGE: R2 requirement to dynamically scale strategy risk allocation based on rolling expectancy
+# in R and rolling Sharpe ratio, maintaining 50% cap on Momentum until rolling expectancy turns positive.
+# SAFE ROLLBACK: The original code is preserved below as comments.
+# -----------------------------------------------------------------------------
+# [PREVIOUS CODE - PRESERVED]:
+# class StrategyStats:
+#     """Accumulated statistics for one strategy."""
+# 
+#     strategy: str
+#     trades: int = 0
+#     wins: int = 0
+#     losses: int = 0
+#     total_pnl: float = 0.0
+#     gross_profit: float = 0.0
+#     gross_loss: float = 0.0        # stored as negative
+#     total_r: float = 0.0           # sum of R multiples
+#     total_hold_minutes: float = 0.0
+#     max_consec_losses: int = 0
+#     _current_streak: int = 0
+#     _recent: deque = field(default_factory=lambda: deque(maxlen=20))  # last 20 PnLs
+# 
+#     # ---- computed properties ----
+# 
+#     @property
+#     def win_rate(self) -> float:
+#         return self.wins / self.trades if self.trades > 0 else 0.0
+# 
+#     @property
+#     def profit_factor(self) -> float:
+#         return self.gross_profit / abs(self.gross_loss) if self.gross_loss < 0 else float("inf")
+# 
+#     @property
+#     def avg_r(self) -> float:
+#         return self.total_r / self.trades if self.trades > 0 else 0.0
+# 
+#     @property
+#     def avg_win(self) -> float:
+#         return self.gross_profit / self.wins if self.wins > 0 else 0.0
+# 
+#     @property
+#     def avg_loss(self) -> float:
+#         return self.gross_loss / self.losses if self.losses > 0 else 0.0
+# 
+#     @property
+#     def expectancy(self) -> float:
+#         """Expected PnL per trade = win_rate * avg_win + loss_rate * avg_loss."""
+#         if self.trades == 0:
+#             return 0.0
+#         loss_rate = self.losses / self.trades
+#         return self.win_rate * self.avg_win + loss_rate * self.avg_loss
+# 
+#     @property
+#     def avg_hold_minutes(self) -> float:
+#         return self.total_hold_minutes / self.trades if self.trades > 0 else 0.0
+# 
+#     @property
+#     def rolling_profit_factor(self) -> float:
+#         """Profit factor over the last 20 trades (recency signal)."""
+#         recent = list(self._recent)
+#         if not recent:
+#             return 0.0
+#         gp = sum(p for p in recent if p > 0)
+#         gl = sum(p for p in recent if p < 0)
+#         return gp / abs(gl) if gl < 0 else float("inf")
+# 
+#     def to_dict(self) -> dict:
+#         return {
+#             "strategy": self.strategy,
+#             "trades": self.trades,
+#             "wins": self.wins,
+#             "losses": self.losses,
+#             "win_rate": round(self.win_rate * 100, 1),
+#             "total_pnl": round(self.total_pnl, 2),
+#             "profit_factor": round(self.profit_factor, 3) if self.profit_factor != float("inf") else None,
+#             "rolling_pf_20": round(self.rolling_profit_factor, 3) if self.rolling_profit_factor != float("inf") else None,
+#             "avg_r": round(self.avg_r, 3),
+#             "expectancy": round(self.expectancy, 2),
+#             "avg_hold_min": round(self.avg_hold_minutes, 1),
+#             "max_consec_losses": self.max_consec_losses,
+#         }
+# -----------------------------------------------------------------------------
+# [NEW CODE]:
 class StrategyStats:
     """Accumulated statistics for one strategy."""
 
@@ -42,6 +128,7 @@ class StrategyStats:
     max_consec_losses: int = 0
     _current_streak: int = 0
     _recent: deque = field(default_factory=lambda: deque(maxlen=20))  # last 20 PnLs
+    _recent_r: deque = field(default_factory=lambda: deque(maxlen=20))  # last 20 R-multiples
 
     # ---- computed properties ----
 
@@ -87,6 +174,26 @@ class StrategyStats:
         gl = sum(p for p in recent if p < 0)
         return gp / abs(gl) if gl < 0 else float("inf")
 
+    @property
+    def rolling_expectancy_r(self) -> float:
+        """Average R multiple over the last 20 trades."""
+        if not self._recent_r:
+            return 0.0
+        return float(sum(self._recent_r) / len(self._recent_r))
+
+    @property
+    def rolling_sharpe(self) -> float:
+        """Annualized Sharpe ratio of R-multiples over the last 20 trades."""
+        if len(self._recent_r) < 2:
+            return 0.0
+        import math
+        mean_r = sum(self._recent_r) / len(self._recent_r)
+        variance = sum((x - mean_r) ** 2 for x in self._recent_r) / (len(self._recent_r) - 1)
+        std_r = math.sqrt(variance)
+        if std_r < 1e-8:
+            return 0.0
+        return float((mean_r / std_r) * math.sqrt(252))
+
     def to_dict(self) -> dict:
         return {
             "strategy": self.strategy,
@@ -97,11 +204,14 @@ class StrategyStats:
             "total_pnl": round(self.total_pnl, 2),
             "profit_factor": round(self.profit_factor, 3) if self.profit_factor != float("inf") else None,
             "rolling_pf_20": round(self.rolling_profit_factor, 3) if self.rolling_profit_factor != float("inf") else None,
+            "rolling_expectancy_r": round(self.rolling_expectancy_r, 3),
+            "rolling_sharpe": round(self.rolling_sharpe, 2),
             "avg_r": round(self.avg_r, 3),
             "expectancy": round(self.expectancy, 2),
             "avg_hold_min": round(self.avg_hold_minutes, 1),
             "max_consec_losses": self.max_consec_losses,
         }
+# =============================================================================
 
 
 class StrategyPerformanceTracker:
@@ -125,6 +235,26 @@ class StrategyPerformanceTracker:
             self._stats[strategy] = StrategyStats(strategy=strategy)
         return self._stats[strategy]
 
+    # =============================================================================
+    # [ADDED 2026-11-11]: Public accessors for strategy performance statistics
+    # ORIGINAL INTENT: Only private _get existed, which created stats on demand.
+    # REASON FOR CHANGE: Expose public accessors for RiskManager dynamic sizing.
+    # SAFE ROLLBACK: Remove get_stats and get_strategy_stats.
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    def get_stats(self, strategy: str) -> StrategyStats:
+        """Return (or instantiate) StrategyStats for the specified strategy."""
+        return self._get(strategy)
+
+    def get_strategy_stats(self, strategy: str) -> StrategyStats | None:
+        """Return existing StrategyStats for the strategy or None if not yet tracked."""
+        strat_key = strategy.lower()
+        for k, v in self._stats.items():
+            if k.lower() == strat_key:
+                return v
+        return None
+    # =============================================================================
+
     def update(self, trade: TradeRecord, now: datetime | None = None) -> None:
         """Record a closed trade into the appropriate strategy bucket."""
         strategy = getattr(trade, "strategy", None) or "unknown"
@@ -145,15 +275,31 @@ class StrategyPerformanceTracker:
             stats._current_streak += 1
             stats.max_consec_losses = max(stats.max_consec_losses, stats._current_streak)
 
-        # R multiple: PnL / (initial_risk_per_share * qty). TradeRecord exposes
-        # `initial_risk` (per-share $ risk) — the previously probed
-        # `initial_risk_per_share` attribute never existed, silently zeroing
-        # every avg_R metric.
+        # =============================================================================
+        # [MODIFIED 2026-11-11]: Populate _recent_r for rolling expectancy and Sharpe
+        # ORIGINAL INTENT: Calculated r and accumulated into stats.total_r, but did not preserve
+        # rolling sequence of recent trade R-multiples.
+        # REASON FOR CHANGE: Support StrategyStats.rolling_expectancy_r and rolling_sharpe calculations
+        # across the last 20 closed trades.
+        # SAFE ROLLBACK: The original code is preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # initial_risk = getattr(trade, "initial_risk", None)
+        # qty = getattr(trade, "qty", None)
+        # if initial_risk and qty and initial_risk > 0:
+        #     r = pnl / (initial_risk * qty)
+        #     stats.total_r += r
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
         initial_risk = getattr(trade, "initial_risk", None)
         qty = getattr(trade, "qty", None)
         if initial_risk and qty and initial_risk > 0:
             r = pnl / (initial_risk * qty)
             stats.total_r += r
+            stats._recent_r.append(r)
+        else:
+            stats._recent_r.append(0.0)
+        # =============================================================================
 
         # Hold time. TradeRecord exposes entry_at/exit_at (the previously
         # probed opened_at/closed_at never existed → hold minutes were always 0).

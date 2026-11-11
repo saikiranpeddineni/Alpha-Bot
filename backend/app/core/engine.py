@@ -106,6 +106,10 @@ from app.core.engine_evaluation import TradingEngineEvaluationMixin
 
 from app.core.engine_halts import TradingEngineHaltsMixin
 
+from app.core.order_router import TradingEngineOrderRouterMixin
+
+from app.core.reconciliation import TradingEngineReconciliationMixin
+
 from app.core.entry_reservations import SameCycleEntryReservations
 
 from app.data.manager import DataManager, make_provider
@@ -156,7 +160,25 @@ _HALT_KEY = "hard_halt_state:{mode}"
 
 
 
-class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
+# =============================================================================
+# [MODIFIED 2026-11-11]: Deconstruct Monolithic TradingEngine via Mixins (R5)
+# ORIGINAL INTENT: TradingEngine inherited only TradingEngineEvaluationMixin and TradingEngineHaltsMixin,
+#   with order routing and reconciliation embedded directly in engine.py.
+# REASON FOR CHANGE: Extract order_router.py and reconciliation.py boundaries while maintaining
+#   100% backward compatibility for all methods and attributes.
+# SAFE ROLLBACK: Previous class declaration preserved below as comments.
+# -----------------------------------------------------------------------------
+# [PREVIOUS CODE - PRESERVED]:
+# class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
+# -----------------------------------------------------------------------------
+# [NEW CODE]:
+class TradingEngine(
+    TradingEngineEvaluationMixin,
+    TradingEngineHaltsMixin,
+    TradingEngineOrderRouterMixin,
+    TradingEngineReconciliationMixin,
+):
+# =============================================================================
 
     def __init__(self, settings: Settings, db: Database) -> None:
 
@@ -403,6 +425,20 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
         self._position_reconciliation_mismatch_streak = 0
 
         self._order_reconciliation_mismatch_streak = 0
+
+        # =============================================================================
+        # [MODIFIED 2026-11-11]: Reconciliation Audit History & Feed Watchdog State (R1)
+        # ORIGINAL INTENT: Reconciliation only tracked streak counters without structured
+        #   audit history, and feed watchdog lacked per-symbol staleness tracking.
+        # REASON FOR CHANGE: Store WARN_ORPHAN_ADOPTED and WARN_ORPHAN_DRAINED audit events
+        #   and per-symbol last_bar_received_at timestamps for 90s/120s staleness watchdogs.
+        # SAFE ROLLBACK: Previous lines preserved above; new state attributes added below.
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        self.orphan_reconciliation_events: list[dict[str, Any]] = []
+        self.last_bar_received_at: dict[str, datetime] = {}
+        self.feed_staleness_status: dict[str, str] = {}
+        # =============================================================================
 
 
 
@@ -1691,75 +1727,104 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
 
         _is_replay = type(self.clock).__name__ == "ReplayClock"
 
+        # =============================================================================
+        # [MODIFIED 2026-11-11]: Feed Watchdog: DATA_STALE (90s) & SAFE_MODE (120s) (R1)
+        # ORIGINAL INTENT: Gated entries on individual symbols using _DATA_GAP_THRESHOLD_SECS,
+        #   but did not mark explicit DATA_STALE feed status or latch global SAFE_MODE.
+        # REASON FOR CHANGE: Track per-symbol last_bar_received_at; mark feeds DATA_STALE after
+        #   90 seconds, and transition engine into SAFE_MODE if all active feeds stall > 120s.
+        # SAFE ROLLBACK: Previous lines preserved above and below.
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        for sym_key, bars in new_closed.items():
+            if bars is not None and not bars.empty:
+                sym_k_upper = sym_key.upper()
+                self.last_bar_received_at[sym_k_upper] = now
+                self.feed_staleness_status[sym_k_upper] = "OK"
+
         if _is_regular_session:
-
             for sym in self.watchlist:
-
                 sym_upper = sym.upper()
-
                 if sym_upper in new_closed and not new_closed[sym_upper].empty:
-
                     # Fresh bar arrived — clear gap flag
-
                     self._last_data_bar_ts[sym_upper] = now
-
                     self._data_gap_symbols.discard(sym_upper)
-
+                    self.feed_staleness_status[sym_upper] = "OK"
                 elif sym_upper in self._last_data_bar_ts:
-
                     last_ts = self._last_data_bar_ts[sym_upper]
-
                     # Protect against overnight clock jumps in replay mode
-
                     if now.date() != last_ts.date():
-
                         self._last_data_bar_ts[sym_upper] = now
-
                         self._data_gap_symbols.discard(sym_upper)
-
                     else:
-
                         elapsed = (now - last_ts).total_seconds()
-
-                        # Live config (UI-editable, persisted): thin printers
-
-                        # need a larger window; 0 disables the block entirely.
-
                         gap_threshold = float(
-
                             getattr(self.risk_config, "data_gap_threshold_secs", _DATA_GAP_THRESHOLD_SECS)
-
                         )
-
                         if gap_threshold > 0 and elapsed > gap_threshold and sym_upper not in self._data_gap_symbols:
-
                             if not _is_replay:
-
                                 self._data_gap_symbols.add(sym_upper)
-
                                 applog.warning(
-
                                     "engine",
-
                                     f"#86: Market-data gap detected for {sym_upper}: no bar for {elapsed:.0f}s "
-
                                     f"during regular session. New entries BLOCKED until data resumes.",
-
                                 )
-
                 elif sym_upper not in self._last_data_bar_ts:
-
                     # Initialize timestamp on first tick
-
                     self._last_data_bar_ts[sym_upper] = now
 
+            # Per-symbol 90s DATA_STALE watchdog across all active symbols
+            if not _is_replay:
+                for sym in active_symbols:
+                    sym_upper = sym.upper()
+                    last_received = self.last_bar_received_at.get(sym_upper)
+                    if last_received is not None:
+                        feed_age = (now - last_received).total_seconds()
+                        if feed_age > 90.0:
+                            if self.feed_staleness_status.get(sym_upper) != "DATA_STALE":
+                                applog.warning(
+                                    "engine.watchdog",
+                                    f"Feed for {sym_upper} marked DATA_STALE (last bar {feed_age:.0f}s ago > 90s).",
+                                )
+                            self.feed_staleness_status[sym_upper] = "DATA_STALE"
+                            self._data_gap_symbols.add(sym_upper)
+                        else:
+                            self.feed_staleness_status[sym_upper] = "OK"
+
+            # Global stall watchdog (> 120s across all active feeds during market hours)
+            if not _is_replay and active_symbols:
+                minutes_since_open = (now_et.hour * 60 + now_et.minute) - (9 * 60 + 30)
+                if minutes_since_open >= 3:
+                    all_feeds_stalled = all(
+                        (sym.upper() not in self.last_bar_received_at)
+                        or ((now - self.last_bar_received_at[sym.upper()]).total_seconds() > 120.0)
+                        for sym in active_symbols
+                    )
+                    if all_feeds_stalled:
+                        if self.system_health != "HALTED":
+                            self.system_health = "SAFE_MODE"
+                        self.allow_new_entries = False
+                        applog.error(
+                            "engine.watchdog",
+                            "CRITICAL: All market data feeds stalled > 120s during market hours. Transitioning engine to SAFE_MODE.",
+                        )
+                    elif (
+                        self.system_health == "SAFE_MODE"
+                        and not getattr(self, "reconciliation_mismatch", False)
+                        and not getattr(self, "reconciliation_failed", False)
+                    ):
+                        self.system_health = "NORMAL"
+                        self.allow_new_entries = True
+                        applog.info(
+                            "engine.watchdog",
+                            "Market data feeds resumed. Restoring engine from SAFE_MODE to NORMAL.",
+                        )
         else:
-
             # Outside regular session: clear all gap flags and history to prevent multi-day bleed
-
             self._data_gap_symbols.clear()
-
             self._last_data_bar_ts.clear()
+            self.feed_staleness_status.clear()
+        # =============================================================================
 
 
 
@@ -3777,906 +3842,927 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
 
 
 
-    async def _close_position_guarded(
-
-        self,
-
-        symbol: str,
-
-        reason: str,
-
-        qty: float | None = None,
-
-        strategy: str | None = None,
-
-    ) -> bool:
-
-        """Close a position once and report whether the broker accepted the close.
-
-
-
-        ``True`` means a close order with a usable identifier was accepted by
-
-        the broker (it may still be waiting to fill).  ``False`` means the
-
-        broker returned no order or explicitly rejected it.  A broker
-
-        exception is re-raised after releasing the latch because that is an
-
-        ambiguous result.  A duplicate call is treated as ``True`` because
-
-        the existing in-flight close already owns the symbol's close intent;
-
-        this preserves the idempotent close latch without reverting PIS state
-
-        for a request that was never submitted.
-
-        """
-
-        if not hasattr(self, "_pending_close_symbols"):
-
-            self._pending_close_symbols = set()
-
-        if not hasattr(self, "_pending_close_order_ids"):
-
-            self._pending_close_order_ids = {}
-
-        # fix(partial-close-wedge): track requested close size and submit time so
-
-        # _drain_fills can release the guard from fill truth alone and stale
-
-        # latches can never wedge PIS exits indefinitely (2026-08-24: after the
-
-        # CRWV/V/AMZN partial scale-outs every subsequent PROTECTION_BREACH
-
-        # exit was silently swallowed for 30-80 minutes).
-
-        if not hasattr(self, "_pending_close_qtys"):
-
-            self._pending_close_qtys = {}
-
-        if not hasattr(self, "_pending_close_submitted_at"):
-
-            self._pending_close_submitted_at = {}
-
-        # fix(#45): also guard against concurrent per-tick flatten submissions
-
-        if symbol in self._pending_close_symbols or symbol in self._flattening_symbols:
-
-            applog.debug("engine", f"{symbol}: skipping duplicate close — close already in-flight (#45)")
-
-            return True
-
-        self._flattening_symbols.add(symbol)
-
-        self._pending_close_symbols.add(symbol)
-
-        try:
-
-            # Support brokers whose close_position predates the qty parameter.
-
-            # Signature inspection (not try/except TypeError) so a TypeError
-
-            # raised INSIDE broker logic can never silently convert a targeted
-
-            # partial close into a full-position close.
-
-            close_parameters = inspect.signature(self.broker.close_position).parameters
-
-            close_kwargs = {"reason": reason}
-
-            if qty is not None and "qty" in close_parameters:
-
-                close_kwargs["qty"] = qty
-
-            if strategy and "strategy" in close_parameters:
-
-                close_kwargs["strategy"] = strategy
-
-            order = await self.broker.close_position(symbol, **close_kwargs)
-
-            if order is None:
-
-                # Close failed immediately (no broker position) — release so retries work.
-
-                self._release_pending_close(symbol, "close returned no order")
-
-                return False
-
-
-
-            status = getattr(getattr(order, "status", None), "value", getattr(order, "status", None))
-
-            status_value = str(status).split(".")[-1].lower()
-
-            if status_value in {OrderStatus.REJECTED.value, OrderStatus.CANCELED.value}:
-
-                # A rejected/canceled order is not an in-flight close.
-
-                # Releasing now is important because PIS must be able to retry
-
-                # on the next bar.
-
-                self._release_pending_close(symbol, f"close {status_value}")
-
-                return False
-
-
-
-            order_id = getattr(order, "id", None)
-
-            if not order_id:
-
-                # Without an order id the fill-drain path cannot bind execution
-
-                # truth to this latch, so do not claim that the close succeeded.
-
-                self._release_pending_close(symbol, "close returned no order id")
-
-                return False
-
-
-
-            # Preserve the caller's execution attribution on broker-generated
-
-            # close orders.  PIS closes do not pass through submit(), so this is
-
-            # the last durable metadata boundary before the fill is observed.
-
-            if strategy:
-
-                order.strategy = strategy
-
-            if reason:
-
-                order.reason = reason
-
-
-
-            # Track the close order id; _drain_fills releases the guard when
-
-            # this order reaches a terminal state. A partial fill no longer
-
-            # latches the guard until the whole lot is gone.
-
-            self._get_pending_close_order_ids()[symbol] = str(order_id)
-
-            self._pending_close_qtys[symbol] = float(qty) if qty is not None else None
-
-            self._pending_close_submitted_at[symbol] = utcnow()
-
-            # Register the close order so fill-drain can resolve it by id.
-
-            # Broker-initiated closes never pass through submit(), and an
-
-            # unresolvable tracked id used to wedge the guard permanently.
-
-            self.recent_orders.appendleft(order)
-
-            hook = getattr(self, "_persist_submitted_close_order", None)
-
-            if hook is not None and asyncio.iscoroutinefunction(hook):
-
-                await hook(order)
-
-            return True
-
-        except Exception as exc:
-
-            # Submission itself failed or its result became ambiguous. Release
-
-            # both guards so a later tick can retry instead of wedging exits;
-
-            # callers receive the broker exception rather than treating the
-
-            # request as filled.  The PIS evaluation boundary catches this,
-
-            # reverts decision-time scale-out state, and returns to the tick
-
-            # without masking the ambiguity.
-
-            self._release_pending_close(symbol, f"close submission ambiguous: {exc}")
-
-            applog.warning("engine", f"{symbol}: close submission failed or is ambiguous: {exc}")
-
-            raise
-
-        finally:
-
-            self._flattening_symbols.discard(symbol)
-
-
-
-    def _get_pending_close_order_ids(self) -> dict[str, str]:
-
-        """Lazily materialize the close-order-id map (test engines may skip __init__)."""
-
-        ids = getattr(self, "_pending_close_order_ids", None)
-
-        if ids is None:
-
-            ids = {}
-
-            self._pending_close_order_ids = ids
-
-        return ids
-
-
-
-    def _release_pending_close(self, symbol: str, cause: str) -> None:
-
-        """Release the per-symbol close latch so future PIS exits can execute."""
-
-        if not hasattr(self, "_pending_close_symbols"):
-
-            return
-
-        if symbol not in self._pending_close_symbols:
-
-            return
-
-        self._pending_close_symbols.discard(symbol)
-
-        self._get_pending_close_order_ids().pop(symbol, None)
-
-        if hasattr(self, "_pending_close_qtys"):
-
-            self._pending_close_qtys.pop(symbol, None)
-
-        if hasattr(self, "_pending_close_submitted_at"):
-
-            self._pending_close_submitted_at.pop(symbol, None)
-
-        applog.debug("engine", f"{symbol}: close-guard released ({cause})")
-
-
-
-    async def _reconcile_pending_closes(self, now: datetime) -> None:
-
-        """Per-tick reconciliation of pending close latches.
-
-
-
-        The legacy release path only ran when a NEW fill arrived for the same
-
-        symbol. After a partial scale-out the residual lot generates no further
-
-        fills until EOD, so a guard whose tracked order could not be resolved
-
-        stayed latched for the rest of the session and silently swallowed every
-
-        PIS exit (2026-08-24 CRWV/V/AMZN). Re-check liveness every tick from
-
-        three sources: tracked-order terminal state, fill-truth completion, and
-
-        a staleness deadline.
-
-        """
-
-        pending = getattr(self, "_pending_close_symbols", None)
-
-        if not pending:
-
-            return
-
-        stale_after = 90.0  # seconds; ~2 evaluation ticks even under degraded data
-
-        for symbol in list(pending):
-
-            tracked_id = self._get_pending_close_order_ids().get(symbol)
-
-
-
-            # 1) Tracked order reached a terminal state?
-
-            if tracked_id:
-
-                resolved = next(
-
-                    (o for o in self.recent_orders if str(o.id) == tracked_id or o.client_order_id == tracked_id),
-
-                    None,
-
-                )
-
-                if resolved is not None:
-
-                    status = getattr(resolved.status, "value", resolved.status)
-
-                    if str(status).upper() in {"FILLED", "CANCELED", "REJECTED"}:
-
-                        self._release_pending_close(symbol, f"order terminal: {status}")
-
-                        continue
-
-
-
-            # 2) Latch older than the staleness deadline? Force-release; PIS
-
-            #    re-evaluates on the next bar and will re-close if still needed.
-
-            submitted_at = getattr(self, "_pending_close_submitted_at", {}).get(symbol)
-
-            if submitted_at is not None and (now - submitted_at).total_seconds() > stale_after:
-
-                applog.warning(
-
-                    "engine",
-
-                    f"{symbol}: close-guard force-released after {stale_after:.0f}s staleness — "
-
-                    "prior close never confirmed; PIS may retry",
-
-                )
-
-                self._release_pending_close(symbol, "stale latch")
-
-
-
-    async def _persist_submitted_close_order(self, order: Order) -> None:
-
-        """Hook for persistence of submitted close orders (durable subclass)."""
-
-
-
-    def _reconcile_positions(self, positions: list[Position]) -> None:
-
-        """Reconcile local lots to authoritative broker positions without erasing matching lot state."""
-
-        _QTY_TOL = 1e-4  # fractional-share/rounding tolerance; 1e-9 caused permanent mismatch thrash
-
-        broker_symbols = {p.symbol for p in positions if abs(float(p.qty)) > _QTY_TOL}
-
-        for local_symbol in list(self.portfolio._lots):
-
-            if local_symbol not in broker_symbols:
-
-                self.portfolio._lots.pop(local_symbol, None)
-
-                self._position_take_profits.pop(local_symbol, None)
-
-                self._position_peaks.pop(local_symbol, None)
-
-                self._position_troughs.pop(local_symbol, None)
-
-                self._position_initial_stops.pop(local_symbol, None)
-
-
-
-        for p in positions:
-
-            existing_lot = self.portfolio._lots.get(p.symbol)
-
-            if existing_lot is not None:
-
-                qty_matches = abs(float(existing_lot.qty) - float(p.qty)) <= _QTY_TOL
-
-                price_scale = max(1.0, abs(float(p.avg_entry_price)))
-
-                avg_matches = abs(float(existing_lot.avg_price) - float(p.avg_entry_price)) <= 1e-8 * price_scale
-
-                if qty_matches and avg_matches:
-
-                    # Fill processing already established the same economic lot. Keep
-
-                    # its original/current stop, initial R, strategy and entry timestamp.
-
-                    p.strategy = existing_lot.strategy
-
-                    continue
-
-
-
-            strat = "manual"
-
-            if hasattr(self.broker, "_symbol_strategies"):
-
-                db_strat = self.db.get_latest_entry_order_strategy(p.symbol, self.mode)
-
-                if db_strat:
-
-                    self.broker._symbol_strategies[p.symbol] = db_strat
-
-                    strat = db_strat
-
-                    applog.info("engine", f"Restored strategy '{db_strat}' for active position {p.symbol}")
-
-
-
-            # Position ownership comes from the latest true ENTRY, never from a
-
-            # newer emergency/protective order.  This keeps UI attribution and
-
-            # strategy-specific exit management bound to the strategy that opened
-
-            # the surviving position.
-
-            entry_payload = self.db.get_latest_entry_order_payload(p.symbol, self.mode)
-
-            if not isinstance(entry_payload, dict):
-
-                entry_payload = None
-
-            fallback_payload = self.db.get_latest_order_payload(p.symbol, self.mode)
-
-            if not isinstance(fallback_payload, dict):
-
-                fallback_payload = None
-
-            order_payload = entry_payload or fallback_payload
-
-            if entry_payload and entry_payload.get("strategy"):
-
-                strat = str(entry_payload["strategy"])
-
-                p.strategy = strat
-
-                if hasattr(self.broker, "_symbol_strategies"):
-
-                    self.broker._symbol_strategies[p.symbol] = strat
-
-            stop_loss = None
-
-            take_profit = None
-
-            initial_risk = None
-
-            opened_at = p.opened_at if hasattr(p, "opened_at") and p.opened_at else datetime.now(UTC)
-
-            if order_payload:
-
-                stop_loss_val = order_payload.get("stop_loss")
-
-                take_profit = order_payload.get("take_profit")
-
-                take_profit_val = take_profit
-
-                try:
-
-                    stop_loss = float(stop_loss_val) if stop_loss_val is not None else None
-
-                except (TypeError, ValueError):
-
-                    stop_loss = None
-
-                try:
-
-                    take_profit = float(take_profit_val) if take_profit_val is not None else None
-
-                except (TypeError, ValueError):
-
-                    take_profit = None
-
-                if stop_loss and stop_loss > 0:
-
-                    initial_risk = abs(p.avg_entry_price - stop_loss)
-
-                # =============================================================================
-                # [MODIFIED 2026-10-25]: Exempt Runner Strategies from Database Take-Profit Injection
-                # ORIGINAL INTENT: Unconditionally injected take_profit from DB order payload onto
-                # all active positions, capping runner positions at 2.0R bracket targets.
-                # REASON FOR CHANGE: Forensic audit proved that capping runners reduced profits by $5,306.
-                # Exempting runner strategies allows multi-R compounding and EOD peak captures.
-                # SAFE ROLLBACK: Previous injection lines preserved below as comments.
-                # -----------------------------------------------------------------------------
-                # [PREVIOUS CODE - PRESERVED]:
-                # if take_profit is not None and float(take_profit) > 0:
-                #     self._position_take_profits[p.symbol] = float(take_profit)
-                #     p.take_profit = float(take_profit)
-                # -----------------------------------------------------------------------------
-                # [NEW CODE]:
-                runner_strats = {"orb", "momentum", "trend_pullback", "bb_squeeze", "gap_and_go", "relative_strength"}
-                if strat not in runner_strats and take_profit is not None and float(take_profit) > 0:
-                    self._position_take_profits[p.symbol] = float(take_profit)
-                    p.take_profit = float(take_profit)
-                elif strat in runner_strats:
-                    p.take_profit = None
-                    self._position_take_profits.pop(p.symbol, None)
-                # =============================================================================
-
-                submitted_at_str = order_payload.get("submitted_at")
-
-                if submitted_at_str:
-
-                    try:
-
-                        opened_at = datetime.fromisoformat(submitted_at_str)
-
-                    except Exception:
-
-                        pass
-
-
-
-            # Restore local stop/risk metadata for lot tracking and PIS. This
-
-            # fallback does not submit or verify a protective broker order.
-
-            if stop_loss is None or stop_loss <= 0:
-
-                stop_pct = 0.015  # 1.5% conservative protective fallback
-
-                if p.qty > 0:
-
-                    stop_loss = round(p.avg_entry_price * (1.0 - stop_pct), 4)
-
-                else:
-
-                    stop_loss = round(p.avg_entry_price * (1.0 + stop_pct), 4)
-
-                initial_risk = abs(p.avg_entry_price - stop_loss)
-
-
-
-            from app.portfolio.tracker import _OpenLot
-
-            self.portfolio._lots[p.symbol] = _OpenLot(
-
-                qty=p.qty,
-
-                avg_price=p.avg_entry_price,
-
-                entry_ts=opened_at,
-
-                strategy=strat,
-
-                stop_loss=stop_loss,
-
-                initial_risk_per_share=initial_risk,
-
-            )
-
-            applog.info(
-
-                "engine",
-
-                f"Reconstructed portfolio lot for {p.symbol}: qty={p.qty}, "
-
-                f"avg_price={p.avg_entry_price}, strategy={strat}, stop_loss={stop_loss}",
-
-            )
-
-        self.reconciliation_failed = False
-
-
-
-
-
-
-
-
-
-    async def _reconcile_pending_submissions(self, now: datetime | None = None) -> None:
-
-        """Resolve ambiguous submits without releasing duplicate/exposure guards early."""
-
-        if not self.pending_reconciliation_orders:
-
-            return
-
-        now = now or utcnow()
-
-        min_absence_age_seconds = 60.0
-
-        required_not_found_observations = 3
-
-        client_ids = list(self.pending_reconciliation_orders.keys())
-
-        applog.info("engine", f"Checking status of {len(client_ids)} ambiguous order submissions: {client_ids}")
-
-        changed = False
-
-        for cid in client_ids:
-
-            order_info = self.pending_reconciliation_orders.get(cid)
-
-            if not isinstance(order_info, dict):
-
-                continue
-
-            symbol = str(order_info.get("symbol", "")).upper()
-
-            try:
-
-                order = await self.broker.get_order_by_client_id(cid)
-
-            except Exception as exc:
-
-                applog.warning("engine", f"Reconciliation query failed for client ID {cid}: {exc}. Retaining guard.")
-
-                continue
-
-            if order is not None:
-
-                applog.info("engine", f"Ambiguous order resolved from broker truth: {symbol} ({cid}) status={order.status}.")
-
-                self.pending_reconciliation_orders.pop(cid, None)
-
-                recovered_target = order_info.get("take_profit")
-
-                if recovered_target is not None:
-
-                    try:
-
-                        recovered_target = float(recovered_target)
-
-                    except (TypeError, ValueError):
-
-                        recovered_target = None
-
-                if recovered_target is not None and recovered_target > 0:
-
-                    self._position_take_profits[symbol] = recovered_target
-
-                    order = order.model_copy(update={"take_profit": recovered_target})
-
-                await asyncio.to_thread(self.db.save_order, order, self.mode)
-
-                changed = True
-
-                continue
-
-            submitted_at = order_info.get("submitted_at")
-
-            try:
-
-                submitted_dt = datetime.fromisoformat(str(submitted_at).replace("Z", "+00:00"))
-
-                if submitted_dt.tzinfo is None:
-
-                    submitted_dt = submitted_dt.replace(tzinfo=UTC)
-
-                age_seconds = max(0.0, (now - submitted_dt.astimezone(UTC)).total_seconds())
-
-            except (TypeError, ValueError):
-
-                age_seconds = 0.0
-
-            count = int(order_info.get("reconcile_not_found_count", 0) or 0) + 1
-
-            order_info["reconcile_not_found_count"] = count
-
-            order_info["last_reconcile_not_found_at"] = now.isoformat()
-
-            if not order_info.get("first_reconcile_not_found_at"):
-
-                order_info["first_reconcile_not_found_at"] = now.isoformat()
-
-            changed = True
-
-            if count < required_not_found_observations or age_seconds < min_absence_age_seconds:
-
-                applog.warning("engine", f"Ambiguous order still unresolved: {symbol} ({cid}) broker_not_found observation={count}/{required_not_found_observations} age={age_seconds:.1f}s; retaining guard.")
-
-                continue
-
-            applog.warning("engine", f"Ambiguous order resolved absent after bounded reconciliation: {symbol} ({cid}) not_found_observations={count} age={age_seconds:.1f}s. Treating as REJECTED.")
-
-            self.pending_reconciliation_orders.pop(cid, None)
-
-            rejected_order = Order(id=cid, client_order_id=cid, symbol=symbol, side=OrderSide.BUY if str(order_info.get("side", "")).lower() == "buy" else OrderSide.SELL, qty=float(order_info.get("qty", 0.0) or 0.0), order_type=OrderType.LIMIT if str(order_info.get("order_type", "")).lower() == "limit" else OrderType.MARKET, limit_price=order_info.get("limit_price"), status=OrderStatus.REJECTED, reason=f"Ambiguous submit resolved absent after repeated broker not-found observations ({count}) and {age_seconds:.1f}s age.")
-
-            await asyncio.to_thread(self.db.save_order, rejected_order, self.mode)
-
-        if changed:
-
-            await asyncio.to_thread(self.db.set_setting, "pending_reconciliation_orders", self.pending_reconciliation_orders)
-
-    # ------------------------------------------------------------------
-
-    # manual operations (REST)
-
-    # ------------------------------------------------------------------
-
-
-
-    async def manual_order(self, req: OrderRequest) -> Order:
-
-        if self.state != EngineState.RUNNING or self.broker is None:
-
-            raise RuntimeError("Engine is not running")
-
-
-
-        # Risk gateway: block manual entry orders in live mode
-
-        positions = await self.broker.positions()
-
-        is_entry = True
-
-        pos = next((p for p in positions if p.symbol == req.symbol), None)
-
-        if pos is not None and abs(pos.qty) > 1e-9:
-
-            if pos.qty > 0:  # Long position
-
-                if req.side == OrderSide.SELL and req.qty <= pos.qty:
-
-                    is_entry = False  # Reducing or closing long is allowed
-
-            else:  # Short position
-
-                if req.side == OrderSide.BUY and req.qty <= abs(pos.qty):
-
-                    is_entry = False  # Reducing or closing short is allowed
-
-
-
-        if self.mode == "live" and is_entry:
-
-            raise RuntimeError(
-
-                f"Manual entry orders for {req.symbol} are disabled in live mode to enforce risk management. "
-
-                f"Use automated strategy entries or close/flatten manually."
-
-            )
-
-
-
-        req.strategy = "manual"
-
-
-
-        # Owner control (CR-21): per-session manual-entry budget. Closes and
-
-        # position reductions always flow; only NEW discretionary entries
-
-        # count against the budget. Raises like other manual gates so the API
-
-        # surfaces it as HTTP 400 with the reason intact.
-
-        if is_entry:
-
-            if not hasattr(self, "_manual_entry_dates"):
-
-                self._manual_entry_dates = []
-
-            today_et = datetime.now(ZoneInfo("America/New_York")).date()
-
-            session_count = sum(1 for d in self._manual_entry_dates if d == today_et)
-
-            _rc = getattr(self, "risk_config", None)
-
-            budget = int(getattr(_rc, "max_manual_entries_per_session", 3) if _rc is not None else 3)
-
-            if session_count >= budget:
-
-                applog.warning(
-
-                    "engine",
-
-                    f"Manual entry BLOCKED for {req.symbol}: session budget exhausted "
-
-                    f"({session_count}/{budget}) -- operator review required",
-
-                )
-
-                raise RuntimeError(
-
-                    f"Manual entry budget exhausted ({session_count}/{budget} used this session) -- "
-
-                    f"operator review required. Closing/reducing positions is still allowed."
-
-                )
-
-            self._manual_entry_dates.append(today_et)
-
-            applog.info("engine", f"Manual entry {session_count + 1}/{budget} this session: {req.side} {req.qty} {req.symbol} ({req.reason})")
-
-
-
-        # If this is a manual sell/cover (closing or reducing), add to pending-close guard so
-
-        # strategies cannot immediately re-enter on the same/next tick before the fill drains.
-
-        if not hasattr(self, "_pending_close_symbols"):
-
-            self._pending_close_symbols = set()
-
-        if not hasattr(self, "_pending_close_order_ids"):
-
-            self._pending_close_order_ids = {}
-
-        sym_upper = req.symbol.upper()
-
-        if not is_entry:
-
-            self._pending_close_symbols.add(sym_upper)
-
-
-
-        try:
-
-            order = await self.broker.submit(req)
-
-        except Exception:
-
-            # Submission failed — nothing is in flight. Release the guard so a
-
-            # later manual attempt or strategy exit can proceed.
-
-            self._pending_close_symbols.discard(sym_upper)
-
-            raise
-
-        if not is_entry:
-
-            if order.status == OrderStatus.REJECTED:
-
-                self._pending_close_symbols.discard(sym_upper)
-
-            else:
-
-                self._pending_close_order_ids[sym_upper] = str(order.id)
-
-        self.recent_orders.appendleft(order)
-
-        await asyncio.to_thread(self.db.save_order, order, self.mode)
-
-        await self._drain_fills(utcnow())
-
-        self.publish("orders", self.orders_payload())
-
-        await self._publish_positions()
-
-        return order
-
-
-
-    async def close_symbol(self, symbol: str) -> Order | None:
-
-        if self.broker is None:
-
-            raise RuntimeError("Engine is not running")
-
-        # Guard: add to pending-close so strategies cannot immediately re-enter on the same/next tick
-
-        sym_upper = symbol.upper()
-
-        if not hasattr(self, "_pending_close_symbols"):
-
-            self._pending_close_symbols = set()
-
-        if not hasattr(self, "_pending_close_order_ids"):
-
-            self._pending_close_order_ids = {}
-
-        self._pending_close_symbols.add(sym_upper)
-
-        try:
-
-            order = await self.broker.close_position(symbol, reason="manual close")
-
-        except Exception:
-
-            self._pending_close_symbols.discard(sym_upper)
-
-            raise
-
-        if order is not None:
-
-            self._pending_close_order_ids[sym_upper] = str(order.id)
-
-            self.recent_orders.appendleft(order)
-
-            await asyncio.to_thread(self.db.save_order, order, self.mode)
-
-        else:
-
-            # Close failed — release guard so retries work
-
-            self._pending_close_symbols.discard(sym_upper)
-
-        await self._drain_fills(utcnow())
-
-        await self._publish_positions()
-
-        return order
-
-
-
-
+    # =============================================================================
+    # [MODIFIED 2026-11-11]: Deconstruct Order Router & Reconciliation Methods to Mixins (R5)
+    # ORIGINAL INTENT: Methods _close_position_guarded, _get_pending_close_order_ids,
+    #   _release_pending_close, _reconcile_pending_closes, _persist_submitted_close_order,
+    #   _reconcile_positions, _reconcile_pending_submissions, manual_order, and close_symbol
+    #   were defined directly on TradingEngine in engine.py.
+    # REASON FOR CHANGE: Extract service boundaries into TradingEngineOrderRouterMixin
+    #   (app.core.order_router) and TradingEngineReconciliationMixin (app.core.reconciliation)
+    #   maintaining 100% backward compatibility for callers and tests.
+    # SAFE ROLLBACK: Original monolithic method implementations preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # async def _close_position_guarded(
+    #
+    # self,
+    #
+    # symbol: str,
+    #
+    # reason: str,
+    #
+    # qty: float | None = None,
+    #
+    # strategy: str | None = None,
+    #
+    # ) -> bool:
+    #
+    # """Close a position once and report whether the broker accepted the close.
+    #
+    #
+    #
+    # ``True`` means a close order with a usable identifier was accepted by
+    #
+    # the broker (it may still be waiting to fill).  ``False`` means the
+    #
+    # broker returned no order or explicitly rejected it.  A broker
+    #
+    # exception is re-raised after releasing the latch because that is an
+    #
+    # ambiguous result.  A duplicate call is treated as ``True`` because
+    #
+    # the existing in-flight close already owns the symbol's close intent;
+    #
+    # this preserves the idempotent close latch without reverting PIS state
+    #
+    # for a request that was never submitted.
+    #
+    # """
+    #
+    # if not hasattr(self, "_pending_close_symbols"):
+    #
+    # self._pending_close_symbols = set()
+    #
+    # if not hasattr(self, "_pending_close_order_ids"):
+    #
+    # self._pending_close_order_ids = {}
+    #
+    # # fix(partial-close-wedge): track requested close size and submit time so
+    #
+    # # _drain_fills can release the guard from fill truth alone and stale
+    #
+    # # latches can never wedge PIS exits indefinitely (2026-08-24: after the
+    #
+    # # CRWV/V/AMZN partial scale-outs every subsequent PROTECTION_BREACH
+    #
+    # # exit was silently swallowed for 30-80 minutes).
+    #
+    # if not hasattr(self, "_pending_close_qtys"):
+    #
+    # self._pending_close_qtys = {}
+    #
+    # if not hasattr(self, "_pending_close_submitted_at"):
+    #
+    # self._pending_close_submitted_at = {}
+    #
+    # # fix(#45): also guard against concurrent per-tick flatten submissions
+    #
+    # if symbol in self._pending_close_symbols or symbol in self._flattening_symbols:
+    #
+    # applog.debug("engine", f"{symbol}: skipping duplicate close — close already in-flight (#45)")
+    #
+    # return True
+    #
+    # self._flattening_symbols.add(symbol)
+    #
+    # self._pending_close_symbols.add(symbol)
+    #
+    # try:
+    #
+    # # Support brokers whose close_position predates the qty parameter.
+    #
+    # # Signature inspection (not try/except TypeError) so a TypeError
+    #
+    # # raised INSIDE broker logic can never silently convert a targeted
+    #
+    # # partial close into a full-position close.
+    #
+    # close_parameters = inspect.signature(self.broker.close_position).parameters
+    #
+    # close_kwargs = {"reason": reason}
+    #
+    # if qty is not None and "qty" in close_parameters:
+    #
+    # close_kwargs["qty"] = qty
+    #
+    # if strategy and "strategy" in close_parameters:
+    #
+    # close_kwargs["strategy"] = strategy
+    #
+    # order = await self.broker.close_position(symbol, **close_kwargs)
+    #
+    # if order is None:
+    #
+    # # Close failed immediately (no broker position) — release so retries work.
+    #
+    # self._release_pending_close(symbol, "close returned no order")
+    #
+    # return False
+    #
+    #
+    #
+    # status = getattr(getattr(order, "status", None), "value", getattr(order, "status", None))
+    #
+    # status_value = str(status).split(".")[-1].lower()
+    #
+    # if status_value in {OrderStatus.REJECTED.value, OrderStatus.CANCELED.value}:
+    #
+    # # A rejected/canceled order is not an in-flight close.
+    #
+    # # Releasing now is important because PIS must be able to retry
+    #
+    # # on the next bar.
+    #
+    # self._release_pending_close(symbol, f"close {status_value}")
+    #
+    # return False
+    #
+    #
+    #
+    # order_id = getattr(order, "id", None)
+    #
+    # if not order_id:
+    #
+    # # Without an order id the fill-drain path cannot bind execution
+    #
+    # # truth to this latch, so do not claim that the close succeeded.
+    #
+    # self._release_pending_close(symbol, "close returned no order id")
+    #
+    # return False
+    #
+    #
+    #
+    # # Preserve the caller's execution attribution on broker-generated
+    #
+    # # close orders.  PIS closes do not pass through submit(), so this is
+    #
+    # # the last durable metadata boundary before the fill is observed.
+    #
+    # if strategy:
+    #
+    # order.strategy = strategy
+    #
+    # if reason:
+    #
+    # order.reason = reason
+    #
+    #
+    #
+    # # Track the close order id; _drain_fills releases the guard when
+    #
+    # # this order reaches a terminal state. A partial fill no longer
+    #
+    # # latches the guard until the whole lot is gone.
+    #
+    # self._get_pending_close_order_ids()[symbol] = str(order_id)
+    #
+    # self._pending_close_qtys[symbol] = float(qty) if qty is not None else None
+    #
+    # self._pending_close_submitted_at[symbol] = utcnow()
+    #
+    # # Register the close order so fill-drain can resolve it by id.
+    #
+    # # Broker-initiated closes never pass through submit(), and an
+    #
+    # # unresolvable tracked id used to wedge the guard permanently.
+    #
+    # self.recent_orders.appendleft(order)
+    #
+    # hook = getattr(self, "_persist_submitted_close_order", None)
+    #
+    # if hook is not None and asyncio.iscoroutinefunction(hook):
+    #
+    # await hook(order)
+    #
+    # return True
+    #
+    # except Exception as exc:
+    #
+    # # Submission itself failed or its result became ambiguous. Release
+    #
+    # # both guards so a later tick can retry instead of wedging exits;
+    #
+    # # callers receive the broker exception rather than treating the
+    #
+    # # request as filled.  The PIS evaluation boundary catches this,
+    #
+    # # reverts decision-time scale-out state, and returns to the tick
+    #
+    # # without masking the ambiguity.
+    #
+    # self._release_pending_close(symbol, f"close submission ambiguous: {exc}")
+    #
+    # applog.warning("engine", f"{symbol}: close submission failed or is ambiguous: {exc}")
+    #
+    # raise
+    #
+    # finally:
+    #
+    # self._flattening_symbols.discard(symbol)
+    #
+    #
+    #
+    # def _get_pending_close_order_ids(self) -> dict[str, str]:
+    #
+    # """Lazily materialize the close-order-id map (test engines may skip __init__)."""
+    #
+    # ids = getattr(self, "_pending_close_order_ids", None)
+    #
+    # if ids is None:
+    #
+    # ids = {}
+    #
+    # self._pending_close_order_ids = ids
+    #
+    # return ids
+    #
+    #
+    #
+    # def _release_pending_close(self, symbol: str, cause: str) -> None:
+    #
+    # """Release the per-symbol close latch so future PIS exits can execute."""
+    #
+    # if not hasattr(self, "_pending_close_symbols"):
+    #
+    # return
+    #
+    # if symbol not in self._pending_close_symbols:
+    #
+    # return
+    #
+    # self._pending_close_symbols.discard(symbol)
+    #
+    # self._get_pending_close_order_ids().pop(symbol, None)
+    #
+    # if hasattr(self, "_pending_close_qtys"):
+    #
+    # self._pending_close_qtys.pop(symbol, None)
+    #
+    # if hasattr(self, "_pending_close_submitted_at"):
+    #
+    # self._pending_close_submitted_at.pop(symbol, None)
+    #
+    # applog.debug("engine", f"{symbol}: close-guard released ({cause})")
+    #
+    #
+    #
+    # async def _reconcile_pending_closes(self, now: datetime) -> None:
+    #
+    # """Per-tick reconciliation of pending close latches.
+    #
+    #
+    #
+    # The legacy release path only ran when a NEW fill arrived for the same
+    #
+    # symbol. After a partial scale-out the residual lot generates no further
+    #
+    # fills until EOD, so a guard whose tracked order could not be resolved
+    #
+    # stayed latched for the rest of the session and silently swallowed every
+    #
+    # PIS exit (2026-08-24 CRWV/V/AMZN). Re-check liveness every tick from
+    #
+    # three sources: tracked-order terminal state, fill-truth completion, and
+    #
+    # a staleness deadline.
+    #
+    # """
+    #
+    # pending = getattr(self, "_pending_close_symbols", None)
+    #
+    # if not pending:
+    #
+    # return
+    #
+    # stale_after = 90.0  # seconds; ~2 evaluation ticks even under degraded data
+    #
+    # for symbol in list(pending):
+    #
+    # tracked_id = self._get_pending_close_order_ids().get(symbol)
+    #
+    #
+    #
+    # # 1) Tracked order reached a terminal state?
+    #
+    # if tracked_id:
+    #
+    # resolved = next(
+    #
+    # (o for o in self.recent_orders if str(o.id) == tracked_id or o.client_order_id == tracked_id),
+    #
+    # None,
+    #
+    # )
+    #
+    # if resolved is not None:
+    #
+    # status = getattr(resolved.status, "value", resolved.status)
+    #
+    # if str(status).upper() in {"FILLED", "CANCELED", "REJECTED"}:
+    #
+    # self._release_pending_close(symbol, f"order terminal: {status}")
+    #
+    # continue
+    #
+    #
+    #
+    # # 2) Latch older than the staleness deadline? Force-release; PIS
+    #
+    # #    re-evaluates on the next bar and will re-close if still needed.
+    #
+    # submitted_at = getattr(self, "_pending_close_submitted_at", {}).get(symbol)
+    #
+    # if submitted_at is not None and (now - submitted_at).total_seconds() > stale_after:
+    #
+    # applog.warning(
+    #
+    # "engine",
+    #
+    # f"{symbol}: close-guard force-released after {stale_after:.0f}s staleness — "
+    #
+    # "prior close never confirmed; PIS may retry",
+    #
+    # )
+    #
+    # self._release_pending_close(symbol, "stale latch")
+    #
+    #
+    #
+    # async def _persist_submitted_close_order(self, order: Order) -> None:
+    #
+    # """Hook for persistence of submitted close orders (durable subclass)."""
+    #
+    #
+    #
+    # def _reconcile_positions(self, positions: list[Position]) -> None:
+    #
+    # """Reconcile local lots to authoritative broker positions without erasing matching lot state."""
+    #
+    # _QTY_TOL = 1e-4  # fractional-share/rounding tolerance; 1e-9 caused permanent mismatch thrash
+    #
+    # broker_symbols = {p.symbol for p in positions if abs(float(p.qty)) > _QTY_TOL}
+    #
+    # for local_symbol in list(self.portfolio._lots):
+    #
+    # if local_symbol not in broker_symbols:
+    #
+    # self.portfolio._lots.pop(local_symbol, None)
+    #
+    # self._position_take_profits.pop(local_symbol, None)
+    #
+    # self._position_peaks.pop(local_symbol, None)
+    #
+    # self._position_troughs.pop(local_symbol, None)
+    #
+    # self._position_initial_stops.pop(local_symbol, None)
+    #
+    #
+    #
+    # for p in positions:
+    #
+    # existing_lot = self.portfolio._lots.get(p.symbol)
+    #
+    # if existing_lot is not None:
+    #
+    # qty_matches = abs(float(existing_lot.qty) - float(p.qty)) <= _QTY_TOL
+    #
+    # price_scale = max(1.0, abs(float(p.avg_entry_price)))
+    #
+    # avg_matches = abs(float(existing_lot.avg_price) - float(p.avg_entry_price)) <= 1e-8 * price_scale
+    #
+    # if qty_matches and avg_matches:
+    #
+    # # Fill processing already established the same economic lot. Keep
+    #
+    # # its original/current stop, initial R, strategy and entry timestamp.
+    #
+    # p.strategy = existing_lot.strategy
+    #
+    # continue
+    #
+    #
+    #
+    # strat = "manual"
+    #
+    # if hasattr(self.broker, "_symbol_strategies"):
+    #
+    # db_strat = self.db.get_latest_entry_order_strategy(p.symbol, self.mode)
+    #
+    # if db_strat:
+    #
+    # self.broker._symbol_strategies[p.symbol] = db_strat
+    #
+    # strat = db_strat
+    #
+    # applog.info("engine", f"Restored strategy '{db_strat}' for active position {p.symbol}")
+    #
+    #
+    #
+    # # Position ownership comes from the latest true ENTRY, never from a
+    #
+    # # newer emergency/protective order.  This keeps UI attribution and
+    #
+    # # strategy-specific exit management bound to the strategy that opened
+    #
+    # # the surviving position.
+    #
+    # entry_payload = self.db.get_latest_entry_order_payload(p.symbol, self.mode)
+    #
+    # if not isinstance(entry_payload, dict):
+    #
+    # entry_payload = None
+    #
+    # fallback_payload = self.db.get_latest_order_payload(p.symbol, self.mode)
+    #
+    # if not isinstance(fallback_payload, dict):
+    #
+    # fallback_payload = None
+    #
+    # order_payload = entry_payload or fallback_payload
+    #
+    # if entry_payload and entry_payload.get("strategy"):
+    #
+    # strat = str(entry_payload["strategy"])
+    #
+    # p.strategy = strat
+    #
+    # if hasattr(self.broker, "_symbol_strategies"):
+    #
+    # self.broker._symbol_strategies[p.symbol] = strat
+    #
+    # stop_loss = None
+    #
+    # take_profit = None
+    #
+    # initial_risk = None
+    #
+    # opened_at = p.opened_at if hasattr(p, "opened_at") and p.opened_at else datetime.now(UTC)
+    #
+    # if order_payload:
+    #
+    # stop_loss_val = order_payload.get("stop_loss")
+    #
+    # take_profit = order_payload.get("take_profit")
+    #
+    # take_profit_val = take_profit
+    #
+    # try:
+    #
+    # stop_loss = float(stop_loss_val) if stop_loss_val is not None else None
+    #
+    # except (TypeError, ValueError):
+    #
+    # stop_loss = None
+    #
+    # try:
+    #
+    # take_profit = float(take_profit_val) if take_profit_val is not None else None
+    #
+    # except (TypeError, ValueError):
+    #
+    # take_profit = None
+    #
+    # if stop_loss and stop_loss > 0:
+    #
+    # initial_risk = abs(p.avg_entry_price - stop_loss)
+    #
+    # # =============================================================================
+    # # [MODIFIED 2026-10-25]: Exempt Runner Strategies from Database Take-Profit Injection
+    # # ORIGINAL INTENT: Unconditionally injected take_profit from DB order payload onto
+    # # all active positions, capping runner positions at 2.0R bracket targets.
+    # # REASON FOR CHANGE: Forensic audit proved that capping runners reduced profits by $5,306.
+    # # Exempting runner strategies allows multi-R compounding and EOD peak captures.
+    # # SAFE ROLLBACK: Previous injection lines preserved below as comments.
+    # # -----------------------------------------------------------------------------
+    # # [PREVIOUS CODE - PRESERVED]:
+    # # if take_profit is not None and float(take_profit) > 0:
+    # #     self._position_take_profits[p.symbol] = float(take_profit)
+    # #     p.take_profit = float(take_profit)
+    # # -----------------------------------------------------------------------------
+    # # [NEW CODE]:
+    # runner_strats = {"orb", "momentum", "trend_pullback", "bb_squeeze", "gap_and_go", "relative_strength"}
+    # if strat not in runner_strats and take_profit is not None and float(take_profit) > 0:
+    # self._position_take_profits[p.symbol] = float(take_profit)
+    # p.take_profit = float(take_profit)
+    # elif strat in runner_strats:
+    # p.take_profit = None
+    # self._position_take_profits.pop(p.symbol, None)
+    # # =============================================================================
+    #
+    # submitted_at_str = order_payload.get("submitted_at")
+    #
+    # if submitted_at_str:
+    #
+    # try:
+    #
+    # opened_at = datetime.fromisoformat(submitted_at_str)
+    #
+    # except Exception:
+    #
+    # pass
+    #
+    #
+    #
+    # # Restore local stop/risk metadata for lot tracking and PIS. This
+    #
+    # # fallback does not submit or verify a protective broker order.
+    #
+    # if stop_loss is None or stop_loss <= 0:
+    #
+    # stop_pct = 0.015  # 1.5% conservative protective fallback
+    #
+    # if p.qty > 0:
+    #
+    # stop_loss = round(p.avg_entry_price * (1.0 - stop_pct), 4)
+    #
+    # else:
+    #
+    # stop_loss = round(p.avg_entry_price * (1.0 + stop_pct), 4)
+    #
+    # initial_risk = abs(p.avg_entry_price - stop_loss)
+    #
+    #
+    #
+    # from app.portfolio.tracker import _OpenLot
+    #
+    # self.portfolio._lots[p.symbol] = _OpenLot(
+    #
+    # qty=p.qty,
+    #
+    # avg_price=p.avg_entry_price,
+    #
+    # entry_ts=opened_at,
+    #
+    # strategy=strat,
+    #
+    # stop_loss=stop_loss,
+    #
+    # initial_risk_per_share=initial_risk,
+    #
+    # )
+    #
+    # applog.info(
+    #
+    # "engine",
+    #
+    # f"Reconstructed portfolio lot for {p.symbol}: qty={p.qty}, "
+    #
+    # f"avg_price={p.avg_entry_price}, strategy={strat}, stop_loss={stop_loss}",
+    #
+    # )
+    #
+    # self.reconciliation_failed = False
+    #
+    #
+    #
+    #
+    #
+    #
+    #
+    #
+    #
+    # async def _reconcile_pending_submissions(self, now: datetime | None = None) -> None:
+    #
+    # """Resolve ambiguous submits without releasing duplicate/exposure guards early."""
+    #
+    # if not self.pending_reconciliation_orders:
+    #
+    # return
+    #
+    # now = now or utcnow()
+    #
+    # min_absence_age_seconds = 60.0
+    #
+    # required_not_found_observations = 3
+    #
+    # client_ids = list(self.pending_reconciliation_orders.keys())
+    #
+    # applog.info("engine", f"Checking status of {len(client_ids)} ambiguous order submissions: {client_ids}")
+    #
+    # changed = False
+    #
+    # for cid in client_ids:
+    #
+    # order_info = self.pending_reconciliation_orders.get(cid)
+    #
+    # if not isinstance(order_info, dict):
+    #
+    # continue
+    #
+    # symbol = str(order_info.get("symbol", "")).upper()
+    #
+    # try:
+    #
+    # order = await self.broker.get_order_by_client_id(cid)
+    #
+    # except Exception as exc:
+    #
+    # applog.warning("engine", f"Reconciliation query failed for client ID {cid}: {exc}. Retaining guard.")
+    #
+    # continue
+    #
+    # if order is not None:
+    #
+    # applog.info("engine", f"Ambiguous order resolved from broker truth: {symbol} ({cid}) status={order.status}.")
+    #
+    # self.pending_reconciliation_orders.pop(cid, None)
+    #
+    # recovered_target = order_info.get("take_profit")
+    #
+    # if recovered_target is not None:
+    #
+    # try:
+    #
+    # recovered_target = float(recovered_target)
+    #
+    # except (TypeError, ValueError):
+    #
+    # recovered_target = None
+    #
+    # if recovered_target is not None and recovered_target > 0:
+    #
+    # self._position_take_profits[symbol] = recovered_target
+    #
+    # order = order.model_copy(update={"take_profit": recovered_target})
+    #
+    # await asyncio.to_thread(self.db.save_order, order, self.mode)
+    #
+    # changed = True
+    #
+    # continue
+    #
+    # submitted_at = order_info.get("submitted_at")
+    #
+    # try:
+    #
+    # submitted_dt = datetime.fromisoformat(str(submitted_at).replace("Z", "+00:00"))
+    #
+    # if submitted_dt.tzinfo is None:
+    #
+    # submitted_dt = submitted_dt.replace(tzinfo=UTC)
+    #
+    # age_seconds = max(0.0, (now - submitted_dt.astimezone(UTC)).total_seconds())
+    #
+    # except (TypeError, ValueError):
+    #
+    # age_seconds = 0.0
+    #
+    # count = int(order_info.get("reconcile_not_found_count", 0) or 0) + 1
+    #
+    # order_info["reconcile_not_found_count"] = count
+    #
+    # order_info["last_reconcile_not_found_at"] = now.isoformat()
+    #
+    # if not order_info.get("first_reconcile_not_found_at"):
+    #
+    # order_info["first_reconcile_not_found_at"] = now.isoformat()
+    #
+    # changed = True
+    #
+    # if count < required_not_found_observations or age_seconds < min_absence_age_seconds:
+    #
+    # applog.warning("engine", f"Ambiguous order still unresolved: {symbol} ({cid}) broker_not_found observation={count}/{required_not_found_observations} age={age_seconds:.1f}s; retaining guard.")
+    #
+    # continue
+    #
+    # applog.warning("engine", f"Ambiguous order resolved absent after bounded reconciliation: {symbol} ({cid}) not_found_observations={count} age={age_seconds:.1f}s. Treating as REJECTED.")
+    #
+    # self.pending_reconciliation_orders.pop(cid, None)
+    #
+    # rejected_order = Order(id=cid, client_order_id=cid, symbol=symbol, side=OrderSide.BUY if str(order_info.get("side", "")).lower() == "buy" else OrderSide.SELL, qty=float(order_info.get("qty", 0.0) or 0.0), order_type=OrderType.LIMIT if str(order_info.get("order_type", "")).lower() == "limit" else OrderType.MARKET, limit_price=order_info.get("limit_price"), status=OrderStatus.REJECTED, reason=f"Ambiguous submit resolved absent after repeated broker not-found observations ({count}) and {age_seconds:.1f}s age.")
+    #
+    # await asyncio.to_thread(self.db.save_order, rejected_order, self.mode)
+    #
+    # if changed:
+    #
+    # await asyncio.to_thread(self.db.set_setting, "pending_reconciliation_orders", self.pending_reconciliation_orders)
+    #
+    # # ------------------------------------------------------------------
+    #
+    # # manual operations (REST)
+    #
+    # # ------------------------------------------------------------------
+    #
+    #
+    #
+    # async def manual_order(self, req: OrderRequest) -> Order:
+    #
+    # if self.state != EngineState.RUNNING or self.broker is None:
+    #
+    # raise RuntimeError("Engine is not running")
+    #
+    #
+    #
+    # # Risk gateway: block manual entry orders in live mode
+    #
+    # positions = await self.broker.positions()
+    #
+    # is_entry = True
+    #
+    # pos = next((p for p in positions if p.symbol == req.symbol), None)
+    #
+    # if pos is not None and abs(pos.qty) > 1e-9:
+    #
+    # if pos.qty > 0:  # Long position
+    #
+    # if req.side == OrderSide.SELL and req.qty <= pos.qty:
+    #
+    # is_entry = False  # Reducing or closing long is allowed
+    #
+    # else:  # Short position
+    #
+    # if req.side == OrderSide.BUY and req.qty <= abs(pos.qty):
+    #
+    # is_entry = False  # Reducing or closing short is allowed
+    #
+    #
+    #
+    # if self.mode == "live" and is_entry:
+    #
+    # raise RuntimeError(
+    #
+    # f"Manual entry orders for {req.symbol} are disabled in live mode to enforce risk management. "
+    #
+    # f"Use automated strategy entries or close/flatten manually."
+    #
+    # )
+    #
+    #
+    #
+    # req.strategy = "manual"
+    #
+    #
+    #
+    # # Owner control (CR-21): per-session manual-entry budget. Closes and
+    #
+    # # position reductions always flow; only NEW discretionary entries
+    #
+    # # count against the budget. Raises like other manual gates so the API
+    #
+    # # surfaces it as HTTP 400 with the reason intact.
+    #
+    # if is_entry:
+    #
+    # if not hasattr(self, "_manual_entry_dates"):
+    #
+    # self._manual_entry_dates = []
+    #
+    # today_et = datetime.now(ZoneInfo("America/New_York")).date()
+    #
+    # session_count = sum(1 for d in self._manual_entry_dates if d == today_et)
+    #
+    # _rc = getattr(self, "risk_config", None)
+    #
+    # budget = int(getattr(_rc, "max_manual_entries_per_session", 3) if _rc is not None else 3)
+    #
+    # if session_count >= budget:
+    #
+    # applog.warning(
+    #
+    # "engine",
+    #
+    # f"Manual entry BLOCKED for {req.symbol}: session budget exhausted "
+    #
+    # f"({session_count}/{budget}) -- operator review required",
+    #
+    # )
+    #
+    # raise RuntimeError(
+    #
+    # f"Manual entry budget exhausted ({session_count}/{budget} used this session) -- "
+    #
+    # f"operator review required. Closing/reducing positions is still allowed."
+    #
+    # )
+    #
+    # self._manual_entry_dates.append(today_et)
+    #
+    # applog.info("engine", f"Manual entry {session_count + 1}/{budget} this session: {req.side} {req.qty} {req.symbol} ({req.reason})")
+    #
+    #
+    #
+    # # If this is a manual sell/cover (closing or reducing), add to pending-close guard so
+    #
+    # # strategies cannot immediately re-enter on the same/next tick before the fill drains.
+    #
+    # if not hasattr(self, "_pending_close_symbols"):
+    #
+    # self._pending_close_symbols = set()
+    #
+    # if not hasattr(self, "_pending_close_order_ids"):
+    #
+    # self._pending_close_order_ids = {}
+    #
+    # sym_upper = req.symbol.upper()
+    #
+    # if not is_entry:
+    #
+    # self._pending_close_symbols.add(sym_upper)
+    #
+    #
+    #
+    # try:
+    #
+    # order = await self.broker.submit(req)
+    #
+    # except Exception:
+    #
+    # # Submission failed — nothing is in flight. Release the guard so a
+    #
+    # # later manual attempt or strategy exit can proceed.
+    #
+    # self._pending_close_symbols.discard(sym_upper)
+    #
+    # raise
+    #
+    # if not is_entry:
+    #
+    # if order.status == OrderStatus.REJECTED:
+    #
+    # self._pending_close_symbols.discard(sym_upper)
+    #
+    # else:
+    #
+    # self._pending_close_order_ids[sym_upper] = str(order.id)
+    #
+    # self.recent_orders.appendleft(order)
+    #
+    # await asyncio.to_thread(self.db.save_order, order, self.mode)
+    #
+    # await self._drain_fills(utcnow())
+    #
+    # self.publish("orders", self.orders_payload())
+    #
+    # await self._publish_positions()
+    #
+    # return order
+    #
+    #
+    #
+    # async def close_symbol(self, symbol: str) -> Order | None:
+    #
+    # if self.broker is None:
+    #
+    # raise RuntimeError("Engine is not running")
+    #
+    # # Guard: add to pending-close so strategies cannot immediately re-enter on the same/next tick
+    #
+    # sym_upper = symbol.upper()
+    #
+    # if not hasattr(self, "_pending_close_symbols"):
+    #
+    # self._pending_close_symbols = set()
+    #
+    # if not hasattr(self, "_pending_close_order_ids"):
+    #
+    # self._pending_close_order_ids = {}
+    #
+    # self._pending_close_symbols.add(sym_upper)
+    #
+    # try:
+    #
+    # order = await self.broker.close_position(symbol, reason="manual close")
+    #
+    # except Exception:
+    #
+    # self._pending_close_symbols.discard(sym_upper)
+    #
+    # raise
+    #
+    # if order is not None:
+    #
+    # self._pending_close_order_ids[sym_upper] = str(order.id)
+    #
+    # self.recent_orders.appendleft(order)
+    #
+    # await asyncio.to_thread(self.db.save_order, order, self.mode)
+    #
+    # else:
+    #
+    # # Close failed — release guard so retries work
+    #
+    # self._pending_close_symbols.discard(sym_upper)
+    #
+    # await self._drain_fills(utcnow())
+    #
+    # await self._publish_positions()
+    #
+    # return order
+    #
+    #
+    #
+    #
+    #
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    # Methods are now provided via mixin inheritance:
+    #   TradingEngineOrderRouterMixin: _close_position_guarded, _get_pending_close_order_ids,
+    #     _release_pending_close, _persist_submitted_close_order, manual_order, close_symbol
+    #   TradingEngineReconciliationMixin: _reconcile_pending_closes, _reconcile_positions,
+    #     _reconcile_pending_submissions, _evaluate_position_reconciliation
+    # =============================================================================
 
     def reset_halt(self) -> None:
 
@@ -6425,6 +6511,18 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
                             absent_at_broker = {s for s in unexplained_mismatches if s in db_syms and s not in broker_syms}
                             if absent_at_broker:
                                 self._reconcile_positions(broker_positions)
+                                for sym in absent_at_broker:
+                                    applog.warning(
+                                        "engine.reconciliation",
+                                        f"WARN_ORPHAN_DRAINED: Local ghost lot {sym} drained from portfolio lots; broker confirmed 0 position.",
+                                    )
+                                    if hasattr(self, "orphan_reconciliation_events") and isinstance(self.orphan_reconciliation_events, list):
+                                        self.orphan_reconciliation_events.append({
+                                            "timestamp": now.isoformat(),
+                                            "event": "WARN_ORPHAN_DRAINED",
+                                            "symbol": sym,
+                                            "details": "Local ghost lot drained from portfolio lots; broker confirmed 0 position.",
+                                        })
                                 applog.info("engine.heartbeat", f"Broker truth position reconciliation restored for {absent_at_broker}; clearing stale local lots.")
 
                             # Case 2: Quantity mismatch on active positions (e.g. stock split or partial fill divergence)
@@ -6442,6 +6540,21 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
                             if orphan_at_broker:
                                 self._reconcile_positions(broker_positions)
                                 for orphan_sym in orphan_at_broker:
+                                    lot = getattr(self.portfolio, "_lots", {}).get(orphan_sym) if self.portfolio else None
+                                    stop_val = getattr(lot, "stop_loss", None) if lot else "N/A"
+                                    applog.warning(
+                                        "engine.reconciliation",
+                                        f"WARN_ORPHAN_ADOPTED: Broker orphan {orphan_sym} (qty={broker_syms.get(orphan_sym)}) adopted into active portfolio lots with protective stop {stop_val}.",
+                                    )
+                                    if hasattr(self, "orphan_reconciliation_events") and isinstance(self.orphan_reconciliation_events, list):
+                                        self.orphan_reconciliation_events.append({
+                                            "timestamp": now.isoformat(),
+                                            "event": "WARN_ORPHAN_ADOPTED",
+                                            "symbol": orphan_sym,
+                                            "qty": broker_syms.get(orphan_sym),
+                                            "stop_loss": stop_val,
+                                            "details": f"Broker orphan adopted into active portfolio lots with protective stop {stop_val}.",
+                                        })
                                     applog.error(
                                         "engine.heartbeat",
                                         f"CRITICAL: Orphan position at broker detected for {orphan_sym} (broker holds {broker_syms.get(orphan_sym)} with no active DB lot). "
@@ -6449,6 +6562,17 @@ class TradingEngine(TradingEngineEvaluationMixin, TradingEngineHaltsMixin):
                                     )
                                     try:
                                         await self._close_position_guarded(orphan_sym, reason="orphan_broker_reconciliation_liquidation")
+                                        applog.warning(
+                                            "engine.reconciliation",
+                                            f"WARN_ORPHAN_DRAINED: Broker orphan {orphan_sym} drained via emergency guarded liquidation.",
+                                        )
+                                        if hasattr(self, "orphan_reconciliation_events") and isinstance(self.orphan_reconciliation_events, list):
+                                            self.orphan_reconciliation_events.append({
+                                                "timestamp": now.isoformat(),
+                                                "event": "WARN_ORPHAN_DRAINED",
+                                                "symbol": orphan_sym,
+                                                "details": "Broker orphan drained via emergency guarded liquidation.",
+                                            })
                                     except Exception as exc:
                                         applog.error("engine.heartbeat", f"Failed to liquidate orphan position {orphan_sym}: {exc}")
                         # =============================================================================

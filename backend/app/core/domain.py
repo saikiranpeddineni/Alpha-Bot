@@ -181,6 +181,17 @@ class Signal(BaseModel):
     # [NEW CODE]:
     predicted_peak_r: float | None = None
     # =============================================================================
+    # [ADDED 2026-11-11]: R3 Cold-Start Flag and Unified Regime Posture Metadata
+    # ORIGINAL INTENT: Signal lacked warmup_pending flag and unified regime metadata.
+    # REASON FOR CHANGE: Enforce R3 cold-start starvation guard (warmup_pending=True) and
+    # preserve unified 6-regime posture decisions across execution and telemetry.
+    # SAFE ROLLBACK: Remove warmup_pending, regime_posture, and unified_regime.
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    warmup_pending: bool = False
+    regime_posture: Any | None = None
+    unified_regime: str | None = None
+    # =============================================================================
 
 
 

@@ -26,6 +26,8 @@ from app.ai.prediction import TradeScoreEngine
 from app.config import RiskConfig, Settings, get_settings
 from app.core.applog import applog
 from app.core.domain import Regime, Signal, SignalAction
+from app.core.regime_matrix import RegimeMatrix, RegimePosture, UnifiedRegimeLabel
+from app.risk.market_regime import MarketRiskState
 from app.strategies.base import REGISTRY
 
 REGIME_WEIGHTS: dict[str, dict[Regime, float]] = {
@@ -96,8 +98,34 @@ class SignalPipeline:
     def regime_weight(self, strategy: str, regime: Regime) -> float:
         return self.regime_weights.get(strategy, {}).get(regime, 1.0)
 
-    def process(self, symbol: str, df: pd.DataFrame, signals: list[Signal], regime: Regime,
-                features: pd.Series | None = None, sector_strength: float | None = None) -> tuple[list[Signal], list[tuple[Signal, str]]]:
+    # =============================================================================
+    # [MODIFIED 2026-11-11]: Wire Unified RegimeMatrix & Cold-Start Guard into SignalPipeline.process
+    # ORIGINAL INTENT: process() accepted only basic parameters without macro posture, cold-start
+    # bar counts, or unified 6-regime gating.
+    # REASON FOR CHANGE: R3 requirement to wire RegimeMatrix directly into process() for directional
+    # allowance, strategy eligibility, and risk scaling; and enforce cold-start bar starvation protection
+    # before 09:45 AM ET (< 15 intraday bars suppresses entry candidates with warmup_pending).
+    # SAFE ROLLBACK: Previous signature preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # def process(self, symbol: str, df: pd.DataFrame, signals: list[Signal], regime: Regime,
+    #             features: pd.Series | None = None, sector_strength: float | None = None) -> tuple[list[Signal], list[tuple[Signal, str]]]:
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    def process(
+        self,
+        symbol: str,
+        df: pd.DataFrame,
+        signals: list[Signal],
+        regime: Regime,
+        features: pd.Series | None = None,
+        sector_strength: float | None = None,
+        posture: RegimePosture | None = None,
+        macro_state: MarketRiskState | None = None,
+        now: datetime | None = None,
+        shadow_ledger: Any | None = None,
+    ) -> tuple[list[Signal], list[tuple[Signal, str]]]:
+    # =============================================================================
         """Return accepted and rejected signals."""
         # =============================================================================
         # [MODIFIED 2026-11-04]: Universal Penny Stock Floor & Inverse ETF Regime Firewall
@@ -127,30 +155,150 @@ class SignalPipeline:
                 valid_signals.append(sig)
                 continue
             cur_px = sig.price or (float(df["close"].iloc[-1]) if df is not None and len(df) > 0 else 0.0)
-            # =============================================================================
-            # [MODIFIED 2026-11-11]: Preserve sub-$5 penny stock guardrail evaluation
-            # ORIGINAL INTENT: Universal penny stock filter dropped all cur_px < 5.0 immediately.
-            # REASON FOR CHANGE: If min_price is configured below $5.0 (penny stock mode) or for
-            # strategy="test", allow signal to pass through to the warmup reduced and risk guardrails.
-            # SAFE ROLLBACK: Previous lines preserved below as comments.
-            # -----------------------------------------------------------------------------
-            # [PREVIOUS CODE - PRESERVED]:
-            # if cur_px > 0 and cur_px < 5.0:
-            #     rejected.append((sig, f"Universal penny stock filter: price ${cur_px:.2f} < $5.00"))
-            #     continue
-            # -----------------------------------------------------------------------------
-            # [NEW CODE]:
             min_p = getattr(getattr(self, "risk_config", None), "min_price", 5.0)
             if cur_px > 0 and cur_px < 5.0 and min_p >= 5.0 and sig.strategy != "test":
                 rejected.append((sig, f"Universal penny stock filter: price ${cur_px:.2f} < $5.00"))
                 continue
-            # =============================================================================
             if symbol.upper() in INVERSE_ETFS and sig.action == SignalAction.ENTER_LONG and regime == Regime.TREND_UP:
                 rejected.append((sig, f"Inverse ETF long prohibited during {regime.value} regime (synthetic counter-trend short)"))
                 continue
             valid_signals.append(sig)
 
         signals = valid_signals
+        if not signals:
+            return accepted, rejected
+
+        # =============================================================================
+        # [ADDED 2026-11-11]: R3 Opening Cold-Start Bar Starvation Guard
+        # ORIGINAL INTENT: Prior warmup checks evaluated len(df) >= 5 on total historical slice,
+        # which at 09:31 AM ET included prior-session bars, evaluating unformed intraday indicators.
+        # REASON FOR CHANGE: Enforce cold-start bar starvation protection: before 09:45 AM ET,
+        # if fewer than 15 intraday bars are present on the current trading day, suppress candidate
+        # entry signals, tag with warmup_pending=True, and log to shadow ledger. Strictly exempt exits.
+        # SAFE ROLLBACK: Remove this block.
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        from zoneinfo import ZoneInfo
+        from datetime import time as dtime
+        _ET = ZoneInfo("America/New_York")
+        intraday_bars = 0
+        current_time = None
+        if df is not None and not df.empty:
+            try:
+                if hasattr(df.index, "tz_convert"):
+                    _et_idx = df.index.tz_convert(_ET)
+                else:
+                    _et_idx = pd.to_datetime(df.index).tz_localize("UTC").tz_convert(_ET)
+
+                if now is not None:
+                    _now_et = now.astimezone(_ET) if now.tzinfo else now.replace(tzinfo=ZoneInfo("UTC")).astimezone(_ET)
+                    _curr_date = _now_et.date()
+                    current_time = _now_et.time()
+                else:
+                    _curr_date = _et_idx[-1].date()
+                    current_time = _et_idx[-1].time()
+
+                intraday_bars = int((_et_idx.date == _curr_date).sum())
+            except Exception:
+                intraday_bars = len(df)
+                current_time = None
+
+        if current_time is not None and current_time < dtime(9, 45) and intraday_bars < 15:
+            surviving_signals: list[Signal] = []
+            for sig in signals:
+                if sig.action in (SignalAction.EXIT, SignalAction.SCALE_OUT_HALF):
+                    surviving_signals.append(sig)
+                    continue
+                # Suppress entry candidate
+                sig.warmup_pending = True
+                _reason = f"warmup_pending: fewer than 15 intraday bars ({intraday_bars}) before 09:45 ET"
+                rejected.append((sig, _reason))
+                # Log to shadow ledger
+                _ledger = shadow_ledger or getattr(self, "shadow_ledger", None)
+                if _ledger is None:
+                    try:
+                        from app.core.shadow_ledger import shadow_ledger as _s_ledger
+                        _ledger = _s_ledger
+                    except Exception:
+                        _ledger = None
+                if _ledger is not None and hasattr(_ledger, "record"):
+                    try:
+                        _ledger.record(
+                            symbol=symbol,
+                            action=str(sig.action.value),
+                            strategy=sig.strategy,
+                            gate="warmup_pending",
+                            reason=_reason,
+                            price=sig.price,
+                            confidence=sig.confidence,
+                            sig=sig,
+                        )
+                    except Exception:
+                        pass
+            signals = surviving_signals
+            if not signals:
+                return accepted, rejected
+
+        # =============================================================================
+        # [ADDED 2026-11-11]: R3 Unified 6-Regime RegimeMatrix Wiring
+        # ORIGINAL INTENT: RegimeMatrix was standalone in backend/app/core/regime_matrix.py and
+        # not wired into SignalPipeline.process(), leaving directional allowances uncoordinated.
+        # REASON FOR CHANGE: Wire unified 6-regime RegimeMatrix directly into signal evaluation
+        # to enforce directional trade allowance (allow_long, allow_short), strategy eligibility,
+        # and posture-driven risk scaling (risk_scalar).
+        # SAFE ROLLBACK: Remove this block.
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        if posture is None:
+            if macro_state is None:
+                macro_state = getattr(getattr(self, "trade_score_engine", None), "market_risk_state", MarketRiskState.NORMAL)
+                if not isinstance(macro_state, MarketRiskState):
+                    macro_state = MarketRiskState.NORMAL
+            _vol_p = None
+            if df is not None and "vol_percentile" in df.columns and len(df) > 0:
+                try:
+                    _vol_p = float(df["vol_percentile"].iloc[-1])
+                except Exception:
+                    _vol_p = None
+            posture = RegimeMatrix.evaluate(macro_state, regime, atr_percentile=_vol_p)
+
+        regime_surviving_signals: list[Signal] = []
+        for sig in signals:
+            if sig.action in (SignalAction.EXIT, SignalAction.SCALE_OUT_HALF):
+                regime_surviving_signals.append(sig)
+                continue
+
+            # 1. Market Stress freeze
+            if posture.regime_label == UnifiedRegimeLabel.MARKET_STRESS or posture.risk_scalar == 0.0:
+                rejected.append((sig, f"RegimeMatrix: all entries frozen under {posture.regime_label.value} ({posture.rationale})"))
+                continue
+
+            # 2. Directional allowance
+            if sig.action == SignalAction.ENTER_LONG and not posture.allow_long:
+                rejected.append((sig, f"RegimeMatrix: long entries suppressed under {posture.regime_label.value} ({posture.rationale})"))
+                continue
+            if sig.action == SignalAction.ENTER_SHORT and not posture.allow_short:
+                rejected.append((sig, f"RegimeMatrix: short entries suppressed under {posture.regime_label.value} ({posture.rationale})"))
+                continue
+
+            # 3. Strategy eligibility under LOW_VOLATILITY (mean-reversion blocked)
+            if posture.regime_label == UnifiedRegimeLabel.LOW_VOLATILITY:
+                from app.strategies.base import REGISTRY as _REG
+                _strat_cls = _REG.get(sig.strategy)
+                _is_reversion = bool(getattr(_strat_cls, "is_mean_reversion", False)) if _strat_cls else (sig.strategy in ("vwap_reversion", "rsi2_reversion"))
+                if _is_reversion:
+                    rejected.append((sig, f"RegimeMatrix: mean-reversion strategy {sig.strategy} suppressed under LOW_VOLATILITY ({posture.rationale})"))
+                    continue
+
+            # 4. Posture risk scaling
+            if posture.risk_scalar > 0:
+                sig.risk_multiplier = round(getattr(sig, "risk_multiplier", 1.0) * posture.risk_scalar, 4)
+
+            sig.regime_posture = posture
+            sig.unified_regime = posture.regime_label.value
+            regime_surviving_signals.append(sig)
+
+        signals = regime_surviving_signals
         if not signals:
             return accepted, rejected
         # =============================================================================

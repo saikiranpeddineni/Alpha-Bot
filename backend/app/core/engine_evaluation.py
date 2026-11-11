@@ -912,9 +912,33 @@ class TradingEngineEvaluationMixin:
 
                 )
 
-                if improves_floor and await self._sync_broker_protective_stop(symbol, new_floor):
-
-                    _lot.stop_loss = new_floor
+                # =============================================================================
+                # [MODIFIED 2026-11-11]: Synchronous Broker Ack & PIS Protection Floor Rollback (R1)
+                # ORIGINAL INTENT: If broker sync failed, _lot.stop_loss was left untouched, but
+                #   PositionBrain._current_stop_floor had already been ratcheted in memory.
+                # REASON FOR CHANGE: Enforce synchronous broker acknowledgement on trailing stop
+                #   replacements before advancing floors; rollback in-memory floor if API times out or fails.
+                # SAFE ROLLBACK: Previous lines preserved below as comments.
+                # -----------------------------------------------------------------------------
+                # [PREVIOUS CODE - PRESERVED]:
+                # if improves_floor and await self._sync_broker_protective_stop(symbol, new_floor):
+                #     _lot.stop_loss = new_floor
+                # -----------------------------------------------------------------------------
+                # [NEW CODE]:
+                if improves_floor:
+                    prev_floor = _lot.stop_loss
+                    sync_ok = await self._sync_broker_protective_stop(symbol, new_floor)
+                    if sync_ok:
+                        _lot.stop_loss = new_floor
+                    else:
+                        if hasattr(self, "pis_adapter") and self.pis_adapter is not None:
+                            if hasattr(self.pis_adapter, "rollback_protection_floor") and prev_floor is not None:
+                                self.pis_adapter.rollback_protection_floor(symbol, prev_floor)
+                        applog.warning(
+                            "engine.exit",
+                            f"{symbol}: PIS floor rolled back to {prev_floor} due to unconfirmed broker stop replacement.",
+                        )
+                # =============================================================================
 
 
 
@@ -1091,6 +1115,25 @@ class TradingEngineEvaluationMixin:
             daily_sma20=await self._daily_sma20(symbol),
 
         )
+
+        # =============================================================================
+        # [ADDED 2026-11-11]: Populate ctx.sector_bars for Sector Divergence Checks
+        # ORIGINAL INTENT: sctx did not carry sector_bars, leaving strategy sector divergence checks inert.
+        # REASON FOR CHANGE: Populate ctx.sector_bars so strategies like Gap & Go can evaluate
+        # sector ETF health and suppress counter-trend breakouts when sector ETF is breaking down.
+        # SAFE ROLLBACK: Remove this block.
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        try:
+            from app.strategies.sector_map import get_sector_etf
+            _sec_etf = get_sector_etf(symbol)
+            if _sec_etf and hasattr(self, "data") and hasattr(self.data, "frame"):
+                _sec_df = self.data.frame(_sec_etf, "1Min", limit=120)
+                if _sec_df is not None and not _sec_df.empty:
+                    sctx.sector_bars = {_sec_etf: _sec_df}
+        except Exception:
+            pass
+        # =============================================================================
 
         signals = []
 
@@ -1373,11 +1416,37 @@ class TradingEngineEvaluationMixin:
 
 
 
+        # =============================================================================
+        # [MODIFIED 2026-11-11]: Pass unified RegimePosture and session timestamp to pipeline
+        # ORIGINAL INTENT: Called self.pipeline.process without RegimePosture or session timestamp.
+        # REASON FOR CHANGE: R3 requirement to wire RegimeMatrix directly into engine_evaluation and
+        # SignalPipeline.process(), and supply session now timestamp for cold-start bar count evaluation.
+        # SAFE ROLLBACK: The original code is preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # accepted, rejected = await asyncio.to_thread(
+        #     partial(self.pipeline.process, symbol, df, signals, regime, sector_strength=rs_score)
+        # )
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        try:
+            from app.core.regime_matrix import RegimeMatrix
+            from app.risk.market_regime import MarketRiskState
+            _macro = getattr(getattr(self, "last_safety_decision", None), "market_risk_state", MarketRiskState.NORMAL)
+            if isinstance(_macro, str):
+                try:
+                    _macro = MarketRiskState(_macro)
+                except Exception:
+                    _macro = MarketRiskState.NORMAL
+            _vol_p = details.get("vol_percentile") if isinstance(details, dict) else None
+            _posture = RegimeMatrix.evaluate(_macro, regime, atr_percentile=_vol_p)
+        except Exception:
+            _posture = None
+
         accepted, rejected = await asyncio.to_thread(
-
-            partial(self.pipeline.process, symbol, df, signals, regime, sector_strength=rs_score)
-
+            partial(self.pipeline.process, symbol, df, signals, regime, sector_strength=rs_score, posture=_posture, now=now)
         )
+        # =============================================================================
 
 
 

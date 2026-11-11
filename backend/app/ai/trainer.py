@@ -642,11 +642,28 @@ class _LegacyContinuousTrainer:
         # retain verdict. Only PROMOTED sides pay for calibration afterwards,
         # which previously cost 3 extra HGB fits per side per symbol even for
         # candidates that were about to be rejected.
+        # =============================================================================
+        # [MODIFIED 2026-11-11]: Enforce class_weight="balanced" in Specialist HGB
+        # ORIGINAL INTENT: _fit_hgb() lacked class_weight parameter, leading to majority
+        # class bias on imbalanced ticker datasets during specialist model training.
+        # REASON FOR CHANGE: Enforce class_weight='balanced' across all specialist models
+        # to ensure fair loss penalty on positive trade setups (R4).
+        # SAFE ROLLBACK: The original code is preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # def _fit_hgb() -> HistGradientBoostingClassifier:
+        #     return HistGradientBoostingClassifier(
+        #         max_iter=150, learning_rate=0.05, max_depth=3, min_samples_leaf=100,
+        #         l2_regularization=5.0, early_stopping=True, random_state=42,
+        #     )
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
         def _fit_hgb() -> HistGradientBoostingClassifier:
             return HistGradientBoostingClassifier(
                 max_iter=150, learning_rate=0.05, max_depth=3, min_samples_leaf=100,
-                l2_regularization=5.0, early_stopping=True, random_state=42,
+                l2_regularization=5.0, early_stopping=True, class_weight="balanced", random_state=42,
             )
+        # =============================================================================
 
         with threadpool_limits(limits=1, user_api='openmp'):
             raw_l = _fit_hgb()
@@ -716,13 +733,32 @@ class _LegacyContinuousTrainer:
         should_promote = promote_long or promote_short
         decision = "PROMOTED" if should_promote else "RETAINED_INCUMBENT"
 
+        # =============================================================================
+        # [MODIFIED 2026-11-11]: Class Balance Logging for Specialist Models
+        # ORIGINAL INTENT: Specialist fit log only recorded AUC scores and promotion verdicts.
+        # REASON FOR CHANGE: Log explicit long/short class distributions and imbalance ratios (R4).
+        # SAFE ROLLBACK: The original code is preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # applog.info(
+        #     "trainer",
+        #     f"  Specialist [{symbol}] FITTED | "
+        #     f"candidate_auc_long={auc_l:.4f} incumbent_auc_long={incumbent_auc_long:.4f} promote_long={promote_long} | "
+        #     f"candidate_auc_short={auc_s:.4f} incumbent_auc_short={incumbent_auc_short:.4f} promote_short={promote_short} | "
+        #     f"threshold=+{self.PROMOTE_THRESHOLD} min_floor={min_promotable_auc:.2f} decision={decision}",
+        # )
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        imb_ratio_l = round(float((y_l == 0).sum()) / max(1.0, float(y_l.sum())), 2)
+        imb_ratio_s = round(float((y_s == 0).sum()) / max(1.0, float(y_s.sum())), 2)
         applog.info(
             "trainer",
             f"  Specialist [{symbol}] FITTED | "
-            f"candidate_auc_long={auc_l:.4f} incumbent_auc_long={incumbent_auc_long:.4f} promote_long={promote_long} | "
-            f"candidate_auc_short={auc_s:.4f} incumbent_auc_short={incumbent_auc_short:.4f} promote_short={promote_short} | "
-            f"threshold=+{self.PROMOTE_THRESHOLD} min_floor={min_promotable_auc:.2f} decision={decision}",
+            f"candidate_auc_long={auc_l:.4f} incumbent_auc_long={incumbent_auc_long:.4f} promote_long={promote_long} (n_pos={int(y_l.sum())}, imb={imb_ratio_l}) | "
+            f"candidate_auc_short={auc_s:.4f} incumbent_auc_short={incumbent_auc_short:.4f} promote_short={promote_short} (n_pos={int(y_s.sum())}, imb={imb_ratio_s}) | "
+            f"threshold=+{self.PROMOTE_THRESHOLD} min_floor={min_promotable_auc:.2f} decision={decision} class_weight=balanced",
         )
+        # =============================================================================
 
         final_clf_l = raw_l
         final_clf_s = raw_s
@@ -763,6 +799,51 @@ class _LegacyContinuousTrainer:
 
             final_candidate_auc = max(final_auc_l, final_auc_s)
 
+            # =============================================================================
+            # [MODIFIED 2026-11-11]: Class Distributions, Imbalance Ratios & Calibration Provenance
+            # ORIGINAL INTENT: Specialist artifact only recorded long-side counts (y_l), omitting
+            # short-side balance, imbalance ratios, class_weight, and calibration method provenance.
+            # REASON FOR CHANGE: Enforce complete bi-directional class balance provenance and
+            # calibration metadata tracking in specialist model artifacts (R4).
+            # SAFE ROLLBACK: The original code is preserved below as comments.
+            # -----------------------------------------------------------------------------
+            # [PREVIOUS CODE - PRESERVED]:
+            # artifact = {
+            #     "auc": final_candidate_auc,
+            #     "auc_long": round(final_auc_l, 6),
+            #     "auc_short": round(final_auc_s, 6),
+            #     "trained_at": datetime.now(UTC).isoformat(),
+            #     "symbol": symbol,
+            #     "n_samples": len(X_l),
+            #     "n_positive": int(y_l.sum()),
+            #     "n_negative": int((y_l == 0).sum()),
+            #     "n_train": split_l,
+            #     "n_validation": len(X_l) - split_l,
+            #     "base_rate": round(float(y_l.mean()), 4),
+            #     "feature_version": feature_hash,
+            #     "feature_count": len(FEATURE_COLUMNS),
+            #     "horizon_bars": 15,
+            #     "threshold_pct": 0.10,
+            #     "label_definition": "price_up_threshold_pct_over_horizon_bars",
+            #     "training_window_start": df.index.min().isoformat() if len(df) > 0 else None,
+            #     "training_window_end": df.index.max().isoformat() if len(df) > 0 else None,
+            # }
+            # -----------------------------------------------------------------------------
+            # [NEW CODE]:
+            n_pos_l = int(y_l.sum())
+            n_neg_l = int((y_l == 0).sum())
+            base_rate_l = round(float(y_l.mean()), 4)
+            imb_ratio_l = round(float(n_neg_l) / max(1.0, float(n_pos_l)), 4)
+
+            n_pos_s = int(y_s.sum())
+            n_neg_s = int((y_s == 0).sum())
+            base_rate_s = round(float(y_s.mean()), 4)
+            imb_ratio_s = round(float(n_neg_s) / max(1.0, float(n_pos_s)), 4)
+
+            from sklearn.calibration import CalibratedClassifierCV
+            calib_m_l = "sigmoid" if isinstance(final_clf_l, CalibratedClassifierCV) else "none"
+            calib_m_s = "sigmoid" if isinstance(final_clf_s, CalibratedClassifierCV) else "none"
+
             artifact = {
                 "auc": final_candidate_auc,
                 "auc_long": round(final_auc_l, 6),
@@ -770,11 +851,24 @@ class _LegacyContinuousTrainer:
                 "trained_at": datetime.now(UTC).isoformat(),
                 "symbol": symbol,
                 "n_samples": len(X_l),
-                "n_positive": int(y_l.sum()),
-                "n_negative": int((y_l == 0).sum()),
+                "n_positive": n_pos_l,
+                "n_negative": n_neg_l,
                 "n_train": split_l,
                 "n_validation": len(X_l) - split_l,
-                "base_rate": round(float(y_l.mean()), 4),
+                "base_rate": base_rate_l,
+                # Explicit bidirectional class balance provenance (R4)
+                "n_positive_long": n_pos_l,
+                "n_negative_long": n_neg_l,
+                "base_rate_long": base_rate_l,
+                "imbalance_ratio_long": imb_ratio_l,
+                "n_positive_short": n_pos_s,
+                "n_negative_short": n_neg_s,
+                "base_rate_short": base_rate_s,
+                "imbalance_ratio_short": imb_ratio_s,
+                "class_weight": "balanced",
+                "calibration_method_long": calib_m_l,
+                "calibration_method_short": calib_m_s,
+                "calibration_cv": 3,
                 "feature_version": feature_hash,
                 "feature_count": len(FEATURE_COLUMNS),
                 "horizon_bars": 15,
@@ -783,6 +877,7 @@ class _LegacyContinuousTrainer:
                 "training_window_start": df.index.min().isoformat() if len(df) > 0 else None,
                 "training_window_end": df.index.max().isoformat() if len(df) > 0 else None,
             }
+            # =============================================================================
             # Omit sides without a fitted model so inference falls back to the
             # global model for that side ("has no 'short' sub-model" path).
             if final_clf_l is not None:

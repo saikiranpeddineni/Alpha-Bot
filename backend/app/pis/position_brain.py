@@ -332,6 +332,24 @@ class PositionBrain:
             self._has_scaled_out = False
             self._runner_qualified = False
 
+    # =============================================================================
+    # [MODIFIED 2026-11-11]: Trailing Stop & PIS Protection Floor Rollback (R1)
+    # ORIGINAL INTENT: PositionBrain updated _current_stop_floor during step() before
+    #   broker acknowledgment. On broker replacement timeout or failure, the floor
+    #   remained advanced in memory, creating phantom stops.
+    # REASON FOR CHANGE: Provide an explicit rollback method so the engine can revert
+    #   _current_stop_floor to the broker-verified previous floor upon sync timeout/failure.
+    # SAFE ROLLBACK: New method added adjacent to revert_scale_out without altering prior logic.
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    def rollback_protection_floor(self, previous_floor: float) -> None:
+        """Rollback in-memory protection floor if broker stop replacement failed or timed out."""
+        with self._lock:
+            if self._is_closed:
+                return
+            self._current_stop_floor = previous_floor
+    # =============================================================================
+
 
     @property
     def lifecycle(self) -> LifecycleState:

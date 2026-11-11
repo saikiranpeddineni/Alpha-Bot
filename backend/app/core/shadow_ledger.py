@@ -143,7 +143,21 @@ class ShadowLedger:
 
     def __init__(self, db_path: Path = _DB_PATH) -> None:
         self._db_path = Path(db_path)
-        self._queue: queue.Queue[dict] = queue.Queue()
+        # =============================================================================
+        # [MODIFIED 2026-11-11]: Non-blocking bounded AsyncWriteQueue with 30s TTL drop guard
+        # ORIGINAL INTENT: Unbounded queue.Queue() held pending rows indefinitely, causing
+        # backlog accumulation when SQLite experienced write lock contention.
+        # REASON FOR CHANGE: Enforce maxsize=5000 and 30-second TTL drop guard to prevent
+        # memory growth and relieve lock contention pressure (R5).
+        # SAFE ROLLBACK: The original code is preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # self._queue: queue.Queue[dict] = queue.Queue()
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        from app.core.async_write_queue import AsyncWriteQueue
+        self._queue: AsyncWriteQueue = AsyncWriteQueue(maxsize=5000, ttl_seconds=30.0)
+        # =============================================================================
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         # Replay isolation: replays must not write rejection forensics into
@@ -329,16 +343,69 @@ class ShadowLedger:
                     # a fixed retry count silently loses rejection forensics.
                     attempt = 0
                     committed = False
+                    # =============================================================================
+                    # [MODIFIED 2026-11-11]: 30-Second TTL Drop Guard under SQLite Lock Contention
+                    # ORIGINAL INTENT: Indefinite retry loop on OperationalError: database is locked
+                    # caused stalled write threads, queue backlog buildup, and engine tick delays.
+                    # REASON FOR CHANGE: Discard queued forensics exceeding 30-second TTL under lock
+                    # contention to relieve database pressure and protect live engine ticks (R5).
+                    # SAFE ROLLBACK: The original code is preserved below as comments.
+                    # -----------------------------------------------------------------------------
+                    # [PREVIOUS CODE - PRESERVED]:
+                    # while not committed and not self._stop.is_set():
+                    #     try:
+                    #         con.executemany(sql, batch)
+                    #         con.commit()
+                    #         committed = True
+                    #         _dbg(f"committed {len(batch)} rows (attempt {attempt})")
+                    #     except sqlite3.OperationalError as e:
+                    #         with suppress(sqlite3.Error):
+                    #             con.rollback()
+                    #         attempt += 1
+                    #         if attempt == 1 or attempt % 5 == 0:
+                    #             applog.warning("shadow", f"write batch waiting on SQLite ({attempt} attempts): {e}")
+                    #         self._stop.wait(min(5.0, 0.2 * attempt))
+                    #     except Exception as e:  # noqa: BLE001
+                    #         with suppress(sqlite3.Error):
+                    #             con.rollback()
+                    #         applog.warning("shadow", f"writer flush failed: {e}")
+                    #         committed = True  # Invalid rows cannot be retried as a batch.
+                    #         break
+                    # -----------------------------------------------------------------------------
+                    # [NEW CODE]:
                     while not committed and not self._stop.is_set():
                         try:
-                            con.executemany(sql, batch)
+                            # Extract pure dictionary payloads if items are wrapped in QueueItem
+                            payloads = [item.payload if hasattr(item, "payload") else item for item in batch]
+                            con.executemany(sql, payloads)
                             con.commit()
                             committed = True
+                            if hasattr(self._queue, "record_written"):
+                                self._queue.record_written(len(batch))
                             _dbg(f"committed {len(batch)} rows (attempt {attempt})")
                         except sqlite3.OperationalError as e:
                             with suppress(sqlite3.Error):
                                 con.rollback()
                             attempt += 1
+                            if hasattr(self._queue, "record_lock_contention"):
+                                self._queue.record_lock_contention()
+
+                            # 30-Second TTL Drop Guard: purge expired forensics to relieve lock pressure
+                            if hasattr(self._queue, "filter_stale_batch"):
+                                batch, expired = self._queue.filter_stale_batch(batch)
+                                if expired:
+                                    applog.warning(
+                                        "shadow",
+                                        f"dropped {len(expired)} stale forensics items (>30s TTL) during SQLite lock contention",
+                                    )
+                                if not batch:
+                                    applog.warning(
+                                        "shadow",
+                                        f"all events in write batch exceeded 30s TTL under SQLite lock contention after {attempt} attempts -- batch dropped to prevent engine tick blocking",
+                                    )
+                                    committed = True
+                                    break
+
                             if attempt == 1 or attempt % 5 == 0:
                                 applog.warning("shadow", f"write batch waiting on SQLite ({attempt} attempts): {e}")
                             self._stop.wait(min(5.0, 0.2 * attempt))
@@ -348,6 +415,7 @@ class ShadowLedger:
                             applog.warning("shadow", f"writer flush failed: {e}")
                             committed = True  # Invalid rows cannot be retried as a batch.
                             break
+                    # =============================================================================
                     for _ in batch:
                         self._queue.task_done()
             finally:
@@ -690,6 +758,13 @@ class ShadowLedger:
             }
         finally:
             con.close()
+
+    @property
+    def queue_stats(self) -> dict:
+        """Return diagnostic metrics from the non-blocking async write queue."""
+        if hasattr(self._queue, "stats"):
+            return self._queue.stats
+        return {"queue_depth": self._queue.qsize()}
 
 
 shadow_ledger = ShadowLedger()

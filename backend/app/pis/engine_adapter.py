@@ -285,6 +285,19 @@ class PISEngineAdapter:
         """Undo decision-time scale-out flags after a failed exit execution."""
         self.service.revert_scale_out(symbol.upper())
 
+    # =============================================================================
+    # [MODIFIED 2026-11-11]: Trailing Stop & PIS Protection Floor Rollback (R1)
+    # ORIGINAL INTENT: PISExecutionAdapter only exposed revert_scale_out.
+    # REASON FOR CHANGE: Expose rollback_protection_floor to allow engine to revert
+    #   in-memory PIS protection floor when broker trailing stop replacement fails.
+    # SAFE ROLLBACK: New method added adjacent to revert_scale_out without altering prior logic.
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    def rollback_protection_floor(self, symbol: str, previous_floor: float) -> None:
+        """Undo ratcheted protection floor after unconfirmed broker stop replacement."""
+        self.service.rollback_protection_floor(symbol.upper(), previous_floor)
+    # =============================================================================
+
     def get_telemetry(self) -> dict[str, Any]:
         """Get service telemetry."""
         return self.service.get_telemetry()

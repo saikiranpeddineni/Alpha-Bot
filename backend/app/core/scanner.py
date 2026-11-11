@@ -38,6 +38,7 @@ from app.risk.market_regime import (
     MarketRiskAggregator,
     MarketRiskState,  # re-exported for convenience
 )
+from app.strategies.sector_map import SECTOR_ETF_MAP, get_sector_etf
 
 
 class ScannerOutcome(Enum):
@@ -543,44 +544,135 @@ class MarketScanner:
         return candidates
 
     # ------------------------------------------------------------------
+    # Sector ETF Health Assessment (R2)
+    # ------------------------------------------------------------------
+
+    async def assess_sector_etf_health(self, as_of: datetime | None = None) -> dict[str, dict]:
+        """Assess the intraday return and trend slope of tracked sector ETFs.
+
+        Returns a dictionary mapping ETF ticker -> {
+            'return_pct': float,
+            'slope': float,
+            'is_breaking_down': bool,
+        }.
+        If an ETF is down < -1.0% with negative trend slope, is_breaking_down is True.
+        """
+        from zoneinfo import ZoneInfo
+        et = ZoneInfo("America/New_York")
+        now_dt = as_of or datetime.now(UTC)
+        now_et = now_dt.astimezone(et)
+        today = now_et.date()
+
+        sector_health: dict[str, dict] = {}
+        unique_etfs = sorted(list(set(SECTOR_ETF_MAP.values())))
+
+        async def _check_etf(etf: str) -> None:
+            try:
+                # First attempt in-memory 1Min frame
+                df = self.data.frame(etf, "1Min", limit=120)
+                if df is None or df.empty or len(df) < 2:
+                    # Fallback to history
+                    end_t = as_of or datetime.now(UTC)
+                    start_t = end_t - timedelta(days=5)
+                    df = await self.data.history(etf, "1Min", start_t, end_t, prefer_cache=True)
+
+                if df is None or df.empty:
+                    return
+
+                # Calculate intraday return and trend slope
+                if hasattr(df.index, "tz_convert"):
+                    try:
+                        idx_et = df.index.tz_convert(et)
+                    except Exception:
+                        idx_et = df.index.tz_localize("UTC").tz_convert(et)
+                else:
+                    idx_et = pd.to_datetime(df.index).tz_localize("UTC").tz_convert(et)
+
+                today_df = df[idx_et.date == today]
+                if len(today_df) >= 2:
+                    session_open = float(today_df["open"].iloc[0])
+                    cur_close = float(today_df["close"].iloc[-1])
+                    ret_pct = ((cur_close - session_open) / max(1e-6, abs(session_open))) * 100.0
+
+                    # Slope calculation
+                    slope = 0.0
+                    if "ema20" in today_df.columns and len(today_df["ema20"]) >= 5:
+                        slope = float(today_df["ema20"].iloc[-1] - today_df["ema20"].iloc[-5])
+                    elif len(today_df["close"]) >= 5:
+                        slope = float(today_df["close"].iloc[-1] - today_df["close"].iloc[-5])
+                    else:
+                        slope = float(today_df["close"].iloc[-1] - today_df["close"].iloc[0])
+
+                    is_breaking = bool(ret_pct < -1.0 and slope < 0.0)
+                    sector_health[etf] = {
+                        "return_pct": ret_pct,
+                        "slope": slope,
+                        "is_breaking_down": is_breaking,
+                    }
+                elif len(df) >= 2:
+                    # Multi-bar fallback
+                    prev_c = float(df["close"].iloc[-2])
+                    cur_c = float(df["close"].iloc[-1])
+                    ret_pct = ((cur_c - prev_c) / max(1e-6, abs(prev_c))) * 100.0
+                    slope = cur_c - prev_c
+                    is_breaking = bool(ret_pct < -1.0 and slope < 0.0)
+                    sector_health[etf] = {
+                        "return_pct": ret_pct,
+                        "slope": slope,
+                        "is_breaking_down": is_breaking,
+                    }
+            except Exception as exc:
+                applog.debug("scanner", f"Sector ETF check failed for {etf}: {exc}")
+
+        await asyncio.gather(*[_check_etf(etf) for etf in unique_etfs])
+        return sector_health
+
+    # ------------------------------------------------------------------
     # Stage 2 — Technical composite score (no extra API calls)
     # ------------------------------------------------------------------
 
+    # =============================================================================
+    # [MODIFIED 2026-11-11]: Sector ETF Health Checks and Breakdown Penalty
+    # ORIGINAL INTENT: _stage2_technical_score evaluated candidates in isolation without checking
+    # sector ETF health, allowing equities in failing sectors to enter top rankings.
+    # REASON FOR CHANGE: R2 requirement to check sector ETF intraday return and trend slope.
+    # When an ETF is breaking down (< -1.0% with negative slope), penalize tech_score by 50%
+    # or suppress long breakout candidates from Stage 2 promotion.
+    # SAFE ROLLBACK: Previous signature and implementation preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # @staticmethod
+    # def _stage2_technical_score(candidates: list[dict], as_of: datetime | None = None) -> list[dict]:
+    #     if not candidates:
+    #         return []
+    # 
+    #     from datetime import UTC
+    #     T = as_of or datetime.now(UTC)
+    #     ...
+    #     scores = 0.30 * rvol_rank + 0.20 * gap_rank + 0.20 * atr_rank + 0.30 * mom_rank
+    #     for i, c in enumerate(candidates):
+    #         c["tech_score"] = float(scores[i])
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
     @staticmethod
-    def _stage2_technical_score(candidates: list[dict], as_of: datetime | None = None) -> list[dict]:
+    def _stage2_technical_score(
+        candidates: list[dict],
+        as_of: datetime | None = None,
+        sector_health: dict[str, dict] | None = None,
+    ) -> list[dict]:
         if not candidates:
             return []
 
         from datetime import UTC
         T = as_of or datetime.now(UTC)
 
-        # =============================================================================
-        # [MODIFIED 2026-10-30]: Volume-confirmed momentum weighting in Stage 2
-        # ORIGINAL INTENT: abs(mom3) was ranked directly without verifying volume confirmation.
-        # REASON FOR CHANGE: Dead-volume spikes (e.g. AXG mom3=+7800% on 100 shares) received
-        # 1.0 rank in momentum, driving composite score to 0.6978 despite rvol=0.0081.
-        # Scaling momentum by relative volume confirmation damps unconfirmed phantom spikes.
-        # SAFE ROLLBACK: The original code is preserved below as comments.
-        # -----------------------------------------------------------------------------
-        # [PREVIOUS CODE - PRESERVED]:
-        # rvols = np.array([c["rvol"] for c in candidates])
-        # atrs = np.array([c["atr_pct"] for c in candidates])
-        # gaps = np.array([c["gap_pct"] for c in candidates])
-        # # Audit Fix: Use absolute magnitude so massive shorts aren't pushed to rank 0.0
-        # moms = np.array([abs(c["mom3"]) for c in candidates])
-        # -----------------------------------------------------------------------------
-        # [NEW CODE]:
         rvols = np.array([c["rvol"] for c in candidates])
         atrs = np.array([c["atr_pct"] for c in candidates])
         gaps = np.array([c["gap_pct"] for c in candidates])
-        # Volume-confirmed momentum: if relative volume is dead (< 0.15 of average),
-        # the price move is an unconfirmed illiquid/odd-lot spike; zero out momentum
-        # so phantom reverse-split spikes cannot dominate the technical rankings.
         moms = np.array([
             abs(c["mom3"]) if c.get("rvol", 1.0) >= 0.15 else 0.0
             for c in candidates
         ])
-        # =============================================================================
 
         def _rank(arr: np.ndarray) -> np.ndarray:
             order = arr.argsort()
@@ -596,16 +688,30 @@ class MarketScanner:
         scores = 0.30 * rvol_rank + 0.20 * gap_rank + 0.20 * atr_rank + 0.30 * mom_rank
         for i, c in enumerate(candidates):
             c["tech_score"] = float(scores[i])
+            # Apply sector breakdown penalty
+            sym = c.get("symbol", "")
+            sector_etf = get_sector_etf(sym)
+            if sector_etf and sector_health and sector_health.get(sector_etf, {}).get("is_breaking_down", False):
+                c["sector_etf"] = sector_etf
+                c["sector_breakdown"] = True
+                c["tech_score"] = round(c["tech_score"] * 0.50, 4)
+                applog.info(
+                    "scanner",
+                    f"SECTOR_HEALTH_PENALTY: symbol={sym} sector_etf={sector_etf} breaking down "
+                    f"(return={sector_health[sector_etf].get('return_pct', 0.0):.2f}%), tech_score penalized to {c['tech_score']:.4f}",
+                )
+
             applog.info(
                 "scanner",
                 f"SCAN_SCORE: symbol={c['symbol']}, T={T.isoformat()}, "
                 f"rel_volume={c['rvol']:.4f}, ATR_pct={c['atr_pct']:.4f}, "
                 f"momentum={c['mom3']:.4f}, VWAP_distance=N/A, "
-                f"composite_score={c['tech_score']:.4f}, stage=TECH_SCORE"
+                f"composite_score={c['tech_score']:.4f}, stage=TECH_SCORE",
             )
 
         ranked = sorted(candidates, key=lambda c: c["tech_score"], reverse=True)
         return ranked[:_TECH_SCORE_TOP_N]
+    # =============================================================================
 
     # ------------------------------------------------------------------
     # Stage 3 — ML AUC validation
@@ -809,7 +915,20 @@ class MarketScanner:
                 applog.warning("scanner", f"Stage 1 returned no candidates due to market filters. Rejections: {rejections}")
                 return ScannerOutcome.SUCCESS_EMPTY, []
 
-            stage2 = self._stage2_technical_score(stage1, as_of=as_of)
+            # =============================================================================
+            # [MODIFIED 2026-11-11]: Pass sector_health into Stage 2 technical scoring
+            # ORIGINAL INTENT: Stage 2 scored candidates without sector ETF health context.
+            # REASON FOR CHANGE: Enforce sector ETF health checks; penalize candidates whose sector ETF
+            # is breaking down (< -1.0% with negative trend slope).
+            # SAFE ROLLBACK: Previous line preserved below as comments.
+            # -----------------------------------------------------------------------------
+            # [PREVIOUS CODE - PRESERVED]:
+            # stage2 = self._stage2_technical_score(stage1, as_of=as_of)
+            # -----------------------------------------------------------------------------
+            # [NEW CODE]:
+            sector_health = await self.assess_sector_etf_health(as_of=as_of)
+            stage2 = self._stage2_technical_score(stage1, as_of=as_of, sector_health=sector_health)
+            # =============================================================================
             stage3 = await self._stage3_ml_validate(stage2, as_of=as_of)
             final = self._select_final(stage3)
             # =============================================================================

@@ -124,6 +124,23 @@ class PISService:
             if brain is not None:
                 brain.revert_scale_out()
 
+    # =============================================================================
+    # [MODIFIED 2026-11-11]: Trailing Stop & PIS Protection Floor Rollback (R1)
+    # ORIGINAL INTENT: PISService only supported reverting scale out flags.
+    # REASON FOR CHANGE: Support rolling back in-memory stop floor upon broker timeout/failure.
+    # SAFE ROLLBACK: New method added adjacent to revert_scale_out without altering prior logic.
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    def rollback_protection_floor(self, symbol: str, previous_floor: float) -> None:
+        """Rollback in-memory protection floor after failed broker stop sync."""
+        symbol_key = symbol.upper()
+        symbol_lock = self._get_symbol_lock(symbol_key)
+        with symbol_lock, self._lock:
+            brain = self._brains.get(symbol_key)
+            if brain is not None:
+                brain.rollback_protection_floor(previous_floor)
+    # =============================================================================
+
     def close_all(self) -> None:
         """Close and purge all active PositionBrains."""
         with self._lock:

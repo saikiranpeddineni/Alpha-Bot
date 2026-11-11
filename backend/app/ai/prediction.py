@@ -238,14 +238,35 @@ def _make_classifier(name: str, n_estimators: int = 300):
             pass
     # Fallback: scikit-learn HistGradientBoosting
     from sklearn.ensemble import HistGradientBoostingClassifier
+    # =============================================================================
+    # [MODIFIED 2026-11-11]: Enforce class_weight="balanced" for HistGradientBoosting
+    # ORIGINAL INTENT: Fallback HistGradientBoosting classifier lacked class balancing,
+    # causing probability clustering and poor sensitivity on imbalanced trade setups.
+    # REASON FOR CHANGE: Enforce class_weight='balanced' in HistGradientBoostingClassifier
+    # across all model pipelines to eliminate directional trade signal suppression (R4).
+    # SAFE ROLLBACK: The original code is preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # return HistGradientBoostingClassifier(
+    #     max_iter=n_estimators,
+    #     learning_rate=0.06,
+    #     max_depth=6,
+    #     l2_regularization=1.0,
+    #     early_stopping=True,
+    #     random_state=42,
+    # )
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
     return HistGradientBoostingClassifier(
         max_iter=n_estimators,
         learning_rate=0.06,
         max_depth=6,
         l2_regularization=1.0,
         early_stopping=True,
+        class_weight="balanced",
         random_state=42,
     )
+    # =============================================================================
 
 
 def _trading_metrics(
@@ -1454,7 +1475,82 @@ class MetaLabelEngine:
                 "n_validation": n_val,
             }
 
-        # Now fit on full dataset before saving
+        # =============================================================================
+        # [MODIFIED 2026-11-11]: CalibratedClassifierCV & Class Balance Provenance Metadata
+        # ORIGINAL INTENT: clf_full was fitted on the full dataset and serialized uncalibrated,
+        # causing predicted probabilities to cluster tightly in the 0.48-0.52 range.
+        # REASON FOR CHANGE: Wrap with CalibratedClassifierCV(cv=3, method=isotonic/sigmoid)
+        # to eliminate probability bunching and record comprehensive class balancing metadata (R4).
+        # SAFE ROLLBACK: The original code is preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # # Now fit on full dataset before saving
+        # clf_full = _make_classifier("lgbm", n_estimators=200)
+        # with warnings.catch_warnings():
+        #     warnings.simplefilter("ignore")
+        #     try:
+        #         clf_full.fit(X_all, y_all)
+        #     except Exception as exc:
+        #         applog.warning("meta", f"[meta_train] {strategy} ({side}) full LGBM failed ({exc}), falling back to HGB")
+        #         clf_full = _make_classifier("hgb")
+        #         clf_full.fit(X_all, y_all)
+        #
+        # provenance = {
+        #     "model": clf_full,
+        #     "strategy": strategy,
+        #     "side": side,
+        #     "val_auc": round(val_auc, 4),
+        #     "min_validation_auc": min_validation_auc,
+        #     "trained_at": datetime.now(UTC).isoformat(),
+        #     "n_samples": n_total,
+        #     "n_positive": n_pos,
+        #     "n_negative": n_neg,
+        #     "n_train": n_train,
+        #     "n_validation": n_val,
+        #     "base_rate": round(float(y_all.mean()), 4),
+        #     "feature_version": feature_hash,
+        #     "feature_count": len(FEATURE_COLUMNS),
+        #     "horizon_bars": horizon_bars,
+        #     "threshold_pct": threshold_pct,
+        #     "label_definition": f"directional_{side}_return_threshold_over_horizon_bars",
+        #     "meta_threshold": threshold,
+        #     "candidate_population": "strategy_replay_candidates",
+        #     "validation_gate_report": validation_gate_report,
+        #     "ordered_timestamp_hash": ts_hash,
+        #     "label_hash": label_hash,
+        # }
+        #
+        # try:
+        #     import joblib
+        #     joblib.dump(provenance, artifact_path)
+        # except Exception as exc:
+        #     applog.warning("meta", f"[meta_train] {strategy} ({side}) artifact save failed: {exc}")
+        #     return {"status": "save_failed", "strategy": strategy, "side": side, "reason": str(exc)}
+        #
+        # # Invalidate in-memory cache so next predict() loads the fresh artifact
+        # cache_key = f"{strategy}_{side}"
+        # self._classifiers[cache_key] = clf_full
+        # self._sample_counts[cache_key] = n_total
+        #
+        # return {
+        #     "status": "success",
+        #     "strategy": strategy,
+        #     "side": side,
+        #     "decision": promotion_decision,
+        #     "val_auc": round(val_auc, 4),
+        #     "n_samples": n_total,
+        #     "n_positive": n_pos,
+        #     "n_negative": n_neg,
+        #     "n_train": n_train,
+        #     "n_validation": n_val,
+        #     "base_rate": round(float(y_all.mean()), 4),
+        #     "feature_version": feature_hash,
+        #     "artifact_path": str(artifact_path),
+        #     "validation_gate_report": validation_gate_report,
+        # }
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        # Fit base model on full dataset
         clf_full = _make_classifier("lgbm", n_estimators=200)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -1465,8 +1561,62 @@ class MetaLabelEngine:
                 clf_full = _make_classifier("hgb")
                 clf_full.fit(X_all, y_all)
 
+        # CalibratedClassifierCV: eliminate probability clustering (R4)
+        calib_method = "isotonic" if len(X_all) >= 1000 else "sigmoid"
+        min_class_samples = min(n_pos, n_neg) if y_all.nunique() >= 2 else 0
+        calib_cv = min(3, min_class_samples) if min_class_samples >= 2 else 0
+        final_model = clf_full
+        calibrated_applied = False
+
+        if calib_cv >= 2:
+            from sklearn.calibration import CalibratedClassifierCV
+            try:
+                calib_estimator = _make_classifier("lgbm", n_estimators=200)
+                calibrated_clf = CalibratedClassifierCV(
+                    estimator=calib_estimator,
+                    method=calib_method,
+                    cv=calib_cv,
+                )
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    try:
+                        calibrated_clf.fit(X_all, y_all, sample_weight=w_all)
+                    except Exception:
+                        calibrated_clf.fit(X_all, y_all)
+                final_model = calibrated_clf
+                calibrated_applied = True
+            except Exception as exc:
+                applog.warning("meta", f"[meta_train] {strategy} ({side}) CalibratedClassifierCV(lgbm) failed ({exc}), trying HGB")
+                try:
+                    calib_estimator_hgb = _make_classifier("hgb")
+                    calibrated_clf = CalibratedClassifierCV(
+                        estimator=calib_estimator_hgb,
+                        method=calib_method,
+                        cv=calib_cv,
+                    )
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        try:
+                            calibrated_clf.fit(X_all, y_all, sample_weight=w_all)
+                        except Exception:
+                            calibrated_clf.fit(X_all, y_all)
+                    final_model = calibrated_clf
+                    calibrated_applied = True
+                except Exception as exc2:
+                    applog.warning("meta", f"[meta_train] {strategy} ({side}) CalibratedClassifierCV fallback failed ({exc2}), retaining raw fit")
+                    final_model = clf_full
+
+        imbalance_ratio = round(float(n_neg) / max(1, float(n_pos)), 4)
+        applog.info(
+            "meta",
+            f"[meta_train_class_balance] strategy={strategy} side={side} | "
+            f"n_pos={n_pos} n_neg={n_neg} imbalance_ratio={imbalance_ratio:.4f} "
+            f"class_weight=balanced calibration={calib_method if calibrated_applied else 'none'} "
+            f"calibration_cv={calib_cv if calibrated_applied else 0}",
+        )
+
         provenance = {
-            "model": clf_full,
+            "model": final_model,
             "strategy": strategy,
             "side": side,
             "val_auc": round(val_auc, 4),
@@ -1475,6 +1625,11 @@ class MetaLabelEngine:
             "n_samples": n_total,
             "n_positive": n_pos,
             "n_negative": n_neg,
+            "imbalance_ratio": imbalance_ratio,
+            "class_weight": "balanced",
+            "calibration_method": calib_method if calibrated_applied else "none",
+            "calibration_cv": calib_cv if calibrated_applied else 0,
+            "is_calibrated": calibrated_applied,
             "n_train": n_train,
             "n_validation": n_val,
             "base_rate": round(float(y_all.mean()), 4),
@@ -1499,7 +1654,7 @@ class MetaLabelEngine:
 
         # Invalidate in-memory cache so next predict() loads the fresh artifact
         cache_key = f"{strategy}_{side}"
-        self._classifiers[cache_key] = clf_full
+        self._classifiers[cache_key] = final_model
         self._sample_counts[cache_key] = n_total
 
         return {
@@ -1511,6 +1666,11 @@ class MetaLabelEngine:
             "n_samples": n_total,
             "n_positive": n_pos,
             "n_negative": n_neg,
+            "imbalance_ratio": imbalance_ratio,
+            "class_weight": "balanced",
+            "calibration_method": calib_method if calibrated_applied else "none",
+            "calibration_cv": calib_cv if calibrated_applied else 0,
+            "is_calibrated": calibrated_applied,
             "n_train": n_train,
             "n_validation": n_val,
             "base_rate": round(float(y_all.mean()), 4),
@@ -1518,6 +1678,7 @@ class MetaLabelEngine:
             "artifact_path": str(artifact_path),
             "validation_gate_report": validation_gate_report,
         }
+        # =============================================================================
 
 
 

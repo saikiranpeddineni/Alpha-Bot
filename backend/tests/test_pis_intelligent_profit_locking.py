@@ -139,3 +139,29 @@ def test_weak_trend_banks_scale_out_at_1r() -> None:
     assert dec.action == ExitAction.PARTIAL_EXIT
     assert ReasonCode.SCALE_OUT_TARGET in dec.reason_codes
     assert brain.has_scaled_out is True
+
+
+# =============================================================================
+# [MODIFIED 2026-11-11]: Test Protection Floor Rollback on Failed Broker Sync (R1)
+# ORIGINAL INTENT: Only verified forward ratcheting of floors and scale-out triggers.
+# REASON FOR CHANGE: Verify that rollback_protection_floor correctly reverts in-memory
+#   _current_stop_floor to previous_floor when broker replacement fails or times out.
+# SAFE ROLLBACK: Added new test below without modifying prior tests.
+# -----------------------------------------------------------------------------
+# [NEW CODE]:
+def test_protection_floor_rollback_on_failed_broker_sync() -> None:
+    """If broker stop replacement fails or times out, floor reverts to previous verified floor."""
+    config = PISConfig()
+    brain = PositionBrain("TEST", _obs(100.0, initial_stop=95.0, atr=1.0), config)
+    assert brain.current_stop_floor == 95.0
+
+    # Advance price to ratchet floor
+    brain.observe(_obs(105.0, atr=1.0, minutes_offset=1))
+    ratcheted_floor = brain.current_stop_floor
+    assert ratcheted_floor > 95.0
+
+    # Simulate broker sync failure / timeout rollback
+    brain.rollback_protection_floor(95.0)
+    assert brain.current_stop_floor == 95.0
+# =============================================================================
+
