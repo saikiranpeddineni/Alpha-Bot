@@ -41,9 +41,9 @@ class TrendPullback(Strategy):
                                       # Was 0.5 (0.5 std below mean = vanishingly rare: 2-3 lifetime
                                       # events). 1.0 keeps the low-vol-dip thesis while letting the
                                       # strategy actually participate.
-        "min_wick_ratio": 0.40,       # Rejection wick must be 40% of candle
         "reward_risk": 3.0,
         "min_risk_atr": 0.5,          # CR-07: Minimum EMA-gap risk distance to avoid degenerate setups
+        "min_profit_pct": 0.035,      # Minimum 3.5% price gain expansion target
     }
     # =============================================================================
 
@@ -140,7 +140,18 @@ class TrendPullback(Strategy):
                             price=close_px,
                             score=0.80,  # Very high probability setup
                             stop_loss=stop_loss,
-                            take_profit=close_px + risk_distance * reward_risk,
+                            # =============================================================================
+                            # [MODIFIED 2026-11-12]: High-Margin Profit Architecture (>= 3.5% min expansion)
+                            # ORIGINAL INTENT: Pure R-multiple target (risk_distance * reward_risk)
+                            # REASON FOR CHANGE: Enforce minimum 3.5% price expansion floor so trades capture high margins
+                            # SAFE ROLLBACK: Preserved original take_profit line below
+                            # -----------------------------------------------------------------------------
+                            # [PREVIOUS CODE - PRESERVED]:
+                            # take_profit=close_px + risk_distance * reward_risk,
+                            # -----------------------------------------------------------------------------
+                            # [NEW CODE]:
+                            take_profit=max(close_px + risk_distance * reward_risk, close_px * (1.0 + p.get("min_profit_pct", 0.035))),
+                            # =============================================================================
                         )
 
         # Short Setup (Downtrend Pullback)
@@ -168,7 +179,18 @@ class TrendPullback(Strategy):
                             price=close_px,
                             score=0.80,  # Very high probability setup
                             stop_loss=stop_loss,
-                            take_profit=close_px - risk_distance * reward_risk,
+                            # =============================================================================
+                            # [MODIFIED 2026-11-12]: High-Margin Profit Architecture (>= 3.5% min expansion)
+                            # ORIGINAL INTENT: Pure R-multiple target (risk_distance * reward_risk)
+                            # REASON FOR CHANGE: Enforce minimum 3.5% price expansion floor so trades capture high margins
+                            # SAFE ROLLBACK: Preserved original take_profit line below
+                            # -----------------------------------------------------------------------------
+                            # [PREVIOUS CODE - PRESERVED]:
+                            # take_profit=close_px - risk_distance * reward_risk,
+                            # -----------------------------------------------------------------------------
+                            # [NEW CODE]:
+                            take_profit=min(close_px - risk_distance * reward_risk, close_px * (1.0 - p.get("min_profit_pct", 0.035))),
+                            # =============================================================================
                         )
         # =============================================================================
 

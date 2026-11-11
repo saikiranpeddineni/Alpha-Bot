@@ -30,9 +30,20 @@ class BollingerBandSqueeze(Strategy):
         "width_percentile_lookback": 100,
         "width_percentile_threshold": 0.15,
         "vol_z_min": 1.0,
-        "atr_stop_mult": 2.0,
-        "reward_risk": 2.0,
-        "trailing_stop_atr_mult": 1.5,
+        # =============================================================================
+        # [MODIFIED 2026-11-12]: High-Margin Reward:Risk (2.5R) and 3.5% Minimum Target Floor
+        # ORIGINAL INTENT: reward_risk was 2.0 without any minimum profit margin percentage.
+        # REASON FOR CHANGE: User directive: "make sure we make huge profits with great margins and not small trades,
+        #   min profit should be more than 3-4%". Raising reward_risk to 2.5 and adding min_profit_pct (0.035).
+        # SAFE ROLLBACK: Previous line preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # "reward_risk": 2.0,
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        "reward_risk": 2.5,
+        "min_profit_pct": 0.035,
+        # =============================================================================
         "use_trend_filter": True,
         # =============================================================================
         # [MODIFIED 2026-10-14]: CR-04 — BB Squeeze min_minutes and new gates
@@ -281,7 +292,22 @@ class BollingerBandSqueeze(Strategy):
         if confirmed_long:
             stop = close - p["atr_stop_mult"] * atr
             risk = close - stop
-            target = close + p["reward_risk"] * risk
+            # =============================================================================
+            # [MODIFIED 2026-11-12]: Enforce Minimum Profit Margin Floor (>= 3.5%) on BB Squeeze Long Target
+            # ORIGINAL INTENT: target was close + p["reward_risk"] * risk without % profit floor.
+            # REASON FOR CHANGE: User directive: "make sure we make huge profits with great margins and not small trades,
+            #   min profit should be more than 3-4%". Enforce min_profit_pct (default 3.5%).
+            # SAFE ROLLBACK: Previous line preserved below as comments.
+            # -----------------------------------------------------------------------------
+            # [PREVIOUS CODE - PRESERVED]:
+            # target = close + p["reward_risk"] * risk
+            # -----------------------------------------------------------------------------
+            # [NEW CODE]:
+            rr = float(p.get("reward_risk", 2.5))
+            min_profit_pct = float(p.get("min_profit_pct", 0.035))
+            calc_target = close + rr * risk
+            target = max(calc_target, close * (1.0 + min_profit_pct))
+            # =============================================================================
             # =============================================================================
             # [ADDED 2026-10-14]: CR-04 — Economic gate (min_target_atr)
             # ORIGINAL INTENT: No target-size sanity check; all confirmed breakouts emitted.
@@ -307,7 +333,22 @@ class BollingerBandSqueeze(Strategy):
         if confirmed_short:
             stop = close + p["atr_stop_mult"] * atr
             risk = stop - close
-            target = close - p["reward_risk"] * risk
+            # =============================================================================
+            # [MODIFIED 2026-11-12]: Enforce Minimum Profit Margin Floor (>= 3.5%) on BB Squeeze Short Target
+            # ORIGINAL INTENT: target was close - p["reward_risk"] * risk without % profit floor.
+            # REASON FOR CHANGE: User directive: "make sure we make huge profits with great margins and not small trades,
+            #   min profit should be more than 3-4%". Enforce min_profit_pct (default 3.5%).
+            # SAFE ROLLBACK: Previous line preserved below as comments.
+            # -----------------------------------------------------------------------------
+            # [PREVIOUS CODE - PRESERVED]:
+            # target = close - p["reward_risk"] * risk
+            # -----------------------------------------------------------------------------
+            # [NEW CODE]:
+            rr = float(p.get("reward_risk", 2.5))
+            min_profit_pct = float(p.get("min_profit_pct", 0.035))
+            calc_target = close - rr * risk
+            target = min(calc_target, close * (1.0 - min_profit_pct))
+            # =============================================================================
             # Economic gate (same as long)
             min_t_atr = float(p.get("min_target_atr", 0.5))
             if min_t_atr > 0 and risk > 0 and (close - target) < min_t_atr * atr:

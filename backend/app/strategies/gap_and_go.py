@@ -45,7 +45,20 @@ class GapAndGo(Strategy):
         "vol_z_min": 1.5,             # Minimum volume Z-score
         "start_time": "09:35",        # Only trade after the first 5 minutes established
         "end_time": "11:30",          # Stop trading after morning drive
-        "reward_risk": 2.5,
+        # =============================================================================
+        # [MODIFIED 2026-11-12]: High-Margin Reward:Risk (3.0R) and 3.5% Minimum Target Floor
+        # ORIGINAL INTENT: reward_risk was 2.5 without any minimum profit margin percentage.
+        # REASON FOR CHANGE: User directive: "make sure we make huge profits with great margins and not small trades,
+        #   min profit should be more than 3-4%". Raising reward_risk to 3.0 and adding min_profit_pct (0.035).
+        # SAFE ROLLBACK: Previous line preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # "reward_risk": 2.5,
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        "reward_risk": 3.0,
+        "min_profit_pct": 0.035,
+        # =============================================================================
         # =============================================================================
         # [ADDED 2026-10-14]: CR-05 — Gap&Go max_gap_pct and exhaustion guard
         # ORIGINAL INTENT: No upper gap bound; all gaps >= min_gap_pct permitted.
@@ -276,6 +289,21 @@ class GapAndGo(Strategy):
                 atr_val_long = float(last_row.get("atr14", 0.0))
                 stop_buf_long = max(0.05, 0.25 * atr_val_long) if atr_val_long > 0 else 0.05
                 calculated_stop = round(ema20 - stop_buf_long, 4)
+                # =============================================================================
+                # [MODIFIED 2026-11-12]: Enforce Minimum Profit Margin Floor (>= 3.5%) on Gap & Go Long Target
+                # ORIGINAL INTENT: take_profit was calculated purely from reward_risk distance.
+                # REASON FOR CHANGE: User directive: "make sure we make huge profits with great margins and not small trades,
+                #   min profit should be more than 3-4%". Enforce min_profit_pct (default 3.5%).
+                # SAFE ROLLBACK: Previous lines preserved below as comments.
+                # -----------------------------------------------------------------------------
+                # [PREVIOUS CODE - PRESERVED]:
+                # take_profit=round(close_px + (close_px - calculated_stop) * reward_risk, 4),
+                # -----------------------------------------------------------------------------
+                # [NEW CODE]:
+                min_profit_pct = float(p.get("min_profit_pct", 0.035))
+                calc_tp_long = round(close_px + (close_px - calculated_stop) * reward_risk, 4)
+                take_profit_long = max(calc_tp_long, round(close_px * (1.0 + min_profit_pct), 4))
+                # =============================================================================
                 return Signal(
                     symbol=symbol,
                     action=SignalAction.ENTER_LONG,
@@ -285,7 +313,7 @@ class GapAndGo(Strategy):
                     price=close_px,
                     score=0.75,
                     stop_loss=calculated_stop,
-                    take_profit=round(close_px + (close_px - calculated_stop) * reward_risk, 4),
+                    take_profit=take_profit_long,
                 )
                 # =============================================================================
 
@@ -339,6 +367,21 @@ class GapAndGo(Strategy):
                 # [NEW CODE]:
                 stop_buf_short = max(0.05, 0.25 * atr_px) if atr_px > 0 else 0.05
                 calculated_stop_short = round(ema20 + stop_buf_short, 4)
+                # =============================================================================
+                # [MODIFIED 2026-11-12]: Enforce Minimum Profit Margin Floor (>= 3.5%) on Gap & Go Short Target
+                # ORIGINAL INTENT: take_profit was calculated purely from reward_risk distance.
+                # REASON FOR CHANGE: User directive: "make sure we make huge profits with great margins and not small trades,
+                #   min profit should be more than 3-4%". Enforce min_profit_pct (default 3.5%).
+                # SAFE ROLLBACK: Previous lines preserved below as comments.
+                # -----------------------------------------------------------------------------
+                # [PREVIOUS CODE - PRESERVED]:
+                # take_profit=round(close_px - (calculated_stop_short - close_px) * reward_risk, 4),
+                # -----------------------------------------------------------------------------
+                # [NEW CODE]:
+                min_profit_pct = float(p.get("min_profit_pct", 0.035))
+                calc_tp_short = round(close_px - (calculated_stop_short - close_px) * reward_risk, 4)
+                take_profit_short = min(calc_tp_short, round(close_px * (1.0 - min_profit_pct), 4))
+                # =============================================================================
                 return Signal(
                     symbol=symbol,
                     action=SignalAction.ENTER_SHORT,
@@ -348,6 +391,6 @@ class GapAndGo(Strategy):
                     price=close_px,
                     score=0.75,
                     stop_loss=calculated_stop_short,
-                    take_profit=round(close_px - (calculated_stop_short - close_px) * reward_risk, 4),
+                    take_profit=take_profit_short,
                 )
                 # =============================================================================

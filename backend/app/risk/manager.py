@@ -719,31 +719,42 @@ class RiskManager:
                 )
 
             else:
-
                 # =============================================================================
-                # [MODIFIED 2026-11-12]: Safe Win Cooldown Sizing & Zero Support
-                # ORIGINAL INTENT: Used (getattr(...) or 5), preventing 0-cooldown and falling back to 5.
-                # REASON FOR CHANGE: Support 0 cooldown when configured, and default fallback to 30m.
+                # [MODIFIED 2026-11-12]: Differentiate Scratch Breather (5m) vs Win Cooldown (30m)
+                # ORIGINAL INTENT: Applied symbol_win_cooldown_minutes uniformly to both wins and scratches.
+                # REASON FOR CHANGE: Scratches are neutral breakeven exits that only need a 5m breather,
+                #   whereas profitable winners require 30m consolidation to prevent revenge chasing.
                 # SAFE ROLLBACK: Previous lines preserved below as comments.
                 # -----------------------------------------------------------------------------
                 # [PREVIOUS CODE - PRESERVED]:
-                # win_cd_mins = int(getattr(self.config, "symbol_win_cooldown_minutes", 5) or 5)
-                # self.symbol_cooldowns[symbol] = now_dt + timedelta(minutes=win_cd_mins)
+                # raw_wcd = getattr(self.config, "symbol_win_cooldown_minutes", 30)
+                # win_cd_mins = 30 if raw_wcd is None else int(raw_wcd)
+                # if win_cd_mins > 0:
+                #     self.symbol_cooldowns[symbol] = now_dt + timedelta(minutes=win_cd_mins)
+                # applog.info(
+                #     "risk",
+                #     f"Win on {symbol} (+${trade.pnl:.2f}) -- locking ticker for {win_cd_mins}m consolidation before permitting second-leg continuation",
+                # )
                 # -----------------------------------------------------------------------------
                 # [NEW CODE]:
-                raw_wcd = getattr(self.config, "symbol_win_cooldown_minutes", 30)
-                win_cd_mins = 30 if raw_wcd is None else int(raw_wcd)
-                if win_cd_mins > 0:
-                    self.symbol_cooldowns[symbol] = now_dt + timedelta(minutes=win_cd_mins)
+                if is_scratch:
+                    scratch_cd_mins = int(getattr(self.config, "symbol_scratch_cooldown_minutes", 5) or 5)
+                    if scratch_cd_mins > 0:
+                        self.symbol_cooldowns[symbol] = now_dt + timedelta(minutes=scratch_cd_mins)
+                    applog.info(
+                        "risk",
+                        f"Scratch on {symbol} (P&L ${trade.pnl:.2f}) -- brief breather for {scratch_cd_mins}m",
+                    )
+                else:
+                    raw_wcd = getattr(self.config, "symbol_win_cooldown_minutes", 30)
+                    win_cd_mins = 30 if raw_wcd is None else int(raw_wcd)
+                    if win_cd_mins > 0:
+                        self.symbol_cooldowns[symbol] = now_dt + timedelta(minutes=win_cd_mins)
+                    applog.info(
+                        "risk",
+                        f"Win on {symbol} (+${trade.pnl:.2f}) -- locking ticker for {win_cd_mins}m consolidation before permitting second-leg continuation",
+                    )
                 # =============================================================================
-
-                applog.info(
-
-                    "risk",
-
-                    f"Win on {symbol} (+${trade.pnl:.2f}) -- locking ticker for {win_cd_mins}m consolidation before permitting second-leg continuation",
-
-                )
 
             self.strategy_consecutive_losses[strategy] = 0
 
@@ -1195,19 +1206,48 @@ class RiskManager:
 
 
 
-        if take_profit is not None:
+        # =============================================================================
+        # [MODIFIED 2026-11-12]: Enforce Minimum Profit Margin Floor (>= 3.5%) on Entry Targets
+        # ORIGINAL INTENT: Accepted any target > price (or fallback 2.0 ATR), allowing micro-targets (0.2%-0.8%).
+        # REASON FOR CHANGE: User directive: "make sure we make huge profits with great margins and not small trades,
+        #   min profit should be more than 3-4%". Enforce min_profit_target_pct (default 3.5%) so all admitted
+        #   positions have take-profit expansion >= 3.5% price gain from entry.
+        # SAFE ROLLBACK: Previous lines preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # if take_profit is not None:
+        #     if signal.action == SignalAction.ENTER_LONG and take_profit <= price:
+        #         return RiskDecision(False, f"long target must be above entry ({take_profit:.4f} <= {price:.4f})")
+        #     if signal.action == SignalAction.ENTER_SHORT and take_profit >= price:
+        #         return RiskDecision(False, f"short target must be below entry ({take_profit:.4f} >= {price:.4f})")
+        # elif atr is not None and atr > 0:
+        #     take_profit = price + 2.0 * atr if signal.action == SignalAction.ENTER_LONG else price - 2.0 * atr
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        min_profit_pct = float(getattr(cfg, "min_profit_target_pct", 3.5) or 3.5)
+        min_profit_frac = min_profit_pct / 100.0
 
-            if signal.action == SignalAction.ENTER_LONG and take_profit <= price:
-
-                return RiskDecision(False, f"long target must be above entry ({take_profit:.4f} <= {price:.4f})")
-
-            if signal.action == SignalAction.ENTER_SHORT and take_profit >= price:
-
-                return RiskDecision(False, f"short target must be below entry ({take_profit:.4f} >= {price:.4f})")
-
-        elif atr is not None and atr > 0:
-
-            take_profit = price + 2.0 * atr if signal.action == SignalAction.ENTER_LONG else price - 2.0 * atr
+        if signal.action == SignalAction.ENTER_LONG:
+            min_target = round(price * (1.0 + min_profit_frac), 4)
+            if take_profit is not None:
+                if take_profit <= price:
+                    return RiskDecision(False, f"long target must be above entry ({take_profit:.4f} <= {price:.4f})")
+                take_profit = max(take_profit, min_target)
+            elif atr is not None and atr > 0:
+                take_profit = max(round(price + 2.5 * atr, 4), min_target)
+            else:
+                take_profit = min_target
+        elif signal.action == SignalAction.ENTER_SHORT:
+            min_target = round(price * (1.0 - min_profit_frac), 4)
+            if take_profit is not None:
+                if take_profit >= price:
+                    return RiskDecision(False, f"short target must be below entry ({take_profit:.4f} >= {price:.4f})")
+                take_profit = min(take_profit, min_target)
+            elif atr is not None and atr > 0:
+                take_profit = min(round(price - 2.5 * atr, 4), min_target)
+            else:
+                take_profit = min_target
+        # =============================================================================
 
 
 

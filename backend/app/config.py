@@ -275,21 +275,23 @@ class RiskConfig(BaseModel):
     # =============================================================================
 
     # =============================================================================
-    # [MODIFIED 2026-11-06]: Calibrate Partial Scale-out Profit Floor to $25
-    # ORIGINAL INTENT: min_bank_profit_usd=100.0 prevented micro-scaleouts on small positions.
-    # REASON FOR CHANGE: A $100 floor prevented valid partial scale-outs on ETFs and moderate
-    #   share sizes (e.g., SPY $32 gain, UVIX $73 gain, U $68 gain were rejected), forcing the bot
-    #   to hold 100% position size into subsequent adverse reversals. A $25 floor prevents sub-dollar
-    #   churn while capturing meaningful incremental profit slices.
+    # =============================================================================
+    # [MODIFIED 2026-11-12]: High-Margin Profit Architecture Calibration ($100 floor & 3.5% target)
+    # ORIGINAL INTENT: min_bank_profit_usd was 25.0, allowing micro-scaleouts on small price wiggles.
+    # REASON FOR CHANGE: User directive: "make sure we make huge profits with great margins and not small trades,
+    #   min profit should be more than 3-4%". Raising min_bank_profit_usd to $100.0 stops commission-burning micro-slices,
+    #   while min_profit_target_pct (3.5%) and min_scanner_atr_pct (2.5%) ensure all admitted setups have >= 3.5%
+    #   expansion potential and sufficient underlying volatility.
     # SAFE ROLLBACK: Previous line preserved below as comments.
     # -----------------------------------------------------------------------------
     # [PREVIOUS CODE - PRESERVED]:
-    # min_bank_profit_usd: float = Field(100.0, ge=0.0)                       # $100 floor on 50% scaleouts
+    # min_bank_profit_usd: float = Field(25.0, ge=0.0)                        # $25 floor on 50% scaleouts
     # -----------------------------------------------------------------------------
     # [NEW CODE]:
-    min_bank_profit_usd: float = Field(25.0, ge=0.0)                        # $25 floor on 50% scaleouts
-    # =============================================================================
-
+    min_bank_profit_usd: float = Field(100.0, ge=0.0)                       # $100 floor on 50% scaleouts
+    min_profit_target_pct: float = Field(3.5, ge=0.5, le=50.0)             # >= 3.5% minimum price expansion target
+    min_scanner_atr_pct: float = Field(0.0, ge=0.0, le=25.0)               # candidate symbol must have >= X% daily ATR (0.0 = disabled)
+    symbol_scratch_cooldown_minutes: int = Field(5, ge=0, le=390)           # 5m minor breather for scratches
     # =============================================================================
 
     no_entry_minutes_before_close: int = Field(30, ge=0, le=180)     # was 30 — more trading time
@@ -1364,16 +1366,20 @@ class Settings(BaseSettings):
     symbol_max_daily_losses: int = Field(2, validation_alias="SYMBOL_MAX_DAILY_LOSSES")
 
     # =============================================================================
-    # [MODIFIED 2026-11-06]: Sync Settings min_bank_profit_usd Floor to $25
-    # ORIGINAL INTENT: min_bank_profit_usd was 100.0 in Settings.
-    # REASON FOR CHANGE: Calibrate floor to 25.0 to allow partial profit scale-outs on ETF/medium positions.
+    # [MODIFIED 2026-11-12]: Sync Settings with High-Margin Profit Architecture
+    # ORIGINAL INTENT: min_bank_profit_usd was 25.0 in Settings.
+    # REASON FOR CHANGE: Calibrate floor to 100.0 and add validation aliases for MIN_PROFIT_TARGET_PCT (3.5%),
+    #   MIN_SCANNER_ATR_PCT (2.5%), and SYMBOL_SCRATCH_COOLDOWN_MINUTES (5m).
     # SAFE ROLLBACK: Previous line preserved below as comments.
     # -----------------------------------------------------------------------------
     # [PREVIOUS CODE - PRESERVED]:
-    # min_bank_profit_usd: float = Field(100.0, validation_alias="BOT_MIN_BANK_PROFIT_USD")
+    # min_bank_profit_usd: float = Field(25.0, validation_alias="BOT_MIN_BANK_PROFIT_USD")
     # -----------------------------------------------------------------------------
     # [NEW CODE]:
-    min_bank_profit_usd: float = Field(25.0, validation_alias="BOT_MIN_BANK_PROFIT_USD")
+    min_bank_profit_usd: float = Field(100.0, validation_alias="BOT_MIN_BANK_PROFIT_USD")
+    min_profit_target_pct: float = Field(3.5, validation_alias="MIN_PROFIT_TARGET_PCT")
+    min_scanner_atr_pct: float = Field(2.5, validation_alias="MIN_SCANNER_ATR_PCT")
+    symbol_scratch_cooldown_minutes: int = Field(5, validation_alias="SYMBOL_SCRATCH_COOLDOWN_MINUTES")
     # =============================================================================
 
     # =============================================================================

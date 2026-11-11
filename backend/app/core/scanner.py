@@ -502,10 +502,33 @@ class MarketScanner:
                         return None
                     # =============================================================================
 
+                    atr_pct = float(((df["high"] - df["low"]) / df["close"] * 100.0).mean())
+
+                    # =============================================================================
+                    # [MODIFIED 2026-11-12]: High-Margin Profit Architecture (ATR Volatility Floor)
+                    # ORIGINAL INTENT: Stage 1 pre-filter did not filter on atr_pct; low-volatility tickers
+                    # (0.5%-1.2% daily ATR) were admitted, creating trades with tiny 0.1%-0.5% targets.
+                    # REASON FOR CHANGE: Enforce min_scanner_atr_pct (>= 2.5% daily range capacity) to ensure
+                    # only high-volatility names capable of expanding >= 3-4% enter the strategy pipeline.
+                    # Benchmark/anchor index ETFs (SPY, QQQ, IWM) are exempted for market regime context.
+                    # SAFE ROLLBACK: Preserved previous assignment without gate below.
+                    # -----------------------------------------------------------------------------
+                    # [PREVIOUS CODE - PRESERVED]:
+                    # record["FINAL_PASS"] = True
+                    # record["FINAL_REJECTION_REASON"] = "NONE"
+                    # -----------------------------------------------------------------------------
+                    # [NEW CODE]:
+                    min_atr_pct = getattr(cfg, "min_scanner_atr_pct", 0.0)
+                    benchmark_exempt = {"SPY", "QQQ", "IWM", "DIA"}
+                    if min_atr_pct > 0.0 and symbol not in benchmark_exempt and atr_pct < min_atr_pct:
+                        record["FINAL_PASS"] = False
+                        record["FINAL_REJECTION_REASON"] = "LOW_VOLATILITY"
+                        return None
+
                     record["FINAL_PASS"] = True
                     record["FINAL_REJECTION_REASON"] = "NONE"
+                    # =============================================================================
 
-                    atr_pct = float(((df["high"] - df["low"]) / df["close"] * 100.0).mean())
                     yesterday_close = float(df["close"].iloc[-2]) if len(df) >= 2 else price
                     today_open = float(df["open"].iloc[-1])
                     gap_pct = abs(today_open / yesterday_close - 1.0) * 100.0 if yesterday_close > 0 else 0.0

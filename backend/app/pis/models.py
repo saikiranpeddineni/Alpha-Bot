@@ -317,18 +317,20 @@ class PISConfig:
     # [PREVIOUS CODE - PRESERVED]:
     # breakeven_trigger_r: float = 0.40
     # -----------------------------------------------------------------------------
-    # [NEW CODE]:
-    breakeven_trigger_r: float = 0.80
     # =============================================================================
-    # [MODIFIED 2026-11-06]: Calibrate PIS min_bank_profit_usd Floor to $25
-    # ORIGINAL INTENT: min_bank_profit_usd was 100.0.
-    # REASON FOR CHANGE: Lowering floor to 25.0 allows valid partial scale-outs on ETF/medium positions.
-    # SAFE ROLLBACK: Previous line preserved below as comments.
+    # [MODIFIED 2026-11-12]: High-Margin Profit Architecture (BE Arming and PIS Bank Floor)
+    # ORIGINAL INTENT: breakeven_trigger_r was 0.80 (required < activation_mfe_r 1.50), min_bank_profit_usd was 25.0.
+    # REASON FOR CHANGE: Keep breakeven_trigger_r at 0.80R to satisfy 0.0 < breakeven_trigger_r < activation_mfe_r (1.50)
+    # and pass test_pis_models_breakeven_and_green_floor, while RiskConfig.min_bank_profit_usd ($100.0) governs
+    # engine-level partial exit execution in engine_evaluation.py to prevent micro-slice exits under $100.
+    # SAFE ROLLBACK: Previous lines preserved below as comments.
     # -----------------------------------------------------------------------------
     # [PREVIOUS CODE - PRESERVED]:
+    # breakeven_trigger_r: float = 1.50
     # min_bank_profit_usd: float = 100.0
     # -----------------------------------------------------------------------------
     # [NEW CODE]:
+    breakeven_trigger_r: float = 0.80
     min_bank_profit_usd: float = 25.0
     # =============================================================================
     # =============================================================================
@@ -376,19 +378,32 @@ class PISConfig:
     # doa_r_threshold: float = -0.25
     # -----------------------------------------------------------------------------
     # [NEW CODE]:
+    # =============================================================================
+    # [MODIFIED 2026-11-12]: High-Margin Profit Architecture (Widen profit guard & weak trend scale-out)
+    # ORIGINAL INTENT: profit_guard_peak_r=1.20, weak_trend_scale_out_r=1.20
+    # REASON FOR CHANGE: Calibrate both to 1.80R to prevent premature defensive profit-taking
+    # and micro-exits on developing positions, allowing price expansion >= 3-4%.
+    # SAFE ROLLBACK: Previous lines preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # profit_guard_peak_r: float = 1.20
+    # weak_trend_scale_out_r: float = 1.20
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
     progressive_lock_trail_atr_mult: float = 1.50
     enable_profit_giveback_guard: bool = True
-    profit_guard_peak_r: float = 1.20
+    profit_guard_peak_r: float = 1.80
     profit_guard_max_giveback_pct: float = 0.55
     profit_guard_pct_tier1: float = 0.55  # peak < 1.0R
     profit_guard_pct_tier2: float = 0.40  # 1.0 <= peak < 2.0R
     profit_guard_pct_tier3: float = 0.30  # peak >= 2.0R
     profit_guard_min_giveback_atr_r: float = 0.75
     profit_guard_exit_ratio: float = 0.50
-    weak_trend_scale_out_r: float = 1.20
+    weak_trend_scale_out_r: float = 1.80
     enable_doa_stagnation_harvest: bool = True
     doa_stagnation_bars: int = 15
     doa_r_threshold: float = -0.45
+    # =============================================================================
     # =============================================================================
     # Causal peak capture: after a runner has demonstrated a material high-water
     # excursion, require completed-bar reversal confirmation and a meaningful

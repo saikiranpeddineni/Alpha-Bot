@@ -204,6 +204,7 @@ class OpeningRangeBreakout(Strategy):
 
         "chop_reward_risk": 0.75,        # Betadesk 2-tier take-profit: 0.75R in chop regimes
         "trending_reward_risk": 3.5,    # 3-tier take-profit: 3.5R expansion in confirmed trend regimes
+        "min_profit_pct": 0.035,        # Minimum 3.5% price gain expansion target
 
         "trailing_stop_atr_mult": 1.5,   # activates dynamic trailing stop
 
@@ -1085,6 +1086,26 @@ class OpeningRangeBreakout(Strategy):
             # target = close + rr_mult * risk
             # -----------------------------------------------------------------------------
             # [NEW CODE]:
+            # =============================================================================
+            # [MODIFIED 2026-11-12]: Enforce Minimum Profit Margin Floor (>= 3.5%) on ORB Long Target
+            # ORIGINAL INTENT: target was close + rr_mult * risk, which produced micro-targets (0.3%-1.5%) on tight stops.
+            # REASON FOR CHANGE: User directive: "make sure we make huge profits with great margins and not small trades,
+            #   min profit should be more than 3-4%". Enforce min_profit_pct (default 3.5%) so that the target
+            #   requires >= 3.5% price expansion.
+            # SAFE ROLLBACK: Previous lines preserved below as comments.
+            # -----------------------------------------------------------------------------
+            # [PREVIOUS CODE - PRESERVED]:
+            # is_chop = (ctx.regime in (Regime.RANGE, Regime.VOLATILE))
+            # is_trending = (ctx.regime == Regime.TREND_UP)
+            # if is_chop:
+            #     rr_mult = float(p.get("chop_reward_risk", 0.75))
+            # elif is_trending:
+            #     rr_mult = float(p.get("trending_reward_risk", 3.5))
+            # else:
+            #     rr_mult = float(p.get("reward_risk", 2.5))
+            # target = close + rr_mult * risk
+            # -----------------------------------------------------------------------------
+            # [NEW CODE]:
             is_chop = (ctx.regime in (Regime.RANGE, Regime.VOLATILE))
             is_trending = (ctx.regime == Regime.TREND_UP)
             if is_chop:
@@ -1093,7 +1114,9 @@ class OpeningRangeBreakout(Strategy):
                 rr_mult = float(p.get("trending_reward_risk", 3.5))
             else:
                 rr_mult = float(p.get("reward_risk", 2.5))
-            target = close + rr_mult * risk
+            min_profit_pct = float(p.get("min_profit_pct", 0.035))
+            target = max(close + rr_mult * risk, close * (1.0 + min_profit_pct))
+            # =============================================================================
             # =============================================================================
 
             self._targets[symbol] = round(target, 4)
@@ -1251,6 +1274,26 @@ class OpeningRangeBreakout(Strategy):
             # target = close - rr_mult * risk
             # -----------------------------------------------------------------------------
             # [NEW CODE]:
+            # =============================================================================
+            # [MODIFIED 2026-11-12]: Enforce Minimum Profit Margin Floor (>= 3.5%) on ORB Short Target
+            # ORIGINAL INTENT: target was close - rr_mult * risk, which produced micro-targets (0.3%-1.5%) on tight stops.
+            # REASON FOR CHANGE: User directive: "make sure we make huge profits with great margins and not small trades,
+            #   min profit should be more than 3-4%". Enforce min_profit_pct (default 3.5%) so that the target
+            #   requires >= 3.5% price expansion.
+            # SAFE ROLLBACK: Previous lines preserved below as comments.
+            # -----------------------------------------------------------------------------
+            # [PREVIOUS CODE - PRESERVED]:
+            # is_chop = (ctx.regime in (Regime.RANGE, Regime.VOLATILE))
+            # is_trending = (ctx.regime == Regime.TREND_DOWN)
+            # if is_chop:
+            #     rr_mult = float(p.get("chop_reward_risk", 0.75))
+            # elif is_trending:
+            #     rr_mult = float(p.get("trending_reward_risk", 3.5))
+            # else:
+            #     rr_mult = float(p.get("reward_risk", 2.5))
+            # target = close - rr_mult * risk
+            # -----------------------------------------------------------------------------
+            # [NEW CODE]:
             is_chop = (ctx.regime in (Regime.RANGE, Regime.VOLATILE))
             is_trending = (ctx.regime == Regime.TREND_DOWN)
             if is_chop:
@@ -1259,7 +1302,9 @@ class OpeningRangeBreakout(Strategy):
                 rr_mult = float(p.get("trending_reward_risk", 3.5))
             else:
                 rr_mult = float(p.get("reward_risk", 2.5))
-            target = close - rr_mult * risk
+            min_profit_pct = float(p.get("min_profit_pct", 0.035))
+            target = min(close - rr_mult * risk, close * (1.0 - min_profit_pct))
+            # =============================================================================
             # =============================================================================
 
             self._targets[symbol] = round(target, 4)

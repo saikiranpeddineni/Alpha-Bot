@@ -74,7 +74,20 @@ class MomentumCross(Strategy):
         "event_window_bars": 3,
         "atr_stop_mult": 2.0,
         "climax_stop_mult": 2.5,
-        "reward_risk": 1.8,
+        # =============================================================================
+        # [MODIFIED 2026-11-12]: High-Margin Reward:Risk (2.5R) and 3.5% Minimum Target Floor
+        # ORIGINAL INTENT: reward_risk was 1.8 without any minimum profit margin percentage.
+        # REASON FOR CHANGE: User directive: "make sure we make huge profits with great margins and not small trades,
+        #   min profit should be more than 3-4%". Raising reward_risk to 2.5 and adding min_profit_pct (0.035).
+        # SAFE ROLLBACK: Previous line preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # "reward_risk": 1.8,
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        "reward_risk": 2.5,
+        "min_profit_pct": 0.035,
+        # =============================================================================
         "trailing_stop_atr_mult": 1.5,
         "htf_trend_filter": False,
         "use_structural_vwap_filter": True,
@@ -424,17 +437,40 @@ class MomentumCross(Strategy):
             # and give trades room to breathe.
             # SAFE ROLLBACK: The original code is removed; rollback via git history.
             # -----------------------------------------------------------------------------
+            # =============================================================================
+            # [MODIFIED 2026-11-12]: Enforce Minimum Profit Margin Floor (>= 3.5%) on Momentum Long Target
+            # ORIGINAL INTENT: target was round(close + (rr * dynamic_mult * atr), 4), producing sub-1% moves on low ATR.
+            # REASON FOR CHANGE: User directive: "make sure we make huge profits with great margins and not small trades,
+            #   min profit should be more than 3-4%". Enforce min_profit_pct (default 3.5%) so that the target
+            #   requires >= 3.5% price expansion.
+            # SAFE ROLLBACK: Previous lines preserved below as comments.
+            # -----------------------------------------------------------------------------
+            # [PREVIOUS CODE - PRESERVED]:
+            # dynamic_mult = float(p.get("climax_stop_mult", 2.5)) if (vol_z > 2.0 and hist_now > hist_prev) else float(p.get("atr_stop_mult", 2.0))
+            # stop = round(close - dynamic_mult * atr, 4)
+            # rr = float(p.get("reward_risk", 1.8))
+            # target = round(close + (rr * dynamic_mult * atr), 4)
+            # min_target_atr = float(p.get("min_target_atr", 0.5))
+            # risk_dist = abs(close - stop)
+            # reward_dist = abs(target - close)
+            # min_rr = float(p.get("min_reward_risk", 1.0))
+            # if reward_dist < (min_target_atr * atr) or risk_dist <= 0 or (reward_dist / risk_dist) < min_rr:
+            #     return None
+            # -----------------------------------------------------------------------------
             # [NEW CODE]:
             dynamic_mult = float(p.get("climax_stop_mult", 2.5)) if (vol_z > 2.0 and hist_now > hist_prev) else float(p.get("atr_stop_mult", 2.0))
             stop = round(close - dynamic_mult * atr, 4)
-            rr = float(p.get("reward_risk", 1.8))
-            target = round(close + (rr * dynamic_mult * atr), 4)
+            rr = float(p.get("reward_risk", 2.5))
+            min_profit_pct = float(p.get("min_profit_pct", 0.035))
+            calc_target = round(close + (rr * dynamic_mult * atr), 4)
+            target = max(calc_target, round(close * (1.0 + min_profit_pct), 4))
             min_target_atr = float(p.get("min_target_atr", 0.5))
             risk_dist = abs(close - stop)
             reward_dist = abs(target - close)
             min_rr = float(p.get("min_reward_risk", 1.0))
             if reward_dist < (min_target_atr * atr) or risk_dist <= 0 or (reward_dist / risk_dist) < min_rr:
                 return None
+            # =============================================================================
             # =============================================================================
             self._consume_event(ctx, symbol, "long", current_time)
             mover_tag = f" [top_gainer +{ctx.mover_change_pct:.1f}%]" if bias == "gainer" else ""
@@ -472,17 +508,40 @@ class MomentumCross(Strategy):
             # Invert to widen stop on climax volume (default 2.5 ATR).
             # SAFE ROLLBACK: The original code is removed; rollback via git history.
             # -----------------------------------------------------------------------------
+            # =============================================================================
+            # [MODIFIED 2026-11-12]: Enforce Minimum Profit Margin Floor (>= 3.5%) on Momentum Short Target
+            # ORIGINAL INTENT: target was round(close - (rr * dynamic_mult * atr), 4), producing sub-1% moves on low ATR.
+            # REASON FOR CHANGE: User directive: "make sure we make huge profits with great margins and not small trades,
+            #   min profit should be more than 3-4%". Enforce min_profit_pct (default 3.5%) so that the target
+            #   requires >= 3.5% price expansion.
+            # SAFE ROLLBACK: Previous lines preserved below as comments.
+            # -----------------------------------------------------------------------------
+            # [PREVIOUS CODE - PRESERVED]:
+            # dynamic_mult = float(p.get("climax_stop_mult", 2.5)) if (vol_z > 2.0 and hist_now < hist_prev) else float(p.get("atr_stop_mult", 2.0))
+            # stop = round(close + dynamic_mult * atr, 4)
+            # rr = float(p.get("reward_risk", 1.8))
+            # target = round(close - (rr * dynamic_mult * atr), 4)
+            # min_target_atr = float(p.get("min_target_atr", 0.5))
+            # risk_dist = abs(stop - close)
+            # reward_dist = abs(close - target)
+            # min_rr = float(p.get("min_reward_risk", 1.0))
+            # if reward_dist < (min_target_atr * atr) or risk_dist <= 0 or (reward_dist / risk_dist) < min_rr:
+            #     return None
+            # -----------------------------------------------------------------------------
             # [NEW CODE]:
             dynamic_mult = float(p.get("climax_stop_mult", 2.5)) if (vol_z > 2.0 and hist_now < hist_prev) else float(p.get("atr_stop_mult", 2.0))
             stop = round(close + dynamic_mult * atr, 4)
-            rr = float(p.get("reward_risk", 1.8))
-            target = round(close - (rr * dynamic_mult * atr), 4)
+            rr = float(p.get("reward_risk", 2.5))
+            min_profit_pct = float(p.get("min_profit_pct", 0.035))
+            calc_target = round(close - (rr * dynamic_mult * atr), 4)
+            target = min(calc_target, round(close * (1.0 - min_profit_pct), 4))
             min_target_atr = float(p.get("min_target_atr", 0.5))
             risk_dist = abs(stop - close)
             reward_dist = abs(close - target)
             min_rr = float(p.get("min_reward_risk", 1.0))
             if reward_dist < (min_target_atr * atr) or risk_dist <= 0 or (reward_dist / risk_dist) < min_rr:
                 return None
+            # =============================================================================
             # =============================================================================
             self._consume_event(ctx, symbol, "short", current_time)
             mover_tag = f" [top_loser {ctx.mover_change_pct:.1f}%]" if bias == "loser" else ""
