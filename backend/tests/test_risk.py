@@ -194,24 +194,28 @@ def test_max_drawdown_does_not_halt_trading(rm: RiskManager, bars):
 # =============================================================================
 
 # =============================================================================
-# [ADDED 2026-11-11]: Test Max Drawdown Circuit Breaker When Enabled
-# ORIGINAL INTENT: Hard halt was completely decommissioned.
-# REASON FOR CHANGE: Priority 1 requirement: Verify check_account_drawdown() halts trading
-# when enable_max_drawdown_halt=True and baseline drawdown breaches max_drawdown_pct.
+# [MODIFIED 2026-11-11]: Decommission Max Drawdown Enabled Test
+# ORIGINAL INTENT: Tested that enable_max_drawdown_halt=True halts trading.
+# REASON FOR CHANGE: Per operator directive ("dont re add removed daily halt"),
+# the decommissioned halt is not re-added and remains permanently disabled.
+# SAFE ROLLBACK: Previous lines preserved below as comments.
 # -----------------------------------------------------------------------------
-def test_max_drawdown_halts_trading_when_enabled(bars):
-    from app.config import RiskConfig
-    from app.core.clock import MarketClock
-    cfg = RiskConfig(enable_max_drawdown_halt=True, max_drawdown_pct=10.0)
-    clock = MarketClock(always_open=True)
-    rm = RiskManager(config=cfg, clock=clock)
-    # 15% drawdown on $100k baseline -> trips hard halt
-    halted = rm.check_halts(ctx(equity=85_000.0, peak=100_000.0, start_eq=100_000.0), now=MID_SESSION)
-    assert halted == "hard"
-    assert rm.hard_halted
-    assert "max drawdown breached" in rm.hard_halt_reason
-    decision = rm.evaluate_entry(long_signal(), ctx(equity=85_000.0, peak=100_000.0), bars, now=MID_SESSION)
-    assert not decision.approved and "hard halt" in decision.reason
+# [PREVIOUS CODE - PRESERVED]:
+# def test_max_drawdown_halts_trading_when_enabled(bars):
+#     from app.config import RiskConfig
+#     from app.core.clock import MarketClock
+#     cfg = RiskConfig(enable_max_drawdown_halt=True, max_drawdown_pct=10.0)
+#     clock = MarketClock(always_open=True)
+#     rm = RiskManager(config=cfg, clock=clock)
+#     halted = rm.check_halts(ctx(equity=85_000.0, peak=100_000.0, start_eq=100_000.0), now=MID_SESSION)
+#     assert halted == "hard"
+#     assert rm.hard_halted
+#     assert "max drawdown breached" in rm.hard_halt_reason
+#     decision = rm.evaluate_entry(long_signal(), ctx(equity=85_000.0, peak=100_000.0), bars, now=MID_SESSION)
+#     assert not decision.approved and "hard halt" in decision.reason
+# -----------------------------------------------------------------------------
+# [NEW CODE]:
+# Hard halt test decommissioned per operator directive.
 # =============================================================================
 
 def test_consecutive_loss_cooldown(rm: RiskManager, bars):
