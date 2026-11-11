@@ -30,12 +30,12 @@ AlphaBot / AlphaDesk is an event-driven systematic equity trading platform with:
 ## Milestones
 | # | Name | Scope | Dependencies | Status |
 |---|------|-------|-------------|--------|
-| M1 | Execution Engine & Broker SRE Hardening | Features 1, 2, 3 | none | IN_PROGRESS (Worker 1) |
-| M2 | Strategy & Portfolio Dynamic Allocation | Features 4, 5, 6 | none | IN_PROGRESS (Worker 2) |
-| M3 | Market Regime Unification & Cold-Start Guard | Features 7, 8 | none | IN_PROGRESS (Worker 2) |
-| M4 | ML Model Calibration & Class Balance | Features 9, 10 | none | IN_PROGRESS (Worker 3) |
-| M5 | Architecture & Concurrency Deconstruction | Features 11, 12 | M1 | IN_PROGRESS (Worker 1 & 3) |
-| M6 | Targeted Verification & Git Integration | Feature 13 | M1, M2, M3, M4, M5 | PLANNED |
+| M1 | Execution Engine & Broker SRE Hardening | Features 1, 2, 3 | none | DONE |
+| M2 | Strategy & Portfolio Dynamic Allocation | Features 4, 5, 6 | none | DONE |
+| M3 | Market Regime Unification & Cold-Start Guard | Features 7, 8 | none | DONE |
+| M4 | ML Model Calibration & Class Balance | Features 9, 10 | none | DONE |
+| M5 | Architecture & Concurrency Deconstruction | Features 11, 12 | M1 | DONE |
+| M6 | Targeted Verification & Git Integration | Feature 13 | M1, M2, M3, M4, M5 | DONE |
 
 ## Interface Contracts
 ### `engine.py` ↔ `order_router.py` & `reconciliation.py`
