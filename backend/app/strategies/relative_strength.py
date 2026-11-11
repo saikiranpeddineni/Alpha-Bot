@@ -92,11 +92,25 @@ class RelativeStrength(Strategy):
         # and require a 0.1 ATR breakout buffer to prevent spread noise triggers.
         # SAFE ROLLBACK: The original code is removed; rollback via git history.
         # -----------------------------------------------------------------------------
+        # [MODIFIED 2026-11-11]: B3 - Calibrate Stop to 1.5×ATR and Target to 2.0R
+        # ORIGINAL INTENT: Used 2.0 * atr14 stop distance and 2.5R target.
+        # REASON FOR CHANGE: Architectural report specifies stop = entry - (1.5 * atr14) and
+        #   target = entry + (2.0 * (entry - stop)) to ensure deterministic 2R geometry that
+        #   is consistent with the Risk Manager's default stop sizing formula.
+        # SAFE ROLLBACK: Revert stop_dist multiplier to 2.0 and reward_risk to 2.5.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # atr14 = float(last_row["atr14"]) if ("atr14" in last_row and not pd.isna(last_row["atr14"])) else (close_px * 0.015)
+        # stop_dist = max(atr14 * 2.0, close_px * 0.005)
+        # reward_risk = float(p.get("reward_risk", 2.5))
+        # buffer = 0.1 * atr14
+        # -----------------------------------------------------------------------------
         # [NEW CODE]:
         atr14 = float(last_row["atr14"]) if ("atr14" in last_row and not pd.isna(last_row["atr14"])) else (close_px * 0.015)
-        stop_dist = max(atr14 * 2.0, close_px * 0.005)
-        reward_risk = float(p.get("reward_risk", 2.5))
+        stop_dist = max(atr14 * 1.5, close_px * 0.005)
+        reward_risk = 2.0  # 2R target as per native stop geometry specification
         buffer = 0.1 * atr14
+        # =============================================================================
 
         # Long Setup (High Relative Strength)
         if ctx.rs_score >= p["rs_long_threshold"]:

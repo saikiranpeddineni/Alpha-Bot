@@ -1302,6 +1302,21 @@ class RiskManager:
             return RiskDecision(False, "invalid risk multiplier")
 
         # =============================================================================
+        # [ADDED 2026-11-11]: B1 - Apply Strategy-Specific Risk Multiplier Cap
+        # ORIGINAL INTENT: Risk multiplier only came from signal-level attributes.
+        # REASON FOR CHANGE: Momentum has historical negative expectancy (-$6,104 Net P&L).
+        #   Multiplying by configured strategy_risk_multipliers (default 0.50 for momentum)
+        #   limits capital allocation to underperforming strategies.
+        # SAFE ROLLBACK: Remove strat_risk_mult logic.
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        strat_risk_multipliers = getattr(cfg, "strategy_risk_multipliers", None) or {}
+        strat_mult = float(strat_risk_multipliers.get(strategy.lower(), 1.0))
+        if math.isfinite(strat_mult) and strat_mult > 0:
+            risk_mult *= strat_mult
+        # =============================================================================
+
+        # =============================================================================
 
         # [MODIFIED 2026-10-23]: Kelly Sizing Starvation Protection
 

@@ -14,6 +14,13 @@ import pandas as pd
 
 from app.core.domain import Regime, Signal, SignalAction
 from app.strategies.base import Strategy, StrategyContext, register
+# =============================================================================
+# [ADDED 2026-11-11]: B2 - Import sector map for divergence pre-filter
+# ORIGINAL INTENT: No sector mapping was imported.
+# REASON FOR CHANGE: Need sector-to-ETF mapping for divergence check.
+# SAFE ROLLBACK: Remove this import and the divergence check below.
+from app.strategies.sector_map import get_sector_etf
+# =============================================================================
 
 ET = ZoneInfo("America/New_York")
 
@@ -50,6 +57,16 @@ class GapAndGo(Strategy):
         "max_gap_pct": 8.0,           # CR-05: gaps >8% are already spent (skip)
         "exhaustion_atr": 2.5,        # CR-05: skip short within 2.5 ATR of session low
         "exhaustion_pct": 3.0,        # CR-05: skip short when 5-bar return < -3% already down
+        # =============================================================================
+        # =============================================================================
+        # [ADDED 2026-11-11]: B2 - Sector Divergence Pre-Filter
+        # ORIGINAL INTENT: No sector-level market context filter existed.
+        # REASON FOR CHANGE: Gap & Go buys individual names whose underlying sector ETF is
+        #   breaking down. When sector ETF has negative intraday return > -1.5% AND EMA slope < 0,
+        #   the individual name gap signal should be suppressed (sector wind is adverse).
+        # SAFE ROLLBACK: Set enable_sector_divergence_filter=False
+        "enable_sector_divergence_filter": True,   # Enable sector ETF divergence check
+        "sector_divergence_return_threshold": -1.5, # Sector ETF must be down > 1.5% intraday
         # =============================================================================
     }
 
@@ -157,6 +174,49 @@ class GapAndGo(Strategy):
         # Do not buy gap-up stocks that collapsed below session open or flagged as mover losers
         if is_gap_up and (close_px <= session_open or is_loser):
             return None
+        # =============================================================================
+
+        # =============================================================================
+        # [ADDED 2026-11-11]: B2 - Sector Divergence Pre-Filter
+        # ORIGINAL INTENT: No sector-level divergence check; individual stock signals emitted
+        #   regardless of whether the underlying sector ETF was in breakdown.
+        # REASON FOR CHANGE: Gap & Go buys individual names whose sector ETF is breaking down.
+        #   When sector ETF has negative intraday return > -1.5% AND EMA slope < 0, suppressing
+        #   the signal reduces false positives from counter-trend sector exhaustion entries.
+        # SAFE ROLLBACK: Set enable_sector_divergence_filter=False in strategy config.
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        if p.get("enable_sector_divergence_filter", True):
+            sector_etf = get_sector_etf(symbol)
+            if sector_etf is not None:
+                # Check if sector ETF data is available via context
+                sector_bars = getattr(ctx, "sector_bars", None)
+                if sector_bars is not None and sector_etf in sector_bars:
+                    etf_df = sector_bars[sector_etf]
+                    if not etf_df.empty and len(etf_df) >= 2:
+                        try:
+                            # Intraday return: compare current close to session open
+                            etf_today = etf_df[etf_df.index.tz_convert(ET).date == today]
+                            if len(etf_today) >= 2:
+                                etf_session_open = float(etf_today["open"].iloc[0])
+                                etf_close = float(etf_today["close"].iloc[-1])
+                                etf_return_pct = (etf_close - etf_session_open) / max(1e-6, abs(etf_session_open)) * 100.0
+                                # EMA slope: negative means trending down
+                                etf_ema20 = etf_today["ema20"] if "ema20" in etf_today.columns else None
+                                etf_ema_slope = 0.0
+                                if etf_ema20 is not None and len(etf_ema20) >= 10:
+                                    etf_ema_slope = float(etf_ema20.iloc[-1] - etf_ema20.iloc[-10])
+                                threshold = float(p.get("sector_divergence_return_threshold", -1.5))
+                                if etf_return_pct < threshold and etf_ema_slope < 0:
+                                    from app.core.applog import applog
+                                    applog.info(
+                                        "strategy.gap_and_go",
+                                        f"{symbol}: sector_divergence_suppressed — {sector_etf} intraday "
+                                        f"return {etf_return_pct:.2f}% < {threshold}% with downward EMA slope",
+                                    )
+                                    return None  # sector_divergence_suppressed
+                        except Exception:
+                            pass  # Skip sector check on error — do not suppress on data failure
         # =============================================================================
 
         # Calculate confidence based on volume and trend alignment

@@ -247,6 +247,20 @@ class RiskConfig(BaseModel):
     strategy_cooldown_minutes: int = Field(20, ge=0, le=390)                # 20m strategy pause
 
     # =============================================================================
+    # [ADDED 2026-11-11]: B1 - Per-Strategy Risk Multipliers
+    # ORIGINAL INTENT: Sizing treated all strategies equally at 1.0x baseline risk.
+    # REASON FOR CHANGE: Momentum has historical negative expectancy (-,104 Net P&L).
+    #   Capping momentum to 0.50 (50% risk) prevents outsized drawdowns until rolling
+    #   expectancy turns positive. Other strategies default to 1.0x.
+    # SAFE ROLLBACK: Remove field or set default empty dict.
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    strategy_risk_multipliers: dict[str, float] = Field(
+        default_factory=lambda: {'momentum': 0.50}
+    )
+    # =============================================================================
+
+    # =============================================================================
     # [MODIFIED 2026-11-06]: Calibrate Partial Scale-out Profit Floor to $25
     # ORIGINAL INTENT: min_bank_profit_usd=100.0 prevented micro-scaleouts on small positions.
     # REASON FOR CHANGE: A $100 floor prevented valid partial scale-outs on ETFs and moderate
