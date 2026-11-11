@@ -254,7 +254,20 @@ def test_july29_soxs_native_geometry_fixture(pipeline, dummy_df, sample_features
         stop_loss=65.81,
         take_profit=67.59 + 1.8 * (67.59 - 65.81) # 70.794 (1.80R)
     )
-    accepted, rejected = pipeline.process("SOXS", dummy_df, [sig_soxs], Regime.TREND_UP, features=sample_features)
+    # =============================================================================
+    # [MODIFIED 2026-11-11]: Pass Regime.TREND_DOWN for SOXS Inverse ETF Fixture
+    # ORIGINAL INTENT: Used Regime.TREND_UP to test geometry processing.
+    # REASON FOR CHANGE: Production firewall blocks inverse ETF Longs during TREND_UP regimes
+    # to prevent synthetic counter-trend shorts. Using TREND_DOWN satisfies the firewall
+    # while verifying native 1.80R target geometry is preserved without compression.
+    # SAFE ROLLBACK: Previous line preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # accepted, rejected = pipeline.process("SOXS", dummy_df, [sig_soxs], Regime.TREND_UP, features=sample_features)
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    accepted, rejected = pipeline.process("SOXS", dummy_df, [sig_soxs], Regime.TREND_DOWN, features=sample_features)
+    # =============================================================================
     assert len(accepted) == 1, f"Signal rejected: {rejected}"
     proc = accepted[0]
     final_risk = abs(proc.price - proc.stop_loss)

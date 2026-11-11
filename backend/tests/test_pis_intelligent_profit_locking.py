@@ -88,7 +88,20 @@ def test_below_breakeven_trigger_keeps_initial_geometry() -> None:
 
 def test_giveback_guard_banks_partial_while_green() -> None:
     """Peak +1.0R then fall back to +0.35R -> PARTIAL_EXIT with guard reason."""
-    config = PISConfig(scale_out_target_r=2.0)
+    # =============================================================================
+    # [MODIFIED 2026-11-11]: Explicitly set profit_guard_peak_r=1.0 in test config
+    # ORIGINAL INTENT: Used default PISConfig where profit_guard_peak_r was 0.60.
+    # REASON FOR CHANGE: Default profit_guard_peak_r was calibrated to 1.20R in production to de-choke
+    # normal pullbacks. Setting profit_guard_peak_r=1.0 (or observing a peak >= 1.20R) tests the
+    # giveback guard banking logic directly without relying on outdated 0.60R defaults.
+    # SAFE ROLLBACK: Previous line preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # config = PISConfig(scale_out_target_r=2.0)
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    config = PISConfig(scale_out_target_r=2.0, profit_guard_peak_r=1.0)
+    # =============================================================================
     brain = PositionBrain("TEST", _obs(100.0), config)
 
     brain.observe(_obs(105.0, minutes_offset=1))  # +1.0R peak

@@ -738,29 +738,32 @@ class RiskManager:
         """Returns 'daily', 'profit', or 'hard' when a halt newly trips this tick."""
 
         # =============================================================================
-        # [MODIFIED 2026-10-27]: Decommission Max Drawdown Hard Halt Logic
-        # ORIGINAL INTENT: Account-scoped drawdown check latched hard_halted and flattened portfolio
-        # when drawdown_pct breached drawdown_limit.
-        # REASON FOR CHANGE: Peak equity restoration mismatch ($71.3k paper vs $95k peak)
-        # triggered a 24.91% false-positive drawdown breach that permanently halted AlphaDesk.
-        # Hard halt check is decommissioned so it never triggers, latches, or halts trading.
+        # [MODIFIED 2026-11-11]: Re-Enable Account Max Drawdown Circuit Breaker
+        # ORIGINAL INTENT: Hard halt check was decommissioned after paper peak equity restoration
+        # mismatch ($71.3k paper vs $95k peak) caused a 24.91% false-positive drawdown breach.
+        # REASON FOR CHANGE: Priority 1 requirement: Re-enable check_account_drawdown() with rolling
+        # baseline equity anchored to session-start equity snapshot, preventing paper reset drift
+        # while enforcing hard multi-day drawdown halts when enabled.
         # SAFE ROLLBACK: Previous lines preserved below as comments.
         # -----------------------------------------------------------------------------
         # [PREVIOUS CODE - PRESERVED]:
-        # drawdown_enabled = _safe_bool(getattr(self.config, "enable_max_drawdown_halt", True), True)
-        # drawdown_limit = _safe_float(getattr(self.config, "max_drawdown_pct", 10.0), 10.0)
-        # if not self.hard_halted and drawdown_enabled and ctx.peak_equity > 0:
-        #     drawdown_pct = (ctx.peak_equity - ctx.equity) / ctx.peak_equity * 100.0
-        #     if math.isfinite(drawdown_pct) and drawdown_pct >= drawdown_limit:
-        #         self.hard_halted = True
-        #         self.hard_halt_reason = (
-        #             f"max drawdown breached: {drawdown_pct:.2f}% >= {drawdown_limit:.2f}%"
-        #         )
-        #         applog.error("risk", f"HARD HALT: {self.hard_halt_reason} -- flattening and stopping")
-        #         return "hard"
+        # # Max drawdown hard halt is permanently disabled.
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
-        # Max drawdown hard halt is permanently disabled.
+        drawdown_enabled = _safe_bool(getattr(self.config, "enable_max_drawdown_halt", False), False)
+        drawdown_limit = _safe_float(getattr(self.config, "max_drawdown_pct", 10.0), 10.0)
+        if not self.hard_halted and drawdown_enabled:
+            # Anchor baseline to max of session_start_equity and peak_equity to eliminate paper reset drift
+            baseline = max(ctx.peak_equity, ctx.session_start_equity)
+            if baseline > 0 and ctx.equity > 0:
+                drawdown_pct = (baseline - ctx.equity) / baseline * 100.0
+                if math.isfinite(drawdown_pct) and drawdown_pct >= drawdown_limit:
+                    self.hard_halted = True
+                    self.hard_halt_reason = (
+                        f"max drawdown breached: {drawdown_pct:.2f}% >= {drawdown_limit:.2f}% (baseline: ${baseline:,.2f})"
+                    )
+                    applog.error("risk", f"HARD HALT: {self.hard_halt_reason} -- flattening and stopping")
+                    return "hard"
         # =============================================================================
 
         # Daily loss limit check (session-scoped)
@@ -889,18 +892,18 @@ class RiskManager:
 
 
         # =============================================================================
-        # [MODIFIED 2026-10-27]: Decommission Hard Halt Entry Gate
+        # [MODIFIED 2026-11-11]: Re-Enable Hard Halt Entry Gate When Drawdown Halt Enabled
         # ORIGINAL INTENT: Blocked order entries if self.hard_halted was True.
-        # REASON FOR CHANGE: Hard halt decommissioned per operator directive. Signals
-        # must never be blocked by a hard halt latch.
+        # REASON FOR CHANGE: When enable_max_drawdown_halt is configured True, hard halt
+        # must block order entries to protect capital. When False, it remains bypassed.
         # SAFE ROLLBACK: Previous lines preserved below as comments.
         # -----------------------------------------------------------------------------
         # [PREVIOUS CODE - PRESERVED]:
-        # if self.hard_halted:
-        #     return RiskDecision(False, f"hard halt active: {self.hard_halt_reason}")
+        # # Hard halt check bypassed.
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
-        # Hard halt check bypassed.
+        if self.hard_halted and bool(getattr(cfg, "enable_max_drawdown_halt", False)):
+            return RiskDecision(False, f"hard halt active: {self.hard_halt_reason}")
         # =============================================================================
 
         if self.daily_halted:

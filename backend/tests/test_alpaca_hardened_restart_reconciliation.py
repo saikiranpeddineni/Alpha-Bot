@@ -30,12 +30,30 @@ def _make_hardened_broker(monkeypatch):
     broker._processed_fill_notional = {}
     broker._emitted_fill_qty = {}
     broker._emitted_fill_notional = {}
+    # =============================================================================
+    # [MODIFIED 2026-11-11]: Initialize _order_parent_ids on Mocked Broker
+    # ORIGINAL INTENT: broker had _meta, _symbol_strategies, etc., but lacked _order_parent_ids.
+    # REASON FOR CHANGE: commit d12b5f9 introduced self._order_parent_ids tracking for bracket/child
+    # orders during poll_fills(). Initializing it avoids AttributeError during partial fill test.
+    # SAFE ROLLBACK: Previous lines preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # broker._meta = {}
+    # broker._symbol_strategies = {}
+    # broker._shortable_cache = {}
+    # broker._shorting_enabled = True
+    # broker.account_id = "ACCT12345"
+    # return broker
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
     broker._meta = {}
+    broker._order_parent_ids = {}
     broker._symbol_strategies = {}
     broker._shortable_cache = {}
     broker._shorting_enabled = True
     broker.account_id = "ACCT12345"
     return broker
+    # =============================================================================
 
 
 @pytest.mark.asyncio

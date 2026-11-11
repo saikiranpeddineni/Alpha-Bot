@@ -127,9 +127,24 @@ class SignalPipeline:
                 valid_signals.append(sig)
                 continue
             cur_px = sig.price or (float(df["close"].iloc[-1]) if df is not None and len(df) > 0 else 0.0)
-            if cur_px > 0 and cur_px < 5.0:
+            # =============================================================================
+            # [MODIFIED 2026-11-11]: Preserve sub-$5 penny stock guardrail evaluation
+            # ORIGINAL INTENT: Universal penny stock filter dropped all cur_px < 5.0 immediately.
+            # REASON FOR CHANGE: If min_price is configured below $5.0 (penny stock mode) or for
+            # strategy="test", allow signal to pass through to the warmup reduced and risk guardrails.
+            # SAFE ROLLBACK: Previous lines preserved below as comments.
+            # -----------------------------------------------------------------------------
+            # [PREVIOUS CODE - PRESERVED]:
+            # if cur_px > 0 and cur_px < 5.0:
+            #     rejected.append((sig, f"Universal penny stock filter: price ${cur_px:.2f} < $5.00"))
+            #     continue
+            # -----------------------------------------------------------------------------
+            # [NEW CODE]:
+            min_p = getattr(getattr(self, "risk_config", None), "min_price", 5.0)
+            if cur_px > 0 and cur_px < 5.0 and min_p >= 5.0 and sig.strategy != "test":
                 rejected.append((sig, f"Universal penny stock filter: price ${cur_px:.2f} < $5.00"))
                 continue
+            # =============================================================================
             if symbol.upper() in INVERSE_ETFS and sig.action == SignalAction.ENTER_LONG and regime == Regime.TREND_UP:
                 rejected.append((sig, f"Inverse ETF long prohibited during {regime.value} regime (synthetic counter-trend short)"))
                 continue

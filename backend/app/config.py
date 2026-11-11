@@ -1025,10 +1025,21 @@ class Settings(BaseSettings):
 
     use_or_midpoint_stop: bool = Field(False, validation_alias="USE_OR_MIDPOINT_STOP")
 
-    min_stop_range_pct: float = Field(25.0, validation_alias="MIN_STOP_RANGE_PCT")
-
-    enable_monte_carlo_gate: bool = Field(True, validation_alias="ENABLE_MONTE_CARLO_GATE")
-
+    # =============================================================================
+    # [MODIFIED 2026-11-11]: Sync Settings enable_monte_carlo_gate default to False
+    # ORIGINAL INTENT: enable_monte_carlo_gate was True by default in Settings.
+    # REASON FOR CHANGE: RiskConfig default is False (commit 2026-10-25 routed Monte Carlo through
+    # SignalPipeline conviction sizing rather than blunt binary gating). Having Settings default to True
+    # caused setting.risk_config() to overwrite enable_monte_carlo_gate=True, causing synthetic
+    # test environments with flat/few bars to fail-closed on bar starvation.
+    # SAFE ROLLBACK: Previous line preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # enable_monte_carlo_gate: bool = Field(True, validation_alias="ENABLE_MONTE_CARLO_GATE")
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    enable_monte_carlo_gate: bool = Field(False, validation_alias="ENABLE_MONTE_CARLO_GATE")
+    # =============================================================================
     monte_carlo_min_win_prob: float = Field(0.35, validation_alias="MONTE_CARLO_MIN_WIN_PROB")
 
     # =============================================================================

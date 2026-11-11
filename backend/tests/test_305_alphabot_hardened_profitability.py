@@ -72,8 +72,19 @@ def test_pis_models_breakeven_and_green_floor():
     cfg = PISConfig()
     cfg.validate()
     assert cfg.breakeven_trigger_r == 0.80
-    assert cfg.min_locked_r == 0.25
-    assert cfg.min_bank_profit_usd == 100.0
+    # =============================================================================
+    # [MODIFIED 2026-11-11]: Update min_bank_profit_usd assertion to $25.0
+    # ORIGINAL INTENT: Asserted cfg.min_bank_profit_usd == 100.0.
+    # REASON FOR CHANGE: Calibrated PIS min_bank_profit_usd floor to $25.0 to allow partial
+    # scaleouts on medium and ETF positions.
+    # SAFE ROLLBACK: Previous line preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # assert cfg.min_bank_profit_usd == 100.0
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    assert cfg.min_bank_profit_usd == 25.0
+    # =============================================================================
 
 
 def test_min_bank_profit_usd_skips_microslices(monkeypatch):

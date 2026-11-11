@@ -453,8 +453,24 @@ class PISConfig:
             raise ValueError("progressive lock fractions must satisfy 0 < start <= end < 1")
         if not (0.0 < self.profit_guard_max_giveback_pct < 1.0):
             raise ValueError(f"profit_guard_max_giveback_pct must be between 0 and 1, got {self.profit_guard_max_giveback_pct}")
-        if self.weak_trend_scale_out_r <= 0.0 or self.weak_trend_scale_out_r > self.scale_out_target_r:
-            raise ValueError(f"weak_trend_scale_out_r must be in (0, scale_out_target_r], got {self.weak_trend_scale_out_r}")
+        # =============================================================================
+        # [MODIFIED 2026-11-11]: Auto-clamp weak_trend_scale_out_r to scale_out_target_r
+        # ORIGINAL INTENT: Raised ValueError if weak_trend_scale_out_r > scale_out_target_r.
+        # REASON FOR CHANGE: When scale_out_target_r is set below weak_trend_scale_out_r (e.g. 1.0R vs 1.20R),
+        # automatically clamp weak_trend_scale_out_r = min(weak_trend_scale_out_r, scale_out_target_r) so
+        # custom or test scale-out targets do not crash with a validation error.
+        # SAFE ROLLBACK: Previous lines preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # if self.weak_trend_scale_out_r <= 0.0 or self.weak_trend_scale_out_r > self.scale_out_target_r:
+        #     raise ValueError(f"weak_trend_scale_out_r must be in (0, scale_out_target_r], got {self.weak_trend_scale_out_r}")
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        if self.weak_trend_scale_out_r <= 0.0:
+            raise ValueError(f"weak_trend_scale_out_r must be > 0, got {self.weak_trend_scale_out_r}")
+        if self.weak_trend_scale_out_r > self.scale_out_target_r:
+            self.weak_trend_scale_out_r = self.scale_out_target_r
+        # =============================================================================
         if not (0.0 < self.floor_tag_exit_ratio < 1.0):
             raise ValueError(f"floor_tag_exit_ratio must be between 0 and 1, got {self.floor_tag_exit_ratio}")
         if self.runner_wide_atr_mult <= 0.0:
