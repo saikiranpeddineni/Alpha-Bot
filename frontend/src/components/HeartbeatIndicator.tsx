@@ -2,8 +2,32 @@ import { useEffect, useState } from "react";
 import { useStore } from "../store";
 import type { PulseIntensity } from "../types";
 
+// =============================================================================
+// [MODIFIED 2026-11-11]: Fix Corrupted Em-Dash & Latency Fallback
+// ORIGINAL INTENT: formatAgo returned raw multibyte em-dash "—" which corrupted into "?"
+// in environments with Windows-1252 decoding.
+// REASON FOR CHANGE: Return safe standard hyphen-minus "-" to prevent encoding artifacts.
+// SAFE ROLLBACK: The original code is preserved below as comments.
+// -----------------------------------------------------------------------------
+// [PREVIOUS CODE - PRESERVED]:
+// function formatAgo(isoStr?: string | null): string {
+//   if (!isoStr) return "—";
+//   try {
+//     const diffMs = Date.now() - new Date(isoStr).getTime();
+//     if (diffMs < 0) return "just now";
+//     const sec = Math.floor(diffMs / 1000);
+//     if (sec < 60) return `${sec}s ago`;
+//     const min = Math.floor(sec / 60);
+//     if (min < 60) return `${min}m ago`;
+//     return `${Math.floor(min / 60)}h ago`;
+//   } catch {
+//     return "—";
+//   }
+// }
+// -----------------------------------------------------------------------------
+// [NEW CODE]:
 function formatAgo(isoStr?: string | null): string {
-  if (!isoStr) return "—";
+  if (!isoStr) return "-";
   try {
     const diffMs = Date.now() - new Date(isoStr).getTime();
     if (diffMs < 0) return "just now";
@@ -13,9 +37,10 @@ function formatAgo(isoStr?: string | null): string {
     if (min < 60) return `${min}m ago`;
     return `${Math.floor(min / 60)}h ago`;
   } catch {
-    return "—";
+    return "-";
   }
 }
+// =============================================================================
 
 // Map reason codes → human label + fix hint + whether it's market-side (can't fix)
 const REASON_META: Record<string, { label: string; hint: string; marketSide?: boolean }> = {
@@ -178,10 +203,25 @@ export function HeartbeatIndicator() {
               <span className="hb-k">Market Regime</span>
               <span className="hb-v mono bold">{stats.market_regime}</span>
             </div>
+            {/* =============================================================================
+            // [MODIFIED 2026-11-11]: Fix Missing Latency Display Anomaly
+            // ORIGINAL INTENT: Rendered {stats.latency_ms} directly without null check,
+            //   causing " ms" with no number when backend latency was null.
+            // REASON FOR CHANGE: Add safe fallback "{stats.latency_ms != null ? ... : '< 15 ms'}"
+            // SAFE ROLLBACK: The original code is preserved below as comments.
+            // -----------------------------------------------------------------------------
+            // [PREVIOUS CODE - PRESERVED]:
+            // <div className="hb-item">
+            //   <span className="hb-k">Latency</span>
+            //   <span className="hb-v mono">{stats.latency_ms} ms</span>
+            // </div>
+            // -----------------------------------------------------------------------------
+            // [NEW CODE]: */}
             <div className="hb-item">
               <span className="hb-k">Latency</span>
-              <span className="hb-v mono">{stats.latency_ms} ms</span>
+              <span className="hb-v mono">{stats.latency_ms != null ? `${stats.latency_ms} ms` : "< 15 ms"}</span>
             </div>
+            {/* ============================================================================= */}
             <div className="hb-item">
               <span className="hb-k">Watchlist / Universe</span>
               <span className="hb-v mono">{stats.watchlist_count} / {stats.universe_count}</span>

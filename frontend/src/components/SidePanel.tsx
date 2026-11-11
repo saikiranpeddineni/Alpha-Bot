@@ -179,7 +179,13 @@ function StrategyRow({ strategy, onToggle, onSaveParams }: StrategyRowProps) {
         <div className="info">
           <div className="name" style={{ display: "flex", alignItems: "center", gap: "6px" }}>
             {strategy.name}
-            <span style={{ fontSize: "10px", color: "var(--accent)" }}>{expanded ? "▲" : "▼"}</span>
+            {/* [MODIFIED 2026-11-11]: Fix Corrupted Strategy Expand Chevron */}
+            {/* [PREVIOUS]: <span style={{ fontSize: "10px", color: "var(--accent)" }}>{expanded ? "▲" : "▼"}</span> */}
+            <span style={{ fontSize: "10px", color: "var(--accent)", display: "inline-flex", alignItems: "center" }}>
+              <svg width="8" height="8" viewBox="0 0 10 10" fill="currentColor" style={{ transform: expanded ? "rotate(180deg)" : "rotate(0deg)", transition: "transform 0.15s ease" }}>
+                <path d="M1 3l4 4 4-4z" />
+              </svg>
+            </span>
           </div>
           <div className="desc" title={strategy.description}>{strategy.description}</div>
         </div>

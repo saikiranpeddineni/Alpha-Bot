@@ -236,7 +236,27 @@ export function SettingsModal(props: { onClose: () => void }) {
             Alpaca keys <b>{status?.has_alpaca_keys ? "configured" : "not set"}</b> ·
             live trading <b>{status?.live_trading_enabled ? "ENABLED" : "disabled"}</b>
             <br />
-            AI model: <b>{status?.model.trained ? `trained (${status.model.samples} samples)` : "heuristic (untrained)"}</b>
+            {/* =============================================================================
+            // [MODIFIED 2026-11-11]: Fix Undefined Samples in AI Model Status
+            // ORIGINAL INTENT: status.model.samples was accessed directly, but backend
+            // status.model schema does not provide a .samples attribute, causing "trained (undefined samples)".
+            // REASON FOR CHANGE: Fall back to validation_auc or plain "trained" when samples is undefined.
+            // SAFE ROLLBACK: The original code is preserved below as comments.
+            // -----------------------------------------------------------------------------
+            // [PREVIOUS CODE - PRESERVED]:
+            // AI model: <b>{status?.model.trained ? `trained (${status.model.samples} samples)` : "heuristic (untrained)"}</b>
+            // -----------------------------------------------------------------------------
+            // [NEW CODE]: */}
+            AI model: <b>
+              {status?.model.trained
+                ? status.model.samples != null
+                  ? `trained (${status.model.samples} samples)`
+                  : status.model.validation_auc != null
+                  ? `trained (AUC: ${status.model.validation_auc.toFixed(3)})`
+                  : "trained"
+                : "heuristic (untrained)"}
+            </b>
+            {/* ============================================================================= */}
           </div>
         </div>
       </div>

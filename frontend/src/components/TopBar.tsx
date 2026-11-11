@@ -64,7 +64,9 @@ export function TopBar(props: { onBacktest: () => void; onSettings: () => void }
 
   return (
     <header className="topbar">
-      <div className="brand"><span className="bolt">⚡</span><span>AlphaDesk</span></div>
+      {/* [MODIFIED 2026-11-11]: Fix Corrupted TopBar Bolt Glyphs */}
+      {/* [PREVIOUS]: <div className="brand"><span className="bolt">⚡</span><span>AlphaDesk</span></div> */}
+      <div className="brand"><span className="bolt" style={{ display: "inline-flex", alignItems: "center" }}><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M13 2L3 14h7v8l11-12h-8z"/></svg></span><span>AlphaDesk</span></div>
       <span className={`badge ${status?.mode ?? "demo"}`}>{status?.mode ?? "—"}</span>
       <span className="market-dot">
         <span className={`dot ${market?.is_open ? "open" : ""}`} />
@@ -85,10 +87,19 @@ export function TopBar(props: { onBacktest: () => void; onSettings: () => void }
           <option value="live" disabled={!status?.live_trading_enabled}>Live {status?.live_trading_enabled ? "" : "(disabled)"}</option>
         </select>
         <button className={`btn ${running ? "danger" : "success"}`} onClick={onStartStop} disabled={!ready || busy || status?.state === "halted"}>
-          {busy ? "…" : running ? "■ Stop" : "▶ Start"}
+          {/* [MODIFIED 2026-11-11]: Safe Stop/Start Indicator */}
+          {/* [PREVIOUS]: {busy ? "…" : running ? "■ Stop" : "▶ Start"} */}
+          {busy ? "..." : running ? "■ Stop" : "▶ Start"}
         </button>
         <button className="btn" onClick={props.onBacktest}>Backtest</button>
-        <button className="btn icon" onClick={props.onSettings} title="Settings">⚙</button>
+        {/* [MODIFIED 2026-11-11]: SVG Settings Gear Icon */}
+        {/* [PREVIOUS]: <button className="btn icon" onClick={props.onSettings} title="Settings">⚙</button> */}
+        <button className="btn icon" onClick={props.onSettings} title="Settings" style={{ display: "inline-flex", alignItems: "center", justifyContent: "center" }}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="3" />
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+          </svg>
+        </button>
       </div>
 
       {liveConfirm && (

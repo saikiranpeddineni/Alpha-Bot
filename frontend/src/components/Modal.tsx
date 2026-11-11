@@ -102,7 +102,9 @@ export function Modal(props: {
       >
         <div className="modal-head">
           <h2 id={titleId} className="modal-title">{props.title}</h2>
-          <button className="x" onClick={props.onClose} aria-label="Close">✕</button>
+          {/* [MODIFIED 2026-11-11]: Fix Corrupted Modal Close Icon */}
+          {/* [PREVIOUS]: <button className="x" onClick={props.onClose} aria-label="Close">✕</button> */}
+          <button className="x" onClick={props.onClose} aria-label="Close">&times;</button>
         </div>
         {props.children}
       </div>

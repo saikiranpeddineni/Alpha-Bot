@@ -81,12 +81,43 @@ export default function App() {
             )}
           </>}
         </main>
+        {/* =============================================================================
+        // [MODIFIED 2026-11-11]: Fix Corrupted Mobile Navigation Bar Icons
+        // ORIGINAL INTENT: Rendered raw Unicode text icons which corrupted into "O,", "-", "+-", "%<", "???".
+        // REASON FOR CHANGE: Use inline vector SVG icons for native-grade mobile navigation.
+        // SAFE ROLLBACK: Previous lines replaced with clean SVG navigation buttons.
+        // ============================================================================= */}
         <nav className="mobile-nav premium-mobile-nav" aria-label="Primary navigation">
-          <MobileNavButton active={mobileTab === "home"} label="Home" icon="⌂" onClick={() => setMobileTab("home")} />
-          <MobileNavButton active={mobileTab === "markets"} label="Markets" icon="◫" onClick={() => setMobileTab("markets")} />
-          <MobileNavButton active={mobileTab === "trade"} label="Trade" icon="↗" onClick={() => setMobileTab("trade")} />
-          <MobileNavButton active={mobileTab === "activity"} label="Activity" icon="≋" onClick={() => setMobileTab("activity")} />
-          <MobileNavButton active={mobileTab === "more"} label="More" icon="•••" onClick={() => setMobileTab("more")} />
+          <MobileNavButton
+            active={mobileTab === "home"}
+            label="Home"
+            icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>}
+            onClick={() => setMobileTab("home")}
+          />
+          <MobileNavButton
+            active={mobileTab === "markets"}
+            label="Markets"
+            icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>}
+            onClick={() => setMobileTab("markets")}
+          />
+          <MobileNavButton
+            active={mobileTab === "trade"}
+            label="Trade"
+            icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>}
+            onClick={() => setMobileTab("trade")}
+          />
+          <MobileNavButton
+            active={mobileTab === "activity"}
+            label="Activity"
+            icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>}
+            onClick={() => setMobileTab("activity")}
+          />
+          <MobileNavButton
+            active={mobileTab === "more"}
+            label="More"
+            icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/><circle cx="5" cy="12" r="2"/></svg>}
+            onClick={() => setMobileTab("more")}
+          />
         </nav>
         {showBacktest && <BacktestModal onClose={() => setShowBacktest(false)} />}
         {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
@@ -150,7 +181,7 @@ function SystemStatusBanner({
   );
 }
 
-function MobileNavButton({ active, label, icon, onClick }: { active: boolean; label: string; icon: string; onClick: () => void }) {
+function MobileNavButton({ active, label, icon, onClick }: { active: boolean; label: string; icon: React.ReactNode; onClick: () => void }) {
   return (
     <button className={`mobile-nav-btn ${active ? "active" : ""}`} onClick={onClick} aria-current={active ? "page" : undefined}>
       <span className="icon">{icon}</span>

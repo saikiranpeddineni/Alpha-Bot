@@ -3,11 +3,12 @@ import { api } from "../api";
 import { fmtCompact, fmtPct, pnlClass } from "../format";
 import { useStore } from "../store";
 
+// [MODIFIED 2026-11-11]: Safe Unicode Escapes for Regime Arrows
 const REGIME_ICONS: Record<string, string> = {
-  trend_up: "↗",
-  trend_down: "↘",
-  range: "↔",
-  volatile: "⚡",
+  trend_up: "\u2197",
+  trend_down: "\u2198",
+  range: "\u2194",
+  volatile: "\u26A1",
 };
 
 export function Watchlist() {
@@ -71,7 +72,17 @@ export function Watchlist() {
           onClick={triggerScanner}
           disabled={scanning}
         >
-          {scanning ? "Scanning..." : "🔍 Scan"}
+          {/* [MODIFIED 2026-11-11]: SVG Search Scan Icon */}
+          {/* [PREVIOUS]: {scanning ? "Scanning..." : "🔍 Scan"} */}
+          {scanning ? "Scanning..." : (
+            <span style={{ display: "inline-flex", alignItems: "center", gap: "4px" }}>
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="11" cy="11" r="8" />
+                <line x1="21" y1="21" x2="16.65" y2="16.65" />
+              </svg>
+              Scan
+            </span>
+          )}
         </button>
       </div>
       <div className="panel-body">
