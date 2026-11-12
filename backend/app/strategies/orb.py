@@ -1114,8 +1114,12 @@ class OpeningRangeBreakout(Strategy):
                 rr_mult = float(p.get("trending_reward_risk", 3.5))
             else:
                 rr_mult = float(p.get("reward_risk", 2.5))
-            min_profit_pct = float(p.get("min_profit_pct", 0.035))
-            target = max(close + rr_mult * risk, close * (1.0 + min_profit_pct))
+            is_index_etf = symbol.upper() in {"SPY", "QQQ", "IWM", "DIA"}
+            if is_index_etf and atr > 0 and close > 0:
+                effective_min_pct = min(float(p.get("min_profit_pct", 0.035)), max(0.010, 2.0 * (atr / close)))
+            else:
+                effective_min_pct = float(p.get("min_profit_pct", 0.035))
+            target = max(close + rr_mult * risk, close * (1.0 + effective_min_pct))
             # =============================================================================
             # =============================================================================
 
@@ -1302,8 +1306,12 @@ class OpeningRangeBreakout(Strategy):
                 rr_mult = float(p.get("trending_reward_risk", 3.5))
             else:
                 rr_mult = float(p.get("reward_risk", 2.5))
-            min_profit_pct = float(p.get("min_profit_pct", 0.035))
-            target = min(close - rr_mult * risk, close * (1.0 - min_profit_pct))
+            is_index_etf = symbol.upper() in {"SPY", "QQQ", "IWM", "DIA"}
+            if is_index_etf and atr > 0 and close > 0:
+                effective_min_pct = min(float(p.get("min_profit_pct", 0.035)), max(0.010, 2.0 * (atr / close)))
+            else:
+                effective_min_pct = float(p.get("min_profit_pct", 0.035))
+            target = min(close - rr_mult * risk, close * (1.0 - effective_min_pct))
             # =============================================================================
             # =============================================================================
 

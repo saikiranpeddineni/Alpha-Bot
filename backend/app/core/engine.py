@@ -755,7 +755,7 @@ class TradingEngine(
 
             if checkpoint and "risk_state" in checkpoint and self.risk:
 
-                self.risk.restore_risk_state(checkpoint["risk_state"])
+                self.risk.restore_risk_state(checkpoint["risk_state"], current_session_date=self.clock.session_date())
 
                 applog.info("engine", f"#43: Restored safety-critical risk state from {restore_mode} checkpoint")
 
@@ -932,7 +932,9 @@ class TradingEngine(
 
         account = await self.broker.account()
 
-        self.portfolio.roll_session(self.clock.session_date(), account.equity)
+        current_session = self.clock.session_date()
+        self.portfolio.roll_session(current_session, account.equity)
+        self.risk.roll_session(current_session)
 
         self.portfolio.peak_equity = max(self.portfolio.peak_equity, account.equity)
 
@@ -1773,33 +1775,68 @@ class TradingEngine(
                     # Initialize timestamp on first tick
                     self._last_data_bar_ts[sym_upper] = now
 
-            # Per-symbol 90s DATA_STALE watchdog across all active symbols
+            # =============================================================================
+            # [MODIFIED 2026-11-12]: Relax Feed Staleness Watchdog from 90s/120s to 180s
+            # ORIGINAL INTENT: Marked feeds DATA_STALE after 90 seconds, adding to _data_gap_symbols
+            #   which blocked 100% of new trade evaluations on active symbols (KLAC, CRWG, BEZ).
+            # REASON FOR CHANGE: Alpaca 1-minute bars routinely experience 60-95s arrival latency during
+            #   moderate volume intervals. 180s (3 bars) prevents false-positive trade halts.
+            # SAFE ROLLBACK: Previous lines preserved below as comments.
+            # -----------------------------------------------------------------------------
+            # [PREVIOUS CODE - PRESERVED]:
+            # if not _is_replay:
+            #     for sym in active_symbols:
+            #         sym_upper = sym.upper()
+            #         last_received = self.last_bar_received_at.get(sym_upper)
+            #         if last_received is not None:
+            #             feed_age = (now - last_received).total_seconds()
+            #             if feed_age > 90.0:
+            #                 if self.feed_staleness_status.get(sym_upper) != "DATA_STALE":
+            #                     applog.warning(
+            #                         "engine.watchdog",
+            #                         f"Feed for {sym_upper} marked DATA_STALE (last bar {feed_age:.0f}s ago > 90s).",
+            #                     )
+            #                 self.feed_staleness_status[sym_upper] = "DATA_STALE"
+            #                 self._data_gap_symbols.add(sym_upper)
+            #             else:
+            #                 self.feed_staleness_status[sym_upper] = "OK"
+            # if not _is_replay and active_symbols:
+            #     minutes_since_open = (now_et.hour * 60 + now_et.minute) - (9 * 60 + 30)
+            #     if minutes_since_open >= 3:
+            #         all_feeds_stalled = all(
+            #             (sym.upper() not in self.last_bar_received_at)
+            #             or ((now - self.last_bar_received_at[sym.upper()]).total_seconds() > 120.0)
+            #             for sym in active_symbols
+            #         )
+            # -----------------------------------------------------------------------------
+            # [NEW CODE]:
             if not _is_replay:
                 for sym in active_symbols:
                     sym_upper = sym.upper()
                     last_received = self.last_bar_received_at.get(sym_upper)
                     if last_received is not None:
                         feed_age = (now - last_received).total_seconds()
-                        if feed_age > 90.0:
+                        if feed_age > 180.0:
                             if self.feed_staleness_status.get(sym_upper) != "DATA_STALE":
                                 applog.warning(
                                     "engine.watchdog",
-                                    f"Feed for {sym_upper} marked DATA_STALE (last bar {feed_age:.0f}s ago > 90s).",
+                                    f"Feed for {sym_upper} marked DATA_STALE (last bar {feed_age:.0f}s ago > 180s).",
                                 )
                             self.feed_staleness_status[sym_upper] = "DATA_STALE"
                             self._data_gap_symbols.add(sym_upper)
                         else:
                             self.feed_staleness_status[sym_upper] = "OK"
 
-            # Global stall watchdog (> 120s across all active feeds during market hours)
+            # Global stall watchdog (> 180s across all active feeds during market hours)
             if not _is_replay and active_symbols:
                 minutes_since_open = (now_et.hour * 60 + now_et.minute) - (9 * 60 + 30)
                 if minutes_since_open >= 3:
                     all_feeds_stalled = all(
                         (sym.upper() not in self.last_bar_received_at)
-                        or ((now - self.last_bar_received_at[sym.upper()]).total_seconds() > 120.0)
+                        or ((now - self.last_bar_received_at[sym.upper()]).total_seconds() > 180.0)
                         for sym in active_symbols
                     )
+            # =============================================================================
                     if all_feeds_stalled:
                         if self.system_health != "HALTED":
                             self.system_health = "SAFE_MODE"

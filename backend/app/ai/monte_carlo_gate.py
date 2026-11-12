@@ -428,8 +428,23 @@ class MonteCarloGate:
         #     return False, stats, reason
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
+        # =============================================================================
+        # [MODIFIED 2026-11-12]: Relax Adaptive Win-Rate Hurdle Floor for Asymmetric High-R Setups
+        # ORIGINAL INTENT: max(0.25, breakeven_win_prob + 0.01) clamped minimum win rate to 25%,
+        #   vetoing mathematical edge on 3.5R to 7.0R high-margin trades that only need 12%-20% win rates.
+        # REASON FOR CHANGE: Lower floor from 0.25 to 0.15 for high-R setups (r_target >= 3.0),
+        #   allowing high-margin asymmetric runners with positive mathematical edge to pass.
+        # SAFE ROLLBACK: Previous line preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # breakeven_win_prob = (1.0 / (1.0 + r_target)) if r_target > 0 else 0.50
+        # adaptive_min_win_prob = min(self.min_win_prob, max(0.25, breakeven_win_prob + 0.01))
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
         breakeven_win_prob = (1.0 / (1.0 + r_target)) if r_target > 0 else 0.50
-        adaptive_min_win_prob = min(self.min_win_prob, max(0.25, breakeven_win_prob + 0.01))
+        min_hurdle_floor = 0.15 if r_target >= 3.0 else 0.25
+        adaptive_min_win_prob = min(self.min_win_prob, max(min_hurdle_floor, breakeven_win_prob + 0.01))
+        # =============================================================================
         is_win_rate_ok = (p_target >= adaptive_min_win_prob) or (edge >= 0.0 and avg_r >= self.min_expected_r)
         if not is_win_rate_ok:
             reason = (

@@ -402,14 +402,36 @@ class MarketScanner:
                     from app.config import get_settings
                     cfg = self.risk_config or get_settings().risk_config()
 
+                    # =============================================================================
+                    # [MODIFIED 2026-11-12]: Align Scanner Price Floor with Pipeline Penny Stock Limit
+                    # ORIGINAL INTENT: Scanner used cfg.min_price (0.50), admitting sub-$5 stocks (STAK $1.84,
+                    #   STIM $1.49) which consumed watchlist slots only to be 100% rejected by pipeline.
+                    # REASON FOR CHANGE: Enforce $5.00 minimum price on non-benchmark candidates to preserve
+                    #   watchlist capacity for liquid names that the execution pipeline will trade.
+                    # SAFE ROLLBACK: Previous lines preserved below as comments.
+                    # -----------------------------------------------------------------------------
+                    # [PREVIOUS CODE - PRESERVED]:
+                    # record["filter_price"] = {
+                    #     "actual": price,
+                    #     "min": cfg.min_price,
+                    #     "result": "PASS" if price >= cfg.min_price else "FAIL"
+                    # }
+                    # if price < cfg.min_price:
+                    #     record["FINAL_REJECTION_REASON"] = "PRICE_FILTER"
+                    #     return None
+                    # -----------------------------------------------------------------------------
+                    # [NEW CODE]:
+                    benchmark_exempt = {"SPY", "QQQ", "IWM", "DIA"}
+                    effective_min_price = 5.0 if symbol not in benchmark_exempt else getattr(cfg, "min_price", 0.5)
                     record["filter_price"] = {
                         "actual": price,
-                        "min": cfg.min_price,
-                        "result": "PASS" if price >= cfg.min_price else "FAIL"
+                        "min": effective_min_price,
+                        "result": "PASS" if price >= effective_min_price else "FAIL"
                     }
-                    if price < cfg.min_price:
+                    if price < effective_min_price:
                         record["FINAL_REJECTION_REASON"] = "PRICE_FILTER"
                         return None
+                    # =============================================================================
 
                     # =============================================================================
                     # [MODIFIED 2026-10-30]: Accurate dollar volume & session liquidity floor

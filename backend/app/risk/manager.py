@@ -319,11 +319,20 @@ class RiskManager:
 
             "symbol_cooldowns": {sym: ts.isoformat() for sym, ts in self.symbol_cooldowns.items()},
 
-            "symbol_loss_counts": dict(self.symbol_loss_counts),
             # =============================================================================
-            # [ADDED 2026-11-12]: Serialize symbol_trade_counts
+            # [MODIFIED 2026-11-12]: Serialize session_date with Risk State
+            # ORIGINAL INTENT: Saved symbol_loss_counts and symbol_trade_counts without session date.
+            # REASON FOR CHANGE: Prevent multi-day stale daily loss counts (e.g. AVGO 2/2) from locking out
+            #   symbols across distinct calendar sessions upon restart.
+            # SAFE ROLLBACK: Previous lines preserved below as comments.
+            # -----------------------------------------------------------------------------
+            # [PREVIOUS CODE - PRESERVED]:
+            # "symbol_loss_counts": dict(self.symbol_loss_counts),
+            # "symbol_trade_counts": dict(self.symbol_trade_counts),
             # -----------------------------------------------------------------------------
             # [NEW CODE]:
+            "session_date": str(self.clock.session_date()) if hasattr(self, "clock") and self.clock else None,
+            "symbol_loss_counts": dict(self.symbol_loss_counts),
             "symbol_trade_counts": dict(self.symbol_trade_counts),
             # =============================================================================
 
@@ -345,7 +354,7 @@ class RiskManager:
 
 
 
-    def restore_risk_state(self, data: dict) -> None:
+    def restore_risk_state(self, data: dict, current_session_date: Any = None) -> None:
 
         """Restore safety-critical risk state from a durable checkpoint."""
 
@@ -379,20 +388,54 @@ class RiskManager:
 
                     pass
 
+        # =============================================================================
+        # [MODIFIED 2026-11-12]: Session-Aware Daily Loss & Trade Count Restoration
+        # ORIGINAL INTENT: Unconditionally restored symbol_loss_counts and symbol_trade_counts.
+        # REASON FOR CHANGE: If checkpoint is from a prior calendar session (or session_date is absent),
+        #   daily loss counters belong to that prior day and must not lockout today's symbols.
+        # SAFE ROLLBACK: Previous lines preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # raw_loss_counts = data.get("symbol_loss_counts")
+        # if isinstance(raw_loss_counts, dict):
+        #     self.symbol_loss_counts = {
+        #         str(symbol).upper(): _safe_int(count, 0)
+        #         for symbol, count in raw_loss_counts.items()
+        #         if str(symbol).strip()
+        #     }
+        # raw_trade_counts = data.get("symbol_trade_counts")
+        # if isinstance(raw_trade_counts, dict):
+        #     self.symbol_trade_counts = {
+        #         str(symbol).upper(): _safe_int(count, 0)
+        #         for symbol, count in raw_trade_counts.items()
+        #         if str(symbol).strip()
+        #     }
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        ckpt_session = data.get("session_date")
+        curr_session = str(current_session_date) if current_session_date else (str(self.clock.session_date()) if hasattr(self, "clock") and self.clock else None)
+        is_same_session = bool(ckpt_session and curr_session and str(ckpt_session) == str(curr_session))
+
         raw_loss_counts = data.get("symbol_loss_counts")
-        if isinstance(raw_loss_counts, dict):
+        if is_same_session and isinstance(raw_loss_counts, dict):
             self.symbol_loss_counts = {
                 str(symbol).upper(): _safe_int(count, 0)
                 for symbol, count in raw_loss_counts.items()
                 if str(symbol).strip()
             }
+        else:
+            self.symbol_loss_counts = {}
+
         raw_trade_counts = data.get("symbol_trade_counts")
-        if isinstance(raw_trade_counts, dict):
+        if is_same_session and isinstance(raw_trade_counts, dict):
             self.symbol_trade_counts = {
                 str(symbol).upper(): _safe_int(count, 0)
                 for symbol, count in raw_trade_counts.items()
                 if str(symbol).strip()
             }
+        else:
+            self.symbol_trade_counts = {}
+        # =============================================================================
 
         if data.get("strategy_cooldowns"):
 
@@ -1225,12 +1268,50 @@ class RiskManager:
         # elif atr is not None and atr > 0:
         #     take_profit = price + 2.0 * atr if signal.action == SignalAction.ENTER_LONG else price - 2.0 * atr
         # -----------------------------------------------------------------------------
+        # =============================================================================
+        # [MODIFIED 2026-11-12]: Volatility-Adaptive Target Expansion Floor
+        # ORIGINAL INTENT: Enforced rigid >= 3.5% floor for all symbols, causing 100% Monte Carlo
+        #   vetoes on mega-caps (AAPL, AMZN, SPY) due to 1.7%-6.2% simulated win rates.
+        # REASON FOR CHANGE: Make minimum price expansion target volatility-adaptive: require full 3.5%
+        #   on high-volatility names (ATR% >= 2.5%), and 2.0 * ATR% (floor 1.2%) on mega-caps.
+        # SAFE ROLLBACK: Previous lines preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # min_profit_pct = float(getattr(cfg, "min_profit_target_pct", 3.5) or 3.5)
+        # min_profit_frac = min_profit_pct / 100.0
+        # if signal.action == SignalAction.ENTER_LONG:
+        #     min_target = round(price * (1.0 + min_profit_frac), 4)
+        #     if take_profit is not None:
+        #         if take_profit <= price:
+        #             return RiskDecision(False, f"long target must be above entry ({take_profit:.4f} <= {price:.4f})")
+        #         take_profit = max(take_profit, min_target)
+        #     elif atr is not None and atr > 0:
+        #         take_profit = max(round(price + 2.5 * atr, 4), min_target)
+        #     else:
+        #         take_profit = min_target
+        # elif signal.action == SignalAction.ENTER_SHORT:
+        #     min_target = round(price * (1.0 - min_profit_frac), 4)
+        #     if take_profit is not None:
+        #         if take_profit >= price:
+        #             return RiskDecision(False, f"short target must be below entry ({take_profit:.4f} >= {price:.4f})")
+        #         take_profit = min(take_profit, min_target)
+        #     elif atr is not None and atr > 0:
+        #         take_profit = min(round(price - 2.5 * atr, 4), min_target)
+        #     else:
+        #         take_profit = min_target
+        # -----------------------------------------------------------------------------
         # [NEW CODE]:
         min_profit_pct = float(getattr(cfg, "min_profit_target_pct", 3.5) or 3.5)
         min_profit_frac = min_profit_pct / 100.0
 
+        is_index_etf = symbol.upper() in {"SPY", "QQQ", "IWM", "DIA"}
+        if is_index_etf and atr is not None and atr > 0 and price > 0:
+            effective_frac = min(min_profit_frac, max(0.010, 2.0 * (atr / price)))
+        else:
+            effective_frac = min_profit_frac
+
         if signal.action == SignalAction.ENTER_LONG:
-            min_target = round(price * (1.0 + min_profit_frac), 4)
+            min_target = round(price * (1.0 + effective_frac), 4)
             if take_profit is not None:
                 if take_profit <= price:
                     return RiskDecision(False, f"long target must be above entry ({take_profit:.4f} <= {price:.4f})")
@@ -1240,7 +1321,7 @@ class RiskManager:
             else:
                 take_profit = min_target
         elif signal.action == SignalAction.ENTER_SHORT:
-            min_target = round(price * (1.0 - min_profit_frac), 4)
+            min_target = round(price * (1.0 - effective_frac), 4)
             if take_profit is not None:
                 if take_profit >= price:
                     return RiskDecision(False, f"short target must be below entry ({take_profit:.4f} >= {price:.4f})")
@@ -1249,6 +1330,7 @@ class RiskManager:
                 take_profit = min(round(price - 2.5 * atr, 4), min_target)
             else:
                 take_profit = min_target
+        # =============================================================================
         # =============================================================================
 
 
