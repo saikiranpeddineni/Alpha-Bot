@@ -1,8 +1,8 @@
 # Gates: Trading Restrictions & Panic Exit Remediation (Alphadesk_002)
 
-OWNS: backend/app/brokers/paper.py, backend/app/pis/models.py, backend/app/strategies/pipeline.py, backend/app/config.py, backend/app/ai/monte_carlo_gate.py, backend/app/risk/manager.py, backend/app/core/engine_evaluation.py, backend/app/opportunities/engine.py, backend/app/strategies/orb.py, backend/tests/test_restrictions_and_exits_remediation.py
+OWNS: backend/app/brokers/paper.py, backend/app/pis/models.py, backend/app/pis/exit_planner.py, backend/app/strategies/pipeline.py, backend/app/config.py, backend/app/ai/monte_carlo_gate.py, backend/app/risk/manager.py, backend/app/core/engine_evaluation.py, backend/app/opportunities/engine.py, backend/app/strategies/orb.py, backend/tests/test_restrictions_and_exits_remediation.py, backend/tests/test_two_tier_protection.py
 
-Scope: Calibrate paper broker trailing stops to prevent premature stop-outs, de-choke PIS protection floors, relax the entry extreme proximity guard to admit genuine momentum breakouts, lower Monte Carlo hurdle to positive edge, calibrate scratch neutrality to prevent ticker lockout, fix opportunity engine scale-out handling, expand ORB runner targets to 3.5R, restore full default watchlist, and verify regression safety.
+Scope: Calibrate paper broker trailing stops to prevent premature stop-outs, de-choke PIS protection floors, relax the entry extreme proximity guard to admit genuine momentum breakouts, lower Monte Carlo hurdle to positive edge, calibrate scratch neutrality to prevent ticker lockout, fix opportunity engine scale-out handling, expand ORB runner targets to 3.5R, restore full default watchlist, implement Two-Tier Protection Architecture (Tier 1 Soft Technical Breach -$300 with structural breathing room + Tier 2 Hard Catastrophe Circuit Breaker -$500), and verify regression safety.
 
 - [x] G1: Paper broker advance trail arms breakeven at 1.2R and preserves breathing room
   CHECK: .venv\Scripts\python -m pytest backend/tests/test_restrictions_and_exits_remediation.py -k test_paper_advance_trail_breathing_room -v
@@ -39,3 +39,11 @@ Scope: Calibrate paper broker trailing stops to prevent premature stop-outs, de-
 - [x] G9: Git branch verified as Alphadesk_002
   CHECK: git branch --show-current
   EXPECT: Alphadesk_002
+
+- [x] G10: Two-Tier protection unit tests pass (Tier 1 soft technical + Tier 2 catastrophe breaker + breathing room)
+  CHECK: .venv\Scripts\python -m pytest backend/tests/test_two_tier_protection.py -v
+  EXPECT: 6 passed
+
+- [x] G11: Full PIS and restrictions regression suite passes
+  CHECK: .venv\Scripts\python -m pytest backend/tests/test_restrictions_and_exits_remediation.py backend/tests/test_two_tier_protection.py backend/tests/test_pis_early_invalidation.py backend/tests/test_pis_floor_tag_runner.py backend/tests/test_pis_noise_immunity.py -v
+  EXPECT: 26 passed

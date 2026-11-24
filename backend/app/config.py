@@ -509,6 +509,21 @@ class RiskConfig(BaseModel):
     # -----------------------------------------------------------------------------
     # [NEW CODE]:
     max_loss_per_trade_usd: float = Field(0.0, ge=0.0, le=100_000.0)
+    # =============================================================================
+    # [MODIFIED 2026-11-24]: Two-Tier Protection Architecture in RiskConfig
+    # ORIGINAL INTENT: RiskConfig lacked two-tier dollar protection limits.
+    # REASON FOR CHANGE: Configure Tier 1 soft technical breach ($300) and Tier 2 hard ($500)
+    # catastrophe breaker boundaries.
+    # SAFE ROLLBACK: Previous code preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # (none - new fields added)
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    enable_two_tier_protection: bool = Field(True)
+    tier1_loss_usd: float = Field(300.0, ge=0.0, le=100_000.0)
+    tier2_loss_usd: float = Field(500.0, ge=0.0, le=100_000.0)
+    # =============================================================================
     enable_native_bracket_targets: bool = Field(False)
     use_or_midpoint_stop: bool = Field(False)
     min_stop_range_pct: float = Field(25.0, ge=0.0, le=100.0)
@@ -1050,6 +1065,21 @@ class Settings(BaseSettings):
     # -----------------------------------------------------------------------------
     # [NEW CODE]:
     max_loss_per_trade_usd: float = Field(0.0, validation_alias="MAX_LOSS_PER_TRADE_USD")
+    # =============================================================================
+    # [MODIFIED 2026-11-24]: Two-Tier Protection Architecture in Settings
+    # ORIGINAL INTENT: Settings lacked two-tier protection validation aliases.
+    # REASON FOR CHANGE: Map ENABLE_TWO_TIER_PROTECTION, TIER1_LOSS_USD, and TIER2_LOSS_USD
+    # from environment variables into runtime settings.
+    # SAFE ROLLBACK: Previous code preserved below as comments.
+    # -----------------------------------------------------------------------------
+    # [PREVIOUS CODE - PRESERVED]:
+    # (none - new fields added)
+    # -----------------------------------------------------------------------------
+    # [NEW CODE]:
+    enable_two_tier_protection: bool = Field(True, validation_alias="ENABLE_TWO_TIER_PROTECTION")
+    tier1_loss_usd: float = Field(300.0, validation_alias="TIER1_LOSS_USD")
+    tier2_loss_usd: float = Field(500.0, validation_alias="TIER2_LOSS_USD")
+    # =============================================================================
 
     enable_native_bracket_targets: bool = Field(False, validation_alias="ENABLE_NATIVE_BRACKET_TARGETS")
 

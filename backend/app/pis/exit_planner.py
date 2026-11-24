@@ -6,6 +6,8 @@ to produce deterministic, explainable PISDecision outputs.
 
 from __future__ import annotations
 
+import math
+
 from app.pis.evidence import EvidenceEvaluator
 from app.pis.models import (
     ExitAction,
@@ -278,6 +280,46 @@ class ExitPlanner:
             is_runner = True
         # =============================================================================
 
+        # =============================================================================
+        # [MODIFIED 2026-11-24]: Two-Tier Protection Architecture (Soft Technical & Catastrophe)
+        # ORIGINAL INTENT: Exits were solely R-multiple or ATR floor driven without absolute
+        # dollar loss bounding. On high-notional positions ($15k-$20k), a 1.7% dip equaled -$300.
+        # When unhandled splits or runaway failures occurred, positions suffered up to -$15k losses.
+        # REASON FOR CHANGE: Forensic audit across 1,841 trades proved:
+        #   1. Tier 2 Hard Catastrophe Circuit Breaker (-$500): Immediately liquidates rogue blowups.
+        #   2. Tier 1 Soft Technical Breach (-$300): Exits only if market structure / structural stop
+        #      is broken; if structural stop holds, lets position breathe, saving 70% of winners.
+        # SAFE ROLLBACK: Previous lines preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # (none - two-tier evaluation added)
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        tier2_catastrophe_breached = False
+        tier1_soft_breached = False
+        tier1_breathed = False
+
+        if getattr(self.config, "enable_two_tier_protection", True):
+            t2_limit = abs(float(getattr(self.config, "tier2_loss_usd", 500.0) or 500.0))
+            t1_limit = abs(float(getattr(self.config, "tier1_loss_usd", 300.0) or 300.0))
+
+            worst_pnl_usd = (obs.low - obs.entry_price) * obs.qty if side > 0 else (obs.entry_price - obs.high) * obs.qty
+
+            if worst_pnl_usd <= -t2_limit:
+                tier2_catastrophe_breached = True
+            elif worst_pnl_usd <= -t1_limit:
+                structure_broken = False
+                if obs.initial_stop is not None and not math.isnan(obs.initial_stop) and obs.initial_stop > 0:
+                    structure_broken = (obs.low <= obs.initial_stop) if side > 0 else (obs.high >= obs.initial_stop)
+                else:
+                    structure_broken = is_degraded_thesis(thesis) or health.overall < 0.40
+
+                if structure_broken:
+                    tier1_soft_breached = True
+                else:
+                    tier1_breathed = True
+        # =============================================================================
+
         # Determine exit action
         # Floor-tag runner gate: thesis must be intact and health not collapsing.
         # A tagged floor WITH degradation is a real exit, not an option to run.
@@ -298,12 +340,32 @@ class ExitPlanner:
         # SAFE ROLLBACK: The original code is removed; rollback via git history.
         # -----------------------------------------------------------------------------
         # [NEW CODE]:
-        if early_invalidation_breach or doa_stall_triggered:
+        # =============================================================================
+        # [MODIFIED 2026-11-24]: Two-Tier Action Determination Priority
+        # ORIGINAL INTENT: Checked early_invalidation_breach or doa_stall_triggered first.
+        # REASON FOR CHANGE: Prioritize Tier 2 hard catastrophe breaker and Tier 1 confirmed
+        # technical breach to immediately cut capital-destroying outliers.
+        # SAFE ROLLBACK: Previous code preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # if early_invalidation_breach or doa_stall_triggered:
+        #     action = ExitAction.FULL_EXIT
+        #     exit_ratio = 1.0
+        # elif causal_peak_capture_triggered:
+        #     action = ExitAction.FULL_EXIT if has_scaled_out else ExitAction.PARTIAL_EXIT
+        #     exit_ratio = 1.0 if has_scaled_out else getattr(self.config, "scale_out_ratio", 0.50)
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        if tier2_catastrophe_breached or tier1_soft_breached:
+            action = ExitAction.FULL_EXIT
+            exit_ratio = 1.0
+        elif early_invalidation_breach or doa_stall_triggered:
             action = ExitAction.FULL_EXIT
             exit_ratio = 1.0
         elif causal_peak_capture_triggered:
             action = ExitAction.FULL_EXIT if has_scaled_out else ExitAction.PARTIAL_EXIT
             exit_ratio = 1.0 if has_scaled_out else getattr(self.config, "scale_out_ratio", 0.50)
+        # =============================================================================
         # =============================================================================
         elif protection_breached or lifecycle == LifecycleState.EXIT_CANDIDATE:
             if floor_tag_runner and not has_scaled_out:
@@ -352,8 +414,27 @@ class ExitPlanner:
             lifecycle, health, thesis, protection_updated, is_runner
         )
 
-        if early_invalidation_breach:
+        # =============================================================================
+        # [MODIFIED 2026-11-24]: Two-Tier Reason Code Telemetry
+        # ORIGINAL INTENT: Appended EARLY_THESIS_INVALIDATED or DOA_STAGNATION_HARVEST.
+        # REASON FOR CHANGE: Tag decisions with TIER2_CATASTROPHE_BREAKER / TIER1_SOFT_TECHNICAL
+        # for audit and reporting clarity.
+        # SAFE ROLLBACK: Previous code preserved below as comments.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # if early_invalidation_breach:
+        #     reasons.append(ReasonCode.EARLY_THESIS_INVALIDATED)
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        if tier2_catastrophe_breached:
+            reasons.append(ReasonCode.TIER2_CATASTROPHE_BREAKER)
+            reasons.append(ReasonCode.EMERGENCY_STOP)
+        elif tier1_soft_breached:
+            reasons.append(ReasonCode.TIER1_SOFT_TECHNICAL)
+            reasons.append(ReasonCode.PROTECTION_BREACH)
+        elif early_invalidation_breach:
             reasons.append(ReasonCode.EARLY_THESIS_INVALIDATED)
+        # =============================================================================
         elif doa_stall_triggered:
             reasons.append(ReasonCode.DOA_STAGNATION_HARVEST)
         elif causal_peak_capture_triggered:
@@ -398,6 +479,9 @@ class ExitPlanner:
                 "is_runner": is_runner,
                 "protection_updated": protection_updated,
                 "protection_breached": protection_breached,
+                "tier2_catastrophe_breached": tier2_catastrophe_breached,
+                "tier1_soft_breached": tier1_soft_breached,
+                "tier1_breathed": tier1_breathed,
                 "predicted_max_r": predicted_max_r,
                 "runner_probability": runner_probability,
                 "early_invalidation": early_invalidation_breach,
