@@ -264,7 +264,25 @@ class TradingEngine(
 
         self._pending_close_submitted_at: dict[str, datetime] = {}
 
-        self.pis_adapter: PISEngineAdapter = PISEngineAdapter()
+        # =============================================================================
+        # [MODIFIED 2026-11-25]: Wire Two-Tier Protection Settings from RiskConfig to PISConfig
+        # ORIGINAL INTENT: PISEngineAdapter() used default PISConfig(), ignoring .env/DB overrides.
+        # REASON FOR CHANGE: Ensure Settings/RiskConfig two-tier values propagate into PIS at boot.
+        # SAFE ROLLBACK: Previous line preserved below as comment.
+        # -----------------------------------------------------------------------------
+        # [PREVIOUS CODE - PRESERVED]:
+        # self.pis_adapter: PISEngineAdapter = PISEngineAdapter()
+        # -----------------------------------------------------------------------------
+        # [NEW CODE]:
+        from app.pis.models import PISConfig
+        self.pis_adapter: PISEngineAdapter = PISEngineAdapter(
+            config=PISConfig(
+                enable_two_tier_protection=getattr(self.risk_config, "enable_two_tier_protection", True),
+                tier1_loss_usd=getattr(self.risk_config, "tier1_loss_usd", 300.0),
+                tier2_loss_usd=getattr(self.risk_config, "tier2_loss_usd", 500.0),
+            )
+        )
+        # =============================================================================
 
         from app.portfolio.recent_performance import RecentPerformanceGovernor
 

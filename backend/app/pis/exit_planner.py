@@ -303,14 +303,24 @@ class ExitPlanner:
             t2_limit = abs(float(getattr(self.config, "tier2_loss_usd", 500.0) or 500.0))
             t1_limit = abs(float(getattr(self.config, "tier1_loss_usd", 300.0) or 300.0))
 
-            worst_pnl_usd = (obs.low - obs.entry_price) * obs.qty if side > 0 else (obs.entry_price - obs.high) * obs.qty
+            # [MODIFIED 2026-11-25]: Include live current_price quote to prevent 60s bar-close lag
+            # [PREVIOUS CODE - PRESERVED]:
+            # worst_pnl_usd = (obs.low - obs.entry_price) * obs.qty if side > 0 else (obs.entry_price - obs.high) * obs.qty
+            # -----------------------------------------------------------------------------
+            live_pnl_usd = (obs.current_price - obs.entry_price) * obs.qty * side
+            bar_worst_pnl_usd = (obs.low - obs.entry_price) * obs.qty if side > 0 else (obs.entry_price - obs.high) * obs.qty
+            worst_pnl_usd = min(live_pnl_usd, bar_worst_pnl_usd)
 
             if worst_pnl_usd <= -t2_limit:
                 tier2_catastrophe_breached = True
             elif worst_pnl_usd <= -t1_limit:
                 structure_broken = False
                 if obs.initial_stop is not None and not math.isnan(obs.initial_stop) and obs.initial_stop > 0:
-                    structure_broken = (obs.low <= obs.initial_stop) if side > 0 else (obs.high >= obs.initial_stop)
+                    # [PREVIOUS CODE - PRESERVED]:
+                    # structure_broken = (obs.low <= obs.initial_stop) if side > 0 else (obs.high >= obs.initial_stop)
+                    live_stop_broken = (obs.current_price <= obs.initial_stop) if side > 0 else (obs.current_price >= obs.initial_stop)
+                    bar_stop_broken = (obs.low <= obs.initial_stop) if side > 0 else (obs.high >= obs.initial_stop)
+                    structure_broken = live_stop_broken or bar_stop_broken
                 else:
                     structure_broken = is_degraded_thesis(thesis) or health.overall < 0.40
 

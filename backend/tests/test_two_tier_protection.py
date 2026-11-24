@@ -202,3 +202,55 @@ def test_short_position_two_tier() -> None:
     )
     assert decision.action == ExitAction.FULL_EXIT
     assert ReasonCode.TIER2_CATASTROPHE_BREAKER in decision.reason_codes
+
+
+def test_live_quote_triggers_tier2_without_bar_close_lag() -> None:
+    """Live tick drop in current_price must trigger Tier 2 immediately without waiting for bar close."""
+    config = PISConfig(enable_two_tier_protection=True, tier1_loss_usd=300.0, tier2_loss_usd=500.0)
+    planner = ExitPlanner(config)
+
+    # Completed bar low is still $99.00 (-$100), but live quote just flashed down to $94.50 (-$550)
+    obs = _make_obs(qty=100.0, entry_price=100.0, current_price=94.50, low=99.00, high=100.00, initial_stop=80.00)
+    health = TradeHealth(momentum_score=0.70, trend_score=0.70, volume_score=0.70, volatility_score=0.70, overall=0.70)
+    thesis = ThesisDrift(drift_score=0.10, adverse_excursion_r=0.10, stagnation_bars=1, is_degraded=False)
+
+    decision = planner.synthesize_decision(
+        obs=obs,
+        lifecycle=LifecycleState.VALIDATED,
+        health=health,
+        thesis=thesis,
+        runner_score=0.0,
+        is_runner=False,
+        target_stop=80.00,
+        peak_r=0.0,
+        trough_r=-0.25,
+        history_len=10,
+    )
+    assert decision.action == ExitAction.FULL_EXIT
+    assert ReasonCode.TIER2_CATASTROPHE_BREAKER in decision.reason_codes
+
+
+def test_live_quote_triggers_tier1_structural_breach() -> None:
+    """Live tick drop below initial_stop with -$350 loss must trigger Tier 1 immediately."""
+    config = PISConfig(enable_two_tier_protection=True, tier1_loss_usd=300.0, tier2_loss_usd=500.0)
+    planner = ExitPlanner(config)
+
+    # Completed bar low is $98.00, but live quote drops to $96.50 (-$350), breaking initial_stop $97.00
+    obs = _make_obs(qty=100.0, entry_price=100.0, current_price=96.50, low=98.00, high=100.00, initial_stop=97.00)
+    health = TradeHealth(momentum_score=0.65, trend_score=0.65, volume_score=0.65, volatility_score=0.65, overall=0.65)
+    thesis = ThesisDrift(drift_score=0.20, adverse_excursion_r=0.50, stagnation_bars=1, is_degraded=False)
+
+    decision = planner.synthesize_decision(
+        obs=obs,
+        lifecycle=LifecycleState.VALIDATED,
+        health=health,
+        thesis=thesis,
+        runner_score=0.0,
+        is_runner=False,
+        target_stop=97.00,
+        peak_r=0.0,
+        trough_r=-0.50,
+        history_len=10,
+    )
+    assert decision.action == ExitAction.FULL_EXIT
+    assert ReasonCode.TIER1_SOFT_TECHNICAL in decision.reason_codes
